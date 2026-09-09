@@ -136,6 +136,7 @@ CONF
 
 FIXTURE=""
 ORPHAN=""
+LIVE_MARK=""
 SPACED=""
 LIVE=""
 cleanup() {
@@ -150,6 +151,7 @@ cleanup() {
   # most: the fixture root holding its compose file is deleted just above, so
   # nothing on the machine could find it afterwards.
   [ -n "$ORPHAN" ] && remove_project "$ORPHAN"
+  [ -n "$LIVE_MARK" ] && docker volume rm "$LIVE_MARK" >/dev/null 2>&1
   if [ -n "$LIVE" ]; then
     # Unlabelled, so remove_project cannot see it -- see compose_live.
     docker rm -f "$LIVE-upstream" >/dev/null 2>&1
@@ -275,6 +277,15 @@ FAKE
     live="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' "$REPO_ROOT/.env")"
     [ -n "$live" ] || fail "no COMPOSE_PROJECT_NAME in .env; run ./scripts/fleet/env.sh"
 
+    # Something for the live worktree to LOSE. The dangerous half of this phase
+    # is "reap spared the stack that is in use", and a project with nothing
+    # under its label satisfies that by having nothing to take -- which is an
+    # assertion that passes whatever reap.sh does. autofleet's own worktrees run
+    # no containers, so the fixture provides the thing at risk.
+    LIVE_MARK="${live}_selftest_live"
+    docker volume create --label "com.docker.compose.project=$live" "$LIVE_MARK" >/dev/null \
+      || fail "could not create the live-worktree fixture volume"
+
     # A stack with no worktree, built by hand out of the pieces compose leaves
     # behind when a worktree is deleted with `rm -rf`.
     ORPHAN="${AUTOFLEET_PROJECT_PREFIX:-af}-reap-test-$$"
@@ -333,8 +344,9 @@ FAKE
     remaining="$(docker volume ls -q --filter "label=com.docker.compose.project=$ORPHAN"; \
                  docker network ls -q --filter "label=com.docker.compose.project=$ORPHAN")"
     [ -z "$remaining" ] || fail "--yes left the orphan behind: $remaining"
-    [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$live")" ] \
+    [ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$live")" ] \
       || fail "--yes took down the live worktree's stack ($live)"
+    docker volume rm "$LIVE_MARK" >/dev/null 2>&1
 
     echo "PASS: reap.sh sweeps $ORPHAN, spares $live, and refuses to guess"
     ;;

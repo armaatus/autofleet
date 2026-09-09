@@ -48,6 +48,12 @@ SEEDS=(
   ".autofleet/guard.json"
   ".autofleet/setup.sh"
   "orca.yaml"
+  # The hooks have to be REGISTERED to run, and a repo that already has a
+  # settings.json has its own permissions in it. Seeding rather than copying
+  # means an existing one is never clobbered -- and the next-steps below say
+  # what to add to it by hand, because merging someone's permission list is not
+  # something an installer should guess at.
+  ".claude/settings.json"
 )
 
 DRY=false
@@ -90,8 +96,10 @@ copy_one() {
     kept=$((kept + 1)); return 0
   fi
   changed=$((changed + 1))
-  echo "   ${DRY:+would write }$rel"
-  $DRY && return 0
+  # `${DRY:+...}` would expand on the string "false" as readily as on "true",
+  # which is how a real install announced itself as a dry run.
+  if $DRY; then echo "   would write $rel"; return 0; fi
+  echo "   $rel"
   mkdir -p "$(dirname "$dst")"
   rm -rf "$dst"
   cp -R "$src" "$dst"
@@ -104,8 +112,8 @@ seed_one() {
     kept=$((kept + 1)); return 0
   fi
   changed=$((changed + 1))
-  echo "   ${DRY:+would seed }$rel"
-  $DRY && return 0
+  if $DRY; then echo "   would seed $rel"; return 0; fi
+  echo "   $rel"
   mkdir -p "$(dirname "$dst")"
   cp -R "$src" "$dst"
 }
@@ -133,7 +141,10 @@ Next, in the repo you just installed into:
        gh label create blocked --color b60205 --description "Waiting on an open blocker; do not start"
        gh label create foundation       --color 5319e7 --description "Defines an interface later issues include; lands alone"
        gh label create needs-human-step --color b60205 --description "Last step is the maintainer's; the fleet opens no worktree"
-  5. Make `merge-gate` a required check on your default branch.
-  6. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+  5. If you already had a .claude/settings.json, add the two hook entries from
+     this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
+     PostToolUse. Unregistered hooks do not run, and nothing says so.
+  6. Make `merge-gate` a required check on your default branch.
+  7. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
 
 NEXT
