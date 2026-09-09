@@ -1,0 +1,11 @@
+# Generated per worktree by scripts/fleet/env.sh.
+.env
+.env.tmp*
+
+# The hooks' scratch space: pidfiles, the autostart log, the review markers
+# guard.py reads. Per worktree, never shared, never committed.
+.autofleet/run/
+
+__pycache__/
+*.pyc
+.DS_Store

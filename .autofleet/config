@@ -1,0 +1,13 @@
+# autofleet, driving itself.
+#
+# This repo is its own reference installation: the framework in scripts/fleet/
+# is the framework a host project vendors, and these are the knobs that repo
+# would set. Everything not named here keeps the default in
+# scripts/fleet/config.sh.
+
+# autofleet is shell and python. There is nothing to compile, no service to
+# stand up, and no port to hand out -- so no compose file, no ports, and no
+# project setup hook beyond the one below.
+AUTOFLEET_PROJECT_PREFIX=autofleet
+AUTOFLEET_TEST_COMMAND="./tests/run.sh"
+AUTOFLEET_NOTIFY_TITLE="autofleet"

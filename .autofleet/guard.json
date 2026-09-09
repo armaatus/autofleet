@@ -1,0 +1,7 @@
+{
+  "_comment": "What guard.py protects in THIS repo, over and above its universal rules. autofleet keeps no pinned contract and no credential files, so both lists are empty -- the file is here as the worked example a host project edits.",
+  "protected_paths": [],
+  "secret_suffixes": [],
+  "secret_contains": [],
+  "secret_tails": []
+}

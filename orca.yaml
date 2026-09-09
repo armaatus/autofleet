@@ -1,0 +1,39 @@
+# Orca workspace configuration.
+#
+# Every worktree created from this repo self-provisions through autofleet's own
+# hooks: it derives its isolated identity, runs the project's setup hook, and
+# starts the watcher that submits the agent's opening prompt.
+#
+# Orca will ask you to trust this file before it runs anything, and again after
+# each change -- these scripts execute on your machine.
+
+scripts:
+  # Runs once per new worktree. See scripts/fleet/setup.sh.
+  setup: ./scripts/fleet/setup.sh
+  # Runs when a worktree is removed: stops the watcher and tears down whatever
+  # stack .autofleet/config named.
+  archive: ./scripts/fleet/archive.sh
+
+# Hold the agent's tab until setup finishes. Without this the agent can run the
+# tests before its rig is up, read the connection error as a code bug, and go
+# chasing it. The few seconds this costs buys away that whole failure mode.
+setupAgentStartupPolicy: wait-for-setup
+
+# The prompt an agent starts with when the workspace is created from a linked
+# issue. Orca treats this as a TEMPLATE, not as argv: it substitutes {{issue}}
+# and {{artifact_url}} and nothing else -- there is no $1 -- and with an empty
+# composer the result becomes the agent's opening prompt. Left unset, Orca's own
+# default is `Complete {{artifact_url}}`, which is how an agent ends up starting
+# work from a bare URL and never reads the spec. So this points the agent at
+# issue-command.sh, which resolves the issue to its body, labels and milestone --
+# the sole channel design intent travels through.
+issueCommand: |
+  Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh {{issue}}` first and follow
+  everything it prints. It resolves issue #{{issue}} ({{artifact_url}}) to its
+  full body, labels and milestone -- the only place this project's design intent
+  is written down -- and then states the finishing conditions. Nothing about the
+  workflow is repeated here, so this prompt cannot drift from that script.
+
+defaultTabs:
+  # Tab 1 is the agent, opened by Orca itself.
+  - title: shell

@@ -1,0 +1,78 @@
+name: ci
+
+# autofleet's own suite. Everything here is shell and python, so there is
+# nothing to build and nothing to install -- which is the whole point: the
+# payload a host project vendors must run on a bare runner.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # On a branch only. A cancelled run is not a green run, and on main every
+  # commit is one somebody has to be able to trust -- two merges close together
+  # would cancel the earlier commit's build outright, with nothing to re-run it.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # A worktree of this repo is what the tests fabricate fixtures against,
+      # and `git worktree list` needs a real repository with a HEAD.
+      - name: the payload parses
+        run: |
+          set -euo pipefail
+          for script in scripts/fleet/*.sh scripts/fleet/runner/*.sh \
+                        .claude/hooks/*.sh .github/scripts/*.sh \
+                        evals/*.sh tests/*.sh install.sh; do
+            bash -n "$script" || { echo "::error file=$script::does not parse"; exit 1; }
+          done
+
+      - name: the selftests hold
+        run: |
+          set -euo pipefail
+          python3 .claude/hooks/guard.py --selftest
+          python3 .github/scripts/merge_gate.py --selftest
+
+      # env.sh writes the .env the reap phase reads back. On a runner there is
+      # no worktree to provision, but the derivation is a pure function of the
+      # path and this is the same call setup.sh makes.
+      - name: the suite
+        run: |
+          set -euo pipefail
+          ./scripts/fleet/env.sh
+          ./tests/run.sh
+
+  install:
+    # The installer is the only thing a new user runs, and the way it breaks is
+    # silent: a payload path that was renamed and not updated here copies
+    # nothing and reports success.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: it installs into an empty repo
+        run: |
+          set -euo pipefail
+          target="$(mktemp -d)"
+          git -C "$target" init -q -b main
+          ./install.sh "$target"
+          for want in scripts/fleet/fleet.sh .github/workflows/merge-gate.yml \
+                      .claude/hooks/guard.py .autofleet/config docs/WORKFLOW.md; do
+            [ -e "$target/$want" ] || { echo "::error::install.sh did not deliver $want"; exit 1; }
+          done
+          # Twice: the second run must be a no-op, not a pile of overwrites.
+          out="$(./install.sh "$target")"
+          printf '%s\n' "$out"
+          grep -q '^0 written' <<<"$out" \
+            || { echo "::error::a second install.sh run was not idempotent"; exit 1; }
