@@ -823,7 +823,9 @@ fails if that entry disappears, because the agent brief names those skills.
 | It blocks | Why |
 |---|---|
 | `gh pr merge`, and the `gh api …/merge` spelling | separation of duties: the agent that wrote it does not merge it |
-| `gh pr merge --auto` is **allowed** | that asks GitHub to merge once `merge-gate` passes — a rule decides, not the agent |
+| `gh pr merge --auto` is **allowed** — but not while the fleet is stopped | that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than the agent. A stop is different: arming a merge hands GitHub an instruction that outlives it, which is an outward effect like any other |
+| the GraphQL names for all of it — `mergePullRequest`, `addPullRequestReview`, `dismissPullRequestReview` | the same acts by a third name. Each was reachable until a review found it |
+| `gh api` carrying a body from a file (`--input`, `@file`) from a fleet worktree | a payload this hook cannot read is one it cannot judge, and `-F query=@file` put a whole mutation out of its sight |
 | force-pushing `main` | the commit chain is the audit trail |
 | writing to `server/contract/captures/` | rewriting a capture silences the only test that notices RomM changing |
 | editing secrets, `.env`, `token.dat`, `device.dat` | hard rule 5 |

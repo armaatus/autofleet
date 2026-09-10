@@ -700,10 +700,20 @@ def check_bash(command, cwd=""):
             # carrying an indirect field is refused outright, because nothing
             # here can say what it does. Inline queries are unaffected, which is
             # what scripts/fleet/resolve-thread.sh sends.
-            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
-                w.startswith("@") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=@", w)
-                for w in rest
-            ):
+            # ON THE FLAG, not on the `@`. `gh api --input <file>` takes a
+            # plain path with no `@` at all -- and this file already knew that,
+            # because `--input` has been in API_FIELD_FLAGS since the stop rule
+            # was written. Keying on the character left
+            # `gh api graphql --input /tmp/m.json` allowed, which is finding 1 of
+            # this change intact in a spelling gh documents. Found by the
+            # independent review of the change that added it.
+            _indirect = False
+            for i, w in enumerate(rest):
+                if w == "--input" or w.startswith("--input="):
+                    _indirect = True
+                elif w.startswith("@") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=@", w):
+                    _indirect = True
+            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and _indirect:
                 deny(
                     "Blocked: `gh api` with a field read from a FILE, from a worktree the "
                     "fleet\n"
@@ -724,7 +734,13 @@ def check_bash(command, cwd=""):
             # vanishes from merge_gate's `latest` while still counting as a
             # review on the head, so dismissing the one that found something
             # clears BOTH conditions at once.
-            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
+            # NOT worktree-scoped, unlike the review rules beside it. The
+            # porcelain `gh pr merge` and the REST `.../pulls/N/merge` both
+            # refuse everywhere, and CLAUDE.md lists merging among the rules that
+            # always apply rather than the three that hold only in a fleet
+            # worktree. Scoped, this name merged from the repo root while the
+            # other two were refused there. Found by the independent review.
+            if sub_cmd[:1] == ["api"] and any(
                 "mergePullRequest" in w for w in rest
             ):
                 deny(
@@ -1167,6 +1183,10 @@ def _stateful_checks():
         # change that added the rule.
         expect(0, {"command": "gh pr review 7 --comment --body x"},
                "...nor reviewing a PR from a worktree the fleet does not own")
+        # ...but merging is refused everywhere, by every one of its three names.
+        expect(2, {"command": "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId} }'"},
+               "merging by mutation is refused outside a fleet worktree too",
+               because="GraphQL name")
         expect(0, {"command": "gh api --method POST repos/o/r/pulls/7/reviews -f body=x"},
                "...nor its REST spelling from there")
         expect(0, {"file_path": os.path.join(_repo_root() or "/w", HOOK_REL)},
@@ -1189,6 +1209,7 @@ def _stateful_checks():
         # wrong while it is stopped.
         expect(2, {"command": "gh pr merge 7 --auto --squash"},
                "...nor arm an auto-merge, which outlives the stop")
+        expect(2, {"command": "gh pr close 7"}, "...nor close a PR")
         expect(2, {"command": "gh issue close 7"}, "...nor close an issue")
         expect(2, {"command": "gh workflow run claude-review.yml -f pr=7"},
                "...nor start a workflow")
@@ -1252,9 +1273,12 @@ def _stateful_checks():
                 expect(2, {"command": "gh api --method=POST repos/o/r/pulls/7/reviews -f body=x"},
                        "...nor with --method=POST, the equals spelling",
                        because="REST name")
+                # `--input` is caught one rule earlier now, by the one that
+                # refuses a body this hook cannot read -- so the reason changed
+                # even though the answer did not. `because` is what noticed.
                 expect(2, {"command": "gh api repos/o/r/pulls/7/reviews --input body.json"},
-                       "...nor with --input, which also makes it a write",
-                       because="REST name")
+                       "...nor with --input, which hands it a body from a file",
+                       because="cannot read")
                 expect(0, {"command": "gh api repos/o/r/pulls/7/reviews"},
                        "...but READING the reviews is what await-review.sh does")
                 # The THIRD spelling. A GraphQL mutation carries no
@@ -1279,8 +1303,18 @@ def _stateful_checks():
                 expect(2, {"command": "gh api graphql -f query=@m.gql"},
                        "...nor the -f spelling of the same",
                        because="cannot read")
-                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews --input @body.json"},
-                       "...nor a REST body read from a file", because="cannot read")
+                # `graphql`, not a `/pulls/N/reviews` path: the pre-existing
+                # field-flag rule cannot reach this one, so these rows are the
+                # only thing covering it. The REST spelling was already blocked
+                # by that older rule, so a row for it proved nothing about this
+                # one -- which is what the independent review caught.
+                expect(2, {"command": "gh api graphql --input /tmp/m.json"},
+                       "...nor a body read from a file with no @ at all",
+                       because="cannot read")
+                expect(2, {"command": "gh api graphql --input=/tmp/m.json"},
+                       "...nor its equals spelling", because="cannot read")
+                expect(2, {"command": "gh api graphql --input -"},
+                       "...nor a body on stdin", because="cannot read")
                 # ...and the acts other rules refuse, by their GraphQL names.
                 expect(2, {"command": "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId} }'"},
                        "...nor merging by the mutation name", because="GraphQL name")
