@@ -550,6 +550,91 @@ except Exception:
   say "  #$num is running in $path"
 }
 
+# -------------------------------------------------------------- the review ---
+# In AUTOFLEET_REVIEW_MODE=local, the dispatcher is what runs the independent
+# review. Nothing else can: the agent that wrote the PR must not review it
+# (.claude/hooks/guard.py refuses `gh pr review` from a fleet worktree), and the
+# workflow that normally does it needs a CLAUDE_CODE_OAUTH_TOKEN this repository
+# does not have. Without this, every PR sits blocked on a review that cannot
+# arrive and `await-review.sh` waits out its deadline three times.
+#
+# In the default `github` mode this returns immediately and costs nothing.
+REVIEWING_DIR="$STATE_DIR/reviewing"
+
+review_open_prs() {
+  [ "${AUTOFLEET_REVIEW_MODE:-github}" = "local" ] || return 0
+  mkdir -p "$REVIEWING_DIR"
+
+  # OUR OWN PULL REQUESTS, and this is a limit rather than an oversight. The
+  # reviewer is an agent with this machine's credentials reading a diff written
+  # by somebody else; starting one unattended on every PR a repository receives
+  # is a thing to opt into deliberately, not a side effect of turning on local
+  # review. `@me` is the account gh is logged in as, which in the fleet's case
+  # is also the account every worktree opens PRs with.
+  local listing
+  listing="$(GH_PAGER=cat gh pr list --state open --author "@me" \
+               --json number,isDraft,headRefOid --limit 50 2>/dev/null)" || {
+    say "could not list the open PRs; skipping the review pass"
+    return 0; }
+
+  # First: forget the reviewers that have finished, so the count below is of
+  # what is actually running and a crashed one does not hold its PR forever.
+  local marker held
+  for marker in "$REVIEWING_DIR"/*; do
+    [ -e "$marker" ] || continue
+    read -r held _ <"$marker" 2>/dev/null || true
+    kill -0 "${held:-0}" 2>/dev/null || rm -f "$marker"
+  done
+
+  local running; running="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
+
+  printf '%s' "$listing" | python3 -c '
+import json, sys
+try:
+    prs = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(0)
+for p in prs:
+    # A draft is not asking for a verdict yet -- the same condition
+    # claude-review.yml puts in its own `if`.
+    if p.get("isDraft"):
+        continue
+    print(p["number"], p.get("headRefOid") or "-", sep="\t")
+' | while IFS="$(printf '\t')" read -r pr head; do
+    [ -n "$pr" ] || continue
+    marker="$REVIEWING_DIR/$pr"
+    if [ -e "$marker" ]; then
+      read -r held for_head <"$marker" 2>/dev/null || true
+      if [ "${for_head:-}" = "$head" ]; then
+        continue                      # one is running, on this very commit
+      fi
+      # The head moved under a running reviewer. Its verdict would carry a
+      # marker for a commit that is no longer current, so merge_gate would
+      # ignore it and the round would be spent for nothing. Kill it and let the
+      # next pass start one on what is there now.
+      say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
+      kill "${held:-0}" 2>/dev/null
+      rm -f "$marker"
+    fi
+    # Bounded by the same number as the worktrees, for the same reason: three is
+    # what a person can still read the output of.
+    if [ "${running:-0}" -ge "$MAX_WORKTREES" ]; then
+      continue
+    fi
+    # `review.sh` is what decides whether this PR actually needs a review -- it
+    # asks merge_gate.py, which is the one place that answer lives (#114). This
+    # only decides whether to ASK, so a PR already reviewed costs one cheap exit
+    # 8 rather than a second review.
+    # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
+    # carrying the remaining PRs, and a background child inheriting it can eat
+    # them. The second PR in a two-PR pass then silently never gets reviewed.
+    ./scripts/fleet/review.sh "$pr" >>"$LOG" 2>&1 </dev/null &
+    printf '%s %s\n' "$!" "$head" >"$marker"
+    running=$((running + 1))
+    say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+  done
+}
+
 # ---------------------------------------------------------------- the reap ---
 # A worktree whose PR is merged has done its job and is holding a slot. Only ones
 # this dispatcher created are touched, and only when nothing goes with them:
@@ -1549,6 +1634,18 @@ warn_blind_dispatcher() {
 # --------------------------------------------------------------- commands ---
 cmd_status() {
   echo "fleet state: $STATE_DIR"
+  # Which reviewer is going to answer the agents waiting in await-review.sh, and
+  # said on the FIRST screen anybody looks at. The failure this heads off is a
+  # quiet one: in `github` mode with no CLAUDE_CODE_OAUTH_TOKEN the review job
+  # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
+  # says which of the two reviewers this repository actually has.
+  if [ "${AUTOFLEET_REVIEW_MODE:-github}" = "local" ]; then
+    local n; n="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
+    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
+  else
+    echo "review:      github -- .github/workflows/claude-review.yml, which needs"
+    echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
+  fi
   # A stop and a running dispatcher are not alternatives: a drain leaves the
   # dispatcher up on purpose, because it is what reaps a worktree once its PR
   # merges -- and that draining dispatcher is running whatever code it parsed.
@@ -1879,6 +1976,12 @@ while that one is up."
     # worktrees it exists to release -- the watchers would have found nothing
     # there to speak about.
     reap_merged
+    # After reap_merged, because a PR that just merged needs no review, and
+    # before the rest because it is the only one of these that UNBLOCKS a
+    # worktree rather than reclaiming one: an agent sitting in await-review.sh
+    # is waiting on exactly this, and every pass it waits is a pass of its
+    # time-box spent.
+    review_open_prs
     enforce_timebox
     notice_stalled
     reap_abandoned

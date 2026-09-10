@@ -89,6 +89,11 @@ thing that makes the rule readable a year later.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every knob, and what it costs.
 - [docs/RUNNERS.md](docs/RUNNERS.md) — the driver contract.
 - [REVIEW.md](REVIEW.md) — the review policy `/code-review` and the workflow follow.
+- The independent review runs in GitHub Actions by default and needs a
+  `CLAUDE_CODE_OAUTH_TOKEN` secret. Without one, set
+  `AUTOFLEET_REVIEW_MODE=local` and the dispatcher runs it on your machine
+  instead — [CONFIGURATION.md](docs/CONFIGURATION.md#the-review) for what that
+  trades away.
 - [CLAUDE.md](CLAUDE.md) — the working agreement for contributing here.
 
 MIT.

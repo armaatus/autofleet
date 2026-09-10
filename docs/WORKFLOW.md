@@ -417,7 +417,29 @@ decoration — `merge-gate` reads it.
 
 ### Stage 5 — Independent review, and the merge
 
-On GitHub:
+**Where this review runs is a knob**, `AUTOFLEET_REVIEW_MODE` in
+`.autofleet/config`. The rest of this stage describes the default, `github`.
+Under `local` the reviewer is a process the **dispatcher** starts on the machine
+— [`scripts/fleet/review.sh`](../scripts/fleet/review.sh), briefed by
+[`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md) — and everything
+below still holds except who submits: same `REVIEW.md`, same verdict states, same
+`<!-- review-findings: N -->` trailer, same `await-review.sh` on this side.
+
+Two things differ, and both are the agent's business:
+
+- **You cannot start it and you cannot fake it.** `guard.py` refuses
+  `gh pr review` from a fleet worktree. The reviewer's verdict carries a second
+  trailer, `<!-- independent-review: local <head-sha> -->`, and that marker is the
+  only reason `merge_gate.py` counts a review submitted by your own account.
+- **There is no Actions run to look at.** A silent reviewer leaves a line in
+  `~/.autofleet/fleet.log` and a transcript under `~/.autofleet/reviews/`, not a
+  `verdict` comment on the PR.
+
+[CONFIGURATION.md](CONFIGURATION.md#the-review) has the trade in full, including
+what `local` gives up. autofleet itself runs on `local`, because it has no
+`CLAUDE_CODE_OAUTH_TOKEN`.
+
+On GitHub, in `github` mode:
 
 - [`ci.yml`](../.github/workflows/ci.yml) — host tests against the real fixture, three
   Switch targets, `core/` include hygiene. ~5.5 minutes.
@@ -642,7 +664,11 @@ merge — it asks GitHub to merge once the required checks pass. Then it stops.
 1. the PR body shows a local `/code-review` pass;
 2. …and a local `/mattpocock-skills:code-review` pass;
 3. an independent review exists on the **current head SHA** — pushing a fix
-   invalidates it, so a re-review is required;
+   invalidates it, so a re-review is required. Whose review counts depends on
+   `AUTOFLEET_REVIEW_MODE`: in `github` mode, anyone but the PR's author; in
+   `local` mode, that plus the author's own review when it carries
+   `<!-- independent-review: local <head-sha> -->`. The mode is read from the
+   **base** ref, so a PR cannot turn on the second rule for itself;
 4. the **latest** review from each author is not `CHANGES_REQUESTED`;
 5. no review thread is unresolved — read from a **complete** thread list, not
    from the first page of one;

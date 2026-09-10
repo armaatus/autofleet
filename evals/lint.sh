@@ -244,11 +244,84 @@ else
   fail "mattpocock-skills is not enabled in .claude/settings.json, but the agent brief calls its skills"
 fi
 
+echo "== local review mode"
+# Every one of these is a link in a chain whose breakage is SILENT, and the
+# silence is the same in each case: merge-gate wants an independent review on the
+# head, nothing produces one, and every PR the fleet opens waits forever. The
+# mode exists precisely because that failure already happens by default on a
+# repository with no CLAUDE_CODE_OAUTH_TOKEN.
+
+# 1. The reviewer's brief. review.sh inlines it into the prompt, so a missing
+#    file is a review submitted against no policy at all.
+if [ -f .claude/agents/reviewer.md ]; then
+  for needle in "review-findings" "independent-review: local" "REVIEW.md" \
+                "mattpocock-skills:code-review"; do
+    grep -q -- "$needle" .claude/agents/reviewer.md \
+      || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to write or read"
+  done
+  ok "the reviewer brief names both trailers, REVIEW.md and the standards pass"
+else
+  fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
+fi
+
+# 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer
+#    what to write and merge_gate.py decides what counts; a drift between them is
+#    a review that submits and is then ignored, which reads exactly like a
+#    reviewer that never ran.
+if grep -q 'independent-review:\\s\*local' .github/scripts/merge_gate.py \
+   && grep -q 'independent-review: local' .claude/agents/reviewer.md; then
+  ok "the local-review marker is spelled the same in the gate and in the brief"
+else
+  fail "the local-review marker has drifted between merge_gate.py and reviewer.md"
+fi
+
+# 3. The BASE-ref read. Drop `.autofleet/config` from that sparse-checkout and
+#    review_mode() finds no file, returns `github`, and every PR on a local-mode
+#    repository blocks -- with the workflow still green and nothing saying why.
+if grep -A6 'sparse-checkout: |' .github/workflows/merge-gate.yml \
+     | grep -q '\.autofleet/config'; then
+  ok "merge-gate.yml checks out .autofleet/config, so the mode is readable in CI"
+else
+  fail "merge-gate.yml no longer sparse-checks-out .autofleet/config; review_mode() would silently answer github and block every PR"
+fi
+if grep -q 'ref: ${{ github.event.pull_request.base.sha }}' .github/workflows/merge-gate.yml; then
+  ok "...from the BASE ref, so a PR cannot switch its own repository into local mode"
+else
+  fail "merge-gate.yml no longer pins the base sha; a PR could turn on local review mode for itself"
+fi
+
+# 4. The guard that makes the marker mean anything. Without it the agent under
+#    review can run `gh pr review` and write its own marker, and every assertion
+#    above stays green while the independence requirement is gone.
+if grep -q '"pr", "review"' .claude/hooks/guard.py; then
+  ok 'guard.py still refuses `gh pr review` from a fleet worktree'
+else
+  fail 'guard.py no longer refuses `gh pr review`, so an agent can forge its own independent review'
+fi
+
+# 5. The dispatcher is what runs it. review.sh existing and never being called is
+#    the same outcome as it not existing.
+if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then
+  ok "the dispatcher's poll calls review_open_prs"
+else
+  fail "fleet.sh no longer calls review_open_prs, so nothing starts the local reviewer"
+fi
+
+# 6. ...and the installer ships it.
+for shipped in ".claude/agents/reviewer.md"; do
+  grep -q "\"$shipped\"" install.sh \
+    || fail "install.sh does not ship $shipped, so a host project vendors a broken local review mode"
+done
+grep -q 'AUTOFLEET_REVIEW_MODE' install.sh \
+  || fail "install.sh never mentions AUTOFLEET_REVIEW_MODE, so a host project is not told the default needs a secret"
+ok "install.sh ships the reviewer and names the knob"
+
 echo "== the flow's own scripts"
 # The brief names these by path. A rename that misses the brief turns into an
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
-              resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh; do
+              resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
+              review.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -581,7 +654,10 @@ grep -q 'merge_gate.py' .github/workflows/merge-gate.yml \
 # `.github/scripts` ALONE. Widen that import to anything outside this directory
 # and the gate stops with an ImportError -- a required check that can never
 # conclude, on every PR.
-if ! grep -q 'sparse-checkout: .github/scripts' .github/workflows/merge-gate.yml; then
+# A LIST now, not one path: `.autofleet/config` rides along so review_mode() can
+# read the mode in CI. Matched loosely enough to survive that becoming three
+# paths, and strictly enough that dropping this one is still caught.
+if ! grep -A6 'sparse-checkout' .github/workflows/merge-gate.yml | grep -q '\.github/scripts'; then
   fail "merge-gate.yml no longer sparse-checks-out .github/scripts; the paths merge_gate.py imports from are no longer the ones it gets"
 fi
 sparse_tmp="$(mktemp -d)"

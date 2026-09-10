@@ -34,6 +34,7 @@ PAYLOAD=(
   ".claude/hooks/shell-parses.sh"
   ".claude/agents/verifier.md"
   ".claude/agents/researcher.md"
+  ".claude/agents/reviewer.md"
   "evals/lint.sh"
   "evals/run.sh"
   "docs/WORKFLOW.md"
@@ -121,7 +122,111 @@ seed_one() {
 echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 echo "==> your answers (seeded once, never overwritten)"
+# Recorded BEFORE the loop, because after it the file exists either way and
+# nothing can tell a fresh seed from the host's own answers.
+had_config=false; [ -e "$TARGET/.autofleet/config" ] && had_config=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
+
+# The seed is autofleet's own config, and autofleet runs itself on
+# `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that
+# has to be exercised daily). Copying that verbatim would hand every host repo
+# the weaker independence guarantee as a DEFAULT, chosen by nobody and announced
+# nowhere -- which is the exact failure the mode's whole design is built to
+# avoid. So a freshly seeded config is normalised back to the strong default and
+# the change is printed. A config the host already had is never touched.
+if ! $had_config && ! $DRY && [ -f "$TARGET/.autofleet/config" ]; then
+  if grep -q '^AUTOFLEET_REVIEW_MODE=local' "$TARGET/.autofleet/config"; then
+    # `.bak` and then removed, because BSD sed and GNU sed disagree about
+    # `-i` with no argument and this has to run on both.
+    sed -i.bak 's/^AUTOFLEET_REVIEW_MODE=local/AUTOFLEET_REVIEW_MODE=github/' \
+      "$TARGET/.autofleet/config"
+    rm -f "$TARGET/.autofleet/config.bak"
+    echo "   .autofleet/config  (review mode set to github, the strong default --"
+    echo "                       step 6 below is where you choose otherwise)"
+  fi
+fi
+
+# ---------------------------------------------------------------- the plugin
+# `mattpocock-skills` is not decoration and it is not optional. The agent brief
+# tells every worktree to run `/mattpocock-skills:code-review`, `merge_gate.py`
+# REQUIRES that pass to be named in the PR body before a PR may merge, and
+# `evals/lint.sh` fails if the entry is missing. So a host repo without it gets
+# a brief asking for a skill nobody has and a gate nothing can satisfy.
+#
+# Two halves, because enabling and installing are different things and this
+# repo has now been bitten by both:
+#
+#   the entry   `.claude/settings.json` is SEEDED, never overwritten -- a repo
+#               that already had one therefore never got the entry at all. This
+#               merges just that key into an existing file, leaving every
+#               permission and hook in it alone.
+#   the install autofleet's own checkout had the entry enabled for MONTHS while
+#               the plugin was installed only for a different project, so every
+#               agent was being told to run a skill that did not resolve and
+#               nothing said so. `enabledPlugins` enables what is installed; it
+#               does not install anything.
+PLUGIN="mattpocock-skills@claude-plugins-official"
+MARKETPLACE="anthropics/claude-plugins-official"
+
+merge_plugin_entry() {
+  local dst="$TARGET/.claude/settings.json"
+  [ -f "$dst" ] || return 0     # seeded from ours, which already has the entry
+  python3 - "$dst" "$PLUGIN" "$DRY" <<'PYEOF'
+import json, sys
+path, plugin, dry = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+try:
+    with open(path) as fh:
+        settings = json.load(fh)
+except Exception as exc:
+    # Not silence: a settings.json this cannot read is one the entry never
+    # reaches, and the failure would surface as an eval failing in the host repo
+    # for a reason nothing connects back to here.
+    print(f"   !! could not read .claude/settings.json ({exc});"
+          f" add {{\"enabledPlugins\": {{\"{plugin}\": true}}}} by hand")
+    raise SystemExit(0)
+if settings.get("enabledPlugins", {}).get(plugin):
+    print("   kept (yours): .claude/settings.json already enables the plugin")
+    raise SystemExit(0)
+if dry:
+    print("   would add enabledPlugins."+plugin+" to .claude/settings.json")
+    raise SystemExit(0)
+settings.setdefault("enabledPlugins", {})[plugin] = True
+with open(path, "w") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+print("   .claude/settings.json  (enabledPlugins += " + plugin + ")")
+PYEOF
+}
+
+install_plugin() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "   claude is not on PATH; install the plugin yourself (see the steps below)"
+    return 0
+  fi
+  if $DRY; then
+    echo "   would install $PLUGIN into $TARGET"
+    return 0
+  fi
+  # `--scope project` writes the install against the TARGET repo's path, which
+  # is why this runs from inside it. Both commands are idempotent, and neither
+  # is fatal: a machine with no network still gets a working vendored payload
+  # and a printed pair of commands to run later.
+  #
+  # It also REWRITES .claude/settings.json to add the same entry
+  # merge_plugin_entry just added -- reordering the keys as it goes, which shows
+  # up as diff noise in the host repo on the first install. That is why the merge
+  # above happens anyway rather than being left to this: `claude` may not be
+  # here, and the entry is what evals/lint.sh and the agent brief depend on.
+  ( cd "$TARGET" \
+      && claude plugin marketplace add "$MARKETPLACE" >/dev/null 2>&1
+    cd "$TARGET" && claude plugin install "$PLUGIN" --scope project >/dev/null 2>&1
+  ) && echo "   $PLUGIN installed for $TARGET" \
+    || echo "   !! could not install $PLUGIN; run the two commands below by hand"
+}
+
+echo "==> the mattpocock-skills plugin (the brief and merge-gate both require it)"
+merge_plugin_entry
+install_plugin
 
 echo
 if $DRY; then
@@ -144,7 +249,19 @@ Next, in the repo you just installed into:
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.
-  6. Make `merge-gate` a required check on your default branch.
-  7. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+  6. Choose where the independent review runs -- AUTOFLEET_REVIEW_MODE in
+     .autofleet/config. The default `github` needs a CLAUDE_CODE_OAUTH_TOKEN
+     secret on the repository (mint one with `claude setup-token`); WITHOUT it
+     that job no-ops and every PR blocks forever on a review that cannot arrive.
+     `local` runs the reviewer on your machine instead, with a weaker
+     independence guarantee that docs/CONFIGURATION.md spells out.
+  7. Make `merge-gate` a required check on your default branch.
+  8. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+
+If the plugin step above could not run, these are the two commands, from inside
+the repo you installed into:
+
+  claude plugin marketplace add anthropics/claude-plugins-official
+  claude plugin install mattpocock-skills@claude-plugins-official --scope project
 
 NEXT

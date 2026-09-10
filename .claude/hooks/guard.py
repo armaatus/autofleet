@@ -533,6 +533,42 @@ def check_bash(command, cwd=""):
         # has, and an agent that can merge is not separated from anything.
         if _verb(words) == "gh":
             rest = words[1:]
+            # The independent review is not the author's to write, and in
+            # `AUTOFLEET_REVIEW_MODE=local` that stops being self-evident.
+            #
+            # In the default `github` mode this rule is redundant: the reviewer
+            # is a different GitHub account, so `merge_gate.independent_reviews()`
+            # discards anything the PR's own author submitted and an agent
+            # reviewing itself achieves nothing. In `local` mode the reviewer and
+            # the author ARE one account, and what separates them is a marker in
+            # the review body -- which an agent with `gh pr review` could simply
+            # write. This is the half that makes the marker mean something:
+            # the agent under review cannot reach the command that produces it.
+            #
+            # Only in a fleet-owned worktree. `scripts/fleet/review.sh` runs from
+            # the repo root, which is not one, which is how the dispatcher's
+            # reviewer still submits. And a person reviewing a PR from their own
+            # checkout is the ordinary case this must not argue about.
+            if rest[:2] == ["pr", "review"] and _fleet_owns_this_worktree():
+                deny(
+                    "Blocked: this worktree was opened by the fleet, and an agent does "
+                    "not submit\n"
+                    "the independent review of its own pull request.\n"
+                    "\n"
+                    "In local review mode the reviewer signs in as the same GitHub "
+                    "account you do,\n"
+                    "so the ONLY thing separating its verdict from yours is a marker in "
+                    "the review\n"
+                    "body -- and this is what keeps that marker out of your reach. The "
+                    "dispatcher\n"
+                    "runs the reviewer for you; wait for it:\n"
+                    "  ./scripts/fleet/await-review.sh\n"
+                    "\n"
+                    "To answer findings, reply on the thread and resolve it, then say "
+                    "what you did:\n"
+                    "  ./scripts/fleet/resolve-thread.sh\n"
+                    "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+                )
             if rest[:2] == ["pr", "merge"]:
                 # `--auto` does not merge. It asks GitHub to merge later, once
                 # the required checks pass -- and `merge-gate` is one of those,
@@ -954,6 +990,14 @@ def _stateful_checks():
                     fh.write("reviewed\n")
                 expect(0, {"command": "git push origin HEAD"},
                        "...and lifts once the review is recorded")
+                # The other half of local review mode, and the sharp one:
+                # with `gh pr review` reachable from here, the marker that makes
+                # a self-review count is a string an agent can type.
+                expect(2, {"command": "gh pr review 7 --comment --body x"},
+                       "a fleet worktree cannot submit its own independent review",
+                       because="does not submit")
+                expect(0, {"command": "gh pr view 7 --json body"},
+                       "...but reading the PR is not reviewing it")
                 expect(2, {"file_path": os.path.join(root, HOOK_REL)},
                        "a fleet worktree cannot rewrite its own guards", tool="Edit",
                        because="enforcement layer")

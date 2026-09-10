@@ -73,10 +73,20 @@ jobs:
       # `gh pr merge --auto` would land it. Listing .github/scripts/ as
       # human-merge-only cannot help there, because the modified script is the
       # one evaluating that list.
+      #
+      # `.autofleet/config` rides along for the same reason, and it must come
+      # from the SAME base ref. `merge_gate.review_mode()` reads
+      # `AUTOFLEET_REVIEW_MODE` out of it, and `local` mode lets a review by the
+      # PR's own account count when it carries the marker -- so a head-ref copy
+      # would let a PR turn on the weaker rule in the very change that rule is
+      # judging. A base with no such file at all is `github`, the strong
+      # default, which refuses rather than admits.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            .autofleet/config
           sparse-checkout-cone-mode: false
 
       # BEFORE Gather, because Gather now runs a script from that same base

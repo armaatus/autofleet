@@ -11,3 +11,19 @@
 AUTOFLEET_PROJECT_PREFIX=autofleet
 AUTOFLEET_TEST_COMMAND="./tests/run.sh"
 AUTOFLEET_NOTIFY_TITLE="autofleet"
+
+# No CLAUDE_CODE_OAUTH_TOKEN on this repository, so claude-review.yml no-ops and
+# the only account that could review a fleet PR is the one that opened it. The
+# dispatcher runs the reviewer here instead. See docs/CONFIGURATION.md for what
+# that gives up -- and note that autofleet being its own reference installation
+# (hard rule 1) is exactly why this is the mode it runs itself on: the weaker
+# path is the one that has to be exercised daily, not the one nobody drives.
+#
+# A PLAIN assignment, like every other line in this file, and not the
+# `: "${X:=...}"` shape config.sh writes its own defaults in. Those defaults run
+# BEFORE this file is sourced, so by the time a `:=` here is reached the variable
+# already holds `github` and the assignment does nothing at all. The only form a
+# host config can override a default with is this one. (Which also means the
+# environment cannot override it for a single command; point AUTOFLEET_CONFIG at
+# another file for that, which is what tests/test_review_mode.sh does.)
+AUTOFLEET_REVIEW_MODE=local
