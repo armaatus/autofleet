@@ -635,6 +635,73 @@ assert_no_box_markers() {
 # be exercised without starting a dispatcher.
 in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
 
+# A runner driver that is NOT Orca: plain files, no CLI, nothing that could
+# reach the app even if it were running. Everything the fleet knows about
+# worktrees, agents and terminals has to arrive through the fourteen functions
+# below, so a callsite that still reaches for `orca` produces a dispatcher that
+# cannot see its own worktrees -- or, with the `orca` planted on PATH beside it,
+# a recorded call that was not supposed to happen.
+#
+# Deliberately the shape a tmux + `git worktree` driver would have, down to the
+# three-way answers: `could not tell` here is a missing backing file rather than
+# a deadline, but the codes the dispatcher reads are the same ones.
+stub_runner() {
+  STUB_DIR="$WORK/stub"
+  mkdir -p "$STUB_DIR"
+  : >"$STUB_DIR/worktrees"; : >"$STUB_DIR/states"; : >"$STUB_DIR/terminals"
+  STUB_CALLS="$STUB_DIR/calls"; : >"$STUB_CALLS"
+  export STUB_DIR STUB_CALLS
+  cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
+#!/usr/bin/env bash
+# A runner backed by three text files. Records every call it is asked to make.
+stub_say() { printf '%s
+' "$*" >>"$STUB_CALLS"; }
+
+runner_available()        { stub_say available; return 0; }
+runner_dispatcher_hint()  { echo "tmux new-session -s fleet"; }
+
+runner_worktree_create() {
+  local repo="$1" name="$2" issue="$3" path="$STUB_DIR/wt-$3"
+  stub_say "worktree create $name $issue"
+  mkdir -p "$path"
+  printf '%s	%s	%s
+' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
+  printf '%s
+' "$path"
+}
+runner_worktree_list()  { stub_say "worktree list"; cat "$STUB_DIR/worktrees"; }
+runner_worktree_issue() {
+  stub_say "worktree issue"
+  [ -s "$STUB_DIR/issue" ] || return 2
+  cat "$STUB_DIR/issue"
+}
+runner_worktree_set()   { stub_say "worktree set $*"; return 0; }
+runner_worktree_remove() {
+  stub_say "worktree remove $1"
+  rm -rf "$1"
+  [ -d "$1" ] && return 1
+  return 0
+}
+runner_agent_states()    { stub_say "agent states"; cat "$STUB_DIR/states"; }
+runner_agent_terminals() { stub_say "agent terminals"; cat "$STUB_DIR/terminals"; }
+runner_agent_terminal() {
+  local list; list="$(runner_agent_terminals)" || return 1
+  printf '%s
+' "$list" | awk -F'	' -v p="$1" '$2 == p { print $1; exit }'
+}
+runner_terminal_draft() {
+  stub_say "terminal draft $1"
+  [ -s "$STUB_DIR/draft" ] || return 0
+  printf '%s %s
+' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
+}
+runner_terminal_send()      { stub_say "terminal send $1"; return 0; }
+runner_terminal_enter()     { stub_say "terminal enter $1"; return 0; }
+runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
+STUBDRIVER
+  export AUTOFLEET_RUNNER=stub
+}
+
 # What .claude/hooks/guard.py answers about one command, against THIS phase's
 # fleet dir: 0 allowed, 2 blocked.
 #
@@ -838,9 +905,73 @@ revert_on_origin() {
 }
 
 case "${1:-}" in
+  runner_stub)
+    # THE acceptance for #1, and the only assertion that keeps holding once the
+    # move has been made: with a driver that is not Orca, a dispatcher, a
+    # worktree hook and the brief resolver all do their whole job, and the CLI
+    # is never touched. Every callsite that regressed out from behind the driver
+    # would show up here as a recorded `orca` call.
+    make_fixture ok
+    make_worktree
+    add_origin
+    stub_runner
+    # An `orca` ON PATH as well as the one the fixture exports: the claim is that
+    # nothing reaches for the CLI, not that nothing reaches for it by the one
+    # name a test happened to set. Both record into $ORCA_CALLS.
+    cp "$WORK/bin/orca-stub" "$WORK/bin/orca"
+
+    printf '%s\t%s\t%s\n' "$WORK/wt" work 42 >"$STUB_DIR/worktrees"
+    printf '%s\t%s\n' "$WORK/wt" waiting >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    printf '%s\t%s\n' t2 "$WORK/repo" >>"$STUB_DIR/terminals"
+    printf '42' >"$STUB_DIR/issue"
+    printf 'read the issue and get to work' >"$STUB_DIR/draft"
+
+    [ "$(in_fleet live_count)" = 1 ] \
+      || fail "the dispatcher could not count its own worktrees through a non-Orca driver"
+
+    # The stall watcher: the agent state and the board, one poll of each.
+    issue_labels "ready"
+    out="$(in_fleet notice_stalled 2>&1)"
+    grep -q "waiting for input" <<<"$out" \
+      || fail "the agent state never arrived through the driver: $out"
+    grep -q "worktree set" "$STUB_CALLS" \
+      || fail "the board update did not go through the driver: $(cat "$STUB_CALLS")"
+
+    # The launch, and then the release: create, set, remove, sweep.
+    in_fleet launch 44 "a second issue" >/dev/null 2>&1 \
+      || fail "launch failed against a driver that answers everything"
+    grep -q "worktree create" "$STUB_CALLS" \
+      || fail "the worktree was not created through the driver: $(cat "$STUB_CALLS")"
+    in_fleet interrupt_agent_in "$WORK/wt" >/dev/null 2>&1
+    grep -q "terminal interrupt t1" "$STUB_CALLS" \
+      || fail "the interrupt did not find this worktree's agent through the driver: $(cat "$STUB_CALLS")"
+    out="$(in_fleet reap_merged 2>&1)"
+    [ -d "$WORK/wt" ] && fail "the merged worktree was not removed through the driver: $out"
+    grep -q -- "--yes" "$REAP_CALLS" \
+      || fail "the stack of a worktree the driver really removed was never swept: $out"
+
+    # ...and the two hooks that run INSIDE a worktree, which reach the runtime
+    # by a different path and were the other half of the grep.
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
+    grep -q "Closes #42" <<<"$out" \
+      || fail "issue-command.sh could not resolve this worktree's issue through the driver: $out"
+    out="$( cd "$WORK/repo" && AGENT_AUTOSTART_POLL_SECONDS=0 \
+              ./scripts/fleet/agent-autostart.sh --once 2>&1 )"
+    grep -q "sent." <<<"$out" \
+      || fail "agent-autostart.sh could not read or submit the draft through the driver: $out"
+    grep -q "terminal enter t2" "$STUB_CALLS" \
+      || fail "the prompt was not submitted through the driver: $(cat "$STUB_CALLS")"
+
+    # The whole point. Not "the fleet still works" -- the fleet works and the CLI
+    # was never asked anything.
+    [ -s "$ORCA_CALLS" ] \
+      && fail "something outside scripts/fleet/runner/ still reaches for the orca CLI: $(cat "$ORCA_CALLS")"
+    echo "ok: dispatcher, reap and both worktree hooks run on a driver that is not Orca"
+    ;;
   card_says)
     make_fixture set_fails
-    out="$(in_fleet card "/some/worktree" --workspace-status in-progress --comment "#42: building" 2>&1)"
+    out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
     grep -qi "board update FAILED" <<<"$out" \
       || fail "a refused board update said nothing: $out"
     grep -q "Unable to determine Orca.app path" <<<"$out" \
@@ -851,7 +982,7 @@ case "${1:-}" in
     ;;
   card_quiet)
     make_fixture ok
-    out="$(in_fleet card "/some/worktree" --comment "#42: building" 2>&1)"
+    out="$(in_fleet card "/some/worktree" comment "#42: building" 2>&1)"
     grep -qi "fail" <<<"$out" && fail "a successful board update complained: $out"
     echo "ok: a board update that worked says nothing"
     ;;
@@ -2263,6 +2394,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub" >&2
     exit 2 ;;
 esac

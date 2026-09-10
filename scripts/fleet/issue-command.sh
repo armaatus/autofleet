@@ -17,9 +17,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/scripts/fleet/lib.sh"
 
 ref="${1:-}"
-if [ -z "$ref" ] && orca_cli_resolve; then
-  ref="$("$ORCA_CLI" worktree current --json 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["worktree"].get("linkedIssue") or "")' 2>/dev/null || true)"
+# `|| true` twice over, because `set -e` is on and BOTH "no runner" and "no
+# linked issue" are ordinary answers here: the argument form is the one the
+# agent uses, and the fallback exists for a person running this by hand.
+if [ -z "$ref" ] && runner_available 2>/dev/null; then
+  ref="$(runner_worktree_issue || true)"
 fi
 
 # Accept a bare number or any .../issues/<n>[...] URL.
@@ -100,10 +102,9 @@ and what you did about them, any issue you edited and why, and `Closes #__ISSUE_
 The `merge-gate` check reads that body: it looks for the words `/code-review`,
 `mattpocock-skills:code-review` and a closing line, and without any one of them
 the PR cannot merge. The closing line is the one the PR template leaves as a
-placeholder -- fill it in. Then tell the Orca board where the work is:
+placeholder -- fill it in. Then tell the board where the work is:
 
-    orca worktree set --worktree active --workspace-status in-review \
-      --comment "#__ISSUE__: PR #<n>, waiting on review"
+    ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**

@@ -95,9 +95,61 @@ fleet_ports() {
   done
 }
 
+# Run a command with a hard deadline, capturing its stdout in $2.
+#
+# Runner-agnostic on purpose, and NOT part of the driver contract: the drivers
+# are its heaviest user, but `finish_removal` runs `reap.sh` through it too, and
+# a `docker compose down` against a wedged daemon has no timeout of its own
+# either. It lived in the Orca driver while it was the only caller, which made
+# every non-Orca use of it read like a layering violation.
+#
+# Why any of this exists: a runtime can accept a connection and then never
+# answer, and orca.yaml's `setupAgentStartupPolicy: wait-for-setup` holds the
+# agent's tab until setup.sh returns -- so a hook that blocks forever costs the
+# whole worktree, which is strictly worse than whatever it was trying to
+# arrange. macOS ships no `timeout`, hence the manual watchdog.
+#
+# Polled in 50ms ticks rather than whole seconds, which is not a micro-
+# optimisation: a child that has already exited is a zombie until bash reaps it,
+# and `kill -0` succeeds on a zombie. With a one-second sleep every call
+# therefore cost a full second even when the command answered instantly.
+# setup.sh makes dozens of these, and `agent-autostart.sh --watch` alone makes
+# two per poll -- which is what turned a test of it into a 21-second one, close
+# enough to its 60s ctest timeout to go red on a loaded machine.
+#
+# Returns the command's status, or 124 when the deadline was hit.
+# $2 gets stdout only, unless FLEET_RUN_CAPTURE_STDERR=1 is set for the call --
+# `VAR=1 fleet_run_with_deadline ...`, which bash scopes to that call alone.
+#
+# Off by default because most callers parse $2 as JSON, and a warning landing in
+# it is a parse error. On for the ones that report a FAILURE: a CLI says why on
+# stderr, so dropping it leaves "it failed" with nothing after it -- and "the
+# app is not running" and "that worktree is gone" then look identical.
+fleet_run_with_deadline() {
+  local seconds="$1" out="$2"; shift 2
+  if [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
+    "$@" >"$out" 2>&1 &
+  else
+    "$@" >"$out" 2>/dev/null &
+  fi
+  local child=$! ticks=0 limit=$((seconds * 20))
+  while kill -0 "$child" 2>/dev/null; do
+    if [ "$ticks" -ge "$limit" ]; then
+      kill "$child" 2>/dev/null
+      wait "$child" 2>/dev/null
+      return 124
+    fi
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  wait "$child"
+}
+
 # The runner driver: everything about creating a worktree, opening a terminal
 # in it, and asking the runtime what it is doing. `orca` is the only one that
-# ships; see fleet/runner/README.md for what a second one would have to do.
+# ships, and it is the WHOLE of the dependency -- nothing outside
+# scripts/fleet/runner/ names it. See docs/RUNNERS.md for the contract a second
+# one has to meet.
 #
 # Sourced here rather than by each script because every hook needs it and a
 # hook that silently has no driver looks exactly like a hook whose driver

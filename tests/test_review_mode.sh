@@ -126,7 +126,9 @@ STUB
   # ------------------------------------------------------------- the orca stub
   #
   # `fleet.sh` resolves the runner AT SOURCE TIME and `die`s if nothing answers
-  # (fleet.sh: `orca_cli_resolve || die "no orca CLI answers here"`). This file
+  # (fleet.sh: `runner_available || die ...`, and the Orca driver is what prints
+  # "no orca CLI answers here" underneath it -- which is what the two phases
+  # below grep for as a canary that fleet.sh sourced at all). This file
   # sources it -- `in_poll` does -- so on a machine with no Orca the subshell
   # exited before running the function under test, and the phases that hid that
   # behind `>/dev/null 2>&1` reported the CONSEQUENCE instead: "the stale marker

@@ -13,11 +13,10 @@
 #   ./scripts/fleet/fleet.sh stop [--now]      # see "Stopping"
 #   ./scripts/fleet/fleet.sh resume
 #
-# Run it in an Orca terminal in the main worktree, so the dispatcher is as
-# visible as the work it starts:
-#
-#   orca terminal create --worktree active --title fleet \
-#     --command "./scripts/fleet/fleet.sh run --auto"
+# Run it in a terminal the runner opens in the main worktree, so the dispatcher
+# is as visible as the work it starts. `fleet.sh` with no command prints the
+# exact line for the configured runner -- it is the one instruction here that
+# cannot be written runner-agnostically, so the driver supplies it.
 #
 # ## What it picks
 #
@@ -161,57 +160,42 @@ check_drain() {
   return 0
 }
 
-# ---------------------------------------------------------------- orca CLI ---
-orca_cli_resolve || die "no orca CLI answers here; is the Orca app running?"
+# ------------------------------------------------------------- the runner ---
+# At SOURCE time, not at first use: everything below assumes a runner that
+# answers, and a dispatcher that discovers otherwise three functions deep
+# reports the consequence instead of the cause. The driver has already said why
+# on stderr; this is the consequence.
+runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so there is nothing to dispatch with"
 
-fleet_json() {
-  local out; out="$(mktemp)"
-  orca_run_with_deadline 30 "$out" "$ORCA_CLI" "$@" --json
-  local rc=$?
-  cat "$out"; rm -f "$out"
-  return $rc
-}
-
-# The Orca board is the status surface: `in-progress` while it builds,
+# The runner's board is the status surface: `in-progress` while it builds,
 # `in-review` once the PR is up (the agent sets that itself), `completed` on
 # merge. The comment is the one line the card shows.
 #
 # A failed update is SAID, not swallowed. WORKFLOW.md calls the board the status
 # surface, so a card that did not update is a board showing something that is not
 # true -- and the `|| true` this replaces meant the dispatcher reported nothing
-# wrong while it happened. When the Orca CLI broke on 2026-09-05 (lib.sh's
-# orca_cli_resolve records it) every card in the fleet would have frozen in
-# silence. Still non-fatal: the board is a display, and a display that cannot be
+# wrong while it happened. When the runner's CLI broke on 2026-09-05 (the Orca
+# driver's orca_cli_resolve records it) every card in the fleet would have
+# frozen in silence. Still non-fatal: the board is a display, and a display that cannot be
 # written is not a reason to stop dispatching work.
+#
+# `key value` pairs, which is the driver's shape: a status and the comment
+# explaining it go up together or the board carries one without the other.
 card() {
   local path="$1" out rc; shift
   out="$(mktemp)"
-  ORCA_RUN_CAPTURE_STDERR=1 orca_run_with_deadline 30 "$out" "$ORCA_CLI" worktree set \
-    --worktree "path:$path" "$@" --json
+  runner_worktree_set "$path" "$@" >"$out" 2>&1
   rc=$?
   if [ "$rc" != 0 ]; then
     say "  board update FAILED (rc $rc) for $path: $*"
-    # The CLI's own words, capped: they are the difference between "the app is
+    # The runner's own words, capped: they are the difference between "the app is
     # not running" and "that worktree is gone", and both look like silence.
     while IFS= read -r line; do
       [ -n "$line" ] && say "    $line"
-    done < <(sed -n '1,3p' "$out")
+    done <"$out"
   fi
   rm -f "$out"
   return 0
-}
-
-# The agent terminal in one worktree, if it has one. The path goes in as an
-# argument rather than into the source: a worktree path can contain anything a
-# filename can.
-agent_terminal_in() {
-  fleet_json terminal list | python3 -c '
-import json, sys
-for t in json.load(sys.stdin)["result"]["terminals"]:
-    if (t.get("worktreePath") == sys.argv[1] and t.get("agentIdentity")
-            and not t.get("orphaned")):
-        print(t["handle"]); break
-' "$1"
 }
 
 # Interrupt the agent in one worktree, if it has one. Both callers are about to
@@ -221,10 +205,9 @@ for t in json.load(sys.stdin)["result"]["terminals"]:
 # reports each interrupt it managed, which needs the exit code this swallows.
 interrupt_agent_in() {
   local handle
-  handle="$(agent_terminal_in "$1")"
+  handle="$(runner_agent_terminal "$1")"
   [ -n "$handle" ] || return 0
-  orca_run_with_deadline 20 /dev/null "$ORCA_CLI" terminal send \
-    --terminal "$handle" --interrupt --json >/dev/null 2>&1
+  runner_terminal_interrupt "$handle"
   return 0
 }
 
@@ -252,7 +235,7 @@ clear_issue_markers() {
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/merge-blind-$1" "$STATE_DIR/merge-held-$1" \
-        "$STATE_DIR/orca-blind-$1" \
+        "$STATE_DIR/runner-blind-$1" \
         "$STATE_DIR/git-blind-$1" "$STATE_DIR/warned-$1" \
         "$STATE_DIR/reason-blind-$1"
 }
@@ -284,23 +267,15 @@ disown_issue() {
 # transient hiccup turns into three duplicate worktrees for issues that already
 # have one: `in_flight` goes blind at the same moment, because it reads the same
 # list.
+#
+# `issue<TAB>path`, which is the driver's `path<TAB>branch<TAB>issue` with the
+# columns this dispatcher reads brought to the front. The branch is dropped
+# rather than carried: nothing here has ever needed it, and a column no caller
+# reads is one the next caller reads wrong.
 live_worktrees() {
-  local out; out="$(mktemp)"
-  orca_run_with_deadline 30 "$out" "$ORCA_CLI" worktree list --json || {
-    rm -f "$out"; return 1; }
-  python3 -c '
-import json, sys
-try:
-    worktrees = json.load(open(sys.argv[1]))["result"]["worktrees"]
-except Exception:
-    raise SystemExit(1)
-for w in worktrees:
-    if not w.get("isMainWorktree") and not w.get("isArchived"):
-        print(w.get("linkedIssue") or "-", w["path"], sep="\t")
-' "$out"
-  local rc=$?
-  rm -f "$out"
-  return $rc
+  local list
+  list="$(runner_worktree_list)" || return 1
+  printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }'
 }
 
 # Prints the count, or fails. A caller that cannot tell how many are running
@@ -501,11 +476,11 @@ foundation_in_flight() {
     return 0
   fi
 
-  # THE LIST IS MACHINE-WIDE, and this is where that starts to matter. `orca
-  # worktree list` is not scoped to a repository, while `poll_issue "$n"`
-  # resolves the number against THIS one -- so an unrelated Orca worktree whose
-  # linked issue number happens to match a `foundation` issue here stops the
-  # fleet launching anything, indefinitely, after a single line in the log.
+  # THE LIST IS MACHINE-WIDE, and this is where that starts to matter.
+  # `runner_worktree_list` is not scoped to a repository, while `poll_issue "$n"`
+  # resolves the number against THIS one -- so an unrelated worktree whose linked
+  # issue number happens to match a `foundation` issue here stops the fleet
+  # launching anything, indefinitely, after a single line in the log.
   #
   # The premise is older than this function: `in_flight` and `count_startable`
   # share it, where it merely inflated a count. Here it is newly fatal rather
@@ -695,15 +670,8 @@ launch() {
 
   say "opening a worktree for #$num -- $title"
   local out; out="$(mktemp)"
-  orca_run_with_deadline 240 "$out" "$ORCA_CLI" worktree create \
-    --repo "path:$REPO_ROOT" \
-    --name "$name" \
-    --issue "$num" \
-    --no-parent \
-    --agent claude \
-    --prompt "$(agent_brief "$num")" \
-    --comment "starting #$num" \
-    --json
+  runner_worktree_create "$REPO_ROOT" "$name" "$num" claude \
+    "$(agent_brief "$num")" "starting #$num" >"$out"
   if [ $? != 0 ]; then
     say "  could not create it:"
     sed 's/^/    /' "$out" | head -5 | tee -a "$LOG"
@@ -711,15 +679,9 @@ launch() {
     return 1
   fi
   local path
-  path="$(python3 -c '
-import json,sys
-try:
-    print(json.load(sys.stdin)["result"]["worktree"]["path"])
-except Exception:
-    print("")
-' <"$out")"
+  path="$(cat "$out")"
   rm -f "$out"
-  [ -n "$path" ] || { say "  created, but Orca reported no path; not tracking it"; return 1; }
+  [ -n "$path" ] || { say "  created, but the runner reported no path; not tracking it"; return 1; }
   own "$num" "$path"
   # The announcement is stale once the fleet has actually MOVED, and this is
   # where it has: a `launch` that FAILED moved nothing and must not re-arm the
@@ -727,7 +689,7 @@ except Exception:
   # foundation_in_flight for why it is cleared here rather than on its no-hold
   # path. Found by the independent review.
   rm -f "$FOUNDATION_HOLD_SAID"
-  card "$path" --workspace-status in-progress --comment "#$num: building"
+  card "$path" workspace-status in-progress comment "#$num: building"
   say "  #$num is running in $path"
 }
 
@@ -962,53 +924,27 @@ for p in prs:
 # with it, or it survives under `restart: unless-stopped` holding two ports
 # forever with nothing left on disk to identify it by -- but AFTER the removal,
 # not before it. See remove_worktree.
-# Remove a worktree, judged by whether it is GONE rather than by an exit code.
+# Remove a worktree and, only if it really went, sweep what it left behind.
+#
+# The three answers -- gone, refused, no answer -- come from the driver, which is
+# where the how of a removal now lives: the force retry, and the reason the
+# runner's own archive hook is never asked for. What is left here is the ORDER,
+# which is this dispatcher's decision rather than the runner's.
 #
 # #27 logged "could not remove it" at 02:08 and kept the slot; the very same
 # command, run again by hand, removed it and printed
 # `warning: local branch "..." was kept because Git could not safely delete it`.
-# A non-zero exit here has meant both "nothing happened" and "it worked, with a
-# caveat", and the fleet cannot tell those apart from the code alone. The
-# filesystem can: the directory is there or it is not.
+# A non-zero exit has meant both "nothing happened" and "it worked, with a
+# caveat", and the fleet cannot tell those apart from the code alone -- which is
+# why `runner_worktree_remove` answers on the filesystem instead.
 #
 # This matters more than one stuck worktree. The fleet runs at a cap of three,
 # and a slot held by a worktree whose work is already merged is a slot that never
 # starts the next issue -- the loop quietly runs at two, then one.
 #
-# The second attempt adds --force, and that is the one that works.
-#
-# This repository has a real submodule -- overlay/lib/libultrahand, pinned in
-# .gitmodules -- and `git worktree remove` refuses outright:
-#
-#   fatal: working trees containing submodules cannot be moved or removed
-#
-# So the plain call fails on every worktree the fleet has ever created, every
-# time, and it is not intermittent. Three accumulated in about eighteen hours on
-# 2026-09-07, each holding four containers, two ports and four volumes that come
-# back on every `docker start` under `restart: unless-stopped`. Worse for
-# throughput: reap_merged has already marked the card `completed` and disowned
-# the issue by then, so `fleet.sh status` still shows the worktree while the
-# dispatcher no longer counts it -- one slot idle for nearly three hours.
-#
-# Forcing is safe HERE specifically: both callers check the worktree holds
-# nothing first. --force forces the worktree removal, not the branch deletion.
-#
-# ## Why the archive hook does not run through the CLI (#163)
-#
-# `orca worktree rm --run-hooks` runs orca.yaml's archive hook -- archive.sh,
-# which takes the stack and its volumes down -- and it runs it BEFORE Orca
-# decides whether it will remove the worktree at all. Orca then refuses (a dirty
-# working tree, the submodule), and "could not remove it" has already destroyed
-# the thing the worktree could not be worked in without:
-#
-#   16:49:15  #122: PR #159 is merged; marking it done and removing the worktree
-#   16:49:32    could not remove it; sweep later with ./scripts/fleet/reap.sh
-#
-# That agent was mid-test-run. A suite failed after 90s with ~130 tests skipped
-# behind it, and the fixture had lost its scan and its token -- none of which the
-# log above suggests. So the order is inverted here: the removal is attempted
-# with no hooks at all, and only a worktree that is genuinely GONE gets its stack
-# swept. A refusal now changes nothing.
+# The teardown runs AFTER the removal, never before it (#163): a hook run first
+# takes the stack down and then leaves it down when the removal refuses, and
+# #122 lost its RomM mid-ctest exactly that way. A refusal here changes nothing.
 #
 # The sweep is reap.sh, which is exactly the tool for "a stack whose worktree no
 # longer exists" and needs no worktree to run -- the README names it as the manual
@@ -1020,16 +956,17 @@ for p in prs:
 # The autostart watcher is the hook's other half, and it does not survive
 # dropping --run-hooks by itself: its pidfile lives INSIDE the worktree, so it is
 # read before the removal and signalled after one that worked. A watcher left
-# behind polls the Orca runtime for a directory that is gone, forever.
-# Returns 0 when the worktree is gone, 2 when the CLI never answered, and 1 when
-# it answered and refused. The caller acts on the difference: a refusal is a
-# decision about THIS worktree and is not worth retrying, while a deadline is
-# Orca.app restarting and says nothing about the worktree at all.
+# behind polls the runtime for a directory that is gone, forever.
+#
+# Returns 0 when the worktree is gone, 2 when the runner never answered, and 1
+# when it answered and refused. The caller acts on the difference: a refusal is a
+# decision about THIS worktree and is not worth retrying, while a deadline is the
+# runtime restarting and says nothing about the worktree at all.
 remove_worktree() {
   local path="$1" out watcher projects env_project rc
-  # The deadline each `worktree rm` gets, LOCAL rather than a constant beside the
-  # other tunables: test_orca_browser.sh exercises this function by extracting it
-  # with `sed` and sourcing it alone, so anything it reads from the file around it
+  # The deadline the removal gets, LOCAL rather than a constant beside the other
+  # tunables: armaatus/rommsync-nx exercises this function by extracting it with
+  # `sed` and sourcing it alone, so anything it reads from the file around it
   # arrives empty -- and an empty deadline is not 180, it is zero.
   local deadline="${AUTOFLEET_RM_DEADLINE:-180}"
   # Pure reads, before anything can be destroyed. All three live INSIDE the
@@ -1047,29 +984,19 @@ remove_worktree() {
     *) [ -n "$env_project" ] && projects="$projects $env_project" ;;
   esac
   out="$(mktemp)"
-  ORCA_RUN_CAPTURE_STDERR=1 orca_run_with_deadline "$deadline" "$out" "$ORCA_CLI" worktree rm \
-    --worktree "path:$path" --json
+  runner_worktree_remove "$path" "$deadline" >"$out" 2>&1
   rc=$?
-  if [ ! -d "$path" ]; then rm -f "$out"; finish_removal "$path" "$watcher" "$projects"; return 0; fi
-  # Only when the CLI actually answered. A first call that hit the deadline means
-  # nothing is answering, and a second 180s spent proving it doubles what a poll
-  # costs while Orca.app restarts.
-  if [ "$rc" != 124 ]; then
-    ORCA_RUN_CAPTURE_STDERR=1 orca_run_with_deadline "$deadline" "$out" "$ORCA_CLI" worktree rm \
-      --worktree "path:$path" --force --json
-    rc=$?
-    if [ ! -d "$path" ]; then rm -f "$out"; finish_removal "$path" "$watcher" "$projects"; return 0; fi
-  fi
-  if [ "$rc" = 124 ]; then
+  if [ "$rc" = 0 ]; then rm -f "$out"; finish_removal "$path" "$watcher" "$projects"; return 0; fi
+  if [ "$rc" = 2 ]; then
     rm -f "$out"
-    say "  the Orca CLI did not answer in ${deadline}s -- nothing was torn down, and this is not a refusal"
+    say "  the runner did not answer in ${deadline}s -- nothing was torn down, and this is not a refusal"
     return 2
   fi
   # Labelled, because the caller's "could not remove it" comes after these and
   # an unlabelled fatal: line above it reads like the fleet's own.
   while IFS= read -r line; do
     [ -n "$line" ] && say "  the removal refused: $line"
-  done < <(sed -n '1,3p' "$out")
+  done <"$out"
   # The line #122 needed and did not get. Not "the worktree is still usable":
   # reap_abandoned interrupts the agent immediately before calling this, so on
   # that path somebody has just been stopped. What is true on both paths is that
@@ -1108,7 +1035,7 @@ finish_removal() {
   # $only is a list of `--only <project>` pairs this function built itself, and a
   # project name is [a-z0-9-] by construction, so the split is the point.
   # shellcheck disable=SC2086
-  ORCA_RUN_CAPTURE_STDERR=1 orca_run_with_deadline 180 "$out" \
+  FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline 180 "$out" \
     "$REPO_ROOT/scripts/fleet/reap.sh" --yes $only
   rc=$?
   cat "$out" >>"$LOG"
@@ -1143,16 +1070,16 @@ park_worktree() {
   # shellcheck disable=SC2059
   byhand="$(printf "$BY_HAND_REMOVAL" "$path")"
   if [ "$rc" = 2 ]; then
-    [ -e "$STATE_DIR/orca-blind-$num" ] && return 0
-    : >"$STATE_DIR/orca-blind-$num"
+    [ -e "$STATE_DIR/runner-blind-$num" ] && return 0
+    : >"$STATE_DIR/runner-blind-$num"
     say "  could not ask -- leaving it owned, and trying again next pass"
-    card "$path" --comment "#$num: $what, but the Orca CLI did not answer -- retrying"
+    card "$path" comment "#$num: $what, but the runner did not answer -- retrying"
     return 0
   fi
-  rm -f "$STATE_DIR/orca-blind-$num"
+  rm -f "$STATE_DIR/runner-blind-$num"
   : >"$STATE_DIR/stuck-$num"
   say "  could not remove it; it keeps its slot until you do: $byhand"
-  card "$path" --comment "#$num: $what, but the removal refused -- still here, still counted"
+  card "$path" comment "#$num: $what, but the removal refused -- still here, still counted"
   return 0
 }
 
@@ -1221,7 +1148,7 @@ reap_merged() {
       [ -e "$STATE_DIR/merge-blind-$num" ] && continue
       : >"$STATE_DIR/merge-blind-$num"
       say "#$num: PR #$merged merged, but git could not say what the worktree holds -- leaving it"
-      card "$path" --comment "#$num: PR #$merged merged; kept -- git could not say what is in it"
+      card "$path" comment "#$num: PR #$merged merged; kept -- git could not say what is in it"
       continue
     fi
     if [ -n "$holds" ]; then
@@ -1229,13 +1156,13 @@ reap_merged() {
       [ -e "$STATE_DIR/merge-held-$num" ] && continue
       : >"$STATE_DIR/merge-held-$num"
       say "#$num: PR #$merged merged, but the worktree holds $holds -- leaving it"
-      card "$path" --comment "#$num: PR #$merged merged, $holds here"
+      card "$path" comment "#$num: PR #$merged merged, $holds here"
       continue
     fi
     rm -f "$STATE_DIR/merge-held-$num" "$STATE_DIR/merge-blind-$num"
 
     say "#$num: PR #$merged is merged; marking it done and removing the worktree"
-    card "$path" --workspace-status completed --comment "#$num: merged in PR #$merged"
+    card "$path" workspace-status completed comment "#$num: merged in PR #$merged"
     remove_worktree "$path"; rc=$?
     if [ "$rc" = 0 ]; then
       disown_issue "$num"
@@ -1392,7 +1319,7 @@ reap_abandoned() {
       [ -e "$STATE_DIR/git-blind-$num" ] && continue
       : >"$STATE_DIR/git-blind-$num"
       say "#$num: $reason, but its git state could not be read -- leaving it"
-      card "$path" --comment "#$num: $reason; kept -- git could not say what is in it"
+      card "$path" comment "#$num: $reason; kept -- git could not say what is in it"
       continue
     fi
     if [ -n "$holds" ]; then
@@ -1402,7 +1329,7 @@ reap_abandoned() {
       [ -e "$STATE_DIR/held-$num" ] && continue
       : >"$STATE_DIR/held-$num"
       say "#$num: $reason, but the worktree holds $holds -- leaving it"
-      card "$path" --comment "#$num: $reason; kept -- it holds $holds"
+      card "$path" comment "#$num: $reason; kept -- it holds $holds"
       continue
     fi
     rm -f "$STATE_DIR/held-$num" "$STATE_DIR/git-blind-$num"
@@ -1417,7 +1344,7 @@ reap_abandoned() {
       # thing twice in one minute, not about never saying it again.
       if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
         interrupt_agent_in "$path"
-        card "$path" --comment "#$num: $reason; this worktree is released next pass unless something lands in it"
+        card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
       fi
       continue
     fi
@@ -1431,7 +1358,7 @@ reap_abandoned() {
     # landed, and this worktree is being released precisely because it did not.
     # Phrased as what it is about to do, not as done: if the removal refuses, this
     # card is still on the board and still the line a person reads.
-    card "$path" --comment "#$num: $reason; nothing is in it, removing the worktree"
+    card "$path" comment "#$num: $reason; nothing is in it, removing the worktree"
     remove_worktree "$path"; rc=$?
     if [ "$rc" = 0 ]; then
       disown_issue "$num"
@@ -1477,21 +1404,12 @@ notice_stalled() {
   # ONE listing per poll, matched against every owned worktree -- not one CLI
   # round-trip per worktree, which is three 30-second-deadline calls a minute
   # for an answer that arrives in a single response.
-  listing="$(fleet_json worktree ps 2>/dev/null)" || return 0
+  listing="$(runner_agent_states 2>/dev/null)" || return 0
   for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"; path="$(cat "$f")"
     [ -d "$path" ] || continue
-    state="$(printf '%s' "$listing" | python3 -c "
-import json, sys
-try:
-    for w in json.load(sys.stdin)['result']['worktrees']:
-        if w.get('path') == sys.argv[1]:
-            print(((w.get('agents') or [{}])[0]).get('state') or '')
-            break
-except Exception:
-    pass
-" "$path" 2>/dev/null)"
+    state="$(printf '%s' "$listing" | awk -F'\t' -v p="$path" '$1 == p { print $2; exit }')"
     [ "$state" = "waiting" ] || {
       rm -f "$STATE_DIR/stalled-$num" "$STATE_DIR/stall-labels-$num"; continue; }
     # Once per stall, not once per poll -- and checked before the lookup, so a
@@ -1527,11 +1445,11 @@ except Exception:
       # said it. Only for this pass: the board is not a log, but a stall that
       # starts later is news no earlier comment covered.
       [ -e "$POLL_CACHE/carded-$num" ] \
-        || card "$path" --comment "#$num: waiting for you -- as expected, not a stall"
+        || card "$path" comment "#$num: waiting for you -- as expected, not a stall"
       notify "#$num is waiting for you" "Its last step is yours to take."
     else
       say "#$num is waiting for input -- in auto mode nothing should be asking"
-      card "$path" --comment "#$num: waiting for input -- needs you"
+      card "$path" comment "#$num: waiting for input -- needs you"
       notify "#$num needs you" "It is sitting at a prompt, not working."
     fi
   done
@@ -1601,7 +1519,7 @@ enforce_timebox() {
          # `waiting`, so notice_stalled never speaks for it, and this worktree
          # keeps a slot until a person looks at it -- one line in fleet.log is
          # not where WORKFLOW.md says status lives.
-         card "$path" --comment "#$num: waiting for you -- as expected, not a stall; past the time-box"
+         card "$path" comment "#$num: waiting for you -- as expected, not a stall; past the time-box"
          # For notice_stalled, which runs later in THIS pass and would otherwise
          # repeat it. Scoped to the poll, not to the exemption: a stall that
          # begins hours from now is news, and has to reach the board.
@@ -1624,7 +1542,7 @@ enforce_timebox() {
     # interrupt the same agent and card the same worktree a second time. Scoped
     # to the poll, like `carded-`: it still gets its own warning next pass.
     : >"$POLL_CACHE/interrupted-$num"
-    card "$path" --comment "#$num: timed out after $((TIMEBOX_SECONDS / 3600))h -- needs you"
+    card "$path" comment "#$num: timed out after $((TIMEBOX_SECONDS / 3600))h -- needs you"
     GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $((TIMEBOX_SECONDS / 3600)) hours with no pull request opened. Its worktree at \`$path\` is kept if it holds uncommitted work or commits that are not on \`main\`, and released otherwise so the slot is free. The fleet will not start this issue again on its own; \`./scripts/fleet/fleet.sh retry $num\` hands it back." >/dev/null 2>&1 || true
     notify "#$num gave up" "$((TIMEBOX_SECONDS / 3600))h with no PR. Not starting it again."
     # Read by reap_abandoned on the next pass, and by the queue for as long as it
@@ -2048,25 +1966,17 @@ cmd_stop() {
       echo "  interrupting agents..."
       local handle path
       if [ "$mode" = "--all" ]; then
-        fleet_json terminal list | python3 -c '
-import json, sys
-for t in json.load(sys.stdin)["result"]["terminals"]:
-    if t.get("agentIdentity") and not t.get("orphaned"):
-        print(t["handle"])
-' | while read -r handle; do
-          orca_run_with_deadline 20 /dev/null "$ORCA_CLI" terminal send \
-            --terminal "$handle" --interrupt --json >/dev/null 2>&1 \
-            && echo "    interrupted $handle"
+        runner_agent_terminals | cut -f1 | while read -r handle; do
+          [ -n "$handle" ] || continue
+          runner_terminal_interrupt "$handle" && echo "    interrupted $handle"
         done
       else
         for f in "$OWNED_DIR"/*; do
           [ -e "$f" ] || continue
           path="$(cat "$f")"
-          handle="$(agent_terminal_in "$path")"
+          handle="$(runner_agent_terminal "$path")"
           [ -n "$handle" ] || continue
-          orca_run_with_deadline 20 /dev/null "$ORCA_CLI" terminal send \
-            --terminal "$handle" --interrupt --json >/dev/null 2>&1 \
-            && echo "    interrupted #$(basename "$f")"
+          runner_terminal_interrupt "$handle" && echo "    interrupted #$(basename "$f")"
         done
       fi
       # ...and the local reviewers, which are children of the dispatcher rather
@@ -2522,8 +2432,8 @@ usage: fleet.sh <command>
   resume                             clear the stop
   retry 44                           hand back an issue the time-box gave up on
 
-Run it in an Orca terminal so it is as visible as the work it starts:
-  orca terminal create --worktree active --title fleet --command "./scripts/fleet/fleet.sh run --auto"
+Run it in a terminal the runner opens, so it is as visible as the work it starts:
+  $(runner_dispatcher_hint)
 USAGE
     exit 2 ;;
 esac

@@ -795,7 +795,9 @@ And what comes back from the change re-enters at stage 1:
 Everything runs through Orca, so the board is the status surface. `fleet.sh`
 drives it: **`in-progress`** while a worktree builds, **`in-review`** once the
 agent has opened its PR, **`completed`** on merge, and a one-line comment on each
-card saying what it is waiting for.
+card saying what it is waiting for. From inside a worktree an agent sets its own
+card with `./scripts/fleet/board.sh in-review "<what it is waiting for>"` --
+which goes through the runner driver, so the brief never names one runner's CLI.
 
 You get a macOS notification for the two cases you would otherwise miss: the
 fleet stopping, and an issue giving up on its time-box. Everything else is
