@@ -417,25 +417,32 @@ foundation_hold() {
 # independent review.
 : "${AUTOFLEET_HOLD_RESAY:=3600}"
 
-foundation_hold_say() {
-  # $1 is what to say the hold is for, used as the marker's content so a hold
-  # that MOVES to a different issue is announced again.
-  local what="$1"; shift
+# Say something once per reason, remembering the reason in $1.
+#
+# ONE MARKER PER THING BEING HELD. This took a single shared file, so two
+# different holds -- a foundation issue in flight and a PR whose reviewer hit
+# the cap -- overwrote each other's reason every poll and BOTH re-announced,
+# once a minute, forever. That is the flooding this whole change exists to
+# remove, reintroduced by the fix for it. The two holds are also evaluated in
+# the same poll body, which is what made it certain rather than unlucky. Found
+# by the independent review.
+hold_say_into() {
+  local where="$1" what="$2"; shift 2
   local said_at now stale=false
-  said_at="$(fleet_mtime "$FOUNDATION_HOLD_SAID")" || said_at=""
+  said_at="$(fleet_mtime "$where")" || said_at=""
   now="$(date +%s)"
-  # Guarded, because an mtime this could not read must degrade to "say it" and
-  # never to an arithmetic error inside the dispatcher's poll.
   case "$said_at" in
     ''|*[!0-9]*) stale=true ;;
     *) [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true ;;
   esac
-  if $stale || [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
-    printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
+  if $stale || [ "$(cat "$where" 2>/dev/null)" != "$what" ]; then
+    printf '%s' "$what" >"$where" 2>/dev/null || true
     local line
     for line in "$@"; do say "$line"; done
   fi
 }
+
+foundation_hold_say() { hold_say_into "$FOUNDATION_HOLD_SAID" "$@"; }
 
 # Is one of the worktrees in flight working on a FOUNDATION issue?
 #
@@ -746,6 +753,9 @@ except Exception:
 #
 # In the default `github` mode this returns immediately and costs nothing.
 REVIEWING_DIR="$STATE_DIR/reviewing"
+# Per pull request, beside its lock and its records: `<pr>.said` remembers which
+# hold has already been explained for that PR, so it cannot overwrite -- or be
+# overwritten by -- the foundation hold's marker.
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -802,7 +812,7 @@ stop_reviewers() {
     # The records go too: a dispatcher starting fresh re-derives what has been
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
-    case "$marker" in *.done|*.tries) rm -f "$marker"; continue ;; esac
+    case "$marker" in *.done|*.tries|*.said) rm -f "$marker"; continue ;; esac
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
     if reviewer_alive "$held"; then
@@ -865,7 +875,7 @@ review_open_prs() {
       [ -e "$m" ] || continue
       # `<pr>.done` is a record, not a lock: it holds a head, not a pid, and
       # reaping it as a dead reviewer would put the re-spawn loop straight back.
-      case "$m" in *.done|*.tries) continue ;; esac
+      case "$m" in *.done|*.tries|*.said) continue ;; esac
       p=""
       read -r p _ <"$m" 2>/dev/null || true
       reviewer_alive "$p"; local is=$?
@@ -914,7 +924,9 @@ for p in prs:
     read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
     [ "${tries_head:-}" = "$head" ] || tries_n=0
     if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
-      foundation_hold_say "review-gaveup-$pr-$head" \
+      # Its OWN marker, per pull request: sharing the foundation one made the
+      # two holds overwrite each other every poll.
+      hold_say_into "$REVIEWING_DIR/$pr.said" "gaveup-$head" \
         "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
         "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
         "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."

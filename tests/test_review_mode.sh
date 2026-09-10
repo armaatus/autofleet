@@ -444,7 +444,10 @@ import merge_gate; print(merge_gate.review_mode())'); }
     await lock_held no || fail "the first reviewer never released its lock"
     # ...and now every later poll must start nothing, because the head is done.
     for _ in 1 2 3; do poll_review_open_prs; done
-    sleep 2
+    # `await`, not a fixed sleep: this asserts that nothing MORE started, and a
+    # bare `sleep 2` on a loaded machine is how a phase like that becomes the
+    # flaky one. A second reviewer would show up here within the deadline.
+    await n_started 2 10 >/dev/null 2>&1 || true
     [ "$(n_started)" = 1 ] \
       || fail "three further polls started $(n_started) reviewers on a head that already has one"
     ok "a head with a counting review is not handed to another reviewer"

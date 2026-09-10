@@ -82,12 +82,15 @@ LOG_DIR="$FLEET_DIR/reviews"
 # submitted or the reviewer was killed and trying again is correct. Getting that
 # asymmetry backwards turns this fix into the silent block the whole mode exists
 # to remove. armaatus/autofleet#33.
+# Both siblings derived in one place, with the same empty-guard: reaching for
+# one of them inline is how the pair drifts apart.
 DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
+TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
 record_done() {
   [ -n "$DONE_MARKER" ] || return 0
   printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
   # The attempt count belongs to heads that got NO verdict. This head got one.
-  rm -f "${AUTOFLEET_REVIEW_MARKER}.tries" 2>/dev/null || true
+  rm -f "$TRIES_MARKER" 2>/dev/null || true
 }
 
 # Empty when a person ran this by hand, and then dropping it does nothing.
