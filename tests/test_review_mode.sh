@@ -234,6 +234,20 @@ await() {
 }
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
+
+# `review_open_prs`, with the reason kept rather than piped away.
+#
+# `fleet.sh` resolves the runner at SOURCE TIME and `die`s without one, so a
+# bare `>/dev/null 2>&1` here turns "nothing under test ran" into "local mode
+# did not review the open PR" -- which is the diagnosis this file cost once
+# already. The `reaper` phase was un-silenced when that was found and this one
+# was not; the lesson belongs to both.
+poll_review_open_prs() {
+  local out; out="$(in_poll review_open_prs 2>&1)"
+  grep -q "no orca CLI answers" <<<"$out" \
+    && fail "fleet.sh would not source, so nothing under test ran: $out"
+  return 0
+}
 # `review_open_prs` needs fleet.sh's own state, so it is sourced rather than run.
 in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; for fn in "$@"; do "$fn"; done); }
 
@@ -412,7 +426,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   make_fixture; stub_reviewer marked
 
   printf 'AUTOFLEET_REVIEW_MODE=github\n' >"$WORK/repo/.autofleet/config"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   [ -z "$(find "$AUTOFLEET_DIR/reviewing" -type f 2>/dev/null)" ] \
     || fail "github mode started a reviewer"
   ok "review_open_prs starts nothing in github mode"
@@ -420,13 +434,13 @@ import merge_gate; print(merge_gate.review_mode())'); }
   printf 'AUTOFLEET_REVIEW_MODE=local\n' >"$WORK/repo/.autofleet/config"
   # A draft is not asking for a verdict yet.
   printf '[{"number":42,"isDraft":true,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   [ -z "$(find "$AUTOFLEET_DIR/reviewing" -type f 2>/dev/null)" ] \
     || fail "a draft PR was sent for review"
   ok "...nor on a draft PR"
 
   printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   # The reviewer is a background child of a subshell that has since exited, so
   # what is waited for is the review it was started to produce, not its pid.
   await n_reviews 1 || fail "local mode did not review the open PR"
@@ -440,7 +454,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # started and then correctly declined to submit would leave the count at 1 and
   # look identical to one that never ran.
   before="$(n_started)"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   await n_reviews 1 20 >/dev/null 2>&1 || true
   [ "$(n_started)" = "$before" ] \
     || fail "a second pass started another reviewer on a head that already has one"

@@ -399,14 +399,15 @@ case "$1 ${2:-}" in
   "worktree create")
     for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
     python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
-import json, sys
+import json, os, sys
 path, issue, where = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     doc = json.load(open(path))
 except Exception:
     doc = {"result": {"worktrees": []}}
 doc.setdefault("result", {}).setdefault("worktrees", []).append(
-    {"linkedIssue": issue, "path": where + "-" + (issue or "x")})
+    {"linkedIssue": (None if os.environ.get("ORCA_CREATE_UNLINKED") else issue),
+     "path": where + "-" + (issue or "x")})
 json.dump(doc, open(path, "w"))
 PYWT
     echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
@@ -1158,6 +1159,66 @@ JSON
       && fail "it also launched something while holding: $(cat "$WORK/run.log")"
     echo "ok: ...and still opens nothing"
     stop_dispatcher
+    ;;
+
+  foundation_break_is_local)
+    # The within-a-pass half must be a property of the DISPATCHER, not of the
+    # Orca CLI's read-your-writes behaviour. `foundation_in_flight` on the next
+    # iteration would also stop the pass -- but only if `worktree list` shows a
+    # worktree `create` returned moments ago AND that entry carries
+    # `linkedIssue`. A CLI that returns null there makes `live_worktrees` print
+    # `-`, which this deliberately reads as "on no issue", and the pass launches
+    # the next candidate behind the foundation issue: 1, 4 and 7 in eleven
+    # seconds with every phase green.
+    #
+    # So: a stub that succeeds at `create` and reports the worktree with NO
+    # linked issue, which is the case the fixture's read-your-writes create
+    # cannot express. Only the local `is_foundation "$labels" && break` saves
+    # this. Found by the independent review, which noted the phase for this half
+    # was asserting the fixture's guarantee rather than the dispatcher's.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]},
+ {"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A CLI that has not caught up: whatever it creates comes back unlinked.
+    export ORCA_CREATE_UNLINKED=1
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    n="$(grep -c "^worktree create" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "with an unlinked worktree the pass opened $n: $(cat "$WORK/run.log")"
+    echo "ok: the pass ends on the launch itself, not on what the CLI reports back"
+    stop_dispatcher
+    ;;
+
+  foundation_resays)
+    # A standing hold with no expiry goes quiet for as long as it stands, and
+    # the line explaining it scrolls off the log. Hourly by default; driven here
+    # with AUTOFLEET_HOLD_RESAY=1 so the phase costs a second rather than an
+    # hour. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    # TWO INTERVALS, not one. mtime has second granularity, so a 1-second
+    # interval makes "immediately again" depend on which side of a second
+    # boundary the two calls land -- flaky one run in three. Each half gets an
+    # interval that cannot be ambiguous for it.
+    export AUTOFLEET_HOLD_RESAY=3600
+    first="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$first" || fail "the first hold said nothing: $first"
+    quiet="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$quiet" \
+      && fail "it re-announced well inside the interval: $quiet"
+    echo "ok: a standing hold stays quiet inside the re-say interval"
+    # ...and now the same standing hold, with the interval long past.
+    export AUTOFLEET_HOLD_RESAY=1
+    sleep 2
+    later="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$later" \
+      || fail "a hold standing past the re-say interval never explained itself again: $later"
+    echo "ok: ...and says itself again once the interval has passed"
     ;;
 
   foundation_waiting_once)
@@ -2202,6 +2263,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

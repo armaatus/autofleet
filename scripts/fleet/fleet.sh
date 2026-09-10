@@ -390,6 +390,48 @@ in_flight() {
 has_label() { printf '%s' "$1" | tr ',' '\n' | grep -qxF -- "$2"; }
 is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 
+FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
+
+# Hold, remember the reason, and say it if it is news. The three branches below
+# were three copies of `printf hold` / `foundation_hold_say` / `return 0`, which
+# is three chances to write a fourth that caches a hold and never explains it.
+# NOTE the call convention: `foundation_hold ... && return 0`. A `return` in here
+# returns from THIS function, not from `foundation_in_flight` -- collapsing the
+# three branches into it without that dropped every hold straight through to
+# "nothing in flight", which three phases caught at once.
+foundation_hold() {
+  local cached="$1" what="$2"; shift 2
+  printf 'hold' >"$cached" 2>/dev/null || true
+  foundation_hold_say "$what" "$@"
+}
+
+# How long a standing hold stays quiet before it says itself again.
+#
+# Without this the marker never expires: it is cleared by a launch and at
+# dispatcher start, and a hold that lifts and returns hours later with nothing
+# launched in between says nothing, because the marker still names it. The
+# benign end of that is a label flapping; the other end is a fleet that has
+# opened no worktree since morning with the explanation scrolled off the log.
+# Hourly against a 60-second poll is 1 line where the bug was 180, and it is
+# still an answer for somebody who runs `tail fleet.log` at noon. Found by the
+# independent review.
+: "${AUTOFLEET_HOLD_RESAY:=3600}"
+
+foundation_hold_say() {
+  # $1 is what to say the hold is for, used as the marker's content so a hold
+  # that MOVES to a different issue is announced again.
+  local what="$1"; shift
+  local said_at now stale=false
+  said_at="$(fleet_mtime "$FOUNDATION_HOLD_SAID")"
+  now="$(date +%s)"
+  [ -n "$said_at" ] && [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true
+  if $stale || [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
+    printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
+    local line
+    for line in "$@"; do say "$line"; done
+  fi
+}
+
 # Is one of the worktrees in flight working on a FOUNDATION issue?
 #
 # CLAUDE.md: "a foundation issue lands alone. When an issue defines an interface
@@ -439,19 +481,6 @@ is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 # silence: zero worktrees opened and not one line in fleet.log saying why, which
 # is precisely the case this function's own comment says it exists for. Found by
 # the local review of the change that added it.
-FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
-
-foundation_hold_say() {
-  # $1 is what to say the hold is for, used as the marker's content so a hold
-  # that MOVES to a different issue is announced again.
-  local what="$1"; shift
-  if [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
-    printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
-    local line
-    for line in "$@"; do say "$line"; done
-  fi
-}
-
 foundation_in_flight() {
   local cached="$POLL_CACHE/foundation" list n _path answer labels
   mkdir -p "$POLL_CACHE" 2>/dev/null
@@ -466,8 +495,7 @@ foundation_in_flight() {
   fi
 
   if ! list="$(live_worktrees)"; then
-    printf 'hold' >"$cached" 2>/dev/null || true
-    foundation_hold_say "list-unreadable" \
+    foundation_hold "$cached" "list-unreadable" \
       "could not read the worktree list, so whether a foundation issue is in flight" \
       "  cannot be answered -- launching nothing rather than guessing"
     return 0
@@ -492,8 +520,7 @@ foundation_in_flight() {
     # say. The distinction was implicit and is now written down.
     case "$n" in ''|-|*[!0-9]*) continue ;; esac
     if ! answer="$(poll_issue "$n")"; then
-      printf 'hold' >"$cached" 2>/dev/null || true
-      foundation_hold_say "labels-$n" \
+      foundation_hold "$cached" "labels-$n" \
         "#$n is in flight and its labels would not read, so whether it is a" \
         "  foundation issue cannot be answered -- launching nothing"
       return 0
@@ -508,8 +535,7 @@ foundation_in_flight() {
     esac
     labels="$(issue_labels_in "$answer")"
     if is_foundation "$labels"; then
-      printf 'hold' >"$cached" 2>/dev/null || true
-      foundation_hold_say "$n" \
+      foundation_hold "$cached" "$n" \
         "#$n is a foundation issue and is still in flight; it lands alone, so" \
         "  nothing else starts until it does"
       return 0
@@ -664,10 +690,6 @@ launch() {
   # iteration see the worktree this launch is about to create -- which is the
   # half of the rule that stops anything starting behind a foundation issue.
   rm -f "$POLL_CACHE/foundation"
-  # ...and the "already said it" marker, because the fleet is moving again: the
-  # next hold, whichever of the two it is, is news. See foundation_in_flight for
-  # why it is cleared HERE and not on its no-hold path.
-  rm -f "$FOUNDATION_HOLD_SAID"
   local num="$1" title="$2"
   local name; name="$(slug "$num-$title")"
 
@@ -699,6 +721,12 @@ except Exception:
   rm -f "$out"
   [ -n "$path" ] || { say "  created, but Orca reported no path; not tracking it"; return 1; }
   own "$num" "$path"
+  # The announcement is stale once the fleet has actually MOVED, and this is
+  # where it has: a `launch` that FAILED moved nothing and must not re-arm the
+  # line, which is what clearing this at the top of the function did. See
+  # foundation_in_flight for why it is cleared here rather than on its no-hold
+  # path. Found by the independent review.
+  rm -f "$FOUNDATION_HOLD_SAID"
   card "$path" --workspace-status in-progress --comment "#$num: building"
   say "  #$num is running in $path"
 }
@@ -2404,6 +2432,27 @@ while that one is up."
       if is_foundation "$labels" && [ "$live" -gt 0 ]; then break; fi
       if launch "$picked" "$title"; then
         opened=$((opened + 1))
+        # THE WITHIN-A-PASS HALF OF THE RULE, from what is already in hand.
+        #
+        # `foundation_in_flight` on the next iteration would also stop here --
+        # `launch` drops its cache for exactly that -- but only by asking the
+        # Orca CLI to tell us something we already know, and only if two things
+        # hold that nothing guarantees: that `worktree list` shows a worktree
+        # `worktree create` returned moments ago, and that the entry carries
+        # `linkedIssue` rather than a null this function reads as "on no issue".
+        # Neither is promised by a CLI backed by an index or a daemon, and the
+        # stub in tests/test_fleet.sh is read-your-writes BY CONSTRUCTION -- a
+        # property this very PR gave it -- so the phase for this half was
+        # asserting the assumption rather than the behaviour.
+        #
+        # `$labels` is the labels of the issue just launched. Asking them costs
+        # nothing and cannot be wrong. The per-iteration check keeps doing what
+        # only it can: the across-passes half, which survives a restart.
+        # Complementary, not redundant. Found by the independent review.
+        if is_foundation "$labels"; then
+          say "#$picked is a foundation issue; it lands alone, so nothing else starts this pass"
+          break
+        fi
       else
         # It stays in the queue. Dropping an issue whose worktree failed to open
         # and then reporting "every issue it was given has landed" is a lie the

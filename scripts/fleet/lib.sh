@@ -166,6 +166,15 @@ fleet_review_mode() {
 }
 fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
 
+# A file's mtime in epoch seconds, or nothing. BSD stat and GNU stat take
+# different flags and neither is present everywhere, so both are tried -- this
+# repo runs on macOS and its CI runs on Linux, and a helper that works on one is
+# a helper that silently returns empty on the other.
+fleet_mtime() {
+  [ -e "${1:-}" ] || return 1
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+}
+
 fleet_stopped() { [ -e "$FLEET_STOP" ]; }
 # A hard stop implies the drain, so this asks about both: a STOP left by a fleet
 # that predates DRAIN still means "start nothing new" to the dispatcher reading
