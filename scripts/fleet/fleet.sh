@@ -413,30 +413,82 @@ is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 # 0 = yes, hold. 1 = no. Never 2: an unreadable answer HOLDS, and says so, for
 # the same reason `in_flight` treats "could not tell" as in flight -- launching
 # on a guess is the expensive direction, and the next pass asks again.
+#
+# ONE ANSWER PER POLL, cached in $POLL_CACHE like every other repeated lookup in
+# this file: the launch loop asks up to MAX_WORKTREES times per pass and the
+# answer cannot change in between except by this loop launching something, which
+# is what `launch` invalidates it for. Three subprocesses for one answer is the
+# pattern `count_startable` exists to avoid, and an earlier version of this
+# claimed no new API call while making one per iteration.
+#
+# ...and it SAYS SO ONCE, not once per poll, which is a different question from
+# the cache: a three-hour foundation issue against a 60-second poll is 180
+# identical lines in fleet.log. The marker in $STATE_DIR is this file's idiom for
+# it -- `queue-labels-$n` and `gaveup-$n` are the same shape -- and it is cleared
+# the moment the hold ends, so the next hold speaks again. Both found by the
+# local review of the change that added this.
+# In $STATE_DIR so it outlives a POLL, and cleared when a dispatcher STARTS --
+# the same rule $POLL_CACHE follows and for the same reason. Left standing across
+# a restart, a new dispatcher reads back the old one's marker and holds in total
+# silence: zero worktrees opened and not one line in fleet.log saying why, which
+# is precisely the case this function's own comment says it exists for. Found by
+# the local review of the change that added it.
+FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
+
+foundation_hold_say() {
+  # $1 is what to say the hold is for, used as the marker's content so a hold
+  # that MOVES to a different issue is announced again.
+  local what="$1"; shift
+  if [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
+    printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
+    local line
+    for line in "$@"; do say "$line"; done
+  fi
+}
+
 foundation_in_flight() {
-  local list n answer labels
-  if ! list="$(live_worktrees)"; then
-    say "could not read the worktree list, so whether a foundation issue is in flight"
-    say "  cannot be answered -- launching nothing this pass rather than guessing"
+  local cached="$POLL_CACHE/foundation" list n _path answer labels
+  mkdir -p "$POLL_CACHE" 2>/dev/null
+  if [ -e "$cached" ]; then
+    [ "$(cat "$cached")" = no ] && return 1
     return 0
   fi
+
+  if ! list="$(live_worktrees)"; then
+    printf 'unreadable' >"$cached" 2>/dev/null || true
+    foundation_hold_say "list-unreadable" \
+      "could not read the worktree list, so whether a foundation issue is in flight" \
+      "  cannot be answered -- launching nothing rather than guessing"
+    return 0
+  fi
+
   while IFS="$(printf '\t')" read -r n _path; do
+    # `-` is `live_worktrees` saying this worktree has no linked issue at all,
+    # which is a worktree somebody opened by hand. That is an ANSWER, not a
+    # failure to answer -- a worktree on no issue is on no foundation issue --
+    # so it does not hold, unlike the two lookups below that genuinely cannot
+    # say. The distinction was implicit and is now written down.
     case "$n" in ''|-|*[!0-9]*) continue ;; esac
     if ! answer="$(poll_issue "$n")"; then
-      say "#$n is in flight and its labels would not read, so whether it is a"
-      say "  foundation issue cannot be answered -- launching nothing this pass"
+      printf 'labels-unreadable-%s' "$n" >"$cached" 2>/dev/null || true
+      foundation_hold_say "labels-$n" \
+        "#$n is in flight and its labels would not read, so whether it is a" \
+        "  foundation issue cannot be answered -- launching nothing"
       return 0
     fi
     labels="$(issue_labels_in "$answer")"
     if is_foundation "$labels"; then
-      # Once per pass, not once per candidate: the caller breaks out of the
-      # launch loop on the first hold, and `forget_poll_answers` at the top of
-      # each pass is what makes the next one say it again.
-      say "#$n is a foundation issue and is still in flight; it lands alone, so"
-      say "  nothing else starts until it does"
+      printf '%s' "$n" >"$cached" 2>/dev/null || true
+      foundation_hold_say "$n" \
+        "#$n is a foundation issue and is still in flight; it lands alone, so" \
+        "  nothing else starts until it does"
       return 0
     fi
   done <<<"$list"
+
+  printf 'no' >"$cached" 2>/dev/null || true
+  # The hold is over, so the next one is news again.
+  rm -f "$FOUNDATION_HOLD_SAID"
   return 1
 }
 
@@ -565,6 +617,11 @@ BRIEF
 }
 
 launch() {
+  # The worktree list is about to change, and `foundation_in_flight` caches its
+  # answer per poll. Dropping it here is what makes the check on the NEXT
+  # iteration see the worktree this launch is about to create -- which is the
+  # half of the rule that stops anything starting behind a foundation issue.
+  rm -f "$POLL_CACHE/foundation"
   local num="$1" title="$2"
   local name; name="$(slug "$num-$title")"
 
@@ -2127,6 +2184,9 @@ while that one is up."
   # are cleared before this dispatcher counts anything, rather than reaped
   # one-by-one against a `kill -0` that cannot tell the difference.
   stop_reviewers >/dev/null
+  # ...and the "already said it" marker, so this dispatcher explains its own
+  # holds rather than inheriting a previous run's silence.
+  rm -f "$FOUNDATION_HOLD_SAID"
 
   record_dispatcher
   echo $$ >"$PIDFILE"
@@ -2212,8 +2272,11 @@ while that one is up."
       # dispatcher started, and it holds again on the iteration after this pass
       # launches one, because by then that worktree is in the list too.
       #
-      # Costs one `live_worktrees` per iteration, capped at MAX_WORKTREES per
-      # pass, and the label lookups behind it are served from the poll cache.
+      # Cheap despite that. The whole answer is cached per poll, and `launch`
+      # drops the cache -- so a pass costs one `live_worktrees` plus one more per
+      # worktree it opens, not one per iteration. An earlier version of this
+      # comment described the cost before that cache existed and claimed only the
+      # label lookups were cached; found by the local review.
       if foundation_in_flight; then break; fi
 
       local picked="" title="" labels=""

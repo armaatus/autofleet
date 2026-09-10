@@ -1015,6 +1015,81 @@ case "${1:-}" in
     echo "ok: ...and says which issue it is holding for"
     ;;
 
+  foundation_launch_held)
+    # THE CALL SITE, not the function. Every other phase here calls
+    # `foundation_in_flight` directly, so deleting the one line that uses it --
+    # `if foundation_in_flight; then break; fi` in the launch loop -- left all of
+    # them green while the fleet went back to opening three worktrees on a
+    # foundation issue. That is hard rule 3's shape exactly, and the local review
+    # of this change found it.
+    #
+    # This drives cmd_run and asserts on what reached the CLI, which is the only
+    # thing that says whether a worktree would have been opened.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A DEADLINE, not --max-prs. `--max-prs` bounds only the FAILURE path: when
+    # the hold works nothing is ever launched, `opened` stays 0, #4 stays
+    # startable, and the run polls forever -- this phase hung the whole suite
+    # until the local review of it found that out. The two phases it was copied
+    # from terminate because their issue is DECLINED AND DROPPED, which empties
+    # the queue; nothing is dropped here.
+    #
+    # Three seconds against AUTOFLEET_POLL=1: pass one runs the launch loop with
+    # the deadline still ahead, which is the pass under test, and a later pass
+    # drains and returns. --max-prs 1 stays as the second bound, so a regression
+    # that launches ends the run at once rather than waiting the deadline out.
+    out="$(in_fleet cmd_run --auto --max-prs 1 --until "$(( $(date +%s) + 3 ))" 2>&1)"
+    grep -q "worktree create" "$ORCA_CALLS" \
+      && fail "the launch loop opened a worktree with a foundation issue in flight: $out"
+    grep -q "lands alone" <<<"$out" \
+      || fail "it launched nothing but did not say why: $out"
+    echo "ok: the launch loop opens nothing while a foundation issue is in flight"
+    ;;
+
+  foundation_said_once)
+    # A three-hour foundation issue against a 60-second poll is 180 identical
+    # lines in fleet.log. The repo's idiom for "once" is a marker in $STATE_DIR
+    # that outlives the poll cache -- `queue-labels-$n` and `gaveup-$n` are the
+    # same shape -- and the first version of this said it every pass.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    first="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$first" || fail "the first hold said nothing: $first"
+    again="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$again" \
+      && fail "the hold is announced once per poll, which is 180 lines for a three-hour issue: $again"
+    echo "ok: a standing hold is said once, not once per poll"
+    # ...and it is news again when the hold ends and a new one begins.
+    issue_labels "ready,docs"
+    in_poll forget_poll_answers foundation_in_flight >/dev/null 2>&1
+    issue_labels "ready,foundation"
+    third="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$third" \
+      || fail "a hold that ended and began again was never announced: $third"
+    echo "ok: ...and a new hold is announced again"
+    ;;
+
+  foundation_one_lookup)
+    # One answer per poll. The launch loop asks up to MAX_WORKTREES times and
+    # the answer cannot change in between except by this loop launching, which
+    # is what invalidates it -- so three subprocesses for one answer is the
+    # pattern count_startable exists to avoid.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_poll forget_poll_answers foundation_in_flight foundation_in_flight foundation_in_flight \
+      >/dev/null 2>&1
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" -le 1 ] \
+      || fail "three calls in one poll read the worktree list $n times"
+    echo "ok: the answer is read once per poll, not once per candidate"
+    ;;
+
   foundation_frees)
     # ...and only a foundation issue holds it. An ordinary worktree must not
     # stop the fleet filling its other two slots.
@@ -1962,6 +2037,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
