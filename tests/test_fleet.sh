@@ -865,9 +865,66 @@ case "${1:-}" in
       || fail "the retry did not pass --force, so the submodule refusal stands"
     echo "ok: a worktree git refuses to remove is removed with --force"
     ;;
+  reap_blind_upstream)
+    # The worktree whose branch GitHub deleted on merge. `@{u}` stops resolving,
+    # git prints nothing, and `grep -c` prints 0 -- so the release check read
+    # "holds nothing" for a worktree that may hold a commit made after
+    # auto-merge fired, and a clean tree then made it a `--force` removal. The
+    # commit went with the directory. armaatus/autofleet#34.
+    make_fixture ok
+    make_worktree
+    # No origin at all: `@{u}` cannot resolve, which is the state a pruned
+    # upstream leaves behind.
+    out="$(in_fleet reap_merged 2>&1)"
+    [ -d "$WORK/wt" ] \
+      || fail "a worktree whose upstream will not resolve was removed: $out"
+    echo "ok: a git that cannot say what a worktree holds keeps it"
+    grep -qi "could not say what the worktree holds" <<<"$out" \
+      || fail "it kept the worktree without saying why: $out"
+    echo "ok: ...and says so, rather than keeping it silently"
+    ;;
+
+  drain_ends_with_parked)
+    # `park_worktree` keeps a worktree owned when its removal was refused, which
+    # is right. But the run loop exits only on `owned == 0`, and under a drain
+    # `queued` is forced to 0 -- so a parked worktree made that the only exit
+    # and it never came. The dispatcher polled forever, `status` never said
+    # idle, and no second dispatcher could start. armaatus/autofleet#37.
+    # A RUNNING dispatcher, stopped -- `cmd_run` refuses to start under a drain,
+    # so the state has to be reached the way a real one reaches it.
+    make_fixture ok
+    make_worktree
+    add_origin
+    : >"$GH_MERGED"
+    ( in_fleet cmd_run --auto >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    wait_for_log "fleet up"
+    : >"$AUTOFLEET_DIR/stuck-42"
+    in_fleet cmd_stop >/dev/null 2>&1
+    run_ended "$HELD_PID" \
+      || fail "the drain never ended with a worktree parked: $(cat "$WORK/run.log")"
+    HELD_PID=""
+    echo "ok: a drain ends even with a worktree waiting for a person"
+    grep -q "waiting for you" "$WORK/run.log" \
+      || fail "it ended without naming what is parked: $(cat "$WORK/run.log")"
+    grep -q "#42" "$WORK/run.log" || fail "it did not name which: $(cat "$WORK/run.log")"
+    echo "ok: ...and names it on the way out"
+    [ -d "$WORK/wt" ] \
+      || fail "it released the parked worktree, which is what parking exists to prevent"
+    echo "ok: ...and leaves it alone"
+    ;;
+
   remove_advice)
     make_fixture rm_never_works
     make_worktree
+    # An upstream, because this phase drives `reap_merged` and therefore has to
+    # get PAST the holds check to reach the removal it is about. It did not have
+    # one, and passed anyway: `@{u}` did not resolve, git printed nothing, and
+    # the count read as "holds nothing". That is the bug armaatus/autofleet#34
+    # fixes, and this phase was standing on it -- `make_fixture`'s own comment
+    # says a worktree with no origin is the "could not tell" case and that every
+    # test expecting a removal sets one up.
+    add_origin
     out="$(in_fleet reap_merged 2>&1)"
     grep -q "could not remove it" <<<"$out" \
       || fail "a failed removal was not reported: $out"
@@ -2263,6 +2320,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh reap_blind_upstream|drain_ends_with_parked|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

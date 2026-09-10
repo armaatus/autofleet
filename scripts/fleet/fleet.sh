@@ -122,7 +122,8 @@ BLOCKED_LABEL="${AUTOFLEET_BLOCKED_LABEL:-blocked}"
 ANSWER_SEP="$(printf '\t')"
 
 mkdir -p "$OWNED_DIR" "$STARTED_DIR"
-forget_poll_answers
+# The poll cache is emptied further down, and only when nobody is using it: see
+# the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
 say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
@@ -1197,8 +1198,23 @@ reap_merged() {
     # how this guard fails open on the one thing it exists to protect, so it is
     # refused rather than guessed -- reap_abandoned's discipline exactly.
     holds=""; blind=0
-    unpushed="$(git -C "$path" log '@{u}..HEAD' --oneline 2>/dev/null | grep -c .)"
-    [ "${unpushed:-0}" != 0 ] && holds="$unpushed unpushed commit(s)"
+    # The EXIT STATUS, not just the count. `grep -c` prints 0 and succeeds when
+    # git printed nothing -- including when it printed nothing because `@{u}`
+    # does not resolve. GitHub deletes the head branch on merge, a `fetch
+    # --prune` in the worktree drops `origin/<branch>`, and from then on this
+    # read "holds nothing" for a worktree that may hold a commit made after
+    # auto-merge fired. Clean tree plus that answer is a `--force` removal, and
+    # the commit goes with the directory.
+    #
+    # The comment four lines up already said this is the third answer and must
+    # be refused rather than guessed; the discipline was applied to
+    # `worktree_dirty_count` below and skipped here. armaatus/autofleet#34.
+    if unpushed="$(git -C "$path" log '@{u}..HEAD' --oneline 2>/dev/null)"; then
+      unpushed="$(printf '%s' "$unpushed" | grep -c . || true)"
+      [ "${unpushed:-0}" != 0 ] && holds="$unpushed unpushed commit(s)"
+    else
+      blind=1
+    fi
     if ! dirty="$(worktree_dirty_count "$path")"; then
       blind=1
     elif [ "${dirty:-0}" != 0 ]; then
@@ -2301,7 +2317,8 @@ while that one is up."
     fi
 
     forget_poll_answers
-    # The order is load-bearing in three places. reap_merged first, because a
+    # ...here, once per pass, and nowhere else: see the note beside the
+    # definition. The order below is load-bearing in three places. reap_merged first, because a
     # worktree whose PR merged is its business and reap_abandoned only ever looks
     # at what is left owned. enforce_timebox before notice_stalled, because the
     # first writes `$POLL_CACHE/carded-` and the second reads it to avoid
@@ -2339,7 +2356,21 @@ while that one is up."
       # LAUNCHING here and keeps reaping, which is the same thing the top of the
       # loop does one pass later.
       if check_drain; then drain_mode=true; reason="you stopped it"; break; fi
-      [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ] && { reason="it opened $opened worktree(s)"; break 2; }
+      # A DRAIN, not an exit. `break 2` left the launch loop AND the poll loop,
+      # so the dispatcher stopped with its worktrees mid-work: nothing reaped
+      # them when their PRs merged, their stacks stayed up under
+      # `restart: unless-stopped`, and $OWNED_DIR kept entries the next
+      # dispatcher inherited and counted against its cap. The comment a few
+      # lines above records that exact bug being fixed for the drain path;
+      # `--until` and `--for` set `drain_mode` and keep reaping, and
+      # docs/WORKFLOW.md advertises all three as equivalent. They were not.
+      # armaatus/autofleet#36.
+      if [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ] && ! $drain_mode; then
+        drain_mode=true
+        reason="it opened $opened worktree(s)"
+        say "opened $opened worktree(s) -- launching nothing more, still reaping what is in flight"
+        break
+      fi
 
       # EVERY ITERATION, which is what makes one check cover both halves of the
       # rule: it holds when a foundation issue was already running when this
@@ -2469,6 +2500,17 @@ while that one is up."
     # it keeps polling, because reaping a merged worktree and enforcing the
     # time-box are its job in both modes.
     local owned; owned="$(ls "$OWNED_DIR" 2>/dev/null | grep -c .)"
+    # ...minus the ones waiting for a PERSON. `park_worktree` keeps a worktree
+    # owned when its removal was refused, which is right -- releasing it would
+    # destroy what could not be removed. But the loop exits only on
+    # `owned == 0`, and under a drain `queued` is forced to 0, so a parked
+    # worktree made that the only exit and it never came: the dispatcher polled
+    # forever, `status` never said idle, and `cmd_run` refuses a second
+    # dispatcher while one is alive. `stop.sh` promises "exits once nothing is
+    # left". armaatus/autofleet#37.
+    local parked; parked="$(ls "$STATE_DIR" 2>/dev/null | grep -c '^stuck-' || true)"
+    [ "${parked:-0}" -gt 0 ] && owned=$(( owned - parked ))
+    [ "${owned:-0}" -lt 0 ] && owned=0
     local queued=0
     if [ "${#wanted[@]}" -gt 0 ]; then
       queued="${#wanted[@]}"
@@ -2476,9 +2518,20 @@ while that one is up."
       # Counted from the lists already in hand rather than by asking `in_flight`
       # per issue: that made two API calls each, and a 200-issue backlog on a
       # 60-second poll is how you meet gh's secondary rate limit.
-      queued="$(count_startable)"
+      # ...and its documented non-zero kept. Discarded, `queued` was empty and
+      # `[ "" -eq 0 ]` wrote a bash error to stderr every poll during a `gh`
+      # outage -- exactly when the log most needs to be readable. "Could not
+      # tell" is not "nothing left": it keeps polling.
+      queued="$(count_startable)" || queued=1
     fi
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
+      if [ "${parked:-0}" -gt 0 ]; then
+        # Named on the way out, every time, because a worktree nobody mentions
+        # is one nobody releases.
+        say "$parked worktree(s) could not be removed and are waiting for you:"
+        ls "$STATE_DIR" 2>/dev/null | sed -n 's/^stuck-/  #/p' | while read -r l; do say "$l"; done
+        say "  Their issues stay owned until you release them; the log above says how."
+      fi
       if $drain_mode; then
         reason="${reason:-you stopped it}; everything in flight has landed"
       elif $auto && $declined; then
@@ -2501,6 +2554,22 @@ while that one is up."
 
 # Sourced by tests/test_orca_fleet.sh, which exercises one function against a
 # stubbed CLI. Executed, it dispatches as usual.
+# The poll cache belongs to whoever is POLLING, and until now every command
+# emptied it at source time. So `status`, `stop`, `retry` and `resume` each
+# deleted it out from under a live dispatcher mid-pass -- and `interrupted-$n`
+# is the only thing stopping `reap_abandoned` re-interrupting an agent that
+# `enforce_timebox` interrupted earlier in that same pass. docs/WORKFLOW.md
+# tells you to run `status` in a loop until it says idle, so the way to hit it
+# was to watch the fleet. It also dropped `issue-$n`, making every watcher
+# re-issue the `gh issue view` that `poll_issue` exists to avoid.
+#
+# Cleared when nobody owns it, which keeps a stale cache from outliving a
+# dispatcher that died -- and left alone when one is live, including the
+# "alive, but ps would not say" answer, because the point is not to touch
+# another process's state. `cmd_run` empties it per pass regardless, which is
+# the only place that actually wants it emptied. armaatus/autofleet#35.
+dispatcher_alive "$(cat "$PIDFILE" 2>/dev/null)" || forget_poll_answers
+
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
