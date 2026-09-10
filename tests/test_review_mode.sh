@@ -123,6 +123,32 @@ exit 0
 STUB
   chmod +x "$WORK/bin/gh"
 
+  # ------------------------------------------------------------- the orca stub
+  #
+  # `fleet.sh` resolves the runner AT SOURCE TIME and `die`s if nothing answers
+  # (fleet.sh: `orca_cli_resolve || die "no orca CLI answers here"`). This file
+  # sources it -- `in_poll` does -- so on a machine with no Orca the subshell
+  # exited before running the function under test, and the phases that hid that
+  # behind `>/dev/null 2>&1` reported the CONSEQUENCE instead: "the stale marker
+  # was not cleared", "local mode did not review the open PR". Both passed on a
+  # laptop with Orca installed and failed in CI, where I first mistook the second
+  # for a timing flake and widened its timeout.
+  #
+  # Answers only what sourcing needs: a version, and an empty worktree list.
+  cat >"$WORK/bin/orca-stub" <<'OSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  --version) echo "orca 0.0.0-test"; exit 0 ;;
+esac
+case "$1 ${2:-}" in
+  "worktree list") echo '{"result":{"worktrees":[]}}'; exit 0 ;;
+esac
+echo '{"ok":true,"result":{}}'
+exit 0
+OSTUB
+  chmod +x "$WORK/bin/orca-stub"
+  export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
+
   GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
   GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
   GH_REVIEWS="$WORK/reviews"; printf '[]' >"$GH_REVIEWS"
@@ -463,7 +489,12 @@ import merge_gate; print(merge_gate.review_mode())'); }
     sleep 120 &
     stranger=$!
     printf '%s %s\n' "$stranger" "$(cat "$GH_HEAD")" >"$AUTOFLEET_DIR/reviewing/99"
-    in_poll stop_reviewers >/dev/null 2>&1
+    # NOT `>/dev/null 2>&1`: a source-time `die` in here is invisible that way,
+    # and the phase then reports the consequence rather than the cause. That is
+    # exactly how this file passed on a laptop and failed in CI.
+    out="$(in_poll stop_reviewers 2>&1)"
+    grep -q "no orca CLI answers" <<<"$out" \
+      && fail "fleet.sh would not source, so nothing under test ran: $out"
     if kill -0 "$stranger" 2>/dev/null; then
       ok "a marker naming a live stranger is cleared without signalling it"
     else
