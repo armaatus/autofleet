@@ -234,6 +234,9 @@ raise SystemExit(2)
 # swallowed, because a card that did not update is a status surface showing
 # something that is not true.
 #
+# Any non-zero means the card was not updated. 2 specifically means the CALLER
+# is malformed rather than the runtime unreachable -- see below.
+#
 # An odd number of arguments is REFUSED rather than rounded down. A caller that
 # means `comment "..."` and passes `comment` alone would otherwise get a board
 # update that silently did less than it was asked for -- and on a status surface
@@ -244,7 +247,7 @@ runner_worktree_set() {
   local path="$1"; shift
   local args=() rc out
   if [ $# -lt 2 ] || [ $(($# % 2)) != 0 ]; then
-    echo "runner_worktree_set: expected key/value pairs, got: $*"
+    echo "runner_worktree_set: expected key/value pairs, got: $*" >&2
     return 2
   fi
   while [ $# -ge 2 ]; do
@@ -300,6 +303,19 @@ runner_worktree_set() {
 # proving that doubles what a poll costs while Orca.app restarts.
 runner_worktree_remove() {
   local path="$1" deadline="${2:-180}" out rc
+  # A worktree that is ALREADY gone is gone, and saying so needs no runtime at
+  # all. Asked before the resolve, or `reap_merged` could not release a slot with
+  # nothing left in it while Orca was down -- which is the same held slot this
+  # function's three-way answer exists to avoid.
+  [ -d "$path" ] || return 0
+  # Then resolved HERE rather than left to orca_cli, because this is the one
+  # function whose rc 1 means something specific -- "answered and refused" -- and
+  # orca_cli answers a failed resolve with 1 like everything else. Without this
+  # line an Orca that is not running came back as a decision about THIS worktree,
+  # with `the removal refused:` and nothing after it, and the dispatcher parked a
+  # slot that only needed retrying. Design note 2 inverted inside the function
+  # added to stop exactly that. Both found by the independent review.
+  orca_cli_resolve || return 2
   out="$(mktemp)"
   FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$deadline" "$out" \
     worktree rm --worktree "path:$path" --json

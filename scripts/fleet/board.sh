@@ -38,6 +38,14 @@ esac
 
 runner_available || { echo "board.sh: no runner answers here; the card is unchanged" >&2; exit 1; }
 
+# Status and comment in ONE call, which is why the driver takes pairs: sent
+# separately, a failure between them leaves the board carrying a new status with
+# the previous line under it.
+args=()
+[ -n "$status" ]  && args+=(workspace-status "$status")
+[ -n "$comment" ] && args+=(comment "$comment")
+[ "${#args[@]}" -gt 0 ] || { echo "board.sh: nothing to set" >&2; exit 2; }
+
 # The card is addressed by PATH, and $REPO_ROOT is bash's logical pwd -- it keeps
 # whatever symlinked prefix the agent's shell had. If that differs from the path
 # the runtime recorded for this worktree, every update from inside it fails. The
@@ -47,14 +55,6 @@ runner_available || { echo "board.sh: no runner answers here; the card is unchan
 # otherwise look like a runner problem, and because the previous form -- the
 # runner resolving "the active worktree" from the calling terminal -- could not
 # be wrong. Raised by the independent review; the refusal below is loud for it.
-
-# Status and comment in ONE call, which is why the driver takes pairs: sent
-# separately, a failure between them leaves the board carrying a new status with
-# the previous line under it.
-args=()
-[ -n "$status" ]  && args+=(workspace-status "$status")
-[ -n "$comment" ] && args+=(comment "$comment")
-[ "${#args[@]}" -gt 0 ] || { echo "board.sh: nothing to set" >&2; exit 2; }
 
 if out="$(runner_worktree_set "$REPO_ROOT" "${args[@]}" 2>&1)"; then
   echo "board: ${status:+$status; }${comment}"

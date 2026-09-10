@@ -96,14 +96,26 @@ runner_worktree_remove <path> [<deadline>]
   status and the comment explaining it: sent separately, a failure between them
   leaves the board carrying a new status with the previous line under it. The
   keys the fleet uses are `workspace-status` and `comment`. Silent on success,
-  the runtime's own words on failure.
+  the runtime's own words on failure. Any non-zero means the card was not
+  updated; `2` specifically means the CALLER passed something that is not a pair
+  list, which is a bug in the caller rather than a statement about the runtime —
+  an odd argument count is refused rather than rounded down, because a dropped
+  key is a board update that silently did less than it was asked for.
 - **`runner_worktree_remove`** returns `0` only if the worktree is REALLY gone,
   `1` if the runner answered and refused, `2` if it never answered. The caller
   acts on the difference: a refusal is a decision about this worktree and is not
   worth retrying, while a deadline is the runtime restarting and says nothing
-  about the worktree at all. It must not run the runner's own teardown hooks —
-  see the comment on the Orca implementation for what that cost
+  about the worktree at all. **A runtime that cannot be reached at all is `2`,
+  not `1`** — reporting "the app is not running" as a decision about the worktree
+  parks a slot that only needed retrying, which is design note 2 inverted inside
+  the function that exists to honour it. It must not run the runner's own
+  teardown hooks — see the comment on the Orca implementation for what that cost
   (armaatus/rommsync-nx#163).
+
+  Its deadline is the caller's second argument, not `runner_set_deadline`'s: the
+  dispatcher tunes this one per removal through `AUTOFLEET_RM_DEADLINE`, and a
+  removal is not a call anyone polls. Same exemption as create, for the same
+  reason.
 
 ### Agents and terminals
 
@@ -130,21 +142,27 @@ runner_terminal_interrupt <handle>
   caller reads the text back to decide whether the runtime drafted a real prompt
   or only the issue URL, and the length is what makes a paste caught half way
   through comparable to the same paste once it has landed.
-`runner_agent_terminal <path>` — the agent terminal in ONE worktree — is **not**
-a driver's job: `lib.sh` provides it as a filter over `runner_agent_terminals`,
-above the line that sources the driver, so a runtime that can answer it directly
-still wins by defining its own. Every driver shipping the same four lines is how
-a copy of it ended up in the test stub.
-
 - **`runner_terminal_send`** types without submitting; **`runner_terminal_enter`**
   submits. They are separate because `agent-autostart.sh` appends to a draft
   before pressing Return, and a driver that only had "send this text" could not
   express it.
 
+One more belongs to the contract but **not** to a driver:
+
+```sh
+runner_agent_terminal <path>   # provided by lib.sh
+```
+
+The agent terminal in ONE worktree. `lib.sh` defines it as a filter over
+`runner_agent_terminals`, above the line that sources the driver, so a runtime
+that can answer it directly still wins by defining its own — and no driver has
+to ship the filter. Every driver shipping its own copy is how a duplicate of it
+ended up in the test stub.
+
 ## Writing a second driver
 
 `tests/test_fleet.sh runner_stub` is the worked example and the regression
-guard: it defines the whole contract over five text files, points
+guard: it defines the whole contract over a handful of text files, points
 `AUTOFLEET_RUNNER` at them, and then drives the dispatcher, the reap,
 `issue-command.sh`, `agent-autostart.sh` and `board.sh` through it — asserting at
 the end that the `orca` CLI was never asked anything, with an `orca` planted on

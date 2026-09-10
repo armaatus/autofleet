@@ -477,8 +477,18 @@ for path in glob.glob("scripts/fleet/*.sh"):
     called |= set(re.findall(r"\brunner_[a-z_]+", open(path).read()))
 called -= provided
 
+# Only the ```sh CONTRACT FENCES count as documentation. Any mention anywhere in
+# the page used to, which made this half of the check vacuous: a function deleted
+# from the contract block still passed because some paragraph further down
+# happened to say its name. The page's job is to be the thing a second driver is
+# written against, and that is the fences. Found by the independent review of the
+# change that added this check.
 doc = open("docs/RUNNERS.md").read()
-documented = set(re.findall(r"\brunner_[a-z_]+", doc)) - {"runner_stub"}
+documented = set()
+for fence in re.findall(r"```sh\n(.*?)```", doc, re.S):
+    documented |= set(re.findall(r"^runner_[a-z_]+", fence, re.M))
+if not documented:
+    sys.exit("docs/RUNNERS.md has no ```sh contract block; this check now asserts nothing")
 
 bad = []
 for driver in drivers:
@@ -489,6 +499,13 @@ for driver in drivers:
         bad.append(f"{driver} defines {name} and docs/RUNNERS.md never names it")
 for name in sorted(provided - documented):
     bad.append(f"lib.sh provides {name} and docs/RUNNERS.md never names it")
+# ...and the other direction, which the check missed on its first pass: a name on
+# the page that nothing defines is a function a second driver would implement for
+# nobody, and it is exactly how the drafted contract came to carry three of them.
+# Found by the independent review of the change that added this check.
+everywhere = provided | set().union(*(defined(d) for d in drivers))
+for name in sorted(documented - everywhere):
+    bad.append(f"docs/RUNNERS.md names {name} and nothing defines it")
 if bad:
     sys.exit("the runner contract and the code disagree:\n  " + "\n  ".join(bad))
 PYEOF

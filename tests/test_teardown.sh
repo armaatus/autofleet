@@ -417,8 +417,41 @@ FAKE
       && fail "a stat that printed prose reached the caller's arithmetic, which is the crash this pins: $out"
     grep -q "rc=1 answer=\[\]" <<<"$out" \
       || fail "fleet_mtime passed on a non-numeric answer instead of refusing it: $out"
-    rm -rf "$work" "$stub"
-    echo "PASS: fleet_mtime answers a number or says it could not tell"
+
+    # The ORDERING half, which the validation above does not cover: a GNU stat,
+    # reproduced on a machine that does not have one. `-f` is --file-system
+    # there, takes no format, and reads `%m` as a SECOND FILE -- so it prints a
+    # filesystem block to stdout for the real one AND exits non-zero. BSD-first
+    # would then append the true number to that prose, the capture would fail
+    # validation, and `fleet_mtime` would answer "could not tell" forever: every
+    # foundation hold silently stops re-explaining itself. Both halves are needed
+    # and only both together are green.
+    gnu="$(mktemp -d)"
+    # Answers a FIXED epoch on `-c` rather than shelling out to the platform
+    # `stat`: the point of this stub is to behave the way GNU does regardless of
+    # which stat the machine running the suite actually has, and a `-c` branch
+    # that ran `/usr/bin/stat -f %m` would itself be the BSD spelling -- green
+    # here and red on the Linux CI this phase exists for. Found by the
+    # independent review.
+    cat >"$gnu/stat" <<'GNUSTAT'
+#!/usr/bin/env bash
+if [ "$1" = "-f" ]; then
+  printf '  File: "%s"\n    ID: 0 Namelen: 255\n' "${3:-x}"
+  exit 1
+fi
+[ "$1" = "-c" ] || exit 1
+echo 1234567890
+GNUSTAT
+    chmod +x "$gnu/stat"
+    out="$( REPO_ROOT="$REPO_ROOT" PATH="$gnu:$PATH" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      answer="$(fleet_mtime "$1")"; echo "rc=$? answer=[$answer]"
+    ' _ "$work/f" 2>&1 )"
+    grep -q '^rc=0 answer=\[1234567890\]$' <<<"$out" \
+      || fail "against a GNU-shaped stat, fleet_mtime could not read an mtime at all -- which is the Linux failure, silent this time: $out"
+
+    rm -rf "$work" "$stub" "$gnu"
+    echo "PASS: fleet_mtime answers a number, on either stat, or says it could not tell"
     ;;
 
   *)

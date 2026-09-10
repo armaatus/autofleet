@@ -46,6 +46,11 @@ rather than reading one off this page — a host project on a different
 ./scripts/fleet/fleet.sh          # prints it, under "Run it in a terminal..."
 ```
 
+If it answers "the runner is not usable here" instead, that IS the answer: the
+dispatcher checks the runner before it will do anything, and there is no terminal
+for it to open until that is fixed. `docs/RUNNERS.md` says what each driver
+needs.
+
 Or directly:
 
 ```bash

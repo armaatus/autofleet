@@ -680,13 +680,14 @@ runner_worktree_issue() {
   [ -s "$STUB_DIR/issue" ] || return 2
   cat "$STUB_DIR/issue"
 }
-runner_worktree_set() {
-  stub_say "worktree set $*"
-  [ $# -lt 3 ] || [ $(( ($# - 1) % 2 )) != 0 ] && return 2
-  return 0
-}
+runner_worktree_set() { stub_say "worktree set $*"; return 0; }
 runner_worktree_remove() {
   stub_say "worktree remove $1"
+  # 2 is "nobody answered", 1 is "answered and refused". The dispatcher parks a
+  # slot on 1 and retries on 2, so a driver that returns the wrong one costs a
+  # worktree for good.
+  [ -e "$STUB_DIR/rm-blind" ]   && return 2
+  [ -e "$STUB_DIR/rm-refuses" ] && { echo "the stub refuses"; return 1; }
   rm -rf "$1"
   [ -d "$1" ] && return 1
   return 0
@@ -934,6 +935,32 @@ case "${1:-}" in
       || fail "a driver call that resolved its own CLI still did not answer: $out"
     grep -q "states rc=0" <<<"$out" \
       || fail "a driver call that resolved its own CLI still did not answer: $out"
+
+    # ...and the ONE function whose rc is not a plain yes/no. `orca_cli` answers
+    # a failed resolve with 1 like every other call, and 1 through
+    # `runner_worktree_remove` is the documented "answered and REFUSED" -- a
+    # decision about this worktree, which the dispatcher parks a slot on rather
+    # than retrying. So an Orca that is not running cost a worktree for good, in
+    # the function added to stop exactly that kind of blindness.
+    #
+    # The resolve is stubbed out rather than starved: whether it can find a CLI
+    # depends on the machine, and what is under test here is the MAPPING.
+    mkdir -p "$WORK/still-here"
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_remove "$1" 1; echo "here rc=$?"
+      runner_worktree_remove "$2" 1; echo "gone rc=$?"
+    ' _ "$WORK/still-here" "$WORK/never-existed" 2>&1 )"
+    grep -q "^here rc=2$" <<<"$out" \
+      || fail "a runner that could not be reached at all was reported as a refusal to remove this worktree, which parks its slot for good: $out"
+    # ...and the other way: a worktree that is already gone IS gone, and saying
+    # so needs no runtime. Answered 2 here and the reap cannot release a slot
+    # with nothing left in it for as long as the app is down.
+    grep -q "^gone rc=0$" <<<"$out" \
+      || fail "a worktree that no longer exists was not reported as removed while the runner was unreachable: $out"
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
     ;;
   runner_stub)
@@ -1005,6 +1032,16 @@ case "${1:-}" in
     printf '%s\t%s\n' t3 "$weird" >>"$STUB_DIR/terminals"
     [ "$(in_fleet runner_agent_terminal "$weird")" = t3 ] \
       || fail "a worktree path with a backslash in it has no agent, as far as the fleet can tell"
+    # ...and the SAME filter in notice_stalled, which had the same defect and
+    # would otherwise be a fix with no assertion. A worktree whose agent is
+    # `waiting` is reported as not waiting, forever.
+    printf '%s\t%s\n' "$weird" waiting >>"$STUB_DIR/states"
+    mkdir -p "$weird"
+    printf '%s\n' "$weird" >"$AUTOFLEET_DIR/worktrees/43"
+    out="$(in_fleet notice_stalled 2>&1)"
+    rm -f "$AUTOFLEET_DIR/worktrees/43"
+    grep -q "#43 is waiting" <<<"$out" \
+      || fail "an agent waiting in a worktree whose path has a backslash was reported as not waiting: $out"
 
     # Design note 2 of the issue, on the one function that has THREE answers:
     # "could not tell" and "there is none" must not reach a person as the same
@@ -1019,6 +1056,37 @@ case "${1:-}" in
     grep -q "no linked issue" <<<"$out" \
       || fail "a worktree that really has no linked issue stopped saying so: $out"
     printf '42' >"$STUB_DIR/issue"
+
+    # A removal nobody answered is NOT a refusal. The dispatcher parks a slot for
+    # good on a refusal and retries on silence, so this is a worktree lost per
+    # runtime restart if the driver conflates them -- and `orca_cli` answering a
+    # failed resolve with 1, like every other call, is exactly how it did.
+    mkdir -p "$STUB_DIR/wt-blind"
+    printf '%s\n' "$STUB_DIR/wt-blind" >"$AUTOFLEET_DIR/worktrees/44"
+    : >"$STUB_DIR/rm-blind"
+    out="$(in_fleet remove_worktree "$STUB_DIR/wt-blind" 2>&1)"; rc=$?
+    rm -f "$STUB_DIR/rm-blind" "$AUTOFLEET_DIR/worktrees/44"
+    [ "$rc" = 2 ] || fail "a removal nobody answered was not reported as 'could not ask' (rc $rc): $out"
+    grep -q "not a refusal" <<<"$out" \
+      || fail "it did not say the difference, which is the whole of it: $out"
+
+    # Every `*-blind-` marker for an issue goes when a fresh worktree takes it,
+    # whatever it is called -- including the name the marker had before the
+    # runner seam, which a fleet upgraded mid-flight still has on disk.
+    # Through a fleet directory with a SPACE in it, which is the whole reason the
+    # glob line quotes everything except the `*`: bare, the path word-splits into
+    # two operands that match nothing and every marker survives, silently.
+    spaced="$WORK/my fleet"
+    mkdir -p "$spaced"
+    : >"$spaced/orca-blind-77"
+    : >"$spaced/runner-blind-77"
+    : >"$spaced/git-blind-77"
+    ( cd "$WORK/repo" && AUTOFLEET_DIR="$spaced" bash -c \
+        '. ./scripts/fleet/fleet.sh && clear_issue_markers 77' ) >/dev/null 2>&1
+    for legacy in orca-blind-77 runner-blind-77 git-blind-77; do
+      [ -e "$spaced/$legacy" ] \
+        && fail "$legacy outlived the worktree that wrote it, and nothing will ever clear it"
+    done
 
     # board.sh is the line issue-command.sh hands EVERY agent, so it is where the
     # seam is asserted by the brief rather than by the dispatcher.

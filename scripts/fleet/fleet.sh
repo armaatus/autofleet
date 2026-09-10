@@ -231,18 +231,25 @@ owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
 # issue that ever stalled. That is the root fix; the two exits in
 # enforce_timebox tidying up after themselves is the belt.
 #
-# `orca-blind-` is the name `runner-blind-` had before the runner seam, and it is
-# swept rather than dropped: a fleet upgraded mid-flight has some on disk, and a
-# marker nothing clears is one small file per issue that ever went blind, forever.
+# The `*-blind-` family is swept as a FAMILY rather than named one at a time.
+# Every one of them means the same thing -- some lookup could not answer for this
+# issue, said once -- and they are the markers most likely to be renamed, because
+# they are named after whatever was doing the looking. `runner-blind-` was
+# `orca-blind-` until the runner seam landed, and a fleet upgraded mid-flight has
+# the old name on disk with nothing left that clears it. The glob also keeps a
+# runner's name from having to appear here at all (hard rule 4).
 clear_issue_markers() {
   rm -f "$STATE_DIR/stalled-$1" "$STATE_DIR/stall-labels-$1" \
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/merge-blind-$1" "$STATE_DIR/merge-held-$1" \
-        "$STATE_DIR/runner-blind-$1" "$STATE_DIR/orca-blind-$1" \
-        "$STATE_DIR/git-blind-$1" "$STATE_DIR/warned-$1" \
-        "$STATE_DIR/reason-blind-$1"
+        "$STATE_DIR/merge-held-$1" "$STATE_DIR/warned-$1"
+  # ONLY the `*` is unquoted. $STATE_DIR is `${AUTOFLEET_DIR:-$HOME/.autofleet}`,
+  # both user-supplied paths: leaving the whole word bare word-splits a directory
+  # with a space in it into two operands that match nothing, and the markers are
+  # then never cleared -- silently, which is the failure this list exists to
+  # prevent. Found by the independent review.
+  rm -f "$STATE_DIR"/*-blind-"$1"
 }
 
 # `gaveup-` is the one per-issue marker deliberately NOT in that list, and the

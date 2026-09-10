@@ -149,7 +149,7 @@ fleet_run_with_deadline() {
 # worktree, filtered out of the machine-wide listing the driver does provide.
 # Defined HERE, above the driver source, so a driver whose runtime can answer it
 # directly still wins by defining its own -- and so that every driver does not
-# ship the same four lines. The stub driver in tests/test_fleet.sh carried a
+# ship the same filter. The stub driver in tests/test_fleet.sh carried a
 # verbatim copy of it until the independent review said so.
 #
 # The path arrives through the ENVIRONMENT rather than through `awk -v`, because
