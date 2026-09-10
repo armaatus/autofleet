@@ -39,6 +39,112 @@ first, because an issue can carry no label that does not exist.
 `AUTOFLEET_FOUNDATION_LABEL` (`foundation`),
 `AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`).
 
+### The review
+
+Two reviews gate a pull request, and only the second one is configurable here.
+The first is the local `/code-review` and `/mattpocock-skills:code-review` pass
+the author runs before pushing — `guard.py` refuses the push without it, and
+`merge_gate.py` refuses to merge a PR whose body does not name both. That is
+required in every mode.
+
+The second is the **independent** review: a verdict from a context that has not
+seen the conversation which produced the diff. `AUTOFLEET_REVIEW_MODE` says where
+it runs.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_REVIEW_MODE` | `github` | `github` or `local`. |
+| `AUTOFLEET_REVIEW_CMD` | `claude` | What `local` mode runs, with `-p` and a fixed tool allowlist. A command on `PATH`, so a wrapper can point it at another model or another account. |
+| `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
+| `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
+
+**`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
+submits it, from that workflow's own account. It needs a
+`CLAUDE_CODE_OAUTH_TOKEN` secret on the repository; mint one with
+`claude setup-token`.
+
+> Without that secret the job **no-ops with a notice and a green check**, and
+> because `merge_gate.py` requires an independent review on the current head,
+> every pull request the fleet opens then blocks forever on a review that cannot
+> arrive. The agents wait out `await-review.sh`'s 45-minute deadline, three
+> times, and the backlog stops. It is the loudest possible consequence of the
+> quietest possible failure, which is why `fleet.sh status` names the mode on its
+> first screen.
+
+**`local`** — the dispatcher runs the reviewer on this machine
+([`scripts/fleet/review.sh`](../scripts/fleet/review.sh), briefed by
+[`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md)) and submits with
+`gh pr review`. Same policy, same `REVIEW.md`, same trailers.
+
+#### What `local` gives up, exactly
+
+The reviewer signs in as whoever `gh` is logged in as, which is normally the same
+account that opened the pull request. So independence stops being something
+GitHub can attest to and becomes something the fleet asserts:
+
+|  | `github` | `local` |
+|---|---|---|
+| Reviewer's context | fresh | fresh |
+| Reviewer's identity | a different account | **the author's account** |
+| What proves it | GitHub's own author field | a marker in the review body |
+| `--request-changes` | available | **refused by GitHub** — see below |
+| Reviewer's credential | an Actions token, scoped by the job's `permissions:`, in a container that is then destroyed | **your own `gh` login**, reaching every repo and org that account can |
+| Inline comments | yes (`gh api` is granted) | no — `gh api` is deliberately **not** granted, so findings go in the body |
+
+**The reviewer runs as you.** That is the row above with the widest blast
+radius, and it is not narrowed by `guard.py`: the reviewer runs from the repo
+root precisely so that the fleet-worktree rules do not apply to it, which is what
+lets it submit at all. So the ceiling on what it can do is its **tool allowlist**,
+and that is why `Bash(gh api:*)` — which `claude-review.yml` does grant — is
+withheld here. What is left can read the tree, read the pull request, and submit
+one review. It is an agent reading a diff written by somebody else; the prompt
+hardening in its brief is a mitigation, not a boundary, exactly as with the guard
+above.
+
+**`--request-changes` does not exist in `local` mode.** GitHub will not accept
+`CHANGES_REQUESTED` on a self-authored pull request (*"Review Can not request
+changes on your own pull request"*), and here the reviewer is the author's
+account. So `merge_gate.py`'s "the latest review still requests changes"
+condition is unreachable, and `<!-- review-findings: N -->` is the only lever
+holding the branch. It is enough — any `N` above zero blocks the merge until the
+author answers — but a control that is documented and silently inapplicable is
+worse than one that is absent, so it is written down here, in
+[REVIEW.md](../REVIEW.md) and in the reviewer's brief. This was found by the
+local reviewer being unable to submit its own verdict.
+
+`merge_gate.independent_reviews()` normally discards anything the PR's author
+submitted. In `local` mode it accepts one **iff** the body carries
+`<!-- independent-review: local <head-sha> -->` for the current head. That is a
+checklist gate, exactly as `record-review.sh` is, and three things keep it
+meaningful:
+
+1. **Opt-in per repository.** The knob lives in `.autofleet/config`, and
+   `install.sh` normalises a freshly seeded config back to `github` so no host
+   project inherits the weaker mode by accident.
+2. **Read from the base ref.** `merge-gate.yml` sparse-checks-out
+   `.autofleet/config` at `pull_request.base.sha`, so a PR cannot switch its own
+   repository into the weaker mode as part of the change that mode is judging.
+3. **Out of the ordinary reach of the author.** `guard.py` refuses, from a
+   fleet-owned worktree, all three ways to submit a review: `gh pr review`,
+   `gh api .../pulls/N/reviews`, and the `addPullRequestReview` GraphQL
+   mutation. The dispatcher runs the reviewer from the repo root, which is not a
+   fleet worktree, which is how it still submits.
+
+   *Reach*, not *possibility*: this is a hook over a command line, not a
+   capability boundary. It stops an agent that drifts into reviewing itself and
+   an agent that follows an instruction planted in a diff. It does not stop an
+   agent that sets out to defeat it, and the summary below says so. The first
+   two spellings shipped guarded; the third did not, and the independent review
+   of that change found it.
+
+`local` **adds** a way to satisfy the requirement; it never removes the strong
+one. A review by a different account still counts, with no marker at all.
+
+The honest summary: `local` protects against an author's blind spots, which is
+what the second opinion is actually for. It does not protect against an author
+determined to forge one. If you need that, keep `github`, or give the reviewer
+its own account and log `gh` in as that.
+
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,

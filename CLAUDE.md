@@ -102,8 +102,10 @@ that depends on it starts, even if the labels say several things are ready.
 1. `./tests/run.sh` is green, and your change has a test that would have failed
    before it — run it and read the output. For a bug fix, commit the failing test
    before the fix.
-2. **Run `/code-review` on your own branch** and put the findings in the PR body.
-   Required, not optional — [REVIEW.md](REVIEW.md) is the policy it follows.
+2. **Run `/code-review` AND `/mattpocock-skills:code-review` on your own branch**
+   and put both sets of findings in the PR body. Required, not optional —
+   `merge_gate.py` refuses a body that does not name both, and
+   [REVIEW.md](REVIEW.md) is the policy they follow.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
 4. Open a PR with `Closes #N`. `merge-gate` requires a closing line and a
    workflow reads it to unblock dependants, so it is not optional.

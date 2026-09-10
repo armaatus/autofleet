@@ -550,6 +550,230 @@ except Exception:
   say "  #$num is running in $path"
 }
 
+# -------------------------------------------------------------- the review ---
+# In AUTOFLEET_REVIEW_MODE=local, the dispatcher is what runs the independent
+# review. Nothing else can: the agent that wrote the PR must not review it
+# (.claude/hooks/guard.py refuses `gh pr review` from a fleet worktree), and the
+# workflow that normally does it needs a CLAUDE_CODE_OAUTH_TOKEN this repository
+# does not have. Without this, every PR sits blocked on a review that cannot
+# arrive and `await-review.sh` waits out its deadline three times.
+#
+# In the default `github` mode this returns immediately and costs nothing.
+REVIEWING_DIR="$STATE_DIR/reviewing"
+
+# Is pid $1 one of OUR reviewers, or merely a live pid?
+#
+# `kill -0` alone is not the question. This is the second place in the fleet that
+# SIGNALS a pid it read out of a file -- `cmd_stop` is the other, and it uses
+# `dispatcher_alive`, whose whole reason for existing is that a marker a `kill -9`
+# left behind names whoever the OS has since given that number to. Nothing clears
+# $REVIEWING_DIR across a dispatcher's death, so a stale marker outlives its
+# process by hours and the number is reused: on the head-moved path that meant
+# SIGTERM to a stranger, and on the unmoved path a marker nothing could ever
+# reap, so that PR was never reviewed again. Both found by the independent review.
+#
+# Same three answers as dispatcher_alive: 0 yes, 1 no, 2 alive but ps would not
+# say. On "cannot say" the caller treats it as ours -- the conservative choice
+# here is to leave a possible reviewer running and its slot held, not to signal
+# an unidentified process.
+#
+# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
+# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
+# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
+# the very review this file starts. `stop_reviewers()` SIGTERMs what this
+# matches, and it runs at every dispatcher start, so a recycled pid landing on an
+# agent's wait would have killed the wait: the exact failure this whole change
+# exists to remove, delivered by the machinery that removes it. Found by the
+# independent review.
+#
+# `dispatcher_alive` anchors for the same reason and was cited as this
+# function's model while not being followed. The pattern matches the path this
+# file actually spawns -- `<repo>/scripts/fleet/review.sh <pr>` -- with the
+# separator required on the left so `await-review.sh` cannot satisfy it.
+reviewer_alive() {
+  local pid="${1:-}" line
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  line="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [ -n "$line" ] || return 2
+  printf '%s\n' "$line" | grep -Eq '(^|[[:space:]/])review\.sh([[:space:]]|$)'
+}
+
+# Every reviewer this dispatcher started, stopped, and their markers cleared.
+#
+# Called from `cmd_stop --now` and at dispatcher start. Without the first,
+# `--now` -- which CLAUDE.md calls the one that "also freezes the agents" --
+# left an in-flight reviewer running for up to AUTOFLEET_REVIEW_TIMEOUT more
+# minutes: an agent holding this machine's gh credentials, unreaped because the
+# dispatcher that would have reaped it was the thing just killed, and invisible
+# to `fleet.sh status`, which counts markers. Without the second, markers from a
+# dispatcher that was `kill -9`d are inherited by the next one and never cleared.
+stop_reviewers() {
+  local marker held stopped=0
+  [ -d "$REVIEWING_DIR" ] || return 0
+  for marker in "$REVIEWING_DIR"/*; do
+    [ -e "$marker" ] || continue
+    held=""
+    read -r held _ <"$marker" 2>/dev/null || true
+    if reviewer_alive "$held"; then
+      kill "$held" 2>/dev/null && stopped=$((stopped + 1))
+    fi
+    rm -f "$marker"
+  done
+  [ "$stopped" -gt 0 ] && echo "  stopped $stopped local reviewer(s)."
+  return 0
+}
+
+review_open_prs() {
+  fleet_review_is_local || return 0
+  # A stopped fleet writes nothing to a pull request, and `review.sh` knows that
+  # -- it exits 3. But it exits 3 AFTER being spawned, once per open PR, every
+  # poll: churn with an answer already known here. A DRAIN deliberately does not
+  # stop reviews, because a drain lets the work in flight finish and a PR waiting
+  # on a verdict is exactly that work.
+  fleet_stopped && return 0
+  mkdir -p "$REVIEWING_DIR"
+
+  # OUR OWN PULL REQUESTS, and this is a limit rather than an oversight. The
+  # reviewer is an agent with this machine's credentials reading a diff written
+  # by somebody else; starting one unattended on every PR a repository receives
+  # is a thing to opt into deliberately, not a side effect of turning on local
+  # review. `@me` is the account gh is logged in as, which in the fleet's case
+  # is also the account every worktree opens PRs with.
+  local listing
+  listing="$(GH_PAGER=cat gh pr list --state open --author "@me" \
+               --json number,isDraft,headRefOid --limit 50 2>/dev/null)" || {
+    say "could not list the open PRs; skipping the review pass"
+    return 0; }
+
+  # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
+  # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
+  # child it has. A marker truncated by a crash between the `>` and the write is
+  # enough to reach it. `kill -0 0` also SUCCEEDS, so the same default on the
+  # reaping path below made an empty marker immortal and its PR never reviewed
+  # again. Both found by the local review of the change that added this.
+  #
+  # A marker whose first field is not a number is treated as gone, which is what
+  # it is: nothing here can signal a process it cannot name.
+  local marker held
+
+  # Forget the reviewers that have finished, and count what is left. Both in one
+  # function, because the count has to be RE-TAKEN inside the loop below and a
+  # count that is only taken once is what starved the fourth pull request.
+  #
+  # A `review.sh` that finds a counting review already on the head exits 8 in
+  # about two API calls -- but it had claimed a slot, and the sweep that frees it
+  # ran only at the top of the pass. With three such PRs and MAX_WORKTREES=3, the
+  # first three took every slot every pass, the fourth hit `continue`, and it was
+  # never reviewed at all: it waited out await-review.sh three times, which is
+  # verbatim the failure #20 exists to remove. Reachable today -- a PR touching
+  # HUMAN_ONLY_PREFIXES sits open waiting for a person, and this one does. Found
+  # by the independent review.
+  live_reviewers() {
+    local m p n=0
+    for m in "$REVIEWING_DIR"/*; do
+      [ -e "$m" ] || continue
+      p=""
+      read -r p _ <"$m" 2>/dev/null || true
+      reviewer_alive "$p"; local is=$?
+      # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
+      # documents as treat-it-as-ours, so it keeps both its marker and its slot.
+      # Only a definite 1 clears it.
+      if [ "$is" != 1 ]; then n=$((n + 1)); else rm -f "$m"; fi
+    done
+    printf '%s\n' "$n"
+  }
+
+  local running; running="$(live_reviewers)"
+
+  printf '%s' "$listing" | python3 -c '
+import json, sys
+try:
+    prs = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(0)
+for p in prs:
+    # A draft is not asking for a verdict yet -- the same condition
+    # claude-review.yml puts in its own `if`.
+    if p.get("isDraft"):
+        continue
+    print(p["number"], p.get("headRefOid") or "-", sep="\t")
+' | while IFS="$(printf '\t')" read -r pr head; do
+    [ -n "$pr" ] || continue
+    marker="$REVIEWING_DIR/$pr"
+    if [ -e "$marker" ]; then
+      local for_head
+      held=""; for_head=""
+      read -r held for_head <"$marker" 2>/dev/null || true
+      if [ "${for_head:-}" = "$head" ]; then
+        continue                      # one is running, on this very commit
+      fi
+      # The head moved under a running reviewer. Its verdict would carry a
+      # marker for a commit that is no longer current, so merge_gate would
+      # ignore it and the round would be spent for nothing. Kill it and let the
+      # next pass start one on what is there now.
+      reviewer_alive "$held"; local is=$?
+      # Said only where it is true: the `2)` branch below declines to restart.
+      [ "$is" = 0 ] && say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
+      case "$is" in
+        0) kill "$held" 2>/dev/null; rm -f "$marker" ;;
+        # "Alive, but ps would not say." Removing the marker here declined to
+        # kill it AND freed its slot, which is an orphan nothing can ever reap --
+        # the opposite of the documented contract two lines up. Keep the marker;
+        # the next pass asks again, and if ps has an answer by then it is either
+        # killed or reaped normally. Found by the independent review.
+        2) say "  (ps would not say what pid $held is; leaving it and its slot alone)"
+           continue ;;
+        *) rm -f "$marker" ;;
+      esac
+      # ...and it is no longer running, so it must not keep occupying a slot.
+      # Without this, three reviewers whose heads all moved in one pass are all
+      # killed and none replaced, costing a whole poll interval out of the
+      # time-box of the very agents that are waiting on them.
+      [ "${running:-0}" -gt 0 ] && running=$((running - 1))
+    fi
+    # Bounded by the same number as the worktrees. NOT the same pool, and the
+    # difference is worth knowing before you raise either: at the cap this is
+    # three worktree agents plus three reviewers, six agents at once. Three
+    # apiece is still what a person can read the output of, and a reviewer is
+    # short-lived where a worktree agent is not -- but an earlier version of this
+    # comment implied one pool of three. Found by the independent review.
+    #
+    # RE-COUNTED, not carried: the reviewers this pass started for PRs that
+    # needed none have already exited by now, and a stale count is what let three
+    # two-second exits hold every slot for the whole pass, forever.
+    running="$(live_reviewers)"
+    if [ "${running:-0}" -ge "$MAX_WORKTREES" ]; then
+      continue
+    fi
+    # `review.sh` is what decides whether this PR actually needs a review -- it
+    # asks merge_gate.py, which is the one place that answer lives (#114). This
+    # only decides whether to ASK, so a PR already reviewed costs one cheap exit
+    # 8 rather than a second review.
+    # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
+    # carrying the remaining PRs, and a background child inheriting it can eat
+    # them. The second PR in a two-PR pass then silently never gets reviewed.
+    # `review.sh` removes this marker itself on every exit path, so a reviewer
+    # that decides there is nothing to do frees its slot at once rather than at
+    # the top of the next pass. AUTOFLEET_REVIEW_MARKER is how it knows which
+    # file is its own.
+    #
+    # WRITTEN AFTER THE SPAWN, because the pid is what goes in it and there is no
+    # pid until the job exists. The race that opens is benign, and it is named
+    # here so the next reader need not work it out: a `review.sh` that exits
+    # before this `printf` runs -- the exit-8 path is two API calls -- removes a
+    # marker that does not exist yet, and the `printf` then recreates it holding
+    # a dead pid. `live_reviewers` reaps that on its next call, which is the very
+    # next candidate in this loop, so the slot is held for one iteration rather
+    # than leaked. An earlier version of this comment claimed the marker was
+    # written first; found by the independent review.
+    AUTOFLEET_REVIEW_MARKER="$marker" \
+      "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
+    printf '%s %s\n' "$!" "$head" >"$marker"
+    say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+  done
+}
+
 # ---------------------------------------------------------------- the reap ---
 # A worktree whose PR is merged has done its job and is holding a slot. Only ones
 # this dispatcher created are touched, and only when nothing goes with them:
@@ -1549,6 +1773,18 @@ warn_blind_dispatcher() {
 # --------------------------------------------------------------- commands ---
 cmd_status() {
   echo "fleet state: $STATE_DIR"
+  # Which reviewer is going to answer the agents waiting in await-review.sh, and
+  # said on the FIRST screen anybody looks at. The failure this heads off is a
+  # quiet one: in `github` mode with no CLAUDE_CODE_OAUTH_TOKEN the review job
+  # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
+  # says which of the two reviewers this repository actually has.
+  if fleet_review_is_local; then
+    local n; n="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
+    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
+  else
+    echo "review:      github -- .github/workflows/claude-review.yml, which needs"
+    echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
+  fi
   # A stop and a running dispatcher are not alternatives: a drain leaves the
   # dispatcher up on purpose, because it is what reaps a worktree once its PR
   # merges -- and that draining dispatcher is running whatever code it parsed.
@@ -1652,6 +1888,12 @@ for t in json.load(sys.stdin)["result"]["terminals"]:
             && echo "    interrupted #$(basename "$f")"
         done
       fi
+      # ...and the local reviewers, which are children of the dispatcher rather
+      # than agents in a worktree, so the terminal interrupts above do not reach
+      # them. Before the dispatcher is killed: after it, nothing is left that
+      # knows which pids they were.
+      stop_reviewers
+
       # Only here. A drain has to leave the dispatcher alive: it is what reaps a
       # worktree once its PR merges, and killing it strands them.
       #
@@ -1830,6 +2072,12 @@ while that one is up."
   # announce that a dispatcher which reads the drain file perfectly well cannot
   # see it. A record with no pidfile is inert the other way round: nothing looks
   # at it, and the next dispatcher overwrites it.
+  # Markers left by a dispatcher that died without cleaning up. Their pids are
+  # not ours, and after a reboot or a few hours they name strangers -- so they
+  # are cleared before this dispatcher counts anything, rather than reaped
+  # one-by-one against a `kill -0` that cannot tell the difference.
+  stop_reviewers >/dev/null
+
   record_dispatcher
   echo $$ >"$PIDFILE"
   # ...but removed only while they still name THIS process. Nothing stops a
@@ -1879,6 +2127,12 @@ while that one is up."
     # worktrees it exists to release -- the watchers would have found nothing
     # there to speak about.
     reap_merged
+    # After reap_merged, because a PR that just merged needs no review, and
+    # before the rest because it is the only one of these that UNBLOCKS a
+    # worktree rather than reclaiming one: an agent sitting in await-review.sh
+    # is waiting on exactly this, and every pass it waits is a pass of its
+    # time-box spent.
+    review_open_prs
     enforce_timebox
     notice_stalled
     reap_abandoned

@@ -34,9 +34,24 @@ PAYLOAD=(
   ".claude/hooks/shell-parses.sh"
   ".claude/agents/verifier.md"
   ".claude/agents/researcher.md"
+  ".claude/agents/reviewer.md"
   "evals/lint.sh"
   "evals/run.sh"
   "docs/WORKFLOW.md"
+  # Vendored because the payload POINTS AT IT: REVIEW.md links to it,
+  # scripts/fleet/review.sh and .claude/agents/reviewer.md cite it as where the
+  # local-review trade is written down, guard.py and merge_gate.py name it in
+  # refusals, and the next steps below send the reader to it -- as does the
+  # comment this installer writes into the host's own .autofleet/config. All of
+  # that shipped while the file did not, so the link 404'd in every host repo.
+  # Hard rule 1, found by the independent review.
+  "docs/CONFIGURATION.md"
+  # ...and RUNNERS.md, for the same reason and found by the same new assertion:
+  # `scripts/fleet/runner/README.md` ships as part of `scripts/fleet` and its
+  # first paragraph links here, so that link has been 404ing in every host repo
+  # since the runner directory existed. A host writing a second driver is exactly
+  # who needs it.
+  "docs/RUNNERS.md"
   "REVIEW.md"
 )
 
@@ -121,7 +136,191 @@ seed_one() {
 echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 echo "==> your answers (seeded once, never overwritten)"
+# Recorded BEFORE the loop, because after it the file exists either way and
+# nothing can tell a fresh seed from the host's own answers.
+had_config=false; [ -e "$TARGET/.autofleet/config" ] && had_config=true
+had_settings=false; [ -e "$TARGET/.claude/settings.json" ] && had_settings=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
+
+# The seed is autofleet's own config, and autofleet runs itself on
+# `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that
+# has to be exercised daily). Copying that verbatim would hand every host repo
+# the weaker independence guarantee as a DEFAULT, chosen by nobody and announced
+# nowhere -- which is the exact failure the mode's whole design is built to
+# avoid. So a freshly seeded config is normalised back to the strong default and
+# the change is printed. A config the host already had is never touched.
+#
+# THE WHOLE BLOCK, not just the assignment. The lines above it in autofleet's own
+# config explain why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on
+# this repository", "the mode it runs itself on" -- and a host repo that read
+# that over a `github` setting would be reading a paragraph about somebody else's
+# repository. Found by the local review of the change that added this.
+#
+# In PYTHON, not sed: this has to match every spelling `merge_gate.review_mode()`
+# accepts, including `export`, quotes and the `: "${X:=local}"` form. A
+# normalisation pinned to one spelling silently ships `local` the day the line is
+# reworded, which is the outcome this exists to prevent.
+normalise_review_mode() {
+  # Under --dry-run the seed has not been written, so there is nothing in the
+  # target to read: report against the file that WOULD be copied. A dry run
+  # silent about a rewrite the real install performs is the bug commit f5817b8
+  # existed to fix, one file over.
+  local cfg="$TARGET/.autofleet/config"
+  $DRY && cfg="$SOURCE/.autofleet/config"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" "$DRY" <<'PYEOF'
+import re, sys
+path, dry = sys.argv[1], sys.argv[2] == "true"
+lines = open(path).read().splitlines()
+
+# The same shapes merge_gate.REVIEW_MODE_RE reads -- `export` and quotes -- and
+# for the same reason: a normalisation pinned to one spelling silently ships
+# `local` the day the line is reworded. Deliberately NOT the `: "${X:=local}"`
+# form: config.sh's own default runs first, so that shape sets nothing, and a
+# file that only *looks* like it selects local mode must not be rewritten as if
+# it did. evals/lint.sh asserts this stays in step with the gate.
+#
+# ...and the LAST such assignment, because that is the one the shell is left
+# holding and the one REVIEW_MODE_RE reads. Rewriting the first would leave a
+# later `=local` standing under a normalised earlier line.
+ASSIGN = re.compile(
+    r"""^[ \t]*(?:export[ \t]+)?"""
+    r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?local\b""",
+    re.I,
+)
+hits = [i for i, ln in enumerate(lines) if ASSIGN.match(ln)]
+hit = hits[-1] if hits else None
+if hit is None:
+    raise SystemExit(0)
+if dry:
+    print("   would set .autofleet/config review mode to github (the strong default)")
+    raise SystemExit(0)
+
+# THE WHOLE BLOCK, not just the assignment. The comment lines above it explain
+# why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on this
+# repository", "the mode it runs itself on" -- and a host repo reading that over
+# a `github` setting is reading a paragraph about somebody else's repository.
+# Walk back over the contiguous comment block that introduces it.
+top = hit
+while top > 0 and lines[top - 1].lstrip().startswith("#"):
+    top -= 1
+while top > 0 and not lines[top - 1].strip():
+    top -= 1
+
+replacement = """# Where the independent review runs -- `github` or `local`.
+#
+# `github` is the default and the strong one, and it needs a
+# CLAUDE_CODE_OAUTH_TOKEN secret on this repository (`claude setup-token`).
+# WITHOUT that secret .github/workflows/claude-review.yml no-ops with a green
+# check and every pull request blocks forever on a review that cannot arrive.
+#
+# `local` runs the reviewer on the machine instead, with a weaker independence
+# guarantee that docs/CONFIGURATION.md spells out in full. Choose deliberately.
+AUTOFLEET_REVIEW_MODE=github""".splitlines()
+
+out = lines[:top] + [""] + replacement + lines[hit + 1:]
+open(path, "w").write("\n".join(out).rstrip("\n") + "\n")
+print("   .autofleet/config  (review mode set to github, the strong default --")
+print("                       the next steps below are where you choose otherwise)")
+PYEOF
+}
+$had_config || normalise_review_mode
+
+# ---------------------------------------------------------------- the plugin
+# `mattpocock-skills` is not decoration and it is not optional. The agent brief
+# tells every worktree to run `/mattpocock-skills:code-review`, `merge_gate.py`
+# REQUIRES that pass to be named in the PR body before a PR may merge, and
+# `evals/lint.sh` fails if the entry is missing. So a host repo without it gets
+# a brief asking for a skill nobody has and a gate nothing can satisfy.
+#
+# Two halves, because enabling and installing are different things and this
+# repo has now been bitten by both:
+#
+#   the entry   `.claude/settings.json` is SEEDED, never overwritten -- a repo
+#               that already had one therefore never got the entry at all. This
+#               merges just that key into an existing file, leaving every
+#               permission and hook in it alone.
+#   the install autofleet's own checkout had the entry enabled for MONTHS while
+#               the plugin was installed only for a different project, so every
+#               agent was being told to run a skill that did not resolve and
+#               nothing said so. `enabledPlugins` enables what is installed; it
+#               does not install anything.
+PLUGIN="mattpocock-skills@claude-plugins-official"
+MARKETPLACE="anthropics/claude-plugins-official"
+
+merge_plugin_entry() {
+  local dst="$TARGET/.claude/settings.json"
+  # A settings.json this install just SEEDED already carries the entry, because
+  # it is a copy of ours -- there is nothing to merge and "kept (yours)" would be
+  # a lie about a file the host did not have. `$had_settings` is recorded before
+  # the seed loop for exactly that reason.
+  if ! $had_settings; then
+    echo "   .claude/settings.json  (seeded from ours, which already enables the plugin)"
+    return 0
+  fi
+  # ...and under --dry-run the seed has not been written, so there is nothing in
+  # the target to read: say what WOULD happen rather than returning in silence.
+  # A dry run quieter than the install it describes is the bug f5817b8 fixed.
+  if [ ! -f "$dst" ]; then
+    $DRY && echo "   would add enabledPlugins.$PLUGIN to .claude/settings.json"
+    return 0
+  fi
+  python3 - "$dst" "$PLUGIN" "$DRY" <<'PYEOF'
+import json, sys
+path, plugin, dry = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+try:
+    with open(path) as fh:
+        settings = json.load(fh)
+except Exception as exc:
+    # Not silence: a settings.json this cannot read is one the entry never
+    # reaches, and the failure would surface as an eval failing in the host repo
+    # for a reason nothing connects back to here.
+    print(f"   !! could not read .claude/settings.json ({exc});"
+          f" add {{\"enabledPlugins\": {{\"{plugin}\": true}}}} by hand")
+    raise SystemExit(0)
+if settings.get("enabledPlugins", {}).get(plugin):
+    print("   kept (yours): .claude/settings.json already enables the plugin")
+    raise SystemExit(0)
+if dry:
+    print("   would add enabledPlugins."+plugin+" to .claude/settings.json")
+    raise SystemExit(0)
+settings.setdefault("enabledPlugins", {})[plugin] = True
+with open(path, "w") as fh:
+    json.dump(settings, fh, indent=2)
+    fh.write("\n")
+print("   .claude/settings.json  (enabledPlugins += " + plugin + ")")
+PYEOF
+}
+
+install_plugin() {
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "   claude is not on PATH; install the plugin yourself (see the steps below)"
+    return 0
+  fi
+  if $DRY; then
+    echo "   would install $PLUGIN into $TARGET"
+    return 0
+  fi
+  # `--scope project` writes the install against the TARGET repo's path, which
+  # is why this runs from inside it. Both commands are idempotent, and neither
+  # is fatal: a machine with no network still gets a working vendored payload
+  # and a printed pair of commands to run later.
+  #
+  # It also REWRITES .claude/settings.json to add the same entry
+  # merge_plugin_entry just added -- reordering the keys as it goes, which shows
+  # up as diff noise in the host repo on the first install. That is why the merge
+  # above happens anyway rather than being left to this: `claude` may not be
+  # here, and the entry is what evals/lint.sh and the agent brief depend on.
+  ( cd "$TARGET" \
+      && claude plugin marketplace add "$MARKETPLACE" >/dev/null 2>&1
+    cd "$TARGET" && claude plugin install "$PLUGIN" --scope project >/dev/null 2>&1
+  ) && echo "   $PLUGIN installed for $TARGET" \
+    || echo "   !! could not install $PLUGIN; run the two commands below by hand"
+}
+
+echo "==> the mattpocock-skills plugin (the brief and merge-gate both require it)"
+merge_plugin_entry
+install_plugin
 
 echo
 if $DRY; then
@@ -144,7 +343,19 @@ Next, in the repo you just installed into:
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.
-  6. Make `merge-gate` a required check on your default branch.
-  7. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+  6. Choose where the independent review runs -- AUTOFLEET_REVIEW_MODE in
+     .autofleet/config. The default `github` needs a CLAUDE_CODE_OAUTH_TOKEN
+     secret on the repository (mint one with `claude setup-token`); WITHOUT it
+     that job no-ops and every PR blocks forever on a review that cannot arrive.
+     `local` runs the reviewer on your machine instead, with a weaker
+     independence guarantee that docs/CONFIGURATION.md spells out.
+  7. Make `merge-gate` a required check on your default branch.
+  8. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+
+If the plugin step above could not run, these are the two commands, from inside
+the repo you installed into:
+
+  claude plugin marketplace add anthropics/claude-plugins-official
+  claude plugin install mattpocock-skills@claude-plugins-official --scope project
 
 NEXT

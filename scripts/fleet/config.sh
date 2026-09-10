@@ -41,6 +41,43 @@
 # meet.
 : "${AUTOFLEET_RUNNER:=orca}"
 
+# ---------------------------------------------------------------- the review
+# Where the INDEPENDENT review runs -- the second opinion on the PR, from a
+# context that has not seen the conversation which produced the diff. The local
+# `/code-review` pass before the push is required in both modes and is not
+# affected by this.
+#
+#   github  .github/workflows/claude-review.yml submits it, from its own
+#           account. Needs a CLAUDE_CODE_OAUTH_TOKEN secret on the repository
+#           (`claude setup-token`). Without that secret the job no-ops and every
+#           PR blocks forever on a review that cannot arrive -- which is the
+#           whole reason the other mode exists.
+#   local   the DISPATCHER runs the reviewer on this machine
+#           (`scripts/fleet/review.sh`) and it submits as whoever `gh` is logged
+#           in as -- usually the same account that opened the PR. Independence
+#           becomes context-level rather than identity-level. That is weaker;
+#           docs/CONFIGURATION.md says exactly how, and `merge_gate.py` reads
+#           this knob from the BASE ref so a PR cannot turn it on for itself.
+#
+# `merge_gate.py` parses this out of `.autofleet/config` with a regex rather
+# than sourcing it, so keep the assignment on one line.
+: "${AUTOFLEET_REVIEW_MODE:=github}"
+# What `review.sh` runs to produce that review. A command on PATH, invoked with
+# `-p` and a fixed tool allowlist. Named rather than hardcoded so a project can
+# point it at a wrapper -- a different model, a different account, a `ssh` to
+# the machine that holds the subscription.
+: "${AUTOFLEET_REVIEW_CMD:=claude}"
+# How long one local review may run before it is killed and the PR left for the
+# next poll to pick up. Long enough for a real diff; short enough that a wedged
+# reviewer is not an overnight hold on the worktree waiting for it.
+: "${AUTOFLEET_REVIEW_TIMEOUT:=1800}"
+# The reviewer's turn budget, passed through as `--max-turns`. The wall clock
+# above is the backstop for a wedged process; this is the bound the reviewer can
+# see and spend against, which is what makes "submit before you run out" in
+# .claude/agents/reviewer.md a budget rather than a hope. 80 is what
+# claude-review.yml grants.
+: "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
+
 # ------------------------------------------------------------- per-worktree
 # The prefix every derived compose project name carries, and the thing reap.sh
 # sweeps by. Must be unique to this project on this machine: reap.sh removes

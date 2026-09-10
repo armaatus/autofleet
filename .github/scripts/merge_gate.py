@@ -9,7 +9,9 @@ produced it:
   1. it was reviewed LOCALLY before it was pushed -- both passes, findings in
      the body;
   2. an independent review exists on the CURRENT head, so pushing a fix
-     invalidates it and a re-review is required;
+     invalidates it and a re-review is required -- from a different account in
+     the default `github` mode, or from the dispatcher's own reviewer in
+     `local` mode, which `review_mode()` explains;
   3. that review's latest word is not "changes requested";
   4. no review thread is still open -- and the thread list it read was
      complete, rather than the first page of one;
@@ -82,6 +84,55 @@ MIN_ANSWER_BODY = 20
 REVIEW_FINDINGS_RE = re.compile(r"<!--\s*review-findings:\s*(\d+)\s*-->", re.I)
 ANSWER_RE = re.compile(r"<!--\s*review-answered\s+([0-9a-f]{6,40})\s*-->", re.I)
 
+# What `scripts/fleet/review.sh` writes at the end of a review it submitted, and
+# the only thing that separates it from the PR author's own `gh pr review`.
+#
+# It carries the head sha for the same reason `ANSWER_RE` does: the marker has to
+# be worth no more than the commit it was written for. A body copied forward to a
+# later push -- by hand, or by an agent reusing its own text -- would otherwise
+# keep counting as the review of a commit nobody read.
+LOCAL_REVIEW_RE = re.compile(
+    r"<!--\s*independent-review:\s*local\s+([0-9a-f]{6,40})\s*-->", re.I
+)
+
+# How `.autofleet/config` spells the knob, in either of the two shapes a shell
+# config file uses: a plain `AUTOFLEET_REVIEW_MODE=local`, and the
+# `: "${AUTOFLEET_REVIEW_MODE:=github}"` form `scripts/fleet/config.sh` writes
+# its defaults in. Deliberately a regex and not a shell parse: this runs in CI
+# over a file from the base ref, and sourcing it would be running the host
+# project's shell code inside the gate that judges the host project.
+# WHAT THE SHELL WOULD BE LEFT HOLDING, and nothing more. Two ways to get that
+# wrong, and this file has had both.
+#
+# TOO NARROW: `export X=v` and `X='v'` are ordinary lines in a file config.sh
+# SOURCES, so a spelling this cannot see is a repository whose shell side runs
+# the local reviewer while the gate discards what it submits -- every PR blocked
+# forever on a review that has already been written.
+#
+# TOO WIDE: `: "${X:=v}"` is the mirror image, and it is the one that was here.
+# config.sh sets its own default with that shape BEFORE sourcing
+# `.autofleet/config`, so by the time a `:=` in the host config is reached the
+# variable already holds `github` and the assignment does nothing at all. Reading
+# it as `local` made this file the only reader that thought so: `fleet.sh` would
+# start no reviewer, `review.sh` would exit 4, `fleet.sh status` would name the
+# github reviewer -- and the gate would sit in the weaker mode waiting for a
+# review nothing was going to write. A host copying the `: "${X:=v}"` style it
+# sees all over config.sh gets exactly that, which is the failure this whole mode
+# exists to remove. #23 is the underlying precedence bug.
+#
+# So: the shapes a host config can actually override a default with, and only
+# those. evals/lint.sh asserts this file and the shell agree, spelling for
+# spelling, rather than trusting the two to stay in step. Found by the
+# independent review of this change.
+# No `[ \t]*` after the `=`: bash has no assignment with a space there, so
+# matching one would be strictly more permissive than the shell it models.
+REVIEW_MODE_RE = re.compile(
+    r"""^[ \t]*(?:export[ \t]+)?"""
+    r"""AUTOFLEET_REVIEW_MODE=["']?([A-Za-z][A-Za-z0-9_-]*)""",
+    re.M,
+)
+REVIEW_MODES = ("github", "local")
+
 HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 
 # What the PR body has to show. These are the two local passes CLAUDE.md
@@ -93,6 +144,70 @@ LOCAL_PASSES = (
     ("mattpocock-skills:code-review",
      "a local /mattpocock-skills:code-review pass (standards, and spec-vs-diff)"),
 )
+
+
+def review_mode(root=None):
+    """Which independent review this repository runs: "github" or "local".
+
+    `github` is the default and the strong one: `.github/workflows/claude-review.yml`
+    submits the review from its own account, so the reviewer is not the author by
+    GitHub's own reckoning and `independent_reviews()` needs no marker to tell
+    them apart.
+
+    `local` is for a project with no CLAUDE_CODE_OAUTH_TOKEN, where that workflow
+    no-ops and every PR would otherwise block forever on a review that cannot
+    arrive. The dispatcher runs the reviewer on the machine instead
+    (`scripts/fleet/review.sh`), and it signs in as the same GitHub account that
+    opened the PR. So independence in that mode is CONTEXT-level -- a process
+    that never saw the conversation which produced the diff -- and not
+    IDENTITY-level. That is weaker, it is the whole trade, and
+    docs/CONFIGURATION.md says so in the same words.
+
+    READ FROM THE BASE REF, never the head. `.github/workflows/merge-gate.yml`
+    checks out `pull_request.base.sha`, so a pull request cannot switch its own
+    repository into the weaker mode as part of the change the mode is judging.
+    The environment wins over the file only so that `--selftest` and
+    `tests/test_review_mode.sh` can drive both modes without writing a config.
+
+    A missing or unreadable file is `github`, which is the safe direction: it
+    refuses PRs rather than admitting them. A base predating this change has no
+    `.autofleet/config` in its sparse checkout at all, and it still evaluates.
+    """
+    # NOT lowercased, and no whitespace stripped after the `=` in the regex
+    # below. `scripts/fleet/lib.sh`'s `fleet_review_mode` -- which is what the
+    # dispatcher, review.sh and the status screen all ask -- matches the literal
+    # string `local` and nothing else, because that is what the shell leaves in
+    # the variable. Reading `LOCAL` as local made this file the only reader that
+    # thought so, and `AUTOFLEET_REVIEW_MODE= local` is not an assignment bash
+    # can make at all, so tolerating it modelled nothing. Either way the two
+    # readers disagree, no reviewer starts, and every PR blocks forever on a
+    # review nothing will write -- which is the failure this whole mode removes.
+    # Found by the independent review; the SPELLINGS list in evals/lint.sh, whose
+    # job was to catch exactly this, had neither variant in it.
+    env = os.environ.get("AUTOFLEET_REVIEW_MODE") or ""
+    if env in REVIEW_MODES:
+        return env
+    if root is None:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+    try:
+        with open(os.path.join(root, ".autofleet", "config")) as fh:
+            text = fh.read()
+    except OSError:
+        return "github"
+    # THE LAST ASSIGNMENT, and then judged -- not the last RECOGNISED one.
+    #
+    # Searching backwards for something valid diverges from the shell in the
+    # permissive direction: `...=local` followed by `...=gihtub` leaves every
+    # shell consumer holding `gihtub` (so no reviewer ever runs) while this
+    # returned `local` (so the gate would accept a marked self-review). Nothing
+    # would produce one, but the rule judging the PR would be the weaker one.
+    # Found by the local review of the change that added this.
+    found = REVIEW_MODE_RE.findall(text)
+    if not found:
+        return "github"
+    value = found[-1]
+    return value if value in REVIEW_MODES else "github"
 
 
 def independent_reviews(pull_request, head_sha):
@@ -116,12 +231,36 @@ def independent_reviews(pull_request, head_sha):
     the review of the commit before it. For a caller waiting on a review that
     condition is strictly stronger than any freshness cut-off it could compute:
     a review cannot be submitted against a commit that does not exist yet.
+
+    IN `local` MODE the author test cannot be the one that decides, because the
+    reviewer and the author are one GitHub account (see `review_mode()`). What
+    stands in for it is `LOCAL_REVIEW_RE`: a review by the author counts only if
+    it carries the marker for THIS head, and only `scripts/fleet/review.sh`
+    writes that. The agent under review cannot write it itself --
+    `.claude/hooks/guard.py` refuses `gh pr review` from a fleet-owned worktree,
+    and the dispatcher runs the reviewer from the repo root, which is not one.
+
+    That is a checklist gate rather than a proof, exactly as
+    `scripts/fleet/record-review.sh` is, and it is opt-in per repository for that
+    reason. A review by a DIFFERENT account still counts in `local` mode with no
+    marker at all: turning the knob on adds a way to satisfy the requirement, it
+    never takes the strong one away.
     """
     pr_author = ((pull_request.get("author") or {}).get("login") or "").lower()
+    local = review_mode() == "local"
+
+    def counts(review):
+        who = ((review.get("author") or {}).get("login") or "").lower()
+        if who != pr_author:
+            return True
+        if not local:
+            return False
+        return any(head_sha.lower().startswith(m.lower())
+                   for m in LOCAL_REVIEW_RE.findall(review.get("body") or ""))
+
     return sorted(
         (r for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
-         if ((r.get("author") or {}).get("login") or "").lower() != pr_author
-         and ((r.get("commit") or {}).get("oid") == head_sha)),
+         if counts(r) and ((r.get("commit") or {}).get("oid") == head_sha)),
         key=lambda r: r.get("submittedAt") or "",
     )
 
@@ -316,10 +455,22 @@ def evaluate(head_sha, pull_request, changed_files):
             "review job to actually submit its findings."
         )
     if not on_head:
+        # The last sentence depends on the mode, and it is read at exactly the
+        # moment somebody is working out why their review did not count. In
+        # `local` mode "a review by the author does not count" is false and sends
+        # them to the wrong conclusion -- the missing marker is the likely cause.
+        # Found by the local review of the change that added the mode.
+        if review_mode() == "local":
+            why = ("A review by this PR's own author counts here only if its body "
+                   "ends with `<!-- independent-review: local " + head_sha[:8] +
+                   "... -->`, which `scripts/fleet/review.sh` writes and nothing "
+                   "else does.")
+        else:
+            why = "A review by this PR's own author does not count."
         problems.append(
             f"no independent review has been submitted against the current head "
             f"({head_sha[:8]}). Pushing a fix invalidates the previous one -- "
-            "re-request review. A review by this PR's own author does not count."
+            "re-request review. " + why
         )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
@@ -1026,13 +1177,146 @@ SELFTEST = [
         ["src/app.c"],
         False,
     ),
+    # ------------------------------------------------------------ review mode
+    #
+    # A sixth field, and only these rows carry it: `review_mode()` reads the
+    # environment before the file, so the runner below exports it around the row
+    # and every other row keeps evaluating in the default `github` mode.
+    (
+        # The reason `local` mode exists. Without CLAUDE_CODE_OAUTH_TOKEN the
+        # review workflow no-ops, the only account that can review is the one
+        # that opened the PR, and every PR blocks forever on a review nothing
+        # can submit. `scripts/fleet/review.sh` writes this marker.
+        "in local mode, the author's own review counts when it carries the marker",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "armaatus"},
+                 "body": "A real review body, long enough to be worth reading and to clear "
+                         "MIN_REVIEW_BODY."
+                         "\n<!-- review-findings: 0 -->"
+                         "\n<!-- independent-review: local abc123 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+        "local",
+    ),
+    (
+        # The marker is the whole of it. An agent that talked its way into a
+        # `gh pr review --comment` on its own PR must not thereby have reviewed
+        # it -- which is the hole the author test closes in `github` mode and
+        # this row is what keeps closed in `local`.
+        "in local mode, an unmarked self-review is still not a review",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "armaatus"},
+                 "body": "A real review body, long enough to be worth reading and to clear "
+                         "MIN_REVIEW_BODY."
+                         "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "local",
+    ),
+    (
+        # The marker names a commit, so it is worth no more than that commit.
+        # A body carried forward to the next push would otherwise keep counting
+        # as the review of code nobody read.
+        "in local mode, a marker for another commit does not count",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "armaatus"},
+                 "body": "A real review body, long enough to be worth reading and to clear "
+                         "MIN_REVIEW_BODY."
+                         "\n<!-- review-findings: 0 -->"
+                         "\n<!-- independent-review: local def456 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "local",
+    ),
+    (
+        # Turning the knob on is what admits it, and nothing else. A repository
+        # that never opted in cannot be talked into the weaker rule by a body.
+        "in github mode, the marker buys a self-review nothing",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "armaatus"},
+                 "body": "A real review body, long enough to be worth reading and to clear "
+                         "MIN_REVIEW_BODY."
+                         "\n<!-- review-findings: 0 -->"
+                         "\n<!-- independent-review: local abc123 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+    ),
+    (
+        # And the strong route is never taken away. `local` ADDS a way to satisfy
+        # the requirement; a review by another account still needs no marker.
+        "in local mode, a review by another account needs no marker",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and to clear "
+                         "MIN_REVIEW_BODY."
+                         "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+        "local",
+    ),
 ]
 
 
 def selftest():
     failures = 0
-    for what, head, pr, files, want in SELFTEST:
-        got, _ = evaluate(head, pr, files)
+    for row in SELFTEST:
+        what, head, pr, files, want = row[:5]
+        # `review_mode()` reads the environment before `.autofleet/config`, so
+        # this is the same precedence a real run uses rather than a test-only
+        # back door -- and a row with no mode runs in whatever the checkout says,
+        # which for autofleet's own tree is now `local`. Set explicitly to
+        # `github` so the rows written before the knob existed keep asserting
+        # what they were written to assert.
+        was = os.environ.get("AUTOFLEET_REVIEW_MODE")
+        os.environ["AUTOFLEET_REVIEW_MODE"] = row[5] if len(row) > 5 else "github"
+        try:
+            got, _ = evaluate(head, pr, files)
+        finally:
+            if was is None:
+                del os.environ["AUTOFLEET_REVIEW_MODE"]
+            else:
+                os.environ["AUTOFLEET_REVIEW_MODE"] = was
         if got != want:
             print(f"FAIL: {what} (expected {want}, got {got})", file=sys.stderr)
             failures += 1

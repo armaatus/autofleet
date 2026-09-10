@@ -11,3 +11,27 @@
 AUTOFLEET_PROJECT_PREFIX=autofleet
 AUTOFLEET_TEST_COMMAND="./tests/run.sh"
 AUTOFLEET_NOTIFY_TITLE="autofleet"
+
+# No CLAUDE_CODE_OAUTH_TOKEN on this repository, so claude-review.yml no-ops and
+# the only account that could review a fleet PR is the one that opened it. The
+# dispatcher runs the reviewer here instead. See docs/CONFIGURATION.md for what
+# that gives up -- and note that autofleet being its own reference installation
+# (hard rule 1) is exactly why this is the mode it runs itself on: the weaker
+# path is the one that has to be exercised daily, not the one nobody drives.
+#
+# A PLAIN assignment, like every other line in this file, and not the
+# `: "${X:=...}"` shape config.sh writes its own defaults in. Those defaults run
+# BEFORE this file is sourced, so by the time a `:=` here is reached the variable
+# already holds `github` and the assignment does nothing at all. The only form a
+# host config can override a default with is this one -- see #23, which is about
+# config.sh documenting a precedence it does not have.
+#
+# The consequence, which is worth knowing before you try it: the environment
+# cannot override this for a single command either, because a plain assignment
+# beats an exported value. `AUTOFLEET_CONFIG=<other-file>` is the seam for that.
+#
+# merge_gate.py is the exception and deliberately so: it reads
+# AUTOFLEET_REVIEW_MODE from the environment FIRST, because it is a Python
+# program that never sources this file and its --selftest has to drive both
+# modes. Two answers to "who wins", for two different readers.
+AUTOFLEET_REVIEW_MODE=local
