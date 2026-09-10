@@ -527,6 +527,18 @@ print(json.dumps({"result": {"terminals": [
 ' "$WORK/wt" >"$ORCA_TERMINALS"
 }
 
+# A live worktree the dispatcher owns, linked to issue $1. `live_worktrees`
+# reads `linkedIssue`, which is the field the foundation check keys on -- a
+# fixture that set only `path` would make every issue answer "-" and the check
+# vacuously true.
+worktree_on_issue() {
+  python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"linkedIssue": sys.argv[1], "path": sys.argv[2]}]}}))
+' "$1" "$WORK/wt" >"$ORCA_WORKTREES"
+}
+
 # The two halves of what one `gh issue view N --json state,labels` would print.
 issue_labels() { printf '%s' "$1" >"$GH_LABELS"; }
 issue_state()  { printf '%s' "$1" >"$GH_STATE"; }
@@ -984,6 +996,77 @@ case "${1:-}" in
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
+  foundation_holds)
+    # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
+    # half of it -- a foundation issue would not JOIN running worktrees, and
+    # nothing stopped others joining a foundation issue. On a cold start `live`
+    # is 0, the foundation issue is picked first, and every later candidate that
+    # pass sails past a check that only asks about ITSELF. autofleet's own first
+    # run opened #1 (foundation), #4 and #7 in eleven seconds.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "a foundation issue in flight did not hold the launch loop (rc=$rc): $out"
+    echo "ok: a foundation issue in flight holds the launch loop"
+    grep -q "lands alone" <<<"$out" \
+      || fail "the hold did not say why: $out"
+    grep -q "#1" <<<"$out" || fail "the hold did not name the issue: $out"
+    echo "ok: ...and says which issue it is holding for"
+    ;;
+
+  foundation_frees)
+    # ...and only a foundation issue holds it. An ordinary worktree must not
+    # stop the fleet filling its other two slots.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "an ordinary issue in flight held the launch loop"
+    echo "ok: an ordinary issue in flight does not hold it"
+    ;;
+
+  foundation_none)
+    # An empty fleet holds nothing, which is the cold-start path.
+    make_fixture ok
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "an empty fleet held the launch loop"
+    echo "ok: an empty fleet holds nothing"
+    ;;
+
+  foundation_blind)
+    # The label lookup fails. HOLDING is the answer, matching in_flight's
+    # documented stance: launching on a guess is the expensive direction, and a
+    # foundation issue guessed wrong is the merge conflict the rule exists to
+    # avoid. The next pass asks again.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels FAIL
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "an unreadable label held nothing (rc=$rc): $out"
+    echo "ok: a label lookup that fails holds rather than launches"
+    grep -q "cannot be answered" <<<"$out" || fail "it did not say it could not tell: $out"
+    echo "ok: ...and says it could not tell, rather than reporting a foundation issue"
+    ;;
+
+  foundation_cli_blind)
+    # ...and the same when the worktree list itself will not answer. There is
+    # then nothing to reason from at all -- not even the count -- so holding is
+    # the only honest answer. `live_count` already refuses to guess from this
+    # shape; this is the same refusal one question later.
+    make_fixture ok
+    # A list that comes back in a shape nothing can read, which is what the
+    # dispatcher actually sees when the CLI half-answers -- the stub's
+    # `worktree list` succeeds in every mode, so making the CLI "fail" would not
+    # reach this path.
+    printf 'not json at all\n' >"$ORCA_WORKTREES"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "an unreadable worktree list held nothing (rc=$rc): $out"
+    echo "ok: a worktree list that will not parse holds too"
+    grep -q "cannot be answered" <<<"$out" || fail "it did not say it could not tell: $out"
+    echo "ok: ...and says so rather than reporting an empty fleet"
+    ;;
+
   queue_skips)
     make_fixture ok
     cat >"$GH_ISSUES" <<'JSON'
@@ -1879,6 +1962,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

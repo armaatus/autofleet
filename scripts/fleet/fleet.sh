@@ -390,6 +390,56 @@ in_flight() {
 has_label() { printf '%s' "$1" | tr ',' '\n' | grep -qxF -- "$2"; }
 is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 
+# Is one of the worktrees in flight working on a FOUNDATION issue?
+#
+# CLAUDE.md: "a foundation issue lands alone. When an issue defines an interface
+# later issues include, it merges before anything that depends on it starts."
+# The dispatcher enforced half of that -- a foundation issue would not JOIN
+# running worktrees -- and nothing stopped others joining a foundation issue. On
+# a cold start `live` is 0, so the foundation issue is picked first, `live`
+# becomes 1, and every later candidate that pass is not itself a foundation
+# issue and sails past the check.
+#
+# That is not theoretical. autofleet's own first real run, in eleven seconds:
+# #1 (foundation, the runner driver), then #4 (docs/WORKFLOW.md, which describes
+# the runner), then #7 (install.sh, which lists what ships and which #1 adds
+# runner files to). Three worktrees on exactly the collision the rule exists to
+# prevent.
+#
+# `live` is a COUNT, and the rule is about what those worktrees are working on --
+# which is why this asks the issues rather than the number, and why it keeps
+# holding across a dispatcher restart, where the count alone says nothing.
+#
+# 0 = yes, hold. 1 = no. Never 2: an unreadable answer HOLDS, and says so, for
+# the same reason `in_flight` treats "could not tell" as in flight -- launching
+# on a guess is the expensive direction, and the next pass asks again.
+foundation_in_flight() {
+  local list n answer labels
+  if ! list="$(live_worktrees)"; then
+    say "could not read the worktree list, so whether a foundation issue is in flight"
+    say "  cannot be answered -- launching nothing this pass rather than guessing"
+    return 0
+  fi
+  while IFS="$(printf '\t')" read -r n _path; do
+    case "$n" in ''|-|*[!0-9]*) continue ;; esac
+    if ! answer="$(poll_issue "$n")"; then
+      say "#$n is in flight and its labels would not read, so whether it is a"
+      say "  foundation issue cannot be answered -- launching nothing this pass"
+      return 0
+    fi
+    labels="$(issue_labels_in "$answer")"
+    if is_foundation "$labels"; then
+      # Once per pass, not once per candidate: the caller breaks out of the
+      # launch loop on the first hold, and `forget_poll_answers` at the top of
+      # each pass is what makes the next one say it again.
+      say "#$n is a foundation issue and is still in flight; it lands alone, so"
+      say "  nothing else starts until it does"
+      return 0
+    fi
+  done <<<"$list"
+  return 1
+}
+
 # Everything the watchers ask GitHub about ONE issue, in one call and one answer
 # per POLL. Prints `<state><TAB><labels>`; 0 = read it, 2 = could not tell.
 #
@@ -2156,6 +2206,15 @@ while that one is up."
       # loop does one pass later.
       if check_drain; then drain_mode=true; reason="you stopped it"; break; fi
       [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ] && { reason="it opened $opened worktree(s)"; break 2; }
+
+      # EVERY ITERATION, which is what makes one check cover both halves of the
+      # rule: it holds when a foundation issue was already running when this
+      # dispatcher started, and it holds again on the iteration after this pass
+      # launches one, because by then that worktree is in the list too.
+      #
+      # Costs one `live_worktrees` per iteration, capped at MAX_WORKTREES per
+      # pass, and the label lookups behind it are served from the poll cache.
+      if foundation_in_flight; then break; fi
 
       local picked="" title="" labels=""
       if [ "${#wanted[@]}" -gt 0 ]; then
