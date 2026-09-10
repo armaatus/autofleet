@@ -72,12 +72,27 @@ signal is buried in twenty preferences costs more attention than it saves.
 
 ## Say how many findings you left
 
-Every review of a pull request ends its body with this line, and nothing else
-after it:
+Every review of a pull request ends its body with this line:
 
 ```
 <!-- review-findings: N -->
 ```
+
+One thing may follow it, and only one. Under `AUTOFLEET_REVIEW_MODE=local` the
+reviewer adds a second trailer naming the commit it judged:
+
+```
+<!-- independent-review: local <head-sha> -->
+```
+
+That is what makes a review count at all in that mode. This file used to forbid
+any line following the count, which forbade that marker — so a reviewer obeying
+the policy it is told to read first and in full omitted it, `merge-gate`
+discarded a review that had been written, read and submitted, and the pull
+request blocked on a review that already existed. Found by the independent
+review that hit it. See
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review); in the default
+`github` mode there is no second trailer and this line is still the last one.
 
 `N` is Important plus Nit, across all three passes, inline comments included.
 `0` means the review found nothing.
@@ -87,6 +102,14 @@ because `merge-gate` cannot otherwise tell a review that found five nits from
 one that found nothing: REVIEW.md sends anything Important to
 `--request-changes` and everything else to `--comment`, so both of those are a
 COMMENTED verdict and both satisfy every other condition the gate has.
+
+**Under `AUTOFLEET_REVIEW_MODE=local` the count is the only lever there is.**
+GitHub refuses `CHANGES_REQUESTED` on a self-authored pull request — "Review Can
+not request changes on your own pull request" — and in that mode the reviewer
+signs in as the author's account. So `--request-changes` is not a route that
+exists there; use `--comment` for every verdict and let `N` hold the branch. A
+reviewer that tries the other one gets a non-zero exit on its last action and may
+end having submitted nothing, which is the worst outcome this file has.
 
 `gh pr merge --auto` is armed when the PR is opened -- deliberately, so a
 finished PR does not sit green with nobody left to merge it -- and this review

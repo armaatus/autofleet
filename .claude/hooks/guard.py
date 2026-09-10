@@ -204,6 +204,39 @@ def _is_git(words, verb):
     return False
 
 
+def _gh_rest(words):
+    """`gh`'s subcommand tokens, with its own global options stripped.
+
+    `gh -R owner/repo pr review 26 --comment` is `gh pr review`, and matching on
+    `words[1:3]` said otherwise -- so every rule below that names a subcommand
+    was one `-R` away from not applying. `_is_git` has done this for git since
+    it was written; the gh rules were reading raw positions.
+
+    Found by the independent review of the change that added the review rule,
+    which noticed the merge rule has always had the same shape.
+
+    Only for deciding WHICH SUBCOMMAND this is. Rules that inspect flags -- the
+    `--auto` allowance on `gh pr merge`, the write detection on `gh api` -- keep
+    reading the unstripped list, because that is where the flags still are.
+    """
+    if not words or words[0].rsplit("/", 1)[-1] != "gh":
+        return []
+    rest, i = [], 1
+    while i < len(words):
+        w = words[i]
+        # The only global option that takes a separate value. `--repo=x` is one
+        # token and falls through to the generic skip below.
+        if w in ("-R", "--repo"):
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        rest.append(w)
+        i += 1
+    return rest
+
+
 def _verb(words):
     return words[0].rsplit("/", 1)[-1] if words else ""
 
@@ -533,6 +566,7 @@ def check_bash(command, cwd=""):
         # has, and an agent that can merge is not separated from anything.
         if _verb(words) == "gh":
             rest = words[1:]
+            sub_cmd = _gh_rest(words)
             # The independent review is not the author's to write, and in
             # `AUTOFLEET_REVIEW_MODE=local` that stops being self-evident.
             #
@@ -549,7 +583,7 @@ def check_bash(command, cwd=""):
             # the repo root, which is not one, which is how the dispatcher's
             # reviewer still submits. And a person reviewing a PR from their own
             # checkout is the ordinary case this must not argue about.
-            if rest[:2] == ["pr", "review"] and _fleet_owns_this_worktree():
+            if sub_cmd[:2] == ["pr", "review"] and _fleet_owns_this_worktree():
                 deny(
                     "Blocked: this worktree was opened by the fleet, and an agent does "
                     "not submit\n"
@@ -569,7 +603,7 @@ def check_bash(command, cwd=""):
                     "  ./scripts/fleet/resolve-thread.sh\n"
                     "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
                 )
-            if rest[:2] == ["pr", "merge"]:
+            if sub_cmd[:2] == ["pr", "merge"]:
                 # `--auto` does not merge. It asks GitHub to merge later, once
                 # the required checks pass -- and `merge-gate` is one of those,
                 # so the conditions in it are what actually decide. That keeps
@@ -585,7 +619,7 @@ def check_bash(command, cwd=""):
                     "its body, and stop there."
                 )
             # The REST spelling of the same thing.
-            if rest[:1] == ["api"] and any(
+            if sub_cmd[:1] == ["api"] and any(
                 re.search(r"/pulls/\d+/merge", w) for w in rest
             ):
                 deny(
@@ -599,11 +633,17 @@ def check_bash(command, cwd=""):
             #
             # THIS IS NOT SYMMETRY FOR ITS OWN SAKE. In `local` review mode the
             # marker in a review body is the only thing separating the reviewer's
-            # verdict from the author's, and `Bash(gh api:*)` is on the agent
-            # allowlist -- so `gh api --method POST repos/O/R/pulls/N/reviews -f
-            # body='...<!-- independent-review: local <sha> -->'` was a live way
-            # for an agent to write its own. docs/CONFIGURATION.md claimed the
-            # marker was out of the author's reach; until this it was not.
+            # verdict from the author's, so `gh api --method POST
+            # repos/O/R/pulls/N/reviews -f body='...<!-- independent-review:
+            # local <sha> -->'` was a live way for an agent to write its own.
+            # docs/CONFIGURATION.md claimed the marker was out of the author's
+            # reach; until this it was not.
+            #
+            # Reachable through `defaultMode: "auto"` in settings.json rather
+            # than through an allowlist entry -- an earlier version of this
+            # comment said `Bash(gh api:*)` was allowlisted, and it is not. The
+            # rule is right; the reason it gave was wrong. Found by the
+            # independent review of this change.
             #
             # Both review passes on the PR that introduced local mode found this
             # independently, which is what two axes are for.
@@ -611,7 +651,40 @@ def check_bash(command, cwd=""):
             # A GET is left alone: reading the reviews on a PR is how
             # `review-status.sh` and `await-review.sh` answer "has this been
             # reviewed yet", and refusing that would break the loop this guards.
-            if rest[:1] == ["api"] and any(
+            # ...and the GRAPHQL spelling, which has no `/pulls/N/reviews` path
+            # in it at all. `gh api graphql -f query='mutation{
+            # addPullRequestReview(...) }'` creates the same review record, with
+            # the same author and the same commit oid, and
+            # `independent_reviews()` counts it identically.
+            #
+            # Not a spelling nobody had thought of: the stop-file rule above
+            # already detects a mutation this way. The rule that carried the
+            # security claim did not, which is the finding.
+            #
+            # The whole `addPullRequestReview*` family, plus the submit: a
+            # PENDING review submitted later is a review too. `resolveReviewThread`
+            # -- the one mutation scripts/fleet/resolve-thread.sh sends -- is
+            # deliberately not in here.
+            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
+                "addPullRequestReview" in w or "submitPullRequestReview" in w
+                for w in rest
+            ):
+                deny(
+                    "Blocked: that GraphQL mutation submits a pull request review, and this\n"
+                    "worktree was opened by the fleet. An agent does not submit the "
+                    "independent\n"
+                    "review of its own pull request -- see the `gh pr review` refusal; this "
+                    "is the\n"
+                    "same act by a third name.\n"
+                    "\n"
+                    "Resolving a thread is `resolveReviewThread`, which is allowed and is "
+                    "what\n"
+                    "./scripts/fleet/resolve-thread.sh sends.\n"
+                    "\n"
+                    "The dispatcher runs the reviewer for you:  "
+                    "./scripts/fleet/await-review.sh"
+                )
+            if sub_cmd[:1] == ["api"] and any(
                 re.search(r"/pulls/\d+/reviews", w) for w in rest
             ) and _fleet_owns_this_worktree():
                 method = ""
@@ -621,11 +694,13 @@ def check_bash(command, cwd=""):
                     elif w.startswith("--method="):
                         method = w.split("=", 1)[1].upper()
                 # `gh api` defaults to GET, and to POST as soon as a field is
-                # given -- so "no -X" is not "harmless read". -f/-F/--raw-field
-                # /--input all make it a write.
+                # given -- so "no -X" is not "harmless read". The flag list is
+                # API_FIELD_FLAGS, shared with the stop-file rule above rather
+                # than spelled a second time here: a list that exists twice is a
+                # list that will disagree with itself.
                 writes = any(
-                    w in ("-f", "-F", "--field", "--raw-field", "--input")
-                    or w.startswith(("-f", "-F", "--field=", "--raw-field=", "--input="))
+                    w in API_FIELD_FLAGS
+                    or any(w.startswith(f + "=") for f in API_FIELD_FLAGS)
                     for w in rest[1:]
                 )
                 if method in ("POST", "PUT", "PATCH") or (not method and writes):
@@ -1067,8 +1142,30 @@ def _stateful_checks():
                 expect(2, {"command": "gh api repos/o/r/pulls/7/reviews -f body=x"},
                        "...nor with no method at all, which gh turns into a POST",
                        because="REST name")
+                expect(2, {"command": "gh api --method=POST repos/o/r/pulls/7/reviews -f body=x"},
+                       "...nor with --method=POST, the equals spelling",
+                       because="REST name")
+                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews --input body.json"},
+                       "...nor with --input, which also makes it a write",
+                       because="REST name")
                 expect(0, {"command": "gh api repos/o/r/pulls/7/reviews"},
                        "...but READING the reviews is what await-review.sh does")
+                # The THIRD spelling. A GraphQL mutation carries no
+                # `/pulls/N/reviews` path, so the rule above never sees it --
+                # and it creates the same review record. Found by the
+                # independent review of the change that added the other two.
+                expect(2, {"command": "gh api graphql -f query='mutation{ addPullRequestReview(input:{pullRequestId:\"x\",event:COMMENT,body:\"y\"}){clientMutationId} }'"},
+                       "...nor the GraphQL mutation that does the same thing",
+                       because="third name")
+                expect(2, {"command": "gh api graphql -f query='mutation{ submitPullRequestReview(input:{pullRequestReviewId:\"x\",event:COMMENT}){clientMutationId} }'"},
+                       "...nor submitting one that was left pending",
+                       because="third name")
+                expect(0, {"command": "gh api graphql -F id=x -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){clientMutationId} }'"},
+                       "...but resolving a thread is what resolve-thread.sh sends")
+                # ...and a global option must not walk past any of it.
+                expect(2, {"command": "gh -R owner/repo pr review 7 --comment --body x"},
+                       "...nor `gh -R owner/repo pr review`, which read as a different subcommand",
+                       because="does not submit")
                 expect(2, {"file_path": os.path.join(root, HOOK_REL)},
                        "a fleet worktree cannot rewrite its own guards", tool="Edit",
                        because="enforcement layer")

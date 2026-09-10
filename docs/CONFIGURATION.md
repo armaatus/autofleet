@@ -55,7 +55,8 @@ it runs.
 |---|---|---|
 | `AUTOFLEET_REVIEW_MODE` | `github` | `github` or `local`. |
 | `AUTOFLEET_REVIEW_CMD` | `claude` | What `local` mode runs, with `-p` and a fixed tool allowlist. A command on `PATH`, so a wrapper can point it at another model or another account. |
-| `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. |
+| `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
+| `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
 
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
 submits it, from that workflow's own account. It needs a
@@ -86,6 +87,18 @@ GitHub can attest to and becomes something the fleet asserts:
 | Reviewer's context | fresh | fresh |
 | Reviewer's identity | a different account | **the author's account** |
 | What proves it | GitHub's own author field | a marker in the review body |
+| `--request-changes` | available | **refused by GitHub** — see below |
+
+**`--request-changes` does not exist in `local` mode.** GitHub will not accept
+`CHANGES_REQUESTED` on a self-authored pull request (*"Review Can not request
+changes on your own pull request"*), and here the reviewer is the author's
+account. So `merge_gate.py`'s "the latest review still requests changes"
+condition is unreachable, and `<!-- review-findings: N -->` is the only lever
+holding the branch. It is enough — any `N` above zero blocks the merge until the
+author answers — but a control that is documented and silently inapplicable is
+worse than one that is absent, so it is written down here, in
+[REVIEW.md](../REVIEW.md) and in the reviewer's brief. This was found by the
+local reviewer being unable to submit its own verdict.
 
 `merge_gate.independent_reviews()` normally discards anything the PR's author
 submitted. In `local` mode it accepts one **iff** the body carries
@@ -99,9 +112,18 @@ meaningful:
 2. **Read from the base ref.** `merge-gate.yml` sparse-checks-out
    `.autofleet/config` at `pull_request.base.sha`, so a PR cannot switch its own
    repository into the weaker mode as part of the change that mode is judging.
-3. **Out of the author's reach.** `guard.py` refuses `gh pr review` from a
-   fleet-owned worktree, so the agent under review cannot write the marker. The
-   dispatcher runs the reviewer from the repo root, which is not one.
+3. **Out of the ordinary reach of the author.** `guard.py` refuses, from a
+   fleet-owned worktree, all three ways to submit a review: `gh pr review`,
+   `gh api .../pulls/N/reviews`, and the `addPullRequestReview` GraphQL
+   mutation. The dispatcher runs the reviewer from the repo root, which is not a
+   fleet worktree, which is how it still submits.
+
+   *Reach*, not *possibility*: this is a hook over a command line, not a
+   capability boundary. It stops an agent that drifts into reviewing itself and
+   an agent that follows an instruction planted in a diff. It does not stop an
+   agent that sets out to defeat it, and the summary below says so. The first
+   two spellings shipped guarded; the third did not, and the independent review
+   of that change found it.
 
 `local` **adds** a way to satisfy the requirement; it never removes the strong
 one. A review by a different account still counts, with no marker at all.

@@ -220,12 +220,33 @@ tools="$tools,Bash(gh pr review:*),Bash(gh api:*)"
   >"$log" 2>&1 &
 reviewer=$!
 
+# THE CHILD DIES WITH THIS SCRIPT, and without this it did not.
+#
+# The dispatcher kills THIS pid when a PR's head moves under a running review
+# (fleet.sh, review_open_prs). SIGTERM to the wrapper left the reviewer itself
+# running: an orphaned agent holding this machine's gh credentials, reviewing a
+# commit nobody will merge, with nothing left to enforce the deadline below
+# because the loop that enforced it was in the process that just died. Two head
+# moves in ten minutes meant three live reviewers on one PR, none of them
+# counted by `running` and none visible to `fleet.sh status`, which counts
+# markers. Found by the independent review of the change that added this.
+#
+# `wait` is interrupted by a trapped signal, so the loop below exits and the
+# handler runs. EXIT as well as the two signals: an unexpected exit anywhere
+# after this point must not leave the reviewer behind either.
+kill_reviewer() {
+  kill "$reviewer" 2>/dev/null
+  # A short grace period, then insist -- the same shape as the deadline path.
+  sleep 2
+  kill -9 "$reviewer" 2>/dev/null
+}
+trap 'kill_reviewer; exit 143' TERM INT
+trap 'kill "$reviewer" 2>/dev/null' EXIT
+
 waited=0
 while kill -0 "$reviewer" 2>/dev/null; do
   if [ "$waited" -ge "$AUTOFLEET_REVIEW_TIMEOUT" ]; then
-    kill "$reviewer" 2>/dev/null
-    sleep 2
-    kill -9 "$reviewer" 2>/dev/null
+    kill_reviewer
     echo "the reviewer ran past ${AUTOFLEET_REVIEW_TIMEOUT}s and was killed; see $log" >&2
     exit 7
   fi

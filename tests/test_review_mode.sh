@@ -133,8 +133,15 @@ STUB
 # existing or not -- and a stub calling a stub is one more place for the test to
 # pass for its own reasons.
 stub_reviewer() {
+  # BEFORE the heredoc, which is unquoted: `$REVIEWER_CALLS` in the stub body is
+  # expanded as the stub is written, so setting it afterwards is an unbound
+  # variable under `set -u` and the stub never gets written at all.
+  REVIEWER_CALLS="$WORK/reviewer-calls"
+  [ -e "$REVIEWER_CALLS" ] || : >"$REVIEWER_CALLS"
+  export REVIEWER_CALLS
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
+printf 'ran\n' >>"$REVIEWER_CALLS"
 case "$1" in
   marked|unmarked)
     trailer=""
@@ -162,6 +169,29 @@ STUB
 # How many review records the PR has. Six copies of this one-liner is five too
 # many, and the copies were what made it easy to assert the wrong thing.
 n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$GH_REVIEWS"; }
+# How many times a reviewer was actually started. `n_reviews` cannot answer that
+# -- a reviewer can run and submit nothing -- and "was one started at all" is the
+# question the queue phase is really asking.
+n_started() { grep -c . "$REVIEWER_CALLS" 2>/dev/null || echo 0; }
+
+# Wait until `$1` prints `$2`, or give up after `$3` seconds and say what it was.
+#
+# GENEROUSLY BOUNDED, because the thing being waited for is a background process
+# on a machine this test does not own. Ten seconds passed on a laptop and failed
+# on a CI runner where the same phase's own reviewer took five -- a flake in the
+# suite that guards the reviewer is worse than no assertion, because it teaches
+# people to re-run rather than read.
+await() {
+  local what="$1" want="$2" bound="${3:-120}" waited=0 got
+  while [ "$waited" -lt "$bound" ]; do
+    got="$($what)"
+    [ "$got" = "$want" ] && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "  (waited ${bound}s for $what to be $want; it is ${got:-?})" >&2
+  return 1
+}
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
 # `review_open_prs` needs fleet.sh's own state, so it is sourced rather than run.
@@ -336,22 +366,24 @@ import merge_gate; print(merge_gate.review_mode())'); }
   printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
   in_poll review_open_prs >/dev/null 2>&1
   # The reviewer is a background child of a subshell that has since exited, so
-  # wait for the review it was started to produce rather than for the pid.
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ "$(n_reviews)" = 1 ] && break
-    sleep 1
-  done
-  [ "$(n_reviews)" = 1 ] \
-    || fail "local mode did not review the open PR"
+  # what is waited for is the review it was started to produce, not its pid.
+  await n_reviews 1 || fail "local mode did not review the open PR"
   ok "...and reviews an open non-draft PR of our own in local mode"
 
-  # ...and never twice. review.sh's own exit 8 is what makes this true, which is
-  # why the marker file is a courtesy rather than the correctness argument.
+  # ...and never twice. review.sh's own exit 8 is what makes that true, which is
+  # why the marker file is a courtesy and not the correctness argument.
+  #
+  # Asserted on whether a REVIEWER WAS STARTED rather than on the review count,
+  # and after waiting for the second pass's child to finish: a reviewer that
+  # started and then correctly declined to submit would leave the count at 1 and
+  # look identical to one that never ran.
+  before="$(n_started)"
   in_poll review_open_prs >/dev/null 2>&1
-  sleep 2
-  [ "$(n_reviews)" = 1 ] \
-    || fail "a second pass submitted a second review"
-  ok "...and a second pass over the same head adds nothing"
+  await n_reviews 1 20 >/dev/null 2>&1 || true
+  [ "$(n_started)" = "$before" ] \
+    || fail "a second pass started another reviewer on a head that already has one"
+  [ "$(n_reviews)" = 1 ] || fail "a second pass submitted a second review"
+  ok "...and a second pass over the same head starts nothing"
   ;;
 
 # ------------------------------------------------------------------- stale

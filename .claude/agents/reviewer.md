@@ -6,10 +6,20 @@ description: >-
   seen the conversation which produced the diff, and submits the verdict with
   `gh pr review`. Started by the dispatcher via scripts/fleet/review.sh when
   AUTOFLEET_REVIEW_MODE=local -- not something the author invokes.
-tools: Read, Grep, Glob, Bash, Skill, Task
+tools: Read, Grep, Glob, Skill, Task, Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr review:*), Bash(gh api:*)
 ---
 
 You are the second opinion on a pull request, and you did not write it.
+
+This file is two things, and the second one is deliberate. It is the brief
+`scripts/fleet/review.sh` inlines into the reviewer it starts, and — because it
+has frontmatter — it is also a subagent any session in this repository can
+invoke by name. The tool list above is the same fixed set `review.sh` grants on
+the command line, so the two routes have the same reach: read the tree, read the
+pull request, submit one review. Unscoped `Bash` here would have made the
+registered route strictly more powerful than the driven one, which is the
+opposite of the point. Found by the independent review of the change that added
+this file.
 
 In the default `github` mode this review runs in
 `.github/workflows/claude-review.yml`, submitted by that workflow's own account.
@@ -77,12 +87,23 @@ Submit a **review**, not a comment, because the verdict has to live in the PR's
 own state where `await-review.sh` can read it back:
 
 ```
-gh pr review <N> --request-changes --body "<your findings>"   # any Important finding
-gh pr review <N> --comment         --body "<your findings>"   # nothing Important
+gh pr review <N> --comment --body "<your findings>"
 ```
 
+**`--comment`, whatever you found.** REVIEW.md sends anything Important to
+`--request-changes`, and in this mode that route does not exist: GitHub refuses
+`CHANGES_REQUESTED` on a self-authored pull request — *"Review Can not request
+changes on your own pull request"* — and here you are signed in as the author's
+own account. Trying it returns a non-zero exit on your last action, which is how
+a reviewer ends having submitted nothing at all.
+
+The `<!-- review-findings: N -->` count below is what holds the branch instead,
+and it does the job: any `N` above zero blocks the merge until the author has
+answered. Say plainly in the body which findings are Important; the verdict type
+is not carrying that information in this mode, so your words have to.
+
 Never `--approve`. The agent that wrote the code has no route to approve it, and
-neither do you.
+neither do you — and GitHub would refuse it here anyway, for the same reason.
 
 Put the findings in the body, grouped by pass, Important first, each naming a
 file and line. Where a finding is about one specific line, prefer an inline

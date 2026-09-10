@@ -264,6 +264,35 @@ else
   fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
 fi
 
+# 2a. REVIEW.md must not forbid the marker. It used to end the findings-trailer
+#     rule with "and nothing else after it", which is exactly the second trailer
+#     -- so a reviewer following the policy it is told to read "first and in
+#     full" produced a review the gate then discarded. Found by the independent
+#     review that hit it.
+# Read with the whitespace squeezed out, because this is prose: a reflow that
+# moved "nothing else" onto the next line would silence a line-oriented grep,
+# and an assertion a reflow can switch off is not an assertion.
+flat() { tr -s '[:space:]' ' ' <"$1"; }
+if flat REVIEW.md | grep -q 'nothing else after it'; then
+  fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
+elif grep -q 'independent-review: local' REVIEW.md; then
+  ok "REVIEW.md allows the second trailer local review mode depends on"
+else
+  fail "REVIEW.md does not mention the local-review marker, so a reviewer reading it in full does not know to write one"
+fi
+
+# 2b. ...and it must not order a verdict GitHub refuses in this mode. `local`
+#     means the reviewer is the PR's author, and GitHub declines
+#     CHANGES_REQUESTED on your own pull request -- so a brief that orders
+#     `--request-changes` for an Important finding ends the run with a non-zero
+#     exit on its last action and nothing submitted.
+if flat REVIEW.md | grep -q 'request changes on your own pull request' \
+   && flat .claude/agents/reviewer.md | grep -q 'request changes on your own pull request'; then
+  ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
+else
+  fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
+fi
+
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer
 #    what to write and merge_gate.py decides what counts; a drift between them is
 #    a review that submits and is then ignored, which reads exactly like a
@@ -347,7 +376,18 @@ grep -q 'AUTOFLEET_REVIEW_MODE' install.sh \
   || fail "install.sh never mentions AUTOFLEET_REVIEW_MODE, so a host project is not told the default needs a secret"
 ok "install.sh ships the reviewer and names the knob"
 
-# 7. ...and normalises every spelling of `local` that the gate can READ.
+# 7. `fleet.sh status` names which reviewer is going to answer. This is the one
+#    line whose whole purpose is to speak when everything else is quiet -- a
+#    `github`-mode repository with no token has a green review job, a waiting
+#    agent, and nothing anywhere saying which reviewer it is waiting for.
+if grep -q 'AUTOFLEET_REVIEW_MODE' scripts/fleet/fleet.sh \
+   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | grep -q 'review:'; then
+  ok "fleet.sh status names the review mode on its first screen"
+else
+  fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
+fi
+
+# 8. ...and normalises every spelling of `local` that the gate can READ.
 #    This repo's own .autofleet/config says `local`, and install.sh seeds that
 #    file verbatim. If the installer's matcher is narrower than
 #    merge_gate.REVIEW_MODE_RE, a rewording of the line here silently ships the
