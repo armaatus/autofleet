@@ -101,14 +101,15 @@ LOCAL_REVIEW_RE = re.compile(
 # its defaults in. Deliberately a regex and not a shell parse: this runs in CI
 # over a file from the base ref, and sourcing it would be running the host
 # project's shell code inside the gate that judges the host project.
-# WHAT THE SHELL WOULD BE LEFT HOLDING, and nothing more.
+# WHAT THE SHELL WOULD BE LEFT HOLDING, and nothing more. Two ways to get that
+# wrong, and this file has had both.
 #
-# `export X=v` and `X='v'` are ordinary lines in a file config.sh SOURCES, so a
-# spelling this cannot see is a repository whose shell side runs the local
-# reviewer while the gate discards what it submits -- every PR blocked forever on
-# a review that has already been written.
+# TOO NARROW: `export X=v` and `X='v'` are ordinary lines in a file config.sh
+# SOURCES, so a spelling this cannot see is a repository whose shell side runs
+# the local reviewer while the gate discards what it submits -- every PR blocked
+# forever on a review that has already been written.
 #
-# `: "${X:=v}"` is the mirror-image error, and it is the one that was here.
+# TOO WIDE: `: "${X:=v}"` is the mirror image, and it is the one that was here.
 # config.sh sets its own default with that shape BEFORE sourcing
 # `.autofleet/config`, so by the time a `:=` in the host config is reached the
 # variable already holds `github` and the assignment does nothing at all. Reading
@@ -123,9 +124,11 @@ LOCAL_REVIEW_RE = re.compile(
 # those. evals/lint.sh asserts this file and the shell agree, spelling for
 # spelling, rather than trusting the two to stay in step. Found by the
 # independent review of this change.
+# No `[ \t]*` after the `=`: bash has no assignment with a space there, so
+# matching one would be strictly more permissive than the shell it models.
 REVIEW_MODE_RE = re.compile(
     r"""^[ \t]*(?:export[ \t]+)?"""
-    r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?([A-Za-z][A-Za-z0-9_-]*)""",
+    r"""AUTOFLEET_REVIEW_MODE=["']?([A-Za-z][A-Za-z0-9_-]*)""",
     re.M,
 )
 REVIEW_MODES = ("github", "local")
@@ -170,7 +173,18 @@ def review_mode(root=None):
     refuses PRs rather than admitting them. A base predating this change has no
     `.autofleet/config` in its sparse checkout at all, and it still evaluates.
     """
-    env = (os.environ.get("AUTOFLEET_REVIEW_MODE") or "").strip().lower()
+    # NOT lowercased, and no whitespace stripped after the `=` in the regex
+    # below. `scripts/fleet/lib.sh`'s `fleet_review_mode` -- which is what the
+    # dispatcher, review.sh and the status screen all ask -- matches the literal
+    # string `local` and nothing else, because that is what the shell leaves in
+    # the variable. Reading `LOCAL` as local made this file the only reader that
+    # thought so, and `AUTOFLEET_REVIEW_MODE= local` is not an assignment bash
+    # can make at all, so tolerating it modelled nothing. Either way the two
+    # readers disagree, no reviewer starts, and every PR blocks forever on a
+    # review nothing will write -- which is the failure this whole mode removes.
+    # Found by the independent review; the SPELLINGS list in evals/lint.sh, whose
+    # job was to catch exactly this, had neither variant in it.
+    env = os.environ.get("AUTOFLEET_REVIEW_MODE") or ""
     if env in REVIEW_MODES:
         return env
     if root is None:
@@ -192,7 +206,7 @@ def review_mode(root=None):
     found = REVIEW_MODE_RE.findall(text)
     if not found:
         return "github"
-    value = found[-1].lower()
+    value = found[-1]
     return value if value in REVIEW_MODES else "github"
 
 

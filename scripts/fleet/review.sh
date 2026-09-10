@@ -114,9 +114,9 @@ esac
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
 # same reason await-review.sh and review-status.sh ask it: three paraphrases of
 # "what counts as a review" drifted apart once already (#114), always in the
-# permissive direction. Skipping is the whole of the idempotence -- the
-# dispatcher's marker file stops a SECOND reviewer starting while one runs, and
-# this stops a redundant one starting after it finished.
+# permissive direction (armaatus/rommsync-nx#114). Skipping is the whole of the
+# idempotence -- the dispatcher's marker stops a SECOND reviewer starting while
+# one runs, and this stops a redundant one starting after it finished.
 # ONE definition, asked twice: once to decide whether to run a reviewer, and once
 # afterwards to decide whether it submitted anything worth having. Those used to
 # be different questions -- the check afterwards counted ANY review record on the
@@ -243,6 +243,17 @@ tools="$tools,Bash(gh pr review:*)"
 # the only bound is the wall clock, and a reviewer killed at the deadline has
 # submitted nothing at all. A budget it can see is what makes "decide your verdict
 # while you still have turns left" in the brief mean anything.
+# `set -m` gives the background job below its own PROCESS GROUP, so the kills
+# further down can reach what it started and not just the command itself.
+#
+# AUTOFLEET_REVIEW_CMD is advertised as a wrapper seam -- point it at a different
+# model or a different account -- and with any wrapper at all, signalling the
+# direct child reaps the wrapper and orphans the agent holding this machine's gh
+# login. That is the failure the trap exists to prevent, arriving through the
+# feature the docs recommend. It is also true without a wrapper for anything the
+# reviewer itself spawns. Found by the independent review, which also noted that
+# the suite reproduced the shape and then checked only the wrapper.
+set -m
 "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
   --allowed-tools "$tools" \
   --max-turns "$AUTOFLEET_REVIEW_MAX_TURNS" \
@@ -269,16 +280,25 @@ reviewer=$!
 # five seconds late. That is fine here and it is written down because an earlier
 # version of this comment claimed `wait` was being interrupted, which is the
 # sentence a reader trusts when judging whether the trap is prompt.
+set +m
+
+# THE GROUP, not the pid. `kill -- -N` signals every process in group N, which is
+# what `set -m` above arranged for. The bare pid is tried as well, for the case
+# where job control was unavailable and no group was created -- signalling a
+# group that does not exist is an error, not a kill.
+signal_reviewer() {
+  kill "-$1" -- "-$reviewer" 2>/dev/null || kill "-$1" "$reviewer" 2>/dev/null
+}
 kill_reviewer() {
-  kill "$reviewer" 2>/dev/null
+  signal_reviewer TERM
   # A short grace period, then insist -- the same shape as the deadline path.
   sleep 2
-  kill -9 "$reviewer" 2>/dev/null
+  signal_reviewer KILL
 }
 # The one EXIT handler, now also taking the reviewer with it. Redefined rather
 # than a second `trap`, which would have discarded the marker cleanup above.
 on_exit() {
-  kill "$reviewer" 2>/dev/null
+  signal_reviewer TERM
   rm -f "${AUTOFLEET_REVIEW_MARKER:-}"
 }
 trap 'kill_reviewer; exit 143' TERM INT

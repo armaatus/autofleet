@@ -572,8 +572,8 @@ its absence is why the mode is on. The dispatcher starts the reviewer; if the
 dispatcher is down, nothing was ever going to answer. Check:
   ./scripts/fleet/fleet.sh status          # is a dispatcher up, and how many
                                            # reviews does it think are in flight
-  tail -40 ~/.autofleet/fleet.log          # what it said about this PR
-  ls ~/.autofleet/reviews/                 # one transcript per review attempt
+  tail -40 $FLEET_DIR/fleet.log            # what it said about this PR
+  ls $FLEET_DIR/reviews/                   # one transcript per review attempt
 A person can also run it by hand:
   ./scripts/fleet/review.sh $pr
 TIMEOUT

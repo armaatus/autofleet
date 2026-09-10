@@ -367,6 +367,56 @@ else
   fail 'guard.py does not refuse the addPullRequestReview mutation, the one review spelling with no URL in it'
 fi
 
+#    THE SUBMIT GRANT. Drop or misspell `Bash(gh pr review:*)` in review.sh's
+#    tool list and the reviewer starts, reads the diff, spends its whole turn
+#    budget, forms a verdict and CANNOT SUBMIT: exit 5, and every PR on a
+#    local-mode repository blocked forever on a review that was actually
+#    written. It is the one link in this chain with no assertion, and the suite
+#    structurally cannot cover it -- `stub_reviewer` replaces the reviewer
+#    command wholesale, so the allowlist is exercised by no test at all.
+#
+#    Both halves in one check, because .claude/agents/reviewer.md duplicates the
+#    list in its frontmatter and ASSERTS that the two are identical. A drift
+#    makes the registered subagent more powerful than the driven one, which is
+#    the thing that paragraph exists to prevent. Found by the independent review.
+if python3 - <<'PYEOF'; then
+import re, sys
+driven = open("scripts/fleet/review.sh").read()
+brief = open(".claude/agents/reviewer.md").read()
+
+block = re.search(r"^tools=.*?(?=\n\n)", driven, re.S | re.M)
+if not block:
+    sys.exit("scripts/fleet/review.sh no longer builds a `tools=` allowlist")
+granted = set(re.findall(r"[A-Za-z]+\([^)]*\)|(?<![\w(])[A-Z][A-Za-z]+(?![\w)])",
+                         block.group(0).replace("tools=", "").replace('"$tools,', "")))
+if "Bash(gh pr review:*)" not in granted:
+    sys.exit("review.sh does not grant `Bash(gh pr review:*)`, so its reviewer can "
+             "read the whole diff and then not submit -- exit 5, and the PR blocks "
+             "on a review that was written")
+if "Bash(gh api:*)" in granted:
+    sys.exit("review.sh grants `Bash(gh api:*)` again. It is withheld on purpose: "
+             "in local mode the reviewer holds the maintainer's own gh login, and "
+             "that is the one grant on the list with no ceiling. "
+             "docs/CONFIGURATION.md carries it as a row in what local gives up")
+
+front = re.search(r"^tools:\s*(.+)$", brief, re.M)
+if not front:
+    sys.exit(".claude/agents/reviewer.md has no `tools:` frontmatter, so the "
+             "registered subagent inherits everything")
+declared = {t.strip() for t in front.group(1).split(",") if t.strip()}
+# The brief may not grant MORE than the driven route. Fewer is safe.
+extra = declared - granted
+if extra:
+    sys.exit("reviewer.md's frontmatter grants what review.sh does not: "
+             + ", ".join(sorted(extra))
+             + " -- the registered subagent would be more powerful than the "
+               "driven one, which is what that file's own note says it must not be")
+PYEOF
+  ok 'the reviewer can submit, cannot reach `gh api`, and the two routes agree'
+else
+  fail "the reviewer's tool allowlist has drifted (above)"
+fi
+
 #    Everything the payload POINTS AT must be in the payload. docs/CONFIGURATION.md
 #    was cited by eight shipped files -- including a markdown link in REVIEW.md --
 #    while shipping nowhere, so the link 404'd in every host repo. Hard rule 1.
@@ -455,6 +505,12 @@ SPELLINGS = [
     "  AUTOFLEET_REVIEW_MODE=local",
     ': "${AUTOFLEET_REVIEW_MODE:=local}"',
     "# AUTOFLEET_REVIEW_MODE=local",
+    # The two the list was missing, and the reason it was missing them is that
+    # it was written from the shapes the gate accepts rather than from the shapes
+    # a person types. Both made the two readers disagree.
+    "AUTOFLEET_REVIEW_MODE=LOCAL",
+    "AUTOFLEET_REVIEW_MODE= local",
+    "AUTOFLEET_REVIEW_MODE=Local",
     "AUTOFLEET_REVIEW_MODE=local\nAUTOFLEET_REVIEW_MODE=github",
     "AUTOFLEET_REVIEW_MODE=whatever",
     "",

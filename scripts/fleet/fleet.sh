@@ -626,6 +626,12 @@ stop_reviewers() {
 
 review_open_prs() {
   fleet_review_is_local || return 0
+  # A stopped fleet writes nothing to a pull request, and `review.sh` knows that
+  # -- it exits 3. But it exits 3 AFTER being spawned, once per open PR, every
+  # poll: churn with an answer already known here. A DRAIN deliberately does not
+  # stop reviews, because a drain lets the work in flight finish and a PR waiting
+  # on a verdict is exactly that work.
+  fleet_stopped && return 0
   mkdir -p "$REVIEWING_DIR"
 
   # OUR OWN PULL REQUESTS, and this is a limit rather than an oversight. The
@@ -669,13 +675,10 @@ review_open_prs() {
       [ -e "$m" ] || continue
       p=""
       read -r p _ <"$m" 2>/dev/null || true
-      # Status 2 is "alive, but ps would not say" -- documented above as "treat
-      # it as ours", so it keeps its marker AND its slot. Only a definite no
-      # clears it.
       reviewer_alive "$p"; local is=$?
-      # 0 is ours; 2 is "alive, but ps would not say", documented above as
-      # treat-it-as-ours, so it keeps both its marker and its slot. Only a
-      # definite 1 clears it.
+      # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
+      # documents as treat-it-as-ours, so it keeps both its marker and its slot.
+      # Only a definite 1 clears it.
       if [ "$is" != 1 ]; then n=$((n + 1)); else rm -f "$m"; fi
     done
     printf '%s\n' "$n"
@@ -709,8 +712,9 @@ for p in prs:
       # marker for a commit that is no longer current, so merge_gate would
       # ignore it and the round would be spent for nothing. Kill it and let the
       # next pass start one on what is there now.
-      say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
       reviewer_alive "$held"; local is=$?
+      # Said only where it is true: the `2)` branch below declines to restart.
+      [ "$is" = 0 ] && say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
       case "$is" in
         0) kill "$held" 2>/dev/null; rm -f "$marker" ;;
         # "Alive, but ps would not say." Removing the marker here declined to
@@ -749,10 +753,20 @@ for p in prs:
     # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
     # carrying the remaining PRs, and a background child inheriting it can eat
     # them. The second PR in a two-PR pass then silently never gets reviewed.
-    # The marker is written BEFORE the spawn is announced and removed by
-    # `review.sh` itself on every exit path, so a reviewer that decides there is
-    # nothing to do frees its slot immediately rather than at the top of the next
-    # pass. AUTOFLEET_REVIEW_MARKER is how it knows which file is its own.
+    # `review.sh` removes this marker itself on every exit path, so a reviewer
+    # that decides there is nothing to do frees its slot at once rather than at
+    # the top of the next pass. AUTOFLEET_REVIEW_MARKER is how it knows which
+    # file is its own.
+    #
+    # WRITTEN AFTER THE SPAWN, because the pid is what goes in it and there is no
+    # pid until the job exists. The race that opens is benign, and it is named
+    # here so the next reader need not work it out: a `review.sh` that exits
+    # before this `printf` runs -- the exit-8 path is two API calls -- removes a
+    # marker that does not exist yet, and the `printf` then recreates it holding
+    # a dead pid. `live_reviewers` reaps that on its next call, which is the very
+    # next candidate in this loop, so the slot is held for one iteration rather
+    # than leaked. An earlier version of this comment claimed the marker was
+    # written first; found by the independent review.
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"

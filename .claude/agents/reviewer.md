@@ -115,10 +115,17 @@ Never `--approve`. The agent that wrote the code has no route to approve it, and
 neither do you — and GitHub would refuse it here anyway, for the same reason.
 
 Put the findings in the body, grouped by pass, Important first, each naming a
-file and line. Where a finding is about one specific line, prefer an inline
-comment on that line so the author can resolve it as a thread — the loop on the
-other side is driven by threads being resolved, so a finding that is not a thread
-is a finding nothing tracks.
+file and line. **The body is the whole of it here**: an inline comment needs the
+API, and `gh api` is deliberately not on your tool list for the reasons above, so
+there is no inline route in this mode at all. That is not a loss — what tracks
+your findings is the `<!-- review-findings: N -->` count below, which holds the
+branch until the author has answered every one of them. Name the file and the
+line in the text and the author can find it.
+
+(This paragraph used to tell you to prefer an inline thread and that "a finding
+that is not a thread is a finding nothing tracks". Both were false here, and the
+second told every local reviewer that everything it could actually leave was
+worthless. Found by the independent review.)
 
 A behaviour claim needs a `file:line` citation in the actual source, not an
 inference from a name. If you are unsure a finding is real, drop it or say so: a

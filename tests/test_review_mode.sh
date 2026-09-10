@@ -167,7 +167,12 @@ json.dump(records, open(path, "w"))
 PY
     ;;
   silent) : ;;
-  hang)   sleep 60 ;;
+  # A child, not the stub itself. AUTOFLEET_REVIEW_CMD is advertised as a
+  # wrapper seam, so the process holding the gh login is routinely a CHILD of
+  # what review.sh signals -- and a kill that reaps only the direct child leaves
+  # it running. The sleep is given a distinctive duration so a test can tell the
+  # wrapper's death from the work's.
+  hang)   sleep 3607 ;;
 esac
 exit 0
 STUB
@@ -367,6 +372,13 @@ import merge_gate; print(merge_gate.review_mode())'); }
   pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
     && fail "the wedged reviewer is still running after the deadline"
   ok "...and the reviewer is gone, not merely given up on"
+  # THE WORK, not the wrapper. Signalling the direct child reaps the stub and
+  # orphans what it started -- which with any AUTOFLEET_REVIEW_CMD wrapper is the
+  # agent holding this machine's gh login. Both this phase and midstop checked
+  # only the wrapper. Found by the independent review.
+  pgrep -f "sleep 3607" >/dev/null 2>&1 \
+    && fail "the wedged reviewer's own child outlived the kill"
+  ok "...and so is what it had started"
   ;;
 
 # --------------------------------------------------------------------- queue
@@ -434,6 +446,9 @@ import merge_gate; print(merge_gate.review_mode())'); }
     pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
       && fail "the reviewer is still running after the stop"
     ok "...and does not leave it running"
+    pgrep -f "sleep 3607" >/dev/null 2>&1 \
+      && fail "the reviewer's own child outlived the stop"
+    ok "...nor anything it had started"
     ;;
 
 # ------------------------------------------------------------------- reaper
@@ -491,6 +506,6 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|timeout|queue" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
   exit 2 ;;
 esac
