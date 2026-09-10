@@ -506,6 +506,10 @@ STUB
   # PR, no labels. Each test overrides only the one it is about.
   ORCA_PS="$WORK/ps";               echo '{"result":{"worktrees":[]}}' >"$ORCA_PS"
   ORCA_WORKTREES="$WORK/wtlist";    echo '{"result":{"worktrees":[]}}' >"$ORCA_WORKTREES"
+  # `orca worktree list` is machine-wide and every fixture here is one project,
+  # so the shape that mattered was never exercised: the MAIN worktree entry that
+  # says which repoId is ours, and a second project's worktrees beside it.
+  REPO_ID="repo-under-test"
   ORCA_TERMINALS="$WORK/terminals"; echo '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
   GH_PRS="$WORK/prs";               echo '[]' >"$GH_PRS"
   GH_ISSUES="$WORK/issues";         echo '[]' >"$GH_ISSUES"
@@ -892,14 +896,21 @@ case "${1:-}" in
     # idle, and no second dispatcher could start. armaatus/autofleet#37.
     # A RUNNING dispatcher, stopped -- `cmd_run` refuses to start under a drain,
     # so the state has to be reached the way a real one reaches it.
-    make_fixture ok
+    # DRIVEN, not hand-written. Writing `stuck-42` by hand meant the phase
+    # passed while `park_worktree` could be renamed out from under production --
+    # the same green-for-the-wrong-reason this branch keeps finding -- and it is
+    # now load-bearing too, since only holds with an OWNED entry are counted.
+    # `rm_never_works` plus a merged PR reaches the park the way `remove_advice`
+    # does.
+    make_fixture rm_never_works
     make_worktree
     add_origin
-    : >"$GH_MERGED"
     ( in_fleet cmd_run --auto >"$WORK/run.log" 2>&1 ) &
     HELD_PID=$!
     wait_for_log "fleet up"
-    : >"$AUTOFLEET_DIR/stuck-42"
+    wait_for_log "could not remove it"
+    [ -e "$AUTOFLEET_DIR/stuck-42" ] \
+      || fail "park_worktree did not park it, so this phase would assert nothing"
     in_fleet cmd_stop >/dev/null 2>&1
     run_ended "$HELD_PID" \
       || fail "the drain never ended with a worktree parked: $(cat "$WORK/run.log")"
@@ -1103,6 +1114,45 @@ case "${1:-}" in
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
+  foreign_worktree)
+    # `orca worktree list` returns every worktree ON THE MACHINE, and every
+    # caller resolves the issue numbers against THIS repo. So another project's
+    # worktree inflated `live`, and `foundation_in_flight` asked `poll_issue`
+    # about an issue number that does not exist here, got "could not read its
+    # labels", and HELD THE FLEET. Seen for real: a rommsync-nx worktree on its
+    # issue 195 stopped autofleet launching anything, with one line in the log.
+    # armaatus/autofleet#31.
+    make_fixture ok
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+  {"repoId": "ours", "path": sys.argv[1], "isMainWorktree": True, "linkedIssue": None},
+  {"repoId": "ours", "path": sys.argv[1] + "/wt-7", "isMainWorktree": False, "linkedIssue": 7},
+  {"repoId": "theirs", "path": "/elsewhere/other-project", "isMainWorktree": True, "linkedIssue": None},
+  {"repoId": "theirs", "path": "/elsewhere/other-project/195-x", "isMainWorktree": False, "linkedIssue": 195},
+]}}))' "$WORK/repo" >"$ORCA_WORKTREES"
+    out="$(in_fleet live_worktrees 2>&1)"
+    grep -q "^7" <<<"$out" || fail "our own worktree is not listed: $out"
+    echo "ok: this repository's worktrees are listed"
+    grep -q "195" <<<"$out" \
+      && fail "another project's worktree is counted as ours, which holds the fleet: $out"
+    echo "ok: ...and another project's are not"
+    [ "$(in_fleet live_count 2>&1)" = 1 ] \
+      || fail "live_count counted a foreign worktree against MAX_WORKTREES"
+    echo "ok: ...so the cap counts only our own"
+
+    # ...and a list this cannot scope is "could not tell", not "none": the
+    # caller's non-zero path already means skip the pass and say so.
+    python3 -c '
+import json
+print(json.dumps({"result": {"worktrees": [
+  {"repoId": "theirs", "path": "/elsewhere/other", "isMainWorktree": True, "linkedIssue": None},
+]}}))' >"$ORCA_WORKTREES"
+    in_fleet live_worktrees >/dev/null 2>&1 \
+      && fail "a list with no entry for this repo read as an empty fleet rather than as unknown"
+    echo "ok: a list this cannot scope is could-not-tell, not empty"
+    ;;
+
   foundation_holds)
     # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
     # half of it -- a foundation issue would not JOIN running worktrees, and
@@ -2320,6 +2370,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh reap_blind_upstream|drain_ends_with_parked|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foreign_worktree|reap_blind_upstream|drain_ends_with_parked|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

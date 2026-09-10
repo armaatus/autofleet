@@ -290,15 +290,50 @@ live_worktrees() {
   orca_run_with_deadline 30 "$out" "$ORCA_CLI" worktree list --json || {
     rm -f "$out"; return 1; }
   python3 -c '
-import json, sys
+import json, os, sys
 try:
     worktrees = json.load(open(sys.argv[1]))["result"]["worktrees"]
 except Exception:
     raise SystemExit(1)
+
+# THIS REPOSITORY ONLY. `orca worktree list` is machine-wide, and every caller
+# resolves the issue numbers it returns against THIS repo -- so another
+# project`s worktree inflated `live`, and `foundation_in_flight` asked
+# `poll_issue` about an issue number that does not exist here, got "could not
+# read its labels", and held the fleet. Observed: a rommsync-nx worktree on its
+# issue 195 stopped autofleet launching anything, indefinitely, with one line in
+# the log. The premise was older than that check; the check is what made it
+# fatal.
+#
+# `repoId` is the runner`s own answer, and ours is the one on the main worktree
+# whose path is this repo. Finding no such entry is NOT "no worktrees" -- it is
+# not knowing, and the caller`s non-zero path already means "skip this pass and
+# say so", which is the honest answer for a list that cannot be scoped.
+here = os.path.realpath(sys.argv[2])
+mine = None
 for w in worktrees:
+    if w.get("isMainWorktree") and os.path.realpath(w.get("path") or "") == here:
+        mine = w.get("repoId")
+        break
+
+# Not finding ourselves is a REFUSAL exactly when the list carries repoIds and
+# none of them is ours: the runner can tell projects apart, and we are not the
+# one it is describing. A runner that reports no repoId at all -- and an empty
+# list, which is every fixture -- gives an unfiltered answer that is already
+# correct, and refusing THAT turns a one-project machine into a dispatcher that
+# skips every pass forever. The first version of this scoping did exactly that
+# and hung the suite; the second let a single foreign project through, because
+# it asked how MANY projects there were rather than whether any of them was ours.
+# The caller`s non-zero already means skip this pass and say so.
+if mine is None and any(w.get("repoId") for w in worktrees):
+    raise SystemExit(1)
+
+for w in worktrees:
+    if mine is not None and w.get("repoId") != mine:
+        continue
     if not w.get("isMainWorktree") and not w.get("isArchived"):
         print(w.get("linkedIssue") or "-", w["path"], sep="\t")
-' "$out"
+' "$out" "$REPO_ROOT"
   local rc=$?
   rm -f "$out"
   return $rc
@@ -2023,8 +2058,24 @@ cmd_status() {
   fi
   echo
   echo "worktrees now:"
+  # A worktree waiting for a PERSON is not a worktree working, and after the
+  # drain learned to end with one outstanding, the state a reader actually meets
+  # is new: the dispatcher gone, `idle` on screen, and a directory still listed
+  # here with nothing saying why it survived or how to release it. Issue 37 asks
+  # this line to tell the two apart; the change that fixed the drain did not.
+  # Found by the independent review.
   live_worktrees | while IFS="$(printf '\t')" read -r num path; do
-    printf '  #%-5s %s\n' "$num" "$path"
+    why=""
+    [ -e "$STATE_DIR/stuck-$num" ]       && why="waiting for you -- its removal was refused"
+    [ -e "$STATE_DIR/merge-held-$num" ]  && why="waiting for you -- merged, and it holds uncommitted work"
+    [ -e "$STATE_DIR/merge-blind-$num" ] && why="waiting for you -- git could not say what it holds"
+    if [ -n "$why" ]; then
+      printf '  #%-5s %s\n' "$num" "$path"
+      printf '         %s\n' "$why"
+      printf '         %s\n' "$(printf "$BY_HAND_REMOVAL" "$path")"
+    else
+      printf '  #%-5s %s\n' "$num" "$path"
+    fi
   done
   echo
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
@@ -2370,7 +2421,10 @@ while that one is up."
       # `--until` and `--for` set `drain_mode` and keep reaping, and
       # docs/WORKFLOW.md advertises all three as equivalent. They were not.
       # armaatus/autofleet#36.
-      if [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ] && ! $drain_mode; then
+      # No `! $drain_mode` guard: the enclosing loop is `while ! $drain_mode`,
+      # and the only assignment inside it breaks out at once, so it could never
+      # be false here and reading it suggested otherwise.
+      if [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ]; then
         drain_mode=true
         reason="it opened $opened worktree(s)"
         say "opened $opened worktree(s) -- launching nothing more, still reaping what is in flight"
@@ -2513,7 +2567,26 @@ while that one is up."
     # forever, `status` never said idle, and `cmd_run` refuses a second
     # dispatcher while one is alive. `stop.sh` promises "exits once nothing is
     # left". armaatus/autofleet#37.
-    local parked; parked="$(ls "$STATE_DIR" 2>/dev/null | grep -c '^stuck-' || true)"
+    # EVERY reason a worktree waits for a person, not just a refused removal.
+    # `stuck-` is one of three: `merge-held-` keeps a merged worktree that still
+    # holds uncommitted work, and `merge-blind-` keeps one whose git could not
+    # say what it holds -- which the same change that added this counter also
+    # made permanent, since nothing recreates a pruned upstream. Counting only
+    # `stuck-` left two ways for the drain to wedge, one of them introduced
+    # alongside the fix. Found by the independent review.
+    local parked
+    parked="$(ls "$STATE_DIR" 2>/dev/null | grep -c -E '^(stuck|merge-held|merge-blind)-' || true)"
+    # ...and only the ones that are actually OWNED. The two counts come from
+    # different directories, and a stale marker with no owned entry would make
+    # `owned` under-count and the dispatcher exit with a worktree still in
+    # flight -- which is the failure the drain bound exists to prevent, inverted.
+    local held_owned=0 m n
+    for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-*; do
+      [ -e "$m" ] || continue
+      n="${m##*-}"
+      [ -e "$OWNED_DIR/$n" ] && held_owned=$((held_owned + 1))
+    done
+    parked="$held_owned"
     [ "${parked:-0}" -gt 0 ] && owned=$(( owned - parked ))
     [ "${owned:-0}" -lt 0 ] && owned=0
     local queued=0
@@ -2533,9 +2606,19 @@ while that one is up."
       if [ "${parked:-0}" -gt 0 ]; then
         # Named on the way out, every time, because a worktree nobody mentions
         # is one nobody releases.
-        say "$parked worktree(s) could not be removed and are waiting for you:"
-        ls "$STATE_DIR" 2>/dev/null | sed -n 's/^stuck-/  #/p' | while read -r l; do say "$l"; done
-        say "  Their issues stay owned until you release them; the log above says how."
+        say "$parked worktree(s) are waiting for you rather than for an agent:"
+        for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-*; do
+          [ -e "$m" ] || continue
+          n="${m##*-}"
+          [ -e "$OWNED_DIR/$n" ] || continue
+          case "$(basename "$m")" in
+            stuck-*)       why="its removal was refused" ;;
+            merge-held-*)  why="it holds uncommitted work" ;;
+            merge-blind-*) why="git could not say what it holds" ;;
+          esac
+          say "  #$n -- $why"
+          say "    $(printf "$BY_HAND_REMOVAL" "$(owned_path "$n")")"
+        done
       fi
       if $drain_mode; then
         reason="${reason:-you stopped it}; everything in flight has landed"
@@ -2573,7 +2656,14 @@ while that one is up."
 # "alive, but ps would not say" answer, because the point is not to touch
 # another process's state. `cmd_run` empties it per pass regardless, which is
 # the only place that actually wants it emptied. armaatus/autofleet#35.
-dispatcher_alive "$(cat "$PIDFILE" 2>/dev/null)" || forget_poll_answers
+# `[ "$?" = 1 ]`, NOT `||`. `dispatcher_alive` has THREE answers and `||`
+# collapses 2 -- "alive, but ps would not say" -- into "no dispatcher", so on a
+# host where ps cannot answer every `status` in the watch loop still wiped a live
+# dispatcher's cache. That is this bug unfixed, in an environment this repo
+# already knows it has and keeps three phases for. Every other caller in this
+# file keeps the two apart. The comment above said so and the code did not.
+dispatcher_alive "$(cat "$PIDFILE" 2>/dev/null)"
+[ "$?" = 1 ] && forget_poll_answers
 
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
