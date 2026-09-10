@@ -555,7 +555,30 @@ PY
   waited=$((waited + POLL_SECONDS))
 done
 
-cat <<TIMEOUT
+# WHICH REVIEWER WAS SUPPOSED TO ANSWER decides what to look at, and getting
+# this wrong sends an agent to check a workflow run that does not exist and a
+# secret whose ABSENCE is the reason the other mode is on. docs/WORKFLOW.md's
+# Stage 5 was updated for local mode and this message, which is the one an agent
+# actually reads at the end of a 45-minute wait, was not. Found by the
+# independent review of the change that added the mode.
+if fleet_review_is_local; then
+  cat <<TIMEOUT
+
+No review arrived in $((DEADLINE_SECONDS / 60)) minutes.
+
+This repository runs the reviewer LOCALLY (AUTOFLEET_REVIEW_MODE=local), so
+there is no Actions run to look at and no CLAUDE_CODE_OAUTH_TOKEN to check --
+its absence is why the mode is on. The dispatcher starts the reviewer; if the
+dispatcher is down, nothing was ever going to answer. Check:
+  ./scripts/fleet/fleet.sh status          # is a dispatcher up, and how many
+                                           # reviews does it think are in flight
+  tail -40 ~/.autofleet/fleet.log          # what it said about this PR
+  ls ~/.autofleet/reviews/                 # one transcript per review attempt
+A person can also run it by hand:
+  ./scripts/fleet/review.sh $pr
+TIMEOUT
+else
+  cat <<TIMEOUT
 
 No review arrived in $((DEADLINE_SECONDS / 60)) minutes.
 
@@ -564,6 +587,7 @@ broken review looks like a green run with no comments. Check:
   gh run list --branch $(git rev-parse --abbrev-ref HEAD) --limit 5
 and whether CLAUDE_CODE_OAUTH_TOKEN is set as a repository secret.
 TIMEOUT
+fi
 if [ -n "$notes_shown" ]; then
   cat <<NOTED
 

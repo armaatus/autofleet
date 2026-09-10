@@ -101,14 +101,31 @@ LOCAL_REVIEW_RE = re.compile(
 # its defaults in. Deliberately a regex and not a shell parse: this runs in CI
 # over a file from the base ref, and sourcing it would be running the host
 # project's shell code inside the gate that judges the host project.
-# `export X=v` and `X='v'` are both ordinary lines in a file config.sh SOURCES,
-# so a spelling this cannot see is a repository whose shell side runs the local
+# WHAT THE SHELL WOULD BE LEFT HOLDING, and nothing more.
+#
+# `export X=v` and `X='v'` are ordinary lines in a file config.sh SOURCES, so a
+# spelling this cannot see is a repository whose shell side runs the local
 # reviewer while the gate discards what it submits -- every PR blocked forever on
-# a review that has already been written, which is the exact failure this mode
-# exists to prevent. Found by the local review of the change that added it.
+# a review that has already been written.
+#
+# `: "${X:=v}"` is the mirror-image error, and it is the one that was here.
+# config.sh sets its own default with that shape BEFORE sourcing
+# `.autofleet/config`, so by the time a `:=` in the host config is reached the
+# variable already holds `github` and the assignment does nothing at all. Reading
+# it as `local` made this file the only reader that thought so: `fleet.sh` would
+# start no reviewer, `review.sh` would exit 4, `fleet.sh status` would name the
+# github reviewer -- and the gate would sit in the weaker mode waiting for a
+# review nothing was going to write. A host copying the `: "${X:=v}"` style it
+# sees all over config.sh gets exactly that, which is the failure this whole mode
+# exists to remove. #23 is the underlying precedence bug.
+#
+# So: the shapes a host config can actually override a default with, and only
+# those. evals/lint.sh asserts this file and the shell agree, spelling for
+# spelling, rather than trusting the two to stay in step. Found by the
+# independent review of this change.
 REVIEW_MODE_RE = re.compile(
-    r"""^[ \t]*(?:export[ \t]+)?(?::[ \t]*["']?\$\{)?"""
-    r"""AUTOFLEET_REVIEW_MODE:?=[ \t]*["']?([A-Za-z][A-Za-z0-9_-]*)""",
+    r"""^[ \t]*(?:export[ \t]+)?"""
+    r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?([A-Za-z][A-Za-z0-9_-]*)""",
     re.M,
 )
 REVIEW_MODES = ("github", "local")

@@ -505,10 +505,21 @@ def check_bash(command, cwd=""):
         # testing stay open: the point is to stop the work reaching anyone, not
         # to freeze the machine.
         if os.path.exists(STOP_FILE):
+            # `gh`'s own globals stripped, because `gh -R owner/repo pr comment`
+            # is `gh pr comment` and matching raw argv said otherwise -- so the
+            # stop that `stop.sh --now` promises freezes every outward effect
+            # was one `-R` away from letting a comment, a PR or an API write go
+            # out. `pr review` was fixed in the change that added its own rule
+            # and this loop was not, which is the same bug one rule over in the
+            # same file. Found by the independent review of that change.
+            gh_sub = _gh_rest(words)
             for prefix in OUTWARD:
-                head = [w.rsplit("/", 1)[-1] for w in words[: len(prefix)]]
-                matched = head == list(prefix) or (
-                    prefix[0] == "git" and _is_git(words, prefix[1]))
+                if prefix[0] == "gh":
+                    matched = ["gh"] + gh_sub[: len(prefix) - 1] == list(prefix)
+                else:
+                    head = [w.rsplit("/", 1)[-1] for w in words[: len(prefix)]]
+                    matched = head == list(prefix) or (
+                        prefix[0] == "git" and _is_git(words, prefix[1]))
                 if matched and prefix == ("gh", "api"):
                     # A read is not outward. A write is, however it is spelled:
                     # an explicit method, any field flag (which makes gh POST on
@@ -543,7 +554,9 @@ def check_bash(command, cwd=""):
         # one. Only in fleet-owned worktrees: pushing a half-finished branch by
         # hand is a normal thing to do and this must not argue about it.
         pushes = _is_git(words, "push")
-        opens_pr = [w.rsplit("/", 1)[-1] for w in words[:3]] == ["gh", "pr", "create"]
+        # Stripped, for the reason above: `gh -R owner/repo pr create` opened a
+        # PR out of an unreviewed fleet worktree.
+        opens_pr = _gh_rest(words)[:2] == ["pr", "create"]
         if (pushes or opens_pr) and _fleet_owns_this_worktree():
             sha = _head_sha()
             marker = os.path.join(_repo_root(), ".autofleet", "run", f"reviewed-{sha}")
@@ -1094,6 +1107,17 @@ def _stateful_checks():
         expect(2, {"command": "git push origin HEAD"}, "a stopped fleet cannot push")
         expect(2, {"command": "gh pr create --title x"}, "...cannot open a PR")
         expect(2, {"command": "gh pr comment 7 --body x"}, "...cannot comment")
+        # ...and not by naming the repository, which used to walk past the whole
+        # OUTWARD list: `words[:3]` is `["gh","-R","o/r"]`, which is no prefix at
+        # all. `stop.sh --now` promises to freeze every outward effect.
+        expect(2, {"command": "gh -R owner/repo pr comment 7 --body x"},
+               "...nor by naming the repository")
+        expect(2, {"command": "gh --repo owner/repo pr create --title x"},
+               "...nor with --repo, which takes its value the same way")
+        expect(2, {"command": "gh -R owner/repo api -X POST repos/o/r/issues/7/comments -f body=x"},
+               "...nor an API write behind a -R")
+        expect(0, {"command": "gh -R owner/repo pr view 7"},
+               "...while reading is still not outward")
         expect(2, {"command": "gh issue edit 7 --body x"}, "...cannot edit an issue")
         expect(0, {"command": "ctest --test-dir build"}, "...but can still run the tests")
         expect(0, {"command": "cmake --build build"}, "...and still build")
@@ -1116,6 +1140,8 @@ def _stateful_checks():
                        "a fleet worktree cannot push before the local review")
                 expect(2, {"command": "gh pr create --title x"},
                        "...nor open a PR")
+                expect(2, {"command": "gh -R owner/repo pr create --title x"},
+                       "...nor open one by naming the repository")
                 expect(0, {"command": "ctest --test-dir build"},
                        "...but the gate is only on what leaves")
                 os.makedirs(os.path.dirname(marker), exist_ok=True)

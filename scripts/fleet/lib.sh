@@ -149,6 +149,23 @@ FLEET_STOP="$FLEET_DIR/STOP"
 FLEET_DRAIN="$FLEET_DIR/DRAIN"
 FLEET_OWNED="$FLEET_DIR/worktrees"
 
+# Which reviewer this repository runs, normalised -- `local` or `github`.
+#
+# ONE PLACE, for the same reason `independent_reviews()` is one place: three
+# copies of `[ "${AUTOFLEET_REVIEW_MODE:-github}" = local ]` are three chances to
+# drift, and the drift that matters is between the shell and
+# `merge_gate.review_mode()`. Anything that is not exactly `local` is `github`,
+# which is what every consumer already did by hand and what the gate does -- so
+# a typo is the STRONG mode, refusing PRs rather than admitting them.
+# evals/lint.sh drives this function against the gate, spelling for spelling.
+fleet_review_mode() {
+  case "${AUTOFLEET_REVIEW_MODE:-github}" in
+    local) printf 'local\n' ;;
+    *)     printf 'github\n' ;;
+  esac
+}
+fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
+
 fleet_stopped() { [ -e "$FLEET_STOP" ]; }
 # A hard stop implies the drain, so this asks about both: a STOP left by a fleet
 # that predates DRAIN still means "start nothing new" to the dispatcher reading

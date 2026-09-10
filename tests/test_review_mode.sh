@@ -39,6 +39,15 @@
 #   test_review_mode.sh timeout   the reviewer wedges -> killed at
 #                                 AUTOFLEET_REVIEW_TIMEOUT and exit 7, rather
 #                                 than holding the worktree until the time-box.
+#   test_review_mode.sh midstop   the stop file appears WHILE a reviewer runs ->
+#                                 the reviewer is killed and review.sh exits 3.
+#                                 `stop --now` promises the agents are frozen,
+#                                 and a reviewer reading the stop once at the top
+#                                 kept its credentials for the rest of its budget.
+#   test_review_mode.sh reaper    a marker naming a live process that is NOT one
+#                                 of ours is never signalled, and a marker naming
+#                                 a dead pid is cleared. This is the second place
+#                                 the fleet signals a pid it read out of a file.
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
@@ -231,11 +240,17 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "$(ask)" = local ] || fail "a plain assignment is not read"
   ok "a plain AUTOFLEET_REVIEW_MODE=local is read"
 
-  # The shape scripts/fleet/config.sh writes its own defaults in. A host project
-  # that copies that style must not silently get `github`.
+  # The shape scripts/fleet/config.sh writes its own defaults in -- and the one
+  # a host config CANNOT use, because config.sh's default runs first and leaves
+  # the variable already set. This row used to assert the opposite, on the
+  # reasoning that a host copying that style must not silently get `github`.
+  # They do get `github`, from the shell, and the gate agreeing with them is the
+  # only thing that stops the two readers disagreeing in the blocking direction:
+  # a gate in local mode waiting for a review no dispatcher will start. Found by
+  # the independent review of the change that added the row.
   printf ': "${AUTOFLEET_REVIEW_MODE:=local}"\n' >"$cfg"
-  [ "$(ask)" = local ] || fail "the \`: \${X:=v}\` shape is not read"
-  ok "...and so is the \`: \${X:=local}\` shape config.sh uses"
+  [ "$(ask)" = github ] || fail "the gate reads a \`:=\` the shell ignores"
+  ok "the \`: \${X:=local}\` shape sets nothing, and the gate agrees"
 
   # Last wins, because that is what the shell would be left holding.
   printf 'AUTOFLEET_REVIEW_MODE=local\nAUTOFLEET_REVIEW_MODE=github\n' >"$cfg"
@@ -385,6 +400,63 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "$(n_reviews)" = 1 ] || fail "a second pass submitted a second review"
   ok "...and a second pass over the same head starts nothing"
   ;;
+
+# ------------------------------------------------------------------ midstop
+  midstop)
+    # `stop.sh --now` freezes the agents. A reviewer that read the stop once, at
+    # the top, was not one of them: 90 seconds into a 30-minute budget it kept
+    # running with this machine's gh credentials. Found by the independent
+    # review of the change that added it.
+    make_fixture; stub_reviewer hang
+    export AUTOFLEET_REVIEW_TIMEOUT=120
+    run_it 42 >"$WORK/out" 2>&1 &
+    runner=$!
+    # Wait until the reviewer is actually up, so this tests the mid-run path and
+    # not the check at the top.
+    await n_started 1 60 || fail "the reviewer never started"
+    : >"$AUTOFLEET_DIR/STOP"
+    waited=0
+    while kill -0 "$runner" 2>/dev/null && [ "$waited" -lt 60 ]; do
+      sleep 1; waited=$((waited + 1))
+    done
+    wait "$runner"; rc=$?
+    [ "$rc" = 3 ] || { cat "$WORK/out" >&2; fail "a stop mid-review did not exit 3 (got $rc)"; }
+    ok "a stop that appears mid-review kills the reviewer and exits 3"
+    pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+      && fail "the reviewer is still running after the stop"
+    ok "...and does not leave it running"
+    ;;
+
+# ------------------------------------------------------------------- reaper
+  reaper)
+    # The second place the fleet signals a pid it read out of a file. Nothing
+    # clears $REVIEWING_DIR across a dispatcher's death, so a stale marker
+    # outlives its process and the number is reused -- `kill -0` cannot tell.
+    make_fixture; stub_reviewer marked
+    mkdir -p "$AUTOFLEET_DIR/reviewing"
+
+    # A live pid that is NOT a reviewer, exactly as pid reuse produces.
+    sleep 120 &
+    stranger=$!
+    printf '%s %s\n' "$stranger" "$(cat "$GH_HEAD")" >"$AUTOFLEET_DIR/reviewing/99"
+    in_poll stop_reviewers >/dev/null 2>&1
+    if kill -0 "$stranger" 2>/dev/null; then
+      ok "a marker naming a live stranger is cleared without signalling it"
+    else
+      kill "$stranger" 2>/dev/null
+      fail "stop_reviewers SIGTERMed a process that is not one of ours"
+    fi
+    kill "$stranger" 2>/dev/null
+    [ -e "$AUTOFLEET_DIR/reviewing/99" ] && fail "the stale marker was not cleared"
+    ok "...and the marker is gone, so that PR is reviewable again"
+
+    # A marker naming nothing at all must not become `kill 0`, which is this
+    # shell's own process group.
+    printf 'notapid x\n' >"$AUTOFLEET_DIR/reviewing/98"
+    in_poll stop_reviewers >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/reviewing/98" ] && fail "an unreadable marker was not cleared"
+    ok "...and an unreadable marker is cleared rather than signalled"
+    ;;
 
 # ------------------------------------------------------------------- stale
   stale)

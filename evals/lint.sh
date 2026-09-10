@@ -387,7 +387,73 @@ else
   fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
 fi
 
-# 8. ...and normalises every spelling of `local` that the gate can READ.
+# 8. THE GATE AND THE SHELL AGREE, spelling for spelling.
+#
+#    This is the assertion whose absence let the two disagree in the BLOCKING
+#    direction. `merge_gate.review_mode()` read `: "${X:=local}"` as local while
+#    every shell consumer read github, because config.sh's own default runs
+#    before `.autofleet/config` is sourced -- so a host copying the style it sees
+#    all over config.sh got a gate sitting in local mode waiting for a review no
+#    dispatcher would ever start. The check that existed compared the gate to the
+#    INSTALLER, never to the shell that actually runs the fleet.
+#
+#    Driven by sourcing config.sh for real, not by a second regex. A paraphrase
+#    of the shell is what is being tested here; using one to test it would assert
+#    that two copies of the same mistake match. Found by the independent review.
+if python3 - <<'PYEOF'; then
+import os, shutil, subprocess, sys, tempfile
+sys.path.insert(0, ".github/scripts")
+# The environment wins in review_mode() -- deliberately, for --selftest -- so an
+# exported value here would make every answer below the same constant and the
+# assertion vacuous. That happened to the installer check beside this one.
+os.environ.pop("AUTOFLEET_REVIEW_MODE", None)
+from merge_gate import review_mode
+
+SPELLINGS = [
+    "AUTOFLEET_REVIEW_MODE=local",
+    "AUTOFLEET_REVIEW_MODE='local'",
+    'AUTOFLEET_REVIEW_MODE="local"',
+    "export AUTOFLEET_REVIEW_MODE=local",
+    "  AUTOFLEET_REVIEW_MODE=local",
+    ': "${AUTOFLEET_REVIEW_MODE:=local}"',
+    "# AUTOFLEET_REVIEW_MODE=local",
+    "AUTOFLEET_REVIEW_MODE=local\nAUTOFLEET_REVIEW_MODE=github",
+    "AUTOFLEET_REVIEW_MODE=whatever",
+    "",
+]
+root = os.getcwd()
+bad = []
+for text in SPELLINGS:
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, ".autofleet"))
+    open(os.path.join(d, ".autofleet", "config"), "w").write(text + "\n")
+    gate = review_mode(root=d)
+    # ...and what the shell is left holding, from config.sh itself.
+    # `fleet_review_mode`, not the raw variable: an unrecognised value leaves
+    # the variable holding itself while every consumer treats it as github, and
+    # comparing the raw string would report a disagreement that is not one --
+    # then be silenced by whoever normalised the comparison instead of the code.
+    # The function IS what the fleet asks, so it is what this asks.
+    shell = subprocess.run(
+        ["bash", "-c",
+         'REPO_ROOT="$1"; cd "$2"; AUTOFLEET_CONFIG="$1/.autofleet/config"; '
+         '. "$2/scripts/fleet/lib.sh"; fleet_review_mode',
+         "_", d, root],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    shutil.rmtree(d)
+    if gate != shell:
+        bad.append(f"{text!r}: gate says {gate!r}, the shell holds {shell!r}")
+if bad:
+    sys.exit("merge_gate.review_mode() and scripts/fleet/config.sh disagree:\n  "
+             + "\n  ".join(bad))
+PYEOF
+  ok "merge_gate.review_mode() and the shell read .autofleet/config the same way"
+else
+  fail "the gate and the shell disagree about the review mode (above); one of them will block every PR"
+fi
+
+# 9. ...and install.sh normalises every spelling of `local` that the gate can READ.
 #    This repo's own .autofleet/config says `local`, and install.sh seeds that
 #    file verbatim. If the installer's matcher is narrower than
 #    merge_gate.REVIEW_MODE_RE, a rewording of the line here silently ships the
@@ -396,6 +462,10 @@ fi
 #    Found by the local review of the change that added it.
 if python3 - <<'PYEOF'; then
 import re, subprocess, sys, tempfile, os, shutil
+# `review_mode()` reads the environment before the file, so an exported value
+# would make `seen_by_gate` the same constant for every spelling and this whole
+# assertion vacuous. Found by the independent review of the change that added it.
+os.environ.pop("AUTOFLEET_REVIEW_MODE", None)
 spellings = [
     "AUTOFLEET_REVIEW_MODE=local",
     "AUTOFLEET_REVIEW_MODE='local'",

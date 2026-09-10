@@ -561,8 +561,57 @@ except Exception:
 # In the default `github` mode this returns immediately and costs nothing.
 REVIEWING_DIR="$STATE_DIR/reviewing"
 
+# Is pid $1 one of OUR reviewers, or merely a live pid?
+#
+# `kill -0` alone is not the question. This is the second place in the fleet that
+# SIGNALS a pid it read out of a file -- `cmd_stop` is the other, and it uses
+# `dispatcher_alive`, whose whole reason for existing is that a marker a `kill -9`
+# left behind names whoever the OS has since given that number to. Nothing clears
+# $REVIEWING_DIR across a dispatcher's death, so a stale marker outlives its
+# process by hours and the number is reused: on the head-moved path that meant
+# SIGTERM to a stranger, and on the unmoved path a marker nothing could ever
+# reap, so that PR was never reviewed again. Both found by the independent review.
+#
+# Same three answers as dispatcher_alive: 0 yes, 1 no, 2 alive but ps would not
+# say. On "cannot say" the caller treats it as ours -- the conservative choice
+# here is to leave a possible reviewer running and its slot held, not to signal
+# an unidentified process.
+reviewer_alive() {
+  local pid="${1:-}" line
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  line="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [ -n "$line" ] || return 2
+  printf '%s\n' "$line" | grep -q 'review\.sh'
+}
+
+# Every reviewer this dispatcher started, stopped, and their markers cleared.
+#
+# Called from `cmd_stop --now` and at dispatcher start. Without the first,
+# `--now` -- which CLAUDE.md calls the one that "also freezes the agents" --
+# left an in-flight reviewer running for up to AUTOFLEET_REVIEW_TIMEOUT more
+# minutes: an agent holding this machine's gh credentials, unreaped because the
+# dispatcher that would have reaped it was the thing just killed, and invisible
+# to `fleet.sh status`, which counts markers. Without the second, markers from a
+# dispatcher that was `kill -9`d are inherited by the next one and never cleared.
+stop_reviewers() {
+  local marker held stopped=0
+  [ -d "$REVIEWING_DIR" ] || return 0
+  for marker in "$REVIEWING_DIR"/*; do
+    [ -e "$marker" ] || continue
+    held=""
+    read -r held _ <"$marker" 2>/dev/null || true
+    if reviewer_alive "$held"; then
+      kill "$held" 2>/dev/null && stopped=$((stopped + 1))
+    fi
+    rm -f "$marker"
+  done
+  [ "$stopped" -gt 0 ] && echo "  stopped $stopped local reviewer(s)."
+  return 0
+}
+
 review_open_prs() {
-  [ "${AUTOFLEET_REVIEW_MODE:-github}" = "local" ] || return 0
+  fleet_review_is_local || return 0
   mkdir -p "$REVIEWING_DIR"
 
   # OUR OWN PULL REQUESTS, and this is a limit rather than an oversight. The
@@ -587,13 +636,6 @@ review_open_prs() {
   # A marker whose first field is not a number is treated as gone, which is what
   # it is: nothing here can signal a process it cannot name.
   local marker held
-  reviewer_alive() {
-    case "${1:-}" in
-      ""|*[!0-9]*) return 1 ;;
-      0) return 1 ;;
-    esac
-    kill -0 "$1" 2>/dev/null
-  }
 
   # First: forget the reviewers that have finished, so the count below is of
   # what is actually running and a crashed one does not hold its PR forever.
@@ -622,6 +664,7 @@ for p in prs:
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
     if [ -e "$marker" ]; then
+      local for_head
       held=""; for_head=""
       read -r held for_head <"$marker" 2>/dev/null || true
       if [ "${for_head:-}" = "$head" ]; then
@@ -640,8 +683,12 @@ for p in prs:
       # time-box of the very agents that are waiting on them.
       [ "${running:-0}" -gt 0 ] && running=$((running - 1))
     fi
-    # Bounded by the same number as the worktrees, for the same reason: three is
-    # what a person can still read the output of.
+    # Bounded by the same number as the worktrees. NOT the same pool, and the
+    # difference is worth knowing before you raise either: at the cap this is
+    # three worktree agents plus three reviewers, six agents at once. Three
+    # apiece is still what a person can read the output of, and a reviewer is
+    # short-lived where a worktree agent is not -- but an earlier version of this
+    # comment implied one pool of three. Found by the independent review.
     if [ "${running:-0}" -ge "$MAX_WORKTREES" ]; then
       continue
     fi
@@ -1663,7 +1710,7 @@ cmd_status() {
   # quiet one: in `github` mode with no CLAUDE_CODE_OAUTH_TOKEN the review job
   # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
   # says which of the two reviewers this repository actually has.
-  if [ "${AUTOFLEET_REVIEW_MODE:-github}" = "local" ]; then
+  if fleet_review_is_local; then
     local n; n="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
     echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
   else
@@ -1773,6 +1820,12 @@ for t in json.load(sys.stdin)["result"]["terminals"]:
             && echo "    interrupted #$(basename "$f")"
         done
       fi
+      # ...and the local reviewers, which are children of the dispatcher rather
+      # than agents in a worktree, so the terminal interrupts above do not reach
+      # them. Before the dispatcher is killed: after it, nothing is left that
+      # knows which pids they were.
+      stop_reviewers
+
       # Only here. A drain has to leave the dispatcher alive: it is what reaps a
       # worktree once its PR merges, and killing it strands them.
       #
@@ -1951,6 +2004,12 @@ while that one is up."
   # announce that a dispatcher which reads the drain file perfectly well cannot
   # see it. A record with no pidfile is inert the other way round: nothing looks
   # at it, and the next dispatcher overwrites it.
+  # Markers left by a dispatcher that died without cleaning up. Their pids are
+  # not ours, and after a reboot or a few hours they name strangers -- so they
+  # are cleared before this dispatcher counts anything, rather than reaped
+  # one-by-one against a `kill -0` that cannot tell the difference.
+  stop_reviewers >/dev/null
+
   record_dispatcher
   echo $$ >"$PIDFILE"
   # ...but removed only while they still name THIS process. Nothing stops a

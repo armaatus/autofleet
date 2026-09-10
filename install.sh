@@ -125,6 +125,7 @@ echo "==> your answers (seeded once, never overwritten)"
 # Recorded BEFORE the loop, because after it the file exists either way and
 # nothing can tell a fresh seed from the host's own answers.
 had_config=false; [ -e "$TARGET/.autofleet/config" ] && had_config=true
+had_settings=false; [ -e "$TARGET/.claude/settings.json" ] && had_settings=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 
 # The seed is autofleet's own config, and autofleet runs itself on
@@ -158,13 +159,15 @@ import re, sys
 path, dry = sys.argv[1], sys.argv[2] == "true"
 lines = open(path).read().splitlines()
 
-# The same shapes merge_gate.REVIEW_MODE_RE reads -- `export`, quotes, and the
-# `: "${X:=local}"` form -- because a normalisation pinned to one spelling
-# silently ships `local` the day the line is reworded, which is the outcome this
-# exists to prevent. evals/lint.sh asserts the two stay in step.
+# The same shapes merge_gate.REVIEW_MODE_RE reads -- `export` and quotes -- and
+# for the same reason: a normalisation pinned to one spelling silently ships
+# `local` the day the line is reworded. Deliberately NOT the `: "${X:=local}"`
+# form: config.sh's own default runs first, so that shape sets nothing, and a
+# file that only *looks* like it selects local mode must not be rewritten as if
+# it did. evals/lint.sh asserts this stays in step with the gate.
 ASSIGN = re.compile(
-    r"""^[ \t]*(?:export[ \t]+)?(?::[ \t]*["']?\$\{)?"""
-    r"""AUTOFLEET_REVIEW_MODE:?=[ \t]*["']?local\b""",
+    r"""^[ \t]*(?:export[ \t]+)?"""
+    r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?local\b""",
     re.I,
 )
 hit = next((i for i, ln in enumerate(lines) if ASSIGN.match(ln)), None)
@@ -228,7 +231,21 @@ MARKETPLACE="anthropics/claude-plugins-official"
 
 merge_plugin_entry() {
   local dst="$TARGET/.claude/settings.json"
-  [ -f "$dst" ] || return 0     # seeded from ours, which already has the entry
+  # A settings.json this install just SEEDED already carries the entry, because
+  # it is a copy of ours -- there is nothing to merge and "kept (yours)" would be
+  # a lie about a file the host did not have. `$had_settings` is recorded before
+  # the seed loop for exactly that reason.
+  if ! $had_settings; then
+    echo "   .claude/settings.json  (seeded from ours, which already enables the plugin)"
+    return 0
+  fi
+  # ...and under --dry-run the seed has not been written, so there is nothing in
+  # the target to read: say what WOULD happen rather than returning in silence.
+  # A dry run quieter than the install it describes is the bug f5817b8 fixed.
+  if [ ! -f "$dst" ]; then
+    $DRY && echo "   would add enabledPlugins.$PLUGIN to .claude/settings.json"
+    return 0
+  fi
   python3 - "$dst" "$PLUGIN" "$DRY" <<'PYEOF'
 import json, sys
 path, plugin, dry = sys.argv[1], sys.argv[2], sys.argv[3] == "true"

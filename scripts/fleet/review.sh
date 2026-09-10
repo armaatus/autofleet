@@ -61,7 +61,7 @@ LOG_DIR="$FLEET_DIR/reviews"
 # The mode first, because every other check costs an API call and this one is a
 # file read. A `github`-mode repository reaching this script is not an error --
 # the dispatcher simply never calls it -- so this is a quiet 4, not a failure.
-if [ "${AUTOFLEET_REVIEW_MODE:-github}" != "local" ]; then
+if ! fleet_review_is_local; then
   echo "AUTOFLEET_REVIEW_MODE is '${AUTOFLEET_REVIEW_MODE:-github}', not 'local'."
   echo "The independent review runs in .github/workflows/claude-review.yml here;"
   echo "nothing for this script to do. docs/CONFIGURATION.md has the two modes."
@@ -231,9 +231,14 @@ reviewer=$!
 # counted by `running` and none visible to `fleet.sh status`, which counts
 # markers. Found by the independent review of the change that added this.
 #
-# `wait` is interrupted by a trapped signal, so the loop below exits and the
-# handler runs. EXIT as well as the two signals: an unexpected exit anywhere
-# after this point must not leave the reviewer behind either.
+# EXIT as well as the two signals: an unexpected exit anywhere after this point
+# must not leave the reviewer behind either.
+#
+# The loop below polls with `sleep 5` rather than blocking in `wait`, and bash
+# defers a trap until the current command returns -- so a SIGTERM lands up to
+# five seconds late. That is fine here and it is written down because an earlier
+# version of this comment claimed `wait` was being interrupted, which is the
+# sentence a reader trusts when judging whether the trap is prompt.
 kill_reviewer() {
   kill "$reviewer" 2>/dev/null
   # A short grace period, then insist -- the same shape as the deadline path.
@@ -249,6 +254,17 @@ while kill -0 "$reviewer" 2>/dev/null; do
     kill_reviewer
     echo "the reviewer ran past ${AUTOFLEET_REVIEW_TIMEOUT}s and was killed; see $log" >&2
     exit 7
+  fi
+  # ...and the stop is re-read, not read once at the top. `stop.sh --now`
+  # promises that nothing goes out and that the agents are frozen; a reviewer
+  # 90 seconds into a 30-minute budget was neither, and it holds this machine's
+  # gh credentials for the rest of that budget. The dispatcher also kills these
+  # directly now (fleet.sh, stop_reviewers), but a reviewer started by hand has
+  # no dispatcher to kill it. Found by the independent review.
+  if fleet_stopped; then
+    kill_reviewer
+    echo "STOPPED mid-review: $FLEET_STOP appeared; the reviewer was killed." >&2
+    exit 3
   fi
   sleep 5
   waited=$((waited + 5))
