@@ -172,7 +172,18 @@ fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
 # a helper that silently returns empty on the other.
 fleet_mtime() {
   [ -e "${1:-}" ] || return 1
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  local m
+  # GNU first, and the ANSWER is what decides -- not the exit status. `stat -f`
+  # means "file system status" to GNU stat, which SUCCEEDS and prints something
+  # that is not a timestamp, so `stat -f %m || stat -c %Y` never reached the
+  # fallback on Linux and handed its caller a string. `$(( now - "File: ..." ))`
+  # then aborted the arithmetic under `set -u`, which on the dispatcher means the
+  # hourly re-say kills the pass. Green on macOS, broken on every Linux host and
+  # in CI, which is where it was caught.
+  m="$(stat -c %Y "$1" 2>/dev/null)"
+  case "$m" in ''|*[!0-9]*) m="$(stat -f %m "$1" 2>/dev/null)" ;; esac
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$m"
 }
 
 fleet_stopped() { [ -e "$FLEET_STOP" ]; }
