@@ -58,6 +58,22 @@ cd "$REPO_ROOT"
 BRIEF="$REPO_ROOT/.claude/agents/reviewer.md"
 LOG_DIR="$FLEET_DIR/reviews"
 
+# The dispatcher's slot marker for THIS run, when the dispatcher started us.
+#
+# Dropped on every exit path, so a run that decides there is nothing to do frees
+# its slot in the same pass rather than at the top of the next one. The
+# dispatcher used to sweep finished reviewers only once per pass, which meant
+# three two-second exits could hold every slot forever and a fourth pull request
+# was never reviewed at all. Found by the independent review.
+#
+# Empty when a person ran this by hand, and then dropping it does nothing.
+#
+# There is exactly ONE EXIT trap in this file, installed here and extended once
+# the reviewer has a pid: a second `trap ... EXIT` REPLACES the first rather than
+# adding to it, and the half that got replaced would be the half nobody noticed.
+on_exit() { rm -f "${AUTOFLEET_REVIEW_MARKER:-}"; }
+trap on_exit EXIT
+
 # The mode first, because every other check costs an API call and this one is a
 # file read. A `github`-mode repository reaching this script is not an error --
 # the dispatcher simply never calls it -- so this is a quiet 4, not a failure.
@@ -200,10 +216,24 @@ echo "    log: $log"
 # without the standards and spec-vs-diff axes, which is most of what that pass is
 # for. `git show` joins `git diff` and `git log` for the same reason: a review
 # that cannot read a commit is reading the diff in the dark.
+# NOT `Bash(gh api:*)`, which claude-review.yml does grant. The workflow's
+# reviewer holds an Actions token scoped by that job's `permissions:` block, in a
+# container that is destroyed afterwards. This one holds the maintainer's own gh
+# login: every repository and organisation that account can reach, with none of
+# guard.py's fleet-worktree rules applying, because this deliberately runs from
+# the repo root so that they do not. `gh api` is the only grant on the list with
+# no ceiling -- `-X PATCH /repos/o/r/issues/N`, `-X DELETE /repos/<any-other>` --
+# and the reviewer is an agent reading a diff written by somebody else.
+#
+# The cost is inline comments, which need the API. Every local review so far has
+# put its findings in the body anyway, because the inline endpoint refuses on
+# unchanged lines -- and the brief already says a finding in the body beats a
+# finding in a log. docs/CONFIGURATION.md carries this as a row in what `local`
+# gives up. Found by the independent review.
 tools='Read,Grep,Glob,Skill,Task,Agent'
 tools="$tools,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 tools="$tools,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
-tools="$tools,Bash(gh pr review:*),Bash(gh api:*)"
+tools="$tools,Bash(gh pr review:*)"
 
 # A deadline, enforced here rather than with `timeout`: that is GNU coreutils and
 # this repo runs on macOS, where it is `gtimeout` if it is installed at all. A
@@ -245,8 +275,13 @@ kill_reviewer() {
   sleep 2
   kill -9 "$reviewer" 2>/dev/null
 }
+# The one EXIT handler, now also taking the reviewer with it. Redefined rather
+# than a second `trap`, which would have discarded the marker cleanup above.
+on_exit() {
+  kill "$reviewer" 2>/dev/null
+  rm -f "${AUTOFLEET_REVIEW_MARKER:-}"
+}
 trap 'kill_reviewer; exit 143' TERM INT
-trap 'kill "$reviewer" 2>/dev/null' EXIT
 
 waited=0
 while kill -0 "$reviewer" 2>/dev/null; do

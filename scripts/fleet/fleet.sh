@@ -576,13 +576,27 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 # say. On "cannot say" the caller treats it as ours -- the conservative choice
 # here is to leave a possible reviewer running and its slot held, not to signal
 # an unidentified process.
+#
+# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
+# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
+# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
+# the very review this file starts. `stop_reviewers()` SIGTERMs what this
+# matches, and it runs at every dispatcher start, so a recycled pid landing on an
+# agent's wait would have killed the wait: the exact failure this whole change
+# exists to remove, delivered by the machinery that removes it. Found by the
+# independent review.
+#
+# `dispatcher_alive` anchors for the same reason and was cited as this
+# function's model while not being followed. The pattern matches the path this
+# file actually spawns -- `<repo>/scripts/fleet/review.sh <pr>` -- with the
+# separator required on the left so `await-review.sh` cannot satisfy it.
 reviewer_alive() {
   local pid="${1:-}" line
   case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -q 'review\.sh'
+  printf '%s\n' "$line" | grep -Eq '(^|[[:space:]/])review\.sh([[:space:]]|$)'
 }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
@@ -637,16 +651,37 @@ review_open_prs() {
   # it is: nothing here can signal a process it cannot name.
   local marker held
 
-  # First: forget the reviewers that have finished, so the count below is of
-  # what is actually running and a crashed one does not hold its PR forever.
-  for marker in "$REVIEWING_DIR"/*; do
-    [ -e "$marker" ] || continue
-    held=""
-    read -r held _ <"$marker" 2>/dev/null || true
-    reviewer_alive "$held" || rm -f "$marker"
-  done
+  # Forget the reviewers that have finished, and count what is left. Both in one
+  # function, because the count has to be RE-TAKEN inside the loop below and a
+  # count that is only taken once is what starved the fourth pull request.
+  #
+  # A `review.sh` that finds a counting review already on the head exits 8 in
+  # about two API calls -- but it had claimed a slot, and the sweep that frees it
+  # ran only at the top of the pass. With three such PRs and MAX_WORKTREES=3, the
+  # first three took every slot every pass, the fourth hit `continue`, and it was
+  # never reviewed at all: it waited out await-review.sh three times, which is
+  # verbatim the failure #20 exists to remove. Reachable today -- a PR touching
+  # HUMAN_ONLY_PREFIXES sits open waiting for a person, and this one does. Found
+  # by the independent review.
+  live_reviewers() {
+    local m p n=0
+    for m in "$REVIEWING_DIR"/*; do
+      [ -e "$m" ] || continue
+      p=""
+      read -r p _ <"$m" 2>/dev/null || true
+      # Status 2 is "alive, but ps would not say" -- documented above as "treat
+      # it as ours", so it keeps its marker AND its slot. Only a definite no
+      # clears it.
+      reviewer_alive "$p"; local is=$?
+      # 0 is ours; 2 is "alive, but ps would not say", documented above as
+      # treat-it-as-ours, so it keeps both its marker and its slot. Only a
+      # definite 1 clears it.
+      if [ "$is" != 1 ]; then n=$((n + 1)); else rm -f "$m"; fi
+    done
+    printf '%s\n' "$n"
+  }
 
-  local running; running="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
+  local running; running="$(live_reviewers)"
 
   printf '%s' "$listing" | python3 -c '
 import json, sys
@@ -675,8 +710,18 @@ for p in prs:
       # ignore it and the round would be spent for nothing. Kill it and let the
       # next pass start one on what is there now.
       say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
-      reviewer_alive "$held" && kill "$held" 2>/dev/null
-      rm -f "$marker"
+      reviewer_alive "$held"; local is=$?
+      case "$is" in
+        0) kill "$held" 2>/dev/null; rm -f "$marker" ;;
+        # "Alive, but ps would not say." Removing the marker here declined to
+        # kill it AND freed its slot, which is an orphan nothing can ever reap --
+        # the opposite of the documented contract two lines up. Keep the marker;
+        # the next pass asks again, and if ps has an answer by then it is either
+        # killed or reaped normally. Found by the independent review.
+        2) say "  (ps would not say what pid $held is; leaving it and its slot alone)"
+           continue ;;
+        *) rm -f "$marker" ;;
+      esac
       # ...and it is no longer running, so it must not keep occupying a slot.
       # Without this, three reviewers whose heads all moved in one pass are all
       # killed and none replaced, costing a whole poll interval out of the
@@ -689,6 +734,11 @@ for p in prs:
     # apiece is still what a person can read the output of, and a reviewer is
     # short-lived where a worktree agent is not -- but an earlier version of this
     # comment implied one pool of three. Found by the independent review.
+    #
+    # RE-COUNTED, not carried: the reviewers this pass started for PRs that
+    # needed none have already exited by now, and a stale count is what let three
+    # two-second exits hold every slot for the whole pass, forever.
+    running="$(live_reviewers)"
     if [ "${running:-0}" -ge "$MAX_WORKTREES" ]; then
       continue
     fi
@@ -699,9 +749,13 @@ for p in prs:
     # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
     # carrying the remaining PRs, and a background child inheriting it can eat
     # them. The second PR in a two-PR pass then silently never gets reviewed.
-    "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
+    # The marker is written BEFORE the spawn is announced and removed by
+    # `review.sh` itself on every exit path, so a reviewer that decides there is
+    # nothing to do frees its slot immediately rather than at the top of the next
+    # pass. AUTOFLEET_REVIEW_MARKER is how it knows which file is its own.
+    AUTOFLEET_REVIEW_MARKER="$marker" \
+      "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"
-    running=$((running + 1))
     say "reviewing PR #$pr at ${head:0:8} (pid $!)"
   done
 }

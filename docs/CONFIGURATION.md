@@ -88,6 +88,18 @@ GitHub can attest to and becomes something the fleet asserts:
 | Reviewer's identity | a different account | **the author's account** |
 | What proves it | GitHub's own author field | a marker in the review body |
 | `--request-changes` | available | **refused by GitHub** — see below |
+| Reviewer's credential | an Actions token, scoped by the job's `permissions:`, in a container that is then destroyed | **your own `gh` login**, reaching every repo and org that account can |
+| Inline comments | yes (`gh api` is granted) | no — `gh api` is deliberately **not** granted, so findings go in the body |
+
+**The reviewer runs as you.** That is the row above with the widest blast
+radius, and it is not narrowed by `guard.py`: the reviewer runs from the repo
+root precisely so that the fleet-worktree rules do not apply to it, which is what
+lets it submit at all. So the ceiling on what it can do is its **tool allowlist**,
+and that is why `Bash(gh api:*)` — which `claude-review.yml` does grant — is
+withheld here. What is left can read the tree, read the pull request, and submit
+one review. It is an agent reading a diff written by somebody else; the prompt
+hardening in its brief is a mitigation, not a boundary, exactly as with the guard
+above.
 
 **`--request-changes` does not exist in `local` mode.** GitHub will not accept
 `CHANGES_REQUESTED` on a self-authored pull request (*"Review Can not request

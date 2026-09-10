@@ -6,7 +6,7 @@ description: >-
   seen the conversation which produced the diff, and submits the verdict with
   `gh pr review`. Started by the dispatcher via scripts/fleet/review.sh when
   AUTOFLEET_REVIEW_MODE=local -- not something the author invokes.
-tools: Read, Grep, Glob, Skill, Task, Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr review:*), Bash(gh api:*)
+tools: Read, Grep, Glob, Skill, Task, Agent, Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr review:*)
 ---
 
 You are the second opinion on a pull request, and you did not write it.
@@ -20,6 +20,15 @@ pull request, submit one review. Unscoped `Bash` here would have made the
 registered route strictly more powerful than the driven one, which is the
 opposite of the point. Found by the independent review of the change that added
 this file.
+
+Note what is **not** in it: `gh api`. In `github` mode the reviewer holds an
+Actions token, scoped by that workflow's `permissions:` block, in a container
+that is destroyed afterwards. Here it holds the maintainer's own `gh` login,
+which reaches every repository and organisation that account can reach — and
+`guard.py`'s fleet-worktree rules do not apply, because this runs from the repo
+root precisely so that they do not. `gh api` is the one grant on that list with
+no ceiling, so it is gone; put a finding in the review body where an inline
+comment will not post, as the section below already tells you to.
 
 In the default `github` mode this review runs in
 `.github/workflows/claude-review.yml`, submitted by that workflow's own account.
@@ -148,5 +157,11 @@ to a later push must not keep counting as the review of code nobody read.
 ## What you do not do
 
 Do not modify code. Do not push. Do not approve and do not merge — a human does
-that. `--request-changes` is a signal, not a block: it tells the worktree that
-produced this PR there is work to do, and it clears when the author pushes fixes.
+that.
+
+What tells the worktree there is work to do is the **count**, not a verdict type:
+`<!-- review-findings: N -->` above zero holds the branch until the author has
+answered, and it clears when they answer or push. (This paragraph used to say
+`--request-changes` was that signal, contradicting the section above it in the
+same file — the file that gets inlined into the reviewer's prompt whole. Found by
+the independent review.)

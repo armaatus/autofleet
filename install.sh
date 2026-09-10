@@ -38,6 +38,20 @@ PAYLOAD=(
   "evals/lint.sh"
   "evals/run.sh"
   "docs/WORKFLOW.md"
+  # Vendored because the payload POINTS AT IT: REVIEW.md links to it,
+  # scripts/fleet/review.sh and .claude/agents/reviewer.md cite it as where the
+  # local-review trade is written down, guard.py and merge_gate.py name it in
+  # refusals, and the next steps below send the reader to it -- as does the
+  # comment this installer writes into the host's own .autofleet/config. All of
+  # that shipped while the file did not, so the link 404'd in every host repo.
+  # Hard rule 1, found by the independent review.
+  "docs/CONFIGURATION.md"
+  # ...and RUNNERS.md, for the same reason and found by the same new assertion:
+  # `scripts/fleet/runner/README.md` ships as part of `scripts/fleet` and its
+  # first paragraph links here, so that link has been 404ing in every host repo
+  # since the runner directory existed. A host writing a second driver is exactly
+  # who needs it.
+  "docs/RUNNERS.md"
   "REVIEW.md"
 )
 
@@ -165,12 +179,17 @@ lines = open(path).read().splitlines()
 # form: config.sh's own default runs first, so that shape sets nothing, and a
 # file that only *looks* like it selects local mode must not be rewritten as if
 # it did. evals/lint.sh asserts this stays in step with the gate.
+#
+# ...and the LAST such assignment, because that is the one the shell is left
+# holding and the one REVIEW_MODE_RE reads. Rewriting the first would leave a
+# later `=local` standing under a normalised earlier line.
 ASSIGN = re.compile(
     r"""^[ \t]*(?:export[ \t]+)?"""
     r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?local\b""",
     re.I,
 )
-hit = next((i for i, ln in enumerate(lines) if ASSIGN.match(ln)), None)
+hits = [i for i, ln in enumerate(lines) if ASSIGN.match(ln)]
+hit = hits[-1] if hits else None
 if hit is None:
     raise SystemExit(0)
 if dry:

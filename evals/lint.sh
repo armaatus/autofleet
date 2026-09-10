@@ -358,6 +358,44 @@ if grep -q '/pulls/\\d+/reviews' .claude/hooks/guard.py; then
 else
   fail 'guard.py does not refuse `gh api .../pulls/N/reviews`, which is the same act by its REST name'
 fi
+#    ...and the GraphQL one, which is the spelling with no path in it at all and
+#    therefore the one a path-based rule cannot see. It had selftest rows and no
+#    wiring assertion, alone among the three. Found by the independent review.
+if grep -q 'addPullRequestReview' .claude/hooks/guard.py; then
+  ok '...and the addPullRequestReview mutation, which carries no path to match'
+else
+  fail 'guard.py does not refuse the addPullRequestReview mutation, the one review spelling with no URL in it'
+fi
+
+#    Everything the payload POINTS AT must be in the payload. docs/CONFIGURATION.md
+#    was cited by eight shipped files -- including a markdown link in REVIEW.md --
+#    while shipping nowhere, so the link 404'd in every host repo. Hard rule 1.
+#    Found by the independent review.
+if python3 - <<'PYEOF'; then
+import re, subprocess, sys
+payload = re.search(r"PAYLOAD=\((.*?)\n\)", open("install.sh").read(), re.S)
+if not payload:
+    sys.exit("install.sh has no PAYLOAD list to check")
+ships = set(re.findall(r'"([^"]+)"', payload.group(1)))
+docs = ["docs/WORKFLOW.md", "docs/CONFIGURATION.md", "docs/RUNNERS.md", "REVIEW.md"]
+searched = ["scripts/fleet", ".claude/hooks", ".claude/agents", ".github/scripts",
+            "evals/lint.sh", "REVIEW.md", "docs/WORKFLOW.md", "install.sh"]
+missing = []
+for doc in docs:
+    if doc in ships:
+        continue
+    hits = subprocess.run(["grep", "-rl", "--", doc.split("/")[-1]] + searched,
+                          capture_output=True, text=True).stdout.split()
+    hits = [h for h in hits if h != doc]
+    if hits:
+        missing.append(f"{doc} is named by {', '.join(sorted(hits))} and is not in PAYLOAD")
+if missing:
+    sys.exit("the payload points at documents it does not ship:\n  " + "\n  ".join(missing))
+PYEOF
+  ok "every doc the payload points at is a doc the payload ships"
+else
+  fail "install.sh ships files that link to documents it does not (above); those links 404 in every host repo"
+fi
 
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.

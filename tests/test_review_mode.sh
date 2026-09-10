@@ -358,6 +358,15 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "a reviewer past AUTOFLEET_REVIEW_TIMEOUT exits 7"
   [ "$spent" -lt 40 ] || fail "it waited ${spent}s, so the deadline is not enforced"
   ok "...after ${spent}s, not after the dispatcher's time-box"
+  # ...and the reviewer is actually DEAD. The exit code and the elapsed time are
+  # both satisfied by a run that gave up on a wedged agent and left it holding
+  # this machine's gh credentials -- delete kill_reviewer from the deadline
+  # branch and everything above stays green. The midstop phase checks this; the
+  # phase whose whole subject is the kill did not. Found by the independent
+  # review.
+  pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+    && fail "the wedged reviewer is still running after the deadline"
+  ok "...and the reviewer is gone, not merely given up on"
   ;;
 
 # --------------------------------------------------------------------- queue
