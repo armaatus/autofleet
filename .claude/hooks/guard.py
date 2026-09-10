@@ -114,6 +114,15 @@ OUTWARD = (
     ("gh", "pr", "create"),
     ("gh", "pr", "comment"),
     ("gh", "pr", "review"),
+    # Arming an auto-merge is an outward effect: it hands GitHub an instruction
+    # that outlives the stop. `stop.sh --now` promises nothing further reaches
+    # the outside world, and the merge rule below deliberately lets `--auto`
+    # past -- which is right when the fleet is running and wrong when it is not.
+    ("gh", "pr", "merge"),
+    ("gh", "pr", "close"),
+    ("gh", "issue", "close"),
+    ("gh", "workflow", "run"),
+    ("gh", "run", "rerun"),
     ("gh", "pr", "edit"),
     ("gh", "issue", "create"),
     ("gh", "issue", "comment"),
@@ -678,6 +687,68 @@ def check_bash(command, cwd=""):
             # PENDING review submitted later is a review too. `resolveReviewThread`
             # -- the one mutation scripts/fleet/resolve-thread.sh sends -- is
             # deliberately not in here.
+            # A GraphQL body this cannot READ is a GraphQL body it must not
+            # allow. `gh api` treats a field value beginning with `@` as a
+            # FILENAME -- `-F query=@/tmp/m.gql` -- so every mutation name below
+            # is off the command line and every substring test here passes. That
+            # is not a corner: writing the file is unguarded, and in local review
+            # mode the marker in a review body is the only thing separating the
+            # reviewer's verdict from the author's, so this forged one. Verified
+            # against this hook before it was closed.
+            #
+            # The rule is the honest one: from a fleet worktree, a `gh api`
+            # carrying an indirect field is refused outright, because nothing
+            # here can say what it does. Inline queries are unaffected, which is
+            # what scripts/fleet/resolve-thread.sh sends.
+            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
+                w.startswith("@") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=@", w)
+                for w in rest
+            ):
+                deny(
+                    "Blocked: `gh api` with a field read from a FILE, from a worktree the "
+                    "fleet\n"
+                    "opened. The rules here are about what the call does, and a body this "
+                    "hook\n"
+                    "cannot read is one it cannot judge -- `-F query=@file` puts the whole\n"
+                    "mutation out of its sight, which is how a review and a merge can be "
+                    "forged.\n"
+                    "\n"
+                    "Put the query on the command line instead, as "
+                    "scripts/fleet/resolve-thread.sh does."
+                )
+            # The mutations that ARE the acts other rules refuse, by their third
+            # name. `gh pr merge` and `gh api .../pulls/N/merge` have been
+            # blocked since they were written; `mergePullRequest` never was --
+            # the GraphQL coverage added for reviews stopped at reviews.
+            # `dismissPullRequestReview` is here because a dismissed review
+            # vanishes from merge_gate's `latest` while still counting as a
+            # review on the head, so dismissing the one that found something
+            # clears BOTH conditions at once.
+            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
+                "mergePullRequest" in w for w in rest
+            ):
+                deny(
+                    "Blocked: `mergePullRequest` is merging a pull request, which agents do "
+                    "not do\n"
+                    'on this repo (CLAUDE.md, "Finishing a task"). A human merges. This is '
+                    "the same\n"
+                    "act as `gh pr merge` and `gh api .../pulls/N/merge`, by its GraphQL name."
+                )
+            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
+                "dismissPullRequestReview" in w for w in rest
+            ):
+                deny(
+                    "Blocked: dismissing a review, from a worktree the fleet opened.\n"
+                    "\n"
+                    "A dismissed review still counts as a review on this head, but drops out "
+                    "of\n"
+                    "the latest-verdict list merge_gate reads -- so dismissing the one that "
+                    "found\n"
+                    "something clears the changes-requested block AND the answer requirement "
+                    "at\n"
+                    "once. Answer the findings instead:  "
+                    "./scripts/fleet/answer-review.sh \"<what you did>\""
+                )
             if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
                 "addPullRequestReview" in w or "submitPullRequestReview" in w
                 for w in rest
@@ -1112,6 +1183,16 @@ def _stateful_checks():
         # all. `stop.sh --now` promises to freeze every outward effect.
         expect(2, {"command": "gh -R owner/repo pr comment 7 --body x"},
                "...nor by naming the repository")
+        # Arming an auto-merge hands GitHub an instruction that OUTLIVES the
+        # stop, which is the definition of an outward effect. The merge rule
+        # lets `--auto` past on purpose; that is right while the fleet runs and
+        # wrong while it is stopped.
+        expect(2, {"command": "gh pr merge 7 --auto --squash"},
+               "...nor arm an auto-merge, which outlives the stop")
+        expect(2, {"command": "gh issue close 7"}, "...nor close an issue")
+        expect(2, {"command": "gh workflow run claude-review.yml -f pr=7"},
+               "...nor start a workflow")
+        expect(2, {"command": "gh run rerun 9"}, "...nor re-run one")
         expect(2, {"command": "gh --repo owner/repo pr create --title x"},
                "...nor with --repo, which takes its value the same way")
         expect(2, {"command": "gh -R owner/repo api -X POST repos/o/r/issues/7/comments -f body=x"},
@@ -1188,6 +1269,24 @@ def _stateful_checks():
                        because="third name")
                 expect(0, {"command": "gh api graphql -F id=x -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){clientMutationId} }'"},
                        "...but resolving a thread is what resolve-thread.sh sends")
+                # THE FOURTH SPELLING, and the one that made the other three
+                # decorative: `gh api` reads a field value beginning with `@` from
+                # a FILE, so the mutation name is never on the command line at
+                # all. Verified against this hook before it was closed.
+                expect(2, {"command": "gh api graphql -F query=@/tmp/m.gql"},
+                       "...nor a mutation this hook cannot read, from a file",
+                       because="cannot read")
+                expect(2, {"command": "gh api graphql -f query=@m.gql"},
+                       "...nor the -f spelling of the same",
+                       because="cannot read")
+                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews --input @body.json"},
+                       "...nor a REST body read from a file", because="cannot read")
+                # ...and the acts other rules refuse, by their GraphQL names.
+                expect(2, {"command": "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId} }'"},
+                       "...nor merging by the mutation name", because="GraphQL name")
+                expect(2, {"command": "gh api graphql -f query='mutation{ dismissPullRequestReview(input:{pullRequestReviewId:\"x\",message:\"m\"}){clientMutationId} }'"},
+                       "...nor dismissing the review that found something",
+                       because="dismissing a review")
                 # ...and a global option must not walk past any of it.
                 expect(2, {"command": "gh -R owner/repo pr review 7 --comment --body x"},
                        "...nor `gh -R owner/repo pr review`, which read as a different subcommand",
