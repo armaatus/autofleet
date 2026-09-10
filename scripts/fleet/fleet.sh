@@ -417,9 +417,15 @@ is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 # ONE ANSWER PER POLL, cached in $POLL_CACHE like every other repeated lookup in
 # this file: the launch loop asks up to MAX_WORKTREES times per pass and the
 # answer cannot change in between except by this loop launching something, which
-# is what `launch` invalidates it for. Three subprocesses for one answer is the
-# pattern `count_startable` exists to avoid, and an earlier version of this
-# claimed no new API call while making one per iteration.
+# is what `launch` invalidates it for. An earlier version of this claimed no new
+# API call while making one per iteration.
+#
+# It is still a SECOND read of the worktree list in a pass -- `live_count` has
+# one and `count_startable` takes a third -- so the "one answer per poll"
+# convention this follows within itself is not yet followed across the three.
+# Caching `live_worktrees` itself is the fix and it belongs to all three callers
+# rather than to this one; #30 has it. Named here rather than left as a comment
+# that quietly overstates. Found by the independent review.
 #
 # ...and it SAYS SO ONCE, not once per poll, which is a different question from
 # the cache: a three-hour foundation issue against a 60-second poll is 180
@@ -449,19 +455,34 @@ foundation_hold_say() {
 foundation_in_flight() {
   local cached="$POLL_CACHE/foundation" list n _path answer labels
   mkdir -p "$POLL_CACHE" 2>/dev/null
+  # TWO VALUES, because two is all anything reads. It used to write four --
+  # `no`, `unreadable`, `labels-unreadable-$n`, `$n` -- while only ever asking
+  # `= no`, so three of them implied a contract nothing honoured. The REASON for
+  # a hold is carried by the say-once marker, which is the thing that needs it.
+  # Found by the independent review.
   if [ -e "$cached" ]; then
     [ "$(cat "$cached")" = no ] && return 1
     return 0
   fi
 
   if ! list="$(live_worktrees)"; then
-    printf 'unreadable' >"$cached" 2>/dev/null || true
+    printf 'hold' >"$cached" 2>/dev/null || true
     foundation_hold_say "list-unreadable" \
       "could not read the worktree list, so whether a foundation issue is in flight" \
       "  cannot be answered -- launching nothing rather than guessing"
     return 0
   fi
 
+  # THE LIST IS MACHINE-WIDE, and this is where that starts to matter. `orca
+  # worktree list` is not scoped to a repository, while `poll_issue "$n"`
+  # resolves the number against THIS one -- so an unrelated Orca worktree whose
+  # linked issue number happens to match a `foundation` issue here stops the
+  # fleet launching anything, indefinitely, after a single line in the log.
+  #
+  # The premise is older than this function: `in_flight` and `count_startable`
+  # share it, where it merely inflated a count. Here it is newly fatal rather
+  # than merely inaccurate, which is why it is written down. #31 has the fix.
+  # Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
     # `-` is `live_worktrees` saying this worktree has no linked issue at all,
     # which is a worktree somebody opened by hand. That is an ANSWER, not a
@@ -470,7 +491,7 @@ foundation_in_flight() {
     # say. The distinction was implicit and is now written down.
     case "$n" in ''|-|*[!0-9]*) continue ;; esac
     if ! answer="$(poll_issue "$n")"; then
-      printf 'labels-unreadable-%s' "$n" >"$cached" 2>/dev/null || true
+      printf 'hold' >"$cached" 2>/dev/null || true
       foundation_hold_say "labels-$n" \
         "#$n is in flight and its labels would not read, so whether it is a" \
         "  foundation issue cannot be answered -- launching nothing"
@@ -478,7 +499,7 @@ foundation_in_flight() {
     fi
     labels="$(issue_labels_in "$answer")"
     if is_foundation "$labels"; then
-      printf '%s' "$n" >"$cached" 2>/dev/null || true
+      printf 'hold' >"$cached" 2>/dev/null || true
       foundation_hold_say "$n" \
         "#$n is a foundation issue and is still in flight; it lands alone, so" \
         "  nothing else starts until it does"
@@ -2341,7 +2362,12 @@ while that one is up."
           # lands alone: three worktrees each inventing their own version of a
           # shared header is the one merge conflict worth serialising to avoid.
           if is_foundation "$l" && [ "$live" -gt 0 ]; then
-            say "#$n is a foundation issue; waiting for the other $live worktree(s) to land"
+            # Through `foundation_hold_say`, so this door to the log is as quiet
+            # as the other one. The same rule announced every poll from here
+            # would have put back the 180 lines per three hours that the marker
+            # exists to prevent. Found by the independent review.
+            foundation_hold_say "waiting-$n" \
+              "#$n is a foundation issue; waiting for the other $live worktree(s) to land"
             break
           fi
           picked="$n"; title="$t"; labels="$l"

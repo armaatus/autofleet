@@ -355,7 +355,10 @@ WORK=""
 # failed assertion does not leave a `sleep` behind for half a minute.
 HELD_PID=""
 cleanup() {
-  [ -n "$HELD_PID" ] && kill "$HELD_PID" 2>/dev/null
+  # The GROUP first: a backgrounded dispatcher is a subshell whose child is the
+  # thing actually polling, and killing only the subshell leaves that child
+  # orphaned with the suite waiting on its pipe.
+  [ -n "$HELD_PID" ] && { kill -- -"$HELD_PID" 2>/dev/null || kill "$HELD_PID" 2>/dev/null; }
   [ -n "$WORK" ] && rm -rf "$WORK"
   return 0
 }
@@ -385,7 +388,28 @@ case "$1 ${2:-}" in
   "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
-  "worktree create") echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
+  #
+  # ...and that APPEARS IN THE LIST afterwards, which a real one does. While it
+  # did not, no test could reach the cache invalidation in `launch` -- the line
+  # carrying the whole within-a-pass half of "a foundation issue lands alone" --
+  # because the worktree a pass opened was invisible to the next `live_worktrees`
+  # in that same pass. Delete that line and the suite stayed green while the
+  # dispatcher went back to opening #1, #4 and #7 in eleven seconds. Found by the
+  # independent review of the change that added it.
+  "worktree create")
+    for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
+    python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
+import json, sys
+path, issue, where = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    doc = json.load(open(path))
+except Exception:
+    doc = {"result": {"worktrees": []}}
+doc.setdefault("result", {}).setdefault("worktrees", []).append(
+    {"linkedIssue": issue, "path": where + "-" + (issue or "x")})
+json.dump(doc, open(path, "w"))
+PYWT
+    echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
   "worktree ps")   cat "$ORCA_PS"; exit 0 ;;
   "terminal list") cat "$ORCA_TERMINALS"; exit 0 ;;
   "terminal send") echo '{"ok":true}'; exit 0 ;;
@@ -745,6 +769,31 @@ wait_for_log() {
   fail "the dispatcher never said '$1': $(cat "$WORK/run.log" 2>/dev/null)"
 }
 
+# A real dispatcher in its OWN PROCESS GROUP, and the way to stop it again.
+#
+# `cmd_stop` cannot: the dispatcher records `$$`, and inside the subshell
+# `in_fleet` runs that is the PHASE's pid, not the dispatcher's -- so a phase
+# that stops it by the book kills something else and leaves an orphan polling
+# forever. Harmless to the phase, which has already asserted and exited 0, and
+# not harmless to `./tests/run.sh`, which then waits on a pipe nothing will
+# close. Two phases hung the suite that way before this existed.
+#
+# `set -m` puts the job in its own group so `kill -- -PID` reaches every process
+# in it. Only phases that let the dispatcher LAUNCH something need this; a drain
+# that owns nothing still ends on its own, which is what `run_ended` is for.
+start_dispatcher() {
+  set -m
+  in_fleet cmd_run "$@" >"$WORK/run.log" 2>&1 &
+  HELD_PID=$!
+  set +m
+}
+
+stop_dispatcher() {
+  [ -n "$HELD_PID" ] || return 0
+  kill -- -"$HELD_PID" 2>/dev/null || kill "$HELD_PID" 2>/dev/null
+  HELD_PID=""
+}
+
 # ...and its exit, which is the thing a drain is supposed to reach on its own.
 run_ended() {
   local i=0
@@ -1031,23 +1080,84 @@ case "${1:-}" in
     cat >"$GH_ISSUES" <<'JSON'
 [{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
 JSON
-    # A DEADLINE, not --max-prs. `--max-prs` bounds only the FAILURE path: when
-    # the hold works nothing is ever launched, `opened` stays 0, #4 stays
-    # startable, and the run polls forever -- this phase hung the whole suite
-    # until the local review of it found that out. The two phases it was copied
-    # from terminate because their issue is DECLINED AND DROPPED, which empties
-    # the queue; nothing is dropped here.
-    #
-    # Three seconds against AUTOFLEET_POLL=1: pass one runs the launch loop with
-    # the deadline still ahead, which is the pass under test, and a later pass
-    # drains and returns. --max-prs 1 stays as the second bound, so a regression
-    # that launches ends the run at once rather than waiting the deadline out.
-    out="$(in_fleet cmd_run --auto --max-prs 1 --until "$(( $(date +%s) + 3 ))" 2>&1)"
-    grep -q "worktree create" "$ORCA_CALLS" \
-      && fail "the launch loop opened a worktree with a foundation issue in flight: $out"
-    grep -q "lands alone" <<<"$out" \
-      || fail "it launched nothing but did not say why: $out"
+    # A REAL DISPATCHER, backgrounded and then stopped. `--max-prs` bounds only
+    # the FAILURE path here -- when the hold works nothing is launched, `opened`
+    # stays 0, #4 stays startable, and the run polls forever. A `--until`
+    # deadline does not save it either: a drain keeps polling until nothing it
+    # owns is left. Both bounded versions hung the suite, and the second one hung
+    # it after the first review had already found the first.
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "the launch loop opened a worktree with a foundation issue in flight: $(cat "$WORK/run.log")"
     echo "ok: the launch loop opens nothing while a foundation issue is in flight"
+    stop_dispatcher
+    ;;
+
+  foundation_cold_start)
+    # THE INCIDENT, reproduced. A cold start with a foundation issue and an
+    # ordinary one both startable is exactly what opened #1, #4 and #7 in eleven
+    # seconds: `live` is 0, the foundation issue goes first, and every later
+    # candidate that pass is not itself a foundation issue.
+    #
+    # This is the phase that reaches `rm -f "$POLL_CACHE/foundation"` in
+    # `launch` -- the one line carrying the whole within-a-pass half of the rule,
+    # and the line no phase could reach while the stub's created worktree stayed
+    # invisible to the next `live_worktrees`. Delete it and the suite was green
+    # while the bug came straight back. Found by the independent review.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]},
+ {"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A REAL DISPATCHER, backgrounded and then stopped -- not a bounded
+    # `in_fleet cmd_run`. A run that launches something cannot come back on its
+    # own here: a drain keeps polling until nothing it owns is left, and this
+    # suite has no way to make a launched worktree reapable. Both bounded
+    # attempts hung the suite before this one.
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    # It launched the foundation issue and then held. One create, no more,
+    # however many passes it has managed by the time this reads.
+    n="$(grep -c "^worktree create" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "a cold start opened $n worktrees with a foundation issue among them: $(cat "$WORK/run.log")"
+    echo "ok: a cold start opens the foundation issue and then nothing else"
+    echo "ok: ...and says why it stopped"
+    stop_dispatcher
+    ;;
+
+  foundation_restart_speaks)
+    # The say-once marker lives in $STATE_DIR so it outlives a POLL. It must not
+    # outlive a DISPATCHER: one restarted while a foundation issue is still in
+    # flight would read back the previous run's marker and hold in total silence
+    # -- zero worktrees and not one line saying why, which is the exact case the
+    # function exists for. `rm -f "$FOUNDATION_HOLD_SAID"` at startup is the fix
+    # and nothing reached it. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # As a previous dispatcher left it: the hold already announced.
+    #
+    # `mkdir -p` first, and then CHECKED. The state dir does not exist until a
+    # dispatcher makes one, so this write silently failed and the phase passed
+    # for the wrong reason -- it was asserting that a fleet with no marker speaks,
+    # which every other phase already covers.
+    mkdir -p "$AUTOFLEET_DIR"
+    printf '1' >"$AUTOFLEET_DIR/holding-for-foundation"
+    [ -s "$AUTOFLEET_DIR/holding-for-foundation" ] \
+      || fail "could not seed the marker, so what follows would assert nothing"
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    echo "ok: a restarted dispatcher explains its own hold rather than inheriting silence"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "it also launched something while holding: $(cat "$WORK/run.log")"
+    echo "ok: ...and still opens nothing"
+    stop_dispatcher
     ;;
 
   foundation_said_once)
@@ -1085,7 +1195,10 @@ JSON
     in_poll forget_poll_answers foundation_in_flight foundation_in_flight foundation_in_flight \
       >/dev/null 2>&1
     n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
-    [ "${n:-0}" -le 1 ] \
+    # `-eq`, not `-le`: a `foundation_in_flight` that never read the list at all
+    # would satisfy `-le 1` while answering from nothing. Found by the
+    # independent review.
+    [ "${n:-0}" = 1 ] \
       || fail "three calls in one poll read the worktree list $n times"
     echo "ok: the answer is read once per poll, not once per candidate"
     ;;
@@ -2037,6 +2150,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
