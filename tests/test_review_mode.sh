@@ -123,6 +123,32 @@ exit 0
 STUB
   chmod +x "$WORK/bin/gh"
 
+  # ------------------------------------------------------------- the orca stub
+  #
+  # `fleet.sh` resolves the runner AT SOURCE TIME and `die`s if nothing answers
+  # (fleet.sh: `orca_cli_resolve || die "no orca CLI answers here"`). This file
+  # sources it -- `in_poll` does -- so on a machine with no Orca the subshell
+  # exited before running the function under test, and the phases that hid that
+  # behind `>/dev/null 2>&1` reported the CONSEQUENCE instead: "the stale marker
+  # was not cleared", "local mode did not review the open PR". Both passed on a
+  # laptop with Orca installed and failed in CI, where I first mistook the second
+  # for a timing flake and widened its timeout.
+  #
+  # Answers only what sourcing needs: a version, and an empty worktree list.
+  cat >"$WORK/bin/orca-stub" <<'OSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  --version) echo "orca 0.0.0-test"; exit 0 ;;
+esac
+case "$1 ${2:-}" in
+  "worktree list") echo '{"result":{"worktrees":[]}}'; exit 0 ;;
+esac
+echo '{"ok":true,"result":{}}'
+exit 0
+OSTUB
+  chmod +x "$WORK/bin/orca-stub"
+  export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
+
   GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
   GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
   GH_REVIEWS="$WORK/reviews"; printf '[]' >"$GH_REVIEWS"
@@ -208,6 +234,20 @@ await() {
 }
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
+
+# `review_open_prs`, with the reason kept rather than piped away.
+#
+# `fleet.sh` resolves the runner at SOURCE TIME and `die`s without one, so a
+# bare `>/dev/null 2>&1` here turns "nothing under test ran" into "local mode
+# did not review the open PR" -- which is the diagnosis this file cost once
+# already. The `reaper` phase was un-silenced when that was found and this one
+# was not; the lesson belongs to both.
+poll_review_open_prs() {
+  local out; out="$(in_poll review_open_prs 2>&1)"
+  grep -q "no orca CLI answers" <<<"$out" \
+    && fail "fleet.sh would not source, so nothing under test ran: $out"
+  return 0
+}
 # `review_open_prs` needs fleet.sh's own state, so it is sourced rather than run.
 in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; for fn in "$@"; do "$fn"; done); }
 
@@ -386,7 +426,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   make_fixture; stub_reviewer marked
 
   printf 'AUTOFLEET_REVIEW_MODE=github\n' >"$WORK/repo/.autofleet/config"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   [ -z "$(find "$AUTOFLEET_DIR/reviewing" -type f 2>/dev/null)" ] \
     || fail "github mode started a reviewer"
   ok "review_open_prs starts nothing in github mode"
@@ -394,13 +434,13 @@ import merge_gate; print(merge_gate.review_mode())'); }
   printf 'AUTOFLEET_REVIEW_MODE=local\n' >"$WORK/repo/.autofleet/config"
   # A draft is not asking for a verdict yet.
   printf '[{"number":42,"isDraft":true,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   [ -z "$(find "$AUTOFLEET_DIR/reviewing" -type f 2>/dev/null)" ] \
     || fail "a draft PR was sent for review"
   ok "...nor on a draft PR"
 
   printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   # The reviewer is a background child of a subshell that has since exited, so
   # what is waited for is the review it was started to produce, not its pid.
   await n_reviews 1 || fail "local mode did not review the open PR"
@@ -414,7 +454,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # started and then correctly declined to submit would leave the count at 1 and
   # look identical to one that never ran.
   before="$(n_started)"
-  in_poll review_open_prs >/dev/null 2>&1
+  poll_review_open_prs
   await n_reviews 1 20 >/dev/null 2>&1 || true
   [ "$(n_started)" = "$before" ] \
     || fail "a second pass started another reviewer on a head that already has one"
@@ -463,7 +503,12 @@ import merge_gate; print(merge_gate.review_mode())'); }
     sleep 120 &
     stranger=$!
     printf '%s %s\n' "$stranger" "$(cat "$GH_HEAD")" >"$AUTOFLEET_DIR/reviewing/99"
-    in_poll stop_reviewers >/dev/null 2>&1
+    # NOT `>/dev/null 2>&1`: a source-time `die` in here is invisible that way,
+    # and the phase then reports the consequence rather than the cause. That is
+    # exactly how this file passed on a laptop and failed in CI.
+    out="$(in_poll stop_reviewers 2>&1)"
+    grep -q "no orca CLI answers" <<<"$out" \
+      && fail "fleet.sh would not source, so nothing under test ran: $out"
     if kill -0 "$stranger" 2>/dev/null; then
       ok "a marker naming a live stranger is cleared without signalling it"
     else

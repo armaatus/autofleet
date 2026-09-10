@@ -355,7 +355,10 @@ WORK=""
 # failed assertion does not leave a `sleep` behind for half a minute.
 HELD_PID=""
 cleanup() {
-  [ -n "$HELD_PID" ] && kill "$HELD_PID" 2>/dev/null
+  # The GROUP first: a backgrounded dispatcher is a subshell whose child is the
+  # thing actually polling, and killing only the subshell leaves that child
+  # orphaned with the suite waiting on its pipe.
+  [ -n "$HELD_PID" ] && { kill -- -"$HELD_PID" 2>/dev/null || kill "$HELD_PID" 2>/dev/null; }
   [ -n "$WORK" ] && rm -rf "$WORK"
   return 0
 }
@@ -385,7 +388,29 @@ case "$1 ${2:-}" in
   "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
-  "worktree create") echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
+  #
+  # ...and that APPEARS IN THE LIST afterwards, which a real one does. While it
+  # did not, no test could reach the cache invalidation in `launch` -- the line
+  # carrying the whole within-a-pass half of "a foundation issue lands alone" --
+  # because the worktree a pass opened was invisible to the next `live_worktrees`
+  # in that same pass. Delete that line and the suite stayed green while the
+  # dispatcher went back to opening #1, #4 and #7 in eleven seconds. Found by the
+  # independent review of the change that added it.
+  "worktree create")
+    for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
+    python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
+import json, os, sys
+path, issue, where = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    doc = json.load(open(path))
+except Exception:
+    doc = {"result": {"worktrees": []}}
+doc.setdefault("result", {}).setdefault("worktrees", []).append(
+    {"linkedIssue": (None if os.environ.get("ORCA_CREATE_UNLINKED") else issue),
+     "path": where + "-" + (issue or "x")})
+json.dump(doc, open(path, "w"))
+PYWT
+    echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
   "worktree ps")   cat "$ORCA_PS"; exit 0 ;;
   "terminal list") cat "$ORCA_TERMINALS"; exit 0 ;;
   "terminal send") echo '{"ok":true}'; exit 0 ;;
@@ -525,6 +550,18 @@ import json, sys
 print(json.dumps({"result": {"terminals": [
     {"handle": "t1", "worktreePath": sys.argv[1], "agentIdentity": "claude"}]}}))
 ' "$WORK/wt" >"$ORCA_TERMINALS"
+}
+
+# A live worktree the dispatcher owns, linked to issue $1. `live_worktrees`
+# reads `linkedIssue`, which is the field the foundation check keys on -- a
+# fixture that set only `path` would make every issue answer "-" and the check
+# vacuously true.
+worktree_on_issue() {
+  python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"linkedIssue": sys.argv[1], "path": sys.argv[2]}]}}))
+' "$1" "$WORK/wt" >"$ORCA_WORKTREES"
 }
 
 # The two halves of what one `gh issue view N --json state,labels` would print.
@@ -731,6 +768,31 @@ wait_for_log() {
     sleep 0.1; i=$((i + 1))
   done
   fail "the dispatcher never said '$1': $(cat "$WORK/run.log" 2>/dev/null)"
+}
+
+# A real dispatcher in its OWN PROCESS GROUP, and the way to stop it again.
+#
+# `cmd_stop` cannot: the dispatcher records `$$`, and inside the subshell
+# `in_fleet` runs that is the PHASE's pid, not the dispatcher's -- so a phase
+# that stops it by the book kills something else and leaves an orphan polling
+# forever. Harmless to the phase, which has already asserted and exited 0, and
+# not harmless to `./tests/run.sh`, which then waits on a pipe nothing will
+# close. Two phases hung the suite that way before this existed.
+#
+# `set -m` puts the job in its own group so `kill -- -PID` reaches every process
+# in it. Only phases that let the dispatcher LAUNCH something need this; a drain
+# that owns nothing still ends on its own, which is what `run_ended` is for.
+start_dispatcher() {
+  set -m
+  in_fleet cmd_run "$@" >"$WORK/run.log" 2>&1 &
+  HELD_PID=$!
+  set +m
+}
+
+stop_dispatcher() {
+  [ -n "$HELD_PID" ] || return 0
+  kill -- -"$HELD_PID" 2>/dev/null || kill "$HELD_PID" 2>/dev/null
+  HELD_PID=""
 }
 
 # ...and its exit, which is the thing a drain is supposed to reach on its own.
@@ -984,6 +1046,328 @@ case "${1:-}" in
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
+  foundation_holds)
+    # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
+    # half of it -- a foundation issue would not JOIN running worktrees, and
+    # nothing stopped others joining a foundation issue. On a cold start `live`
+    # is 0, the foundation issue is picked first, and every later candidate that
+    # pass sails past a check that only asks about ITSELF. autofleet's own first
+    # run opened #1 (foundation), #4 and #7 in eleven seconds.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "a foundation issue in flight did not hold the launch loop (rc=$rc): $out"
+    echo "ok: a foundation issue in flight holds the launch loop"
+    grep -q "lands alone" <<<"$out" \
+      || fail "the hold did not say why: $out"
+    grep -q "#1" <<<"$out" || fail "the hold did not name the issue: $out"
+    echo "ok: ...and says which issue it is holding for"
+    ;;
+
+  foundation_launch_held)
+    # THE CALL SITE, not the function. Every other phase here calls
+    # `foundation_in_flight` directly, so deleting the one line that uses it --
+    # `if foundation_in_flight; then break; fi` in the launch loop -- left all of
+    # them green while the fleet went back to opening three worktrees on a
+    # foundation issue. That is hard rule 3's shape exactly, and the local review
+    # of this change found it.
+    #
+    # This drives cmd_run and asserts on what reached the CLI, which is the only
+    # thing that says whether a worktree would have been opened.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A REAL DISPATCHER, backgrounded and then stopped. `--max-prs` bounds only
+    # the FAILURE path here -- when the hold works nothing is launched, `opened`
+    # stays 0, #4 stays startable, and the run polls forever. A `--until`
+    # deadline does not save it either: a drain keeps polling until nothing it
+    # owns is left. Both bounded versions hung the suite, and the second one hung
+    # it after the first review had already found the first.
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "the launch loop opened a worktree with a foundation issue in flight: $(cat "$WORK/run.log")"
+    echo "ok: the launch loop opens nothing while a foundation issue is in flight"
+    stop_dispatcher
+    ;;
+
+  foundation_cold_start)
+    # THE INCIDENT, reproduced. A cold start with a foundation issue and an
+    # ordinary one both startable is exactly what opened #1, #4 and #7 in eleven
+    # seconds: `live` is 0, the foundation issue goes first, and every later
+    # candidate that pass is not itself a foundation issue.
+    #
+    # This is the phase that reaches `rm -f "$POLL_CACHE/foundation"` in
+    # `launch` -- the one line carrying the whole within-a-pass half of the rule,
+    # and the line no phase could reach while the stub's created worktree stayed
+    # invisible to the next `live_worktrees`. Delete it and the suite was green
+    # while the bug came straight back. Found by the independent review.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]},
+ {"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A REAL DISPATCHER, backgrounded and then stopped -- not a bounded
+    # `in_fleet cmd_run`. A run that launches something cannot come back on its
+    # own here: a drain keeps polling until nothing it owns is left, and this
+    # suite has no way to make a launched worktree reapable. Both bounded
+    # attempts hung the suite before this one.
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    # It launched the foundation issue and then held. One create, no more,
+    # however many passes it has managed by the time this reads.
+    n="$(grep -c "^worktree create" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "a cold start opened $n worktrees with a foundation issue among them: $(cat "$WORK/run.log")"
+    echo "ok: a cold start opens the foundation issue and then nothing else"
+    echo "ok: ...and says why it stopped"
+    stop_dispatcher
+    ;;
+
+  foundation_restart_speaks)
+    # The say-once marker lives in $STATE_DIR so it outlives a POLL. It must not
+    # outlive a DISPATCHER: one restarted while a foundation issue is still in
+    # flight would read back the previous run's marker and hold in total silence
+    # -- zero worktrees and not one line saying why, which is the exact case the
+    # function exists for. `rm -f "$FOUNDATION_HOLD_SAID"` at startup is the fix
+    # and nothing reached it. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # As a previous dispatcher left it: the hold already announced.
+    #
+    # `mkdir -p` first, and then CHECKED. The state dir does not exist until a
+    # dispatcher makes one, so this write silently failed and the phase passed
+    # for the wrong reason -- it was asserting that a fleet with no marker speaks,
+    # which every other phase already covers.
+    mkdir -p "$AUTOFLEET_DIR"
+    printf '1' >"$AUTOFLEET_DIR/holding-for-foundation"
+    [ -s "$AUTOFLEET_DIR/holding-for-foundation" ] \
+      || fail "could not seed the marker, so what follows would assert nothing"
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    echo "ok: a restarted dispatcher explains its own hold rather than inheriting silence"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "it also launched something while holding: $(cat "$WORK/run.log")"
+    echo "ok: ...and still opens nothing"
+    stop_dispatcher
+    ;;
+
+  foundation_break_is_local)
+    # The within-a-pass half must be a property of the DISPATCHER, not of the
+    # Orca CLI's read-your-writes behaviour. `foundation_in_flight` on the next
+    # iteration would also stop the pass -- but only if `worktree list` shows a
+    # worktree `create` returned moments ago AND that entry carries
+    # `linkedIssue`. A CLI that returns null there makes `live_worktrees` print
+    # `-`, which this deliberately reads as "on no issue", and the pass launches
+    # the next candidate behind the foundation issue: 1, 4 and 7 in eleven
+    # seconds with every phase green.
+    #
+    # So: a stub that succeeds at `create` and reports the worktree with NO
+    # linked issue, which is the case the fixture's read-your-writes create
+    # cannot express. Only the local `is_foundation "$labels" && break` saves
+    # this. Found by the independent review, which noted the phase for this half
+    # was asserting the fixture's guarantee rather than the dispatcher's.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]},
+ {"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    # A CLI that has not caught up: whatever it creates comes back unlinked.
+    export ORCA_CREATE_UNLINKED=1
+    start_dispatcher --auto
+    wait_for_log "lands alone"
+    n="$(grep -c "^worktree create" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "with an unlinked worktree the pass opened $n: $(cat "$WORK/run.log")"
+    echo "ok: the pass ends on the launch itself, not on what the CLI reports back"
+    stop_dispatcher
+    ;;
+
+  foundation_resays)
+    # A standing hold with no expiry goes quiet for as long as it stands, and
+    # the line explaining it scrolls off the log. Hourly by default; driven here
+    # with AUTOFLEET_HOLD_RESAY=1 so the phase costs a second rather than an
+    # hour. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    # TWO INTERVALS, not one. mtime has second granularity, so a 1-second
+    # interval makes "immediately again" depend on which side of a second
+    # boundary the two calls land -- flaky one run in three. Each half gets an
+    # interval that cannot be ambiguous for it.
+    export AUTOFLEET_HOLD_RESAY=3600
+    first="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$first" || fail "the first hold said nothing: $first"
+    quiet="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$quiet" \
+      && fail "it re-announced well inside the interval: $quiet"
+    echo "ok: a standing hold stays quiet inside the re-say interval"
+    # ...and now the same standing hold, with the interval long past.
+    export AUTOFLEET_HOLD_RESAY=1
+    sleep 2
+    later="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$later" \
+      || fail "a hold standing past the re-say interval never explained itself again: $later"
+    echo "ok: ...and says itself again once the interval has passed"
+    ;;
+
+  foundation_waiting_once)
+    # THE OTHER HOLD: a foundation CANDIDATE declining to join ordinary
+    # worktrees. It is the older of the two and it had no phase at all, which is
+    # how a fix for its noise shipped broken -- `foundation_in_flight` runs first
+    # every iteration, so the only route to this branch is that function falling
+    # through, and it cleared the marker on the way past. The marker was
+    # write-only and the line printed every poll. Found by the independent
+    # review.
+    make_fixture ok
+    # An ORDINARY worktree in flight, so foundation_in_flight says no...
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    # ...and the only startable issue is a foundation one, which is the branch.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
+JSON
+    start_dispatcher --auto
+    wait_for_log "waiting for the other"
+    # It said it once. Give it several more passes and it must not say it again.
+    before="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    sleep 3
+    after="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    [ "$before" = "$after" ] \
+      || fail "the waiting hold is announced every poll ($before then $after in three seconds)"
+    echo "ok: a foundation candidate waiting its turn is announced once, not once per poll"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "it announced the wait and launched the foundation issue anyway"
+    echo "ok: ...and it does not launch alongside the ordinary worktree"
+    stop_dispatcher
+    ;;
+
+  foundation_closed_frees)
+    # A foundation issue that has CLOSED -- merged, worktree not yet reaped --
+    # is finished, and holding the whole fleet for it until the reap catches up
+    # is a stall with nothing left behind it. `poll_issue` returns state and
+    # labels; this used only the labels. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    issue_state CLOSED
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "a closed foundation issue still held the launch loop"
+    echo "ok: a closed foundation issue holds nothing"
+    ;;
+
+  foundation_said_once)
+    # A three-hour foundation issue against a 60-second poll is 180 identical
+    # lines in fleet.log. The repo's idiom for "once" is a marker in $STATE_DIR
+    # that outlives the poll cache -- `queue-labels-$n` and `gaveup-$n` are the
+    # same shape -- and the first version of this said it every pass.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    first="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$first" || fail "the first hold said nothing: $first"
+    again="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$again" \
+      && fail "the hold is announced once per poll, which is 180 lines for a three-hour issue: $again"
+    echo "ok: a standing hold is said once, not once per poll"
+    # ...and it is news again when a DIFFERENT issue holds. The marker is keyed
+    # on what the hold is for, so a hold that moves is announced.
+    #
+    # Deliberately not "the labels flapped and came back": the marker is cleared
+    # by `launch`, not by the hold lifting, because the independent review found
+    # that clearing it on the no-hold path deleted it one step before the other
+    # hold could read it. A standing hold that briefly stopped being one, with
+    # nothing launched in between, has told the reader nothing new -- so it stays
+    # quiet, and that is the trade this phase records rather than papers over.
+    worktree_on_issue 2
+    third="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
+    grep -q "lands alone" <<<"$third" \
+      || fail "a hold for a different issue was never announced: $third"
+    grep -q "#2" <<<"$third" || fail "it announced the hold but named the wrong issue: $third"
+    echo "ok: ...and a hold that moves to another issue is announced again"
+    ;;
+
+  foundation_one_lookup)
+    # One answer per poll. The launch loop asks up to MAX_WORKTREES times and
+    # the answer cannot change in between except by this loop launching, which
+    # is what invalidates it -- so three subprocesses for one answer is the
+    # pattern count_startable exists to avoid.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_poll forget_poll_answers foundation_in_flight foundation_in_flight foundation_in_flight \
+      >/dev/null 2>&1
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    # `-eq`, not `-le`: a `foundation_in_flight` that never read the list at all
+    # would satisfy `-le 1` while answering from nothing. Found by the
+    # independent review.
+    [ "${n:-0}" = 1 ] \
+      || fail "three calls in one poll read the worktree list $n times"
+    echo "ok: the answer is read once per poll, not once per candidate"
+    ;;
+
+  foundation_frees)
+    # ...and only a foundation issue holds it. An ordinary worktree must not
+    # stop the fleet filling its other two slots.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "an ordinary issue in flight held the launch loop"
+    echo "ok: an ordinary issue in flight does not hold it"
+    ;;
+
+  foundation_none)
+    # An empty fleet holds nothing, which is the cold-start path.
+    make_fixture ok
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "an empty fleet held the launch loop"
+    echo "ok: an empty fleet holds nothing"
+    ;;
+
+  foundation_blind)
+    # The label lookup fails. HOLDING is the answer, matching in_flight's
+    # documented stance: launching on a guess is the expensive direction, and a
+    # foundation issue guessed wrong is the merge conflict the rule exists to
+    # avoid. The next pass asks again.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels FAIL
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "an unreadable label held nothing (rc=$rc): $out"
+    echo "ok: a label lookup that fails holds rather than launches"
+    grep -q "cannot be answered" <<<"$out" || fail "it did not say it could not tell: $out"
+    echo "ok: ...and says it could not tell, rather than reporting a foundation issue"
+    ;;
+
+  foundation_cli_blind)
+    # ...and the same when the worktree list itself will not answer. There is
+    # then nothing to reason from at all -- not even the count -- so holding is
+    # the only honest answer. `live_count` already refuses to guess from this
+    # shape; this is the same refusal one question later.
+    make_fixture ok
+    # A list that comes back in a shape nothing can read, which is what the
+    # dispatcher actually sees when the CLI half-answers -- the stub's
+    # `worktree list` succeeds in every mode, so making the CLI "fail" would not
+    # reach this path.
+    printf 'not json at all\n' >"$ORCA_WORKTREES"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 0 ] || fail "an unreadable worktree list held nothing (rc=$rc): $out"
+    echo "ok: a worktree list that will not parse holds too"
+    grep -q "cannot be answered" <<<"$out" || fail "it did not say it could not tell: $out"
+    echo "ok: ...and says so rather than reporting an empty fleet"
+    ;;
+
   queue_skips)
     make_fixture ok
     cat >"$GH_ISSUES" <<'JSON'
@@ -1879,6 +2263,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
