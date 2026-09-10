@@ -138,10 +138,18 @@ runner_dispatcher_hint() {
 # On failure, prints the runtime's own words instead -- the caller shows them,
 # because "could not create it" with nothing after it is the same message
 # whether the app is down or the branch already exists.
+#
+# Which needs FLEET_RUN_CAPTURE_STDERR, and did not have it: a CLI says why on
+# stderr, so without the prefix `launch` printed "could not create it:" followed
+# by nothing at all -- word for word the message this function exists to avoid.
+# `main` had the same omission at the callsite; it became a broken promise when
+# docs/RUNNERS.md started stating it, and a second driver reading that page would
+# have implemented it correctly while the reference driver did not. Found by the
+# independent review.
 runner_worktree_create() {
   local repo="$1" name="$2" issue="$3" agent="$4" prompt="$5" comment="$6"
   local out rc; out="$(mktemp)"
-  orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
+  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
     --repo "path:$repo" \
     --name "$name" \
     --issue "$issue" \

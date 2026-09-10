@@ -145,6 +145,29 @@ fleet_run_with_deadline() {
   wait "$child"
 }
 
+# One row out of a `path`-keyed TSV, by path: the $2 column of the first line
+# whose $1 column equals $3, reading the table on stdin.
+#
+# ONE copy of it, because the same lookup exists twice -- the agent terminal in a
+# worktree, and that worktree's agent state -- and it had the SAME BUG in both,
+# fixed in both at once. `awk -v` REINTERPRETS what it assigns, so a worktree
+# path containing a backslash arrived as `/Users/joe/mydir` when it was
+# `/Users/joe/my\dir`, the comparison went false, and the caller was told there
+# is no agent there. That is `stop` never interrupting an agent, and
+# `agent-autostart.sh` giving up after two minutes with the prompt unsent -- both
+# silent, because "no agent in that worktree" is indistinguishable from the
+# truth. The python these replaced took the path as `sys.argv` and were immune;
+# `ENVIRON[]` is awk's equivalent.
+#
+# The COLUMN numbers still go through `-v`, and that is safe: they are integers
+# this file writes. Only the path is attacker-shaped. Merging the two copies was
+# the independent review's suggestion, so the next such lookup cannot
+# reintroduce it.
+fleet_field_for_path() {
+  AUTOFLEET_AWK_PATH="$3" awk -F'\t' -v k="$1" -v v="$2" \
+    '$k == ENVIRON["AUTOFLEET_AWK_PATH"] { print $v; exit }'
+}
+
 # The one contract function with no runner in it: the agent terminal in ONE
 # worktree, filtered out of the machine-wide listing the driver does provide.
 # Defined HERE, above the driver source, so a driver whose runtime can answer it
@@ -152,22 +175,12 @@ fleet_run_with_deadline() {
 # ship the same filter. The stub driver in tests/test_fleet.sh carried a
 # verbatim copy of it until the independent review said so.
 #
-# The path arrives through the ENVIRONMENT rather than through `awk -v`, because
-# a worktree path can contain anything a filename can and `-v` REINTERPRETS what
-# it is given: `/Users/joe/my\dir` becomes `/Users/joe/mydir`, the comparison is
-# false, and the caller is told this worktree has no agent. That is the silent
-# half of two failures -- `stop` never interrupting the agent, and
-# `agent-autostart.sh` giving up after two minutes with the prompt unsent. The
-# python this replaced took it as `sys.argv` and was immune; `ENVIRON[]` is the
-# awk equivalent. Found by the independent review.
-#
 # Non-zero only when the listing could not be read; no output means there is no
 # agent there, which is a real answer.
 runner_agent_terminal() {
   local list
   list="$(runner_agent_terminals)" || return 1
-  printf '%s\n' "$list" \
-    | AUTOFLEET_AWK_PATH="$1" awk -F'\t' '$2 == ENVIRON["AUTOFLEET_AWK_PATH"] { print $1; exit }'
+  printf '%s\n' "$list" | fleet_field_for_path 2 1 "$1"
 }
 
 # The runner driver: everything about creating a worktree, opening a terminal

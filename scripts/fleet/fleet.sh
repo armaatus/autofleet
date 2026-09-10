@@ -1001,7 +1001,11 @@ remove_worktree() {
   if [ "$rc" = 0 ]; then rm -f "$out"; finish_removal "$path" "$watcher" "$projects"; return 0; fi
   if [ "$rc" = 2 ]; then
     rm -f "$out"
-    say "  the runner did not answer in ${deadline}s -- nothing was torn down, and this is not a refusal"
+    # No "in ${deadline}s": rc 2 is also a runner that could not be reached at
+    # all, which returns immediately. Naming seconds never spent is worst on the
+    # one path where a person is being asked to tell a restarting app from a
+    # wedged one. Found by the independent review.
+    say "  the runner did not answer -- nothing was torn down, and this is not a refusal"
     return 2
   fi
   # Labelled, because the caller's "could not remove it" comes after these and
@@ -1421,12 +1425,11 @@ notice_stalled() {
     [ -e "$f" ] || continue
     num="$(basename "$f")"; path="$(cat "$f")"
     [ -d "$path" ] || continue
-    # Through the environment, not `awk -v`, which reinterprets backslashes in
-    # what it assigns -- a worktree path with one in it would never match, and
-    # this watcher would report every agent in it as not waiting, forever. See
-    # runner_agent_terminal in lib.sh, which had the same defect.
-    state="$(printf '%s' "$listing" \
-      | AUTOFLEET_AWK_PATH="$path" awk -F'\t' '$1 == ENVIRON["AUTOFLEET_AWK_PATH"] { print $2; exit }')"
+    # lib.sh's helper rather than an awk here: this lookup and
+    # runner_agent_terminal's are the same one with the columns swapped, and they
+    # had the same `awk -v` defect, fixed in both at once. The reason lives on
+    # the helper now, in one place.
+    state="$(printf '%s' "$listing" | fleet_field_for_path 1 2 "$path")"
     [ "$state" = "waiting" ] || {
       rm -f "$STATE_DIR/stalled-$num" "$STATE_DIR/stall-labels-$num"; continue; }
     # Once per stall, not once per poll -- and checked before the lookup, so a

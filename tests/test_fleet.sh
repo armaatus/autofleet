@@ -397,6 +397,11 @@ case "$1 ${2:-}" in
   # dispatcher went back to opening #1, #4 and #7 in eleven seconds. Found by the
   # independent review of the change that added it.
   "worktree create")
+    # On STDERR, where a CLI actually reports a failure -- a stub that printed it
+    # on stdout would pass a driver that drops stderr on the floor, which is the
+    # regression this mode exists for. Same reasoning as the `set` branch below.
+    [ "$mode" = create_fails ] && {
+      echo "fatal: a branch named '44-a-second-issue' already exists" >&2; exit 1; }
     for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
     python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
 import json, os, sys
@@ -961,6 +966,28 @@ case "${1:-}" in
     # with nothing left in it for as long as the app is down.
     grep -q "^gone rc=0$" <<<"$out" \
       || fail "a worktree that no longer exists was not reported as removed while the runner was unreachable: $out"
+
+    # The arity refusal, which docs/RUNNERS.md promotes to the contract -- rc 2
+    # means the CALLER is malformed -- and which nothing asserted in either
+    # place. Delete the guard and `args` is empty; `"${args[@]}"` under `set -u`
+    # on bash 3.2 is a fatal unbound variable INSIDE the driver, so the whole
+    # `card` call dies differently and the suite stays green either way. Found by
+    # the independent review.
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_set /some/worktree;         echo "none rc=$?"
+      runner_worktree_set /some/worktree comment; echo "odd rc=$?"
+    ' 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "a malformed pair list killed the caller from inside the driver instead of being refused: $out"
+    grep -q "^none rc=2$" <<<"$out" \
+      || fail "a board update with no key/value pairs at all was not refused: $out"
+    grep -q "^odd rc=2$" <<<"$out" \
+      || fail "a key with no value was rounded down instead of refused, so the update silently did less than it was asked: $out"
+
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
     ;;
   runner_stub)
@@ -1100,6 +1127,20 @@ case "${1:-}" in
     [ -s "$ORCA_CALLS" ] \
       && fail "something outside scripts/fleet/runner/ still reaches for the orca CLI: $(cat "$ORCA_CALLS")"
     echo "ok: dispatcher, reap and both worktree hooks run on a driver that is not Orca"
+    ;;
+  create_says)
+    # `launch` printing "could not create it:" and then nothing is the same line
+    # whether the app is down or the branch already exists, and it repeats every
+    # pass with the issue left in the queue. The driver has to relay the
+    # runtime's stderr for that line to be worth anything -- docs/RUNNERS.md says
+    # so, and until the independent review said otherwise nothing asserted it.
+    make_fixture create_fails
+    out="$(in_fleet launch 44 "a second issue" 2>&1)"
+    grep -q "could not create it" <<<"$out" \
+      || fail "a refused worktree creation was not reported at all: $out"
+    grep -q "already exists" <<<"$out" \
+      || fail "the runtime said why on stderr and the driver dropped it, so the log cannot tell a refused branch name from an app that is not running: $out"
+    echo "ok: a refused worktree creation carries the runtime's own reason"
     ;;
   card_says)
     make_fixture set_fails
@@ -2526,6 +2567,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved" >&2
     exit 2 ;;
 esac

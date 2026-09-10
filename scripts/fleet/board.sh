@@ -49,12 +49,17 @@ args=()
 # The card is addressed by PATH, and $REPO_ROOT is bash's logical pwd -- it keeps
 # whatever symlinked prefix the agent's shell had. If that differs from the path
 # the runtime recorded for this worktree, every update from inside it fails. The
-# assumption is not new: `agent-autostart.sh` has matched the runtime's
-# `worktreePath` against this same derivation since it was written, in every
-# worktree the fleet has opened. It is written down because the failure would
-# otherwise look like a runner problem, and because the previous form -- the
-# runner resolving "the active worktree" from the calling terminal -- could not
-# be wrong. Raised by the independent review; the refusal below is loud for it.
+# `agent-autostart.sh` derives its path the same way and has matched the
+# runtime's record in every worktree the fleet has opened -- but that is WEAKER
+# evidence here than it looks, and the independent review was right to say so:
+# that script is started by setup.sh from the runner's own hook, so its cwd is
+# the recorded path by construction and could not have disagreed. THIS script is
+# run by an agent, from whatever cwd the agent is in, which can carry a
+# symlinked prefix the runtime's record does not.
+#
+# So it is an assumption, written down rather than relied on quietly. What bounds
+# the cost is the refusal below: this fails loudly, naming the card as stale,
+# rather than reporting a board update that did not happen.
 
 if out="$(runner_worktree_set "$REPO_ROOT" "${args[@]}" 2>&1)"; then
   echo "board: ${status:+$status; }${comment}"

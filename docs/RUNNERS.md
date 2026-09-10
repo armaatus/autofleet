@@ -41,6 +41,13 @@ both are load-bearing rather than stylistic:
 Nothing below returns JSON. A caller that parses JSON has hardcoded one runner,
 which is the thing this seam exists to prevent.
 
+Where a function relays **the runtime's own words** on failure, it relays **at
+most the first three lines**. That bound is the driver's, not the caller's: the
+dispatcher used to cap them itself and gave that up when the calls moved, so a
+driver relaying a verbose runtime unchecked would flood `fleet.log` with nothing
+left to stop it. Three lines is what the first line of a refusal plus its
+context has always taken. Raised by the independent review.
+
 ### Is it there
 
 ```sh
@@ -128,12 +135,15 @@ runner_terminal_enter <handle>
 runner_terminal_interrupt <handle>
 ```
 
-- **`runner_agent_states`** is ONE listing for the whole machine, not one call
-  per worktree: the dispatcher matches it against every owned worktree each
+- **`runner_agent_states`** is non-zero when the listing could not be read; a
+  worktree with no agent is simply absent, which is a real answer. It is ONE
+  listing for the whole machine, not one call per worktree: the dispatcher matches it against every owned worktree each
   poll, and three deadline-length calls a minute for an answer that arrives in a
   single response is the shape this replaced.
-- **`runner_agent_terminals`** lists only live agent tabs — not the shell and
-  log tabs beside them, and not handles whose terminal is already gone. The
+- **`runner_agent_terminals`** is non-zero when the listing could not be read;
+  an empty list means there are none, which the caller has to be able to tell
+  apart. It lists only live agent tabs — not the shell and log tabs beside them,
+  and not handles whose terminal is already gone. The
   worktree path is on every line because it is what keeps three parallel
   worktrees from sending into each other's agents.
 - **`runner_terminal_draft`** is the composer text an agent has NOT sent, as
