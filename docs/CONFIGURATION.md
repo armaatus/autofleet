@@ -126,9 +126,16 @@ meaningful:
    `.autofleet/config` at `pull_request.base.sha`, so a PR cannot switch its own
    repository into the weaker mode as part of the change that mode is judging.
 3. **Out of the ordinary reach of the author.** `guard.py` refuses, from a
-   fleet-owned worktree, all three ways to submit a review: `gh pr review`,
-   `gh api .../pulls/N/reviews`, and the `addPullRequestReview` GraphQL
-   mutation. The dispatcher runs the reviewer from the repo root, which is not a
+   fleet-owned worktree, every way to submit a review it can recognise:
+   `gh pr review`, `gh api .../pulls/N/reviews`, the `addPullRequestReview` and
+   `submitPullRequestReview` GraphQL mutations — and any `gh api` carrying a
+   body it cannot read (`--input`, `@file`), because a payload this hook cannot
+   inspect is one it cannot judge.
+
+   *Recognise* is the operative word, and it is not a synonym for *all*. This
+   list has grown twice, each time because a review found a spelling that walked
+   past it — first the REST name, then GraphQL, then a body in a file. Treat it
+   as the set of mistakes caught so far, not as a proof. The dispatcher runs the reviewer from the repo root, which is not a
    fleet worktree, which is how it still submits.
 
    *Reach*, not *possibility*: this is a hook over a command line, not a
