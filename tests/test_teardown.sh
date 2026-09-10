@@ -374,8 +374,55 @@ FAKE
     echo "PASS: teardown activates every compose profile ($(echo $profiles | tr '\n' ' '))"
     ;;
 
+  mtime)
+    # `fleet_mtime` reads a file's mtime with BSD stat or GNU stat, and the two
+    # spell it differently. GNU's `-f` is --file-system, takes no format, and so
+    # reads `%m` as a SECOND FILE: it fails on that one, succeeds on the real
+    # one, and prints a filesystem block to stdout on the way out. The caller
+    # then did arithmetic on a string beginning `File:`, and bash under `set -u`
+    # evaluated `File` as a variable -- so every foundation hold on Linux died
+    # where it should have re-explained itself, and `main` was red for it while
+    # this suite passed on macOS, where the BSD spelling answered first.
+    #
+    # Both halves are asserted here, because the ordering fix alone would have
+    # gone green on the pair that happened to break: a stat whose output is not a
+    # number must be "could not tell", not a string handed onwards.
+    work="$(mktemp -d)"
+    printf 'x' >"$work/f"
+    out="$( REPO_ROOT="$REPO_ROOT" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      fleet_mtime "$1"; echo "rc=$?"
+      fleet_mtime "$1/nope"; echo "missing rc=$?"
+    ' _ "$work" 2>&1 )"
+    grep -qE '^[0-9]+$' <<<"$out" \
+      || fail "fleet_mtime did not answer a plain epoch second for a file that exists: $out"
+    grep -q "^rc=0$" <<<"$out" || fail "fleet_mtime failed on a file that is there: $out"
+    grep -q "^missing rc=1$" <<<"$out" \
+      || fail "fleet_mtime did not say it could not tell for a file that is not there: $out"
+
+    # A stat that answers something that is not a number, whatever the reason.
+    # This is the shape GNU stat produced, reproduced on a machine whose stat
+    # does not: the answer must be REFUSED rather than passed to the caller.
+    stub="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\ncat <<EOF\n  File: "/x"\n    ID: 0 Namelen: 255\nEOF\nexit 0\n' >"$stub/stat"
+    chmod +x "$stub/stat"
+    out="$( REPO_ROOT="$REPO_ROOT" PATH="$stub:$PATH" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      answer="$(fleet_mtime "$1")"; rc=$?
+      echo "rc=$rc answer=[$answer]"
+      now=100
+      [ -n "$answer" ] && echo "arith=$(( now - answer ))"
+    ' _ "$work/f" 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "a stat that printed prose reached the caller's arithmetic, which is the crash this pins: $out"
+    grep -q "rc=1 answer=\[\]" <<<"$out" \
+      || fail "fleet_mtime passed on a non-numeric answer instead of refusing it: $out"
+    rm -rf "$work" "$stub"
+    echo "PASS: fleet_mtime answers a number or says it could not tell"
+    ;;
+
   *)
-    echo "usage: tests/test_teardown.sh derives|reap|watcher|profiles" >&2
+    echo "usage: tests/test_teardown.sh derives|reap|watcher|profiles|mtime" >&2
     exit 2
     ;;
 esac

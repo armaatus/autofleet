@@ -242,14 +242,29 @@ fleet_review_mode() {
   esac
 }
 fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
-
-# A file's mtime in epoch seconds, or nothing. BSD stat and GNU stat take
-# different flags and neither is present everywhere, so both are tried -- this
-# repo runs on macOS and its CI runs on Linux, and a helper that works on one is
-# a helper that silently returns empty on the other.
+# A file's mtime in epoch seconds, or non-zero if it cannot be had.
+#
+# GNU first, BSD second, and THE ANSWER IS VALIDATED -- which is not belt and
+# braces, it is the bug. `stat -f %m` is BSD's spelling; GNU's `-f` means
+# --file-system, takes no format, and therefore reads `%m` as a second FILE. It
+# fails on that one and SUCCEEDS on the real one, printing a filesystem block to
+# stdout on the way. The caller then did `$(( now - said_at ))` on a string
+# beginning `File:`, and bash under `set -u` evaluated `File` as a variable:
+#
+#   ./scripts/fleet/fleet.sh: line 407: File: unbound variable
+#
+# So every foundation hold on Linux died where it should have re-explained
+# itself, and the suite was red on `main` for it. Ordering alone would fix
+# today's pair; validating the answer is what makes the next `stat` that prints
+# something unexpected a "could not tell" rather than a crash three frames up.
 fleet_mtime() {
   [ -e "${1:-}" ] || return 1
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)"
+  case "$m" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$m"
 }
 
 fleet_stopped() { [ -e "$FLEET_STOP" ]; }
