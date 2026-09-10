@@ -12,8 +12,21 @@ name: unblock dependents
 on:
   pull_request:
     types: [closed]
+  # `opened` and `edited` as well as the two closings, and their absence was a
+  # hole with no bottom: `fleet.sh` selects on the POSITIVE `ready` label, so an
+  # issue filed with no blockers carried NO label and was unstartable until some
+  # unrelated issue happened to close. Every issue filed by hand got `ready` only
+  # because somebody passed it on the command line -- and CLAUDE.md tells agents
+  # to file and edit issues as they find things, which is exactly the path that
+  # produces one nothing will ever start.
+  #
+  # `edited` for the other half of the same convention: CLAUDE.md says the
+  # `Blocked by #N` lines are editable, and until now editing them re-derived
+  # nothing, so a dependency that had genuinely been resolved kept its issue
+  # blocked. The job recomputes every open issue from scratch, so firing it more
+  # often is idempotent -- it costs one page of issues.
   issues:
-    types: [closed, reopened]
+    types: [opened, edited, closed, reopened]
   workflow_dispatch:
 
 permissions:
@@ -46,8 +59,23 @@ jobs:
                 try {
                   const {data} = await github.rest.issues.get({owner, repo, issue_number: number});
                   state.set(number, data.state === 'open');
-                } catch {
-                  state.set(number, false); // unknown issue blocks nothing
+                } catch (err) {
+                  // A 404 is an issue that does not exist -- a typo'd number,
+                  // or one from another repository -- and that blocks nothing.
+                  //
+                  // ANYTHING ELSE IS NOT AN ANSWER. A rate limit or a 5xx read
+                  // as "closed" marks an issue `ready` whose blocker is open,
+                  // and for a foundation issue that is the collision the label
+                  // exists to prevent. Treated as OPEN, which leaves the issue
+                  // `blocked` -- the direction that costs a wait rather than a
+                  // merge conflict -- and the job is self-healing, so the next
+                  // run corrects it.
+                  const notFound = err && err.status === 404;
+                  if (!notFound) {
+                    core.warning(`could not read #${number} (${err && err.status}); ` +
+                                 `treating it as OPEN, so anything it blocks stays blocked`);
+                  }
+                  state.set(number, !notFound);
                 }
               }
               return state.get(number);
