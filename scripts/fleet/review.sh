@@ -86,6 +86,29 @@ LOG_DIR="$FLEET_DIR/reviews"
 # one of them inline is how the pair drifts apart.
 DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
 TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
+
+# The dispatcher counts a try BEFORE the spawn, because it has to decide from
+# something. That makes the count a count of SPAWNS -- and a spawn that never
+# reached a reviewer is not an attempt at a verdict. Exits 2 (could not read the
+# PR), 3 (the fleet is stopped) and 6 (no reviewer command on PATH) are all of
+# that kind, and three `gh` blips a minute apart would otherwise retire a head
+# for good. Issue 33's Acceptance asks for the opposite, and both the knob's
+# comment and its row in docs/CONFIGURATION.md describe attempts that "submit
+# nothing". Found by the independent review.
+#
+# What DOES burn a try: 5, a reviewer that ran and submitted nothing, and 7, one
+# killed at the deadline having submitted nothing. Those are the ones the cap is
+# for.
+unspent_try() {
+  [ -n "$TRIES_MARKER" ] || return 0
+  local h n
+  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  [ "${h:-}" = "$head" ] || return 0
+  n=$(( ${n:-1} - 1 ))
+  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
+  else printf '%s %s\n' "$head" "$n" >"$TRIES_MARKER" 2>/dev/null || true
+  fi
+}
 record_done() {
   [ -n "$DONE_MARKER" ] || return 0
   printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
@@ -114,7 +137,7 @@ fi
 # The stop is a stop. This submits a review to a pull request, which is exactly
 # what nothing may do while that file exists -- and the reviewer it spawns would
 # be blocked by guard.py anyway, one API call later and with a worse message.
-fleet_stopped && { echo "STOPPED: $FLEET_STOP exists."; exit 3; }
+fleet_stopped && { echo "STOPPED: $FLEET_STOP exists."; unspent_try; exit 3; }
 
 [ -r "$BRIEF" ] || { echo "no reviewer brief at $BRIEF" >&2; exit 2; }
 
@@ -136,6 +159,9 @@ fleet_owner_repo || {
 head="$(GH_PAGER=cat gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)"
 case "$head" in
   ""|null) echo "could not read PR #$pr's head from gh" >&2; exit 2 ;;
+  # No `unspent_try` here: $head is what keys the marker and we have not got one.
+  # The dispatcher's count is keyed on the head too, so a try recorded against a
+  # head this run never learned is discarded by the next run that does.
 esac
 
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
@@ -197,7 +223,7 @@ esac
 command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {
   echo "AUTOFLEET_REVIEW_CMD is '$AUTOFLEET_REVIEW_CMD', which is not on PATH." >&2
   echo "Set it in .autofleet/config, or install the reviewer." >&2
-  exit 6; }
+  unspent_try; exit 6; }
 
 mkdir -p "$LOG_DIR"
 log="$LOG_DIR/pr-$pr-${head:0:8}.log"

@@ -77,7 +77,7 @@
 # .claude/agents/reviewer.md a budget rather than a hope. 80 is what
 # claude-review.yml grants.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
-# How many times one head may be handed to a reviewer that submits nothing.
+# How many attempts one head may get that produce NO VERDICT.
 #
 # A reviewer that runs and submits nothing is retried, because that is usually
 # transient -- and unbounded, it is a full-budget reviewer started every poll

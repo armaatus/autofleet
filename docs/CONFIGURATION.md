@@ -56,7 +56,7 @@ it runs.
 | `AUTOFLEET_REVIEW_MODE` | `github` | `github` or `local`. |
 | `AUTOFLEET_REVIEW_CMD` | `claude` | What `local` mode runs, with `-p` and a fixed tool allowlist. A command on `PATH`, so a wrapper can point it at another model or another account. |
 | `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
-| `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many reviewers one head may get that submit **nothing**. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. |
+| `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many attempts one head may get that end with **no verdict** — a reviewer that ran and submitted nothing, or one killed at the timeout. A run that never reached a reviewer (the fleet was stopped, `gh` would not answer, the command is not on `PATH`) does not spend one. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. |
 | `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
 
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)

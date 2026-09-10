@@ -222,6 +222,27 @@ n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))
 # -- a reviewer can run and submit nothing -- and "was one started at all" is the
 # question the queue phase is really asking.
 n_started() { grep -c . "$REVIEWER_CALLS" 2>/dev/null || echo 0; }
+# How many times the DISPATCHER started review.sh -- which is what the re-spawn
+# bug is about, and is not the same as how many times a reviewer ran.
+#
+# `n_started` counts the stub, and the exit-8 path returns before the stub is
+# ever invoked. So on the base code the extra spawns happened, produced no stub
+# call, and a phase asserting `n_started` was satisfied: it passed before the fix
+# as well as after, measuring model calls where the issue is about spawns. The
+# dispatcher says "reviewing PR #N at <head> (pid ...)" once per spawn, and that
+# is the line to count. Found by the independent review -- the sixth phase on
+# this project to pass for a reason other than the one it claimed, in the change
+# whose own body reports the fifth.
+# The DISPATCHER's line, which carries a pid -- not `review.sh`'s own
+# `==> reviewing PR #42 at <head> with <cmd>`, which lands in the same file
+# because the dispatcher redirects the child's output into it. Counting both
+# doubled every spawn.
+#
+# `|| true` inside the substitution, not `|| echo 0`: `grep -c` PRINTS 0 and
+# exits 1 when it finds nothing, so `|| echo 0` appends a second line and the
+# caller compares "0\n0" against a number. That has now cost time twice in this
+# file.
+n_spawned() { local n; n="$(grep -c "reviewing PR #42 at .* (pid" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s\n' "${n:-0}"; }
 # Whether a reviewer still holds PR 42's lock. A poll taken while one is running
 # is CORRECTLY skipped, so a phase that polls again immediately is testing the
 # dedup rather than the thing it means to.
@@ -439,17 +460,17 @@ import merge_gate; print(merge_gate.review_mode())'); }
     make_fixture; stub_reviewer marked
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
     poll_review_open_prs
-    await n_started 1 || fail "the first pass started no reviewer"
+    await n_spawned 1 || fail "the first pass started no reviewer"
     await n_reviews 1 || fail "the first reviewer submitted nothing"
     await lock_held no || fail "the first reviewer never released its lock"
     # ...and now every later poll must start nothing, because the head is done.
     for _ in 1 2 3; do poll_review_open_prs; done
-    # `await`, not a fixed sleep: this asserts that nothing MORE started, and a
-    # bare `sleep 2` on a loaded machine is how a phase like that becomes the
-    # flaky one. A second reviewer would show up here within the deadline.
-    await n_started 2 10 >/dev/null 2>&1 || true
-    [ "$(n_started)" = 1 ] \
-      || fail "three further polls started $(n_started) reviewers on a head that already has one"
+    # On SPAWNS. Asserting on stub calls passed against the base code too,
+    # because the spawns it should have counted all exited before reaching the
+    # stub. `await`, not a fixed sleep, so a loaded machine does not decide it.
+    await n_spawned 2 10 >/dev/null 2>&1 || true
+    [ "$(n_spawned)" = 1 ] \
+      || fail "three further polls started $(n_spawned) reviewers on a head that already has one"
     ok "a head with a counting review is not handed to another reviewer"
 
     # A push invalidates it: new head, new review.
@@ -457,7 +478,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
     git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
     poll_review_open_prs
-    await n_started 2 || fail "a new head did not get a reviewer"
+    await n_spawned 2 || fail "a new head did not get a reviewer"
     ok "...and a push starts one again"
     ;;
 
@@ -506,6 +527,56 @@ import merge_gate; print(merge_gate.review_mode())'); }
     grep -q "submitted nothing, which is the cap" <<<"$out" \
       || fail "it stopped retrying without saying so: $out"
     ok "...and says so, rather than going quiet"
+    ;;
+
+# --------------------------------------------------------------------- holds
+  holds)
+    # TWO HOLDS AT ONCE, which is the state the shared say-once marker broke.
+    # A foundation issue in flight and a PR whose reviewer hit the cap are
+    # evaluated in the same poll body; sharing one file meant each overwrote the
+    # other's reason and BOTH re-announced every poll -- the flooding this whole
+    # change removes. `capped` runs with no foundation issue, so it stayed green
+    # against the shared marker. Found by the independent review.
+    make_fixture; stub_reviewer silent
+    export AUTOFLEET_REVIEW_MAX_TRIES=1
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    # Spend the one try, so the next pass holds on the cap.
+    poll_review_open_prs
+    await lock_held no || fail "the first reviewer never released its lock"
+
+    # ...and a foundation hold standing at the same time.
+    mkdir -p "$AUTOFLEET_DIR"
+    (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+     foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+      >/dev/null 2>&1
+
+    n_cap()   { local n; n="$(grep -c "which is the cap" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
+    n_found() { local n; n="$(grep -c "lands alone" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
+    # Let each hold speak ONCE first. The baseline is "both have been
+    # announced"; what this phase is about is whether they then stay quiet with
+    # the other one standing. Taken before the first announcement, the cap's own
+    # correct first line read as a repeat.
+    poll_review_open_prs
+    (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+     foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+      >/dev/null 2>&1
+    before_cap="$(n_cap)"
+    before_found="$(n_found)"
+    [ "$before_cap" -ge 1 ] || fail "the cap hold never announced at all, so this asserts nothing"
+    [ "$before_found" -ge 1 ] || fail "the foundation hold never announced at all"
+    for _ in 1 2 3; do
+      poll_review_open_prs
+      (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+       foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+        >/dev/null 2>&1
+    done
+    after_cap="$(n_cap)"
+    after_found="$(n_found)"
+    [ "$before_cap" = "$after_cap" ] \
+      || fail "the cap hold re-announced while a foundation hold stood ($before_cap then $after_cap)"
+    [ "$before_found" = "$after_found" ] \
+      || fail "the foundation hold re-announced while a cap hold stood ($before_found then $after_found)"
+    ok "two holds at once each stay quiet; neither overwrites the other's reason"
     ;;
 
 # --------------------------------------------------------------------- queue
@@ -638,6 +709,6 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ;;
 
   *)
-  echo "usage: $0 once|retries|capped|mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
+  echo "usage: $0 holds|once|retries|capped|mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
   exit 2 ;;
 esac

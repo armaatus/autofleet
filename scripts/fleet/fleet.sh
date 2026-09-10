@@ -2013,7 +2013,16 @@ cmd_status() {
   # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
   # says which of the two reviewers this repository actually has.
   if fleet_review_is_local; then
-    local n; n="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
+    # LOCKS only. `stop_reviewers` and `live_reviewers` both learned to skip
+    # the record files; this third reader of the directory did not -- and it is
+    # the one its own comment calls the first screen anybody looks at. A `.done`
+    # stands for as long as its head does, which is the point of the file, so
+    # status reported a reviewer in flight permanently rather than transiently,
+    # and three reviewed PRs read as every slot taken. Found by the independent
+    # review, on both axes independently.
+    local n
+    n="$(find "$REVIEWING_DIR" -type f ! -name '*.done' ! -name '*.tries' ! -name '*.said' \
+           2>/dev/null | grep -c . || true)"
     echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
