@@ -278,25 +278,56 @@ fi
 # 3. The BASE-ref read. Drop `.autofleet/config` from that sparse-checkout and
 #    review_mode() finds no file, returns `github`, and every PR on a local-mode
 #    repository blocks -- with the workflow still green and nothing saying why.
-if grep -A6 'sparse-checkout: |' .github/workflows/merge-gate.yml \
-     | grep -q '\.autofleet/config'; then
-  ok "merge-gate.yml checks out .autofleet/config, so the mode is readable in CI"
+# ONE step, not two greps. Checked separately, `.autofleet/config` could move to
+# a head-ref checkout and both halves would stay green -- and a head-ref read is
+# exactly the hole the base-ref read exists to close, since the PR would then be
+# choosing the rule that judges it. Found by the local review of this change.
+if python3 - <<'PYEOF'; then
+import re, sys
+wf = open(".github/workflows/merge-gate.yml").read()
+# Each `- uses: actions/checkout` block, up to the next step at the same indent.
+steps = re.split(r"\n      - (?=uses:|name:|id:)", wf)
+for step in steps:
+    # `startswith`, because split()'s first element is the whole file preamble --
+    # which discusses both the checkout and the config in prose and would
+    # otherwise be judged as if it were the step.
+    if not step.startswith("uses: actions/checkout"):
+        continue
+    if ".autofleet/config" not in step:
+        continue
+    if "github.event.pull_request.base.sha" in step:
+        sys.exit(0)
+    sys.exit("the checkout that fetches .autofleet/config is not pinned to the base sha, "
+             "so a pull request could turn on local review mode for itself")
+sys.exit("no checkout step in merge-gate.yml fetches .autofleet/config; review_mode() "
+         "would silently answer github and block every PR on a local-mode repository")
+PYEOF
+  ok "merge-gate.yml reads .autofleet/config from the BASE ref, in one checkout"
 else
-  fail "merge-gate.yml no longer sparse-checks-out .autofleet/config; review_mode() would silently answer github and block every PR"
-fi
-if grep -q 'ref: ${{ github.event.pull_request.base.sha }}' .github/workflows/merge-gate.yml; then
-  ok "...from the BASE ref, so a PR cannot switch its own repository into local mode"
-else
-  fail "merge-gate.yml no longer pins the base sha; a PR could turn on local review mode for itself"
+  fail "merge-gate.yml's base-ref read of .autofleet/config has come apart (above)"
 fi
 
 # 4. The guard that makes the marker mean anything. Without it the agent under
-#    review can run `gh pr review` and write its own marker, and every assertion
-#    above stays green while the independence requirement is gone.
-if grep -q '"pr", "review"' .claude/hooks/guard.py; then
+#    review can submit its own review and write its own marker, and every
+#    assertion above stays green while the independence requirement is gone.
+#
+#    ANCHORED ON THE CONJUNCT, not on the words. This grepped for
+#    `"pr", "review"`, which also matches guard.py's OUTWARD tuple -- a line that
+#    predates the rule and governs only a STOPPED fleet. The whole rule could be
+#    deleted with this check still green, which is precisely the shape hard rule
+#    3 exists to forbid. Found by the local review of the PR that added it.
+if grep -q '\["pr", "review"\] and _fleet_owns_this_worktree()' .claude/hooks/guard.py; then
   ok 'guard.py still refuses `gh pr review` from a fleet worktree'
 else
-  fail 'guard.py no longer refuses `gh pr review`, so an agent can forge its own independent review'
+  fail 'guard.py no longer refuses `gh pr review` from a fleet worktree, so an agent can forge its own independent review'
+fi
+#    ...and the REST spelling of the same act, which `Bash(gh api:*)` puts within
+#    reach of every agent. `gh pr merge` has had both spellings guarded since it
+#    was written; `gh pr review` shipped with only one.
+if grep -q '/pulls/\\d+/reviews' .claude/hooks/guard.py; then
+  ok '...and the `gh api .../pulls/N/reviews` spelling of it'
+else
+  fail 'guard.py does not refuse `gh api .../pulls/N/reviews`, which is the same act by its REST name'
 fi
 
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
@@ -315,6 +346,56 @@ done
 grep -q 'AUTOFLEET_REVIEW_MODE' install.sh \
   || fail "install.sh never mentions AUTOFLEET_REVIEW_MODE, so a host project is not told the default needs a secret"
 ok "install.sh ships the reviewer and names the knob"
+
+# 7. ...and normalises every spelling of `local` that the gate can READ.
+#    This repo's own .autofleet/config says `local`, and install.sh seeds that
+#    file verbatim. If the installer's matcher is narrower than
+#    merge_gate.REVIEW_MODE_RE, a rewording of the line here silently ships the
+#    weaker mode to every host project -- "chosen by nobody and announced
+#    nowhere", which is the outcome the installer's own comment says it prevents.
+#    Found by the local review of the change that added it.
+if python3 - <<'PYEOF'; then
+import re, subprocess, sys, tempfile, os, shutil
+spellings = [
+    "AUTOFLEET_REVIEW_MODE=local",
+    "AUTOFLEET_REVIEW_MODE='local'",
+    'AUTOFLEET_REVIEW_MODE="local"',
+    "export AUTOFLEET_REVIEW_MODE=local",
+    '  AUTOFLEET_REVIEW_MODE=local',
+    ': "${AUTOFLEET_REVIEW_MODE:=local}"',
+]
+sys.path.insert(0, ".github/scripts")
+from merge_gate import review_mode
+src = open("install.sh").read()
+m = re.search(r"ASSIGN = re\.compile\(\n(.*?)\n\s*re\.I,\n\)", src, re.S)
+if not m:
+    sys.exit("install.sh no longer has an ASSIGN pattern to check against the gate's")
+# The two adjacent raw-string literals, concatenated the way Python would. The
+# captured text ends in the `,` that separates them from `re.I`, so it has to go
+# before this is an expression rather than a one-tuple.
+literal = m.group(1).strip().rstrip(",")
+try:
+    pattern = re.compile(eval("(" + literal + ")"), re.I)
+except Exception as exc:
+    sys.exit(f"could not read install.sh's ASSIGN pattern ({exc}); it has changed shape")
+bad = []
+for line in spellings:
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, ".autofleet"))
+    open(os.path.join(d, ".autofleet", "config"), "w").write(line + "\n")
+    seen_by_gate = review_mode(root=d) == "local"
+    shutil.rmtree(d)
+    seen_by_installer = bool(pattern.match(line))
+    if seen_by_gate and not seen_by_installer:
+        bad.append(line)
+if bad:
+    sys.exit("install.sh would not normalise these, but merge_gate.py reads them "
+             "as local: " + "; ".join(bad))
+PYEOF
+  ok 'install.sh normalises every spelling of `local` merge_gate.py can read'
+else
+  fail "install.sh's normalisation is narrower than merge_gate.py's reader (above)"
+fi
 
 echo "== the flow's own scripts"
 # The brief names these by path. A rename that misses the brief turns into an

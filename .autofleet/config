@@ -23,7 +23,15 @@ AUTOFLEET_NOTIFY_TITLE="autofleet"
 # `: "${X:=...}"` shape config.sh writes its own defaults in. Those defaults run
 # BEFORE this file is sourced, so by the time a `:=` here is reached the variable
 # already holds `github` and the assignment does nothing at all. The only form a
-# host config can override a default with is this one. (Which also means the
-# environment cannot override it for a single command; point AUTOFLEET_CONFIG at
-# another file for that, which is what tests/test_review_mode.sh does.)
+# host config can override a default with is this one -- see #23, which is about
+# config.sh documenting a precedence it does not have.
+#
+# The consequence, which is worth knowing before you try it: the environment
+# cannot override this for a single command either, because a plain assignment
+# beats an exported value. `AUTOFLEET_CONFIG=<other-file>` is the seam for that.
+#
+# merge_gate.py is the exception and deliberately so: it reads
+# AUTOFLEET_REVIEW_MODE from the environment FIRST, because it is a Python
+# program that never sources this file and its --selftest has to drive both
+# modes. Two answers to "who wins", for two different readers.
 AUTOFLEET_REVIEW_MODE=local

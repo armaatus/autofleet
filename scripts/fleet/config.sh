@@ -71,6 +71,12 @@
 # next poll to pick up. Long enough for a real diff; short enough that a wedged
 # reviewer is not an overnight hold on the worktree waiting for it.
 : "${AUTOFLEET_REVIEW_TIMEOUT:=1800}"
+# The reviewer's turn budget, passed through as `--max-turns`. The wall clock
+# above is the backstop for a wedged process; this is the bound the reviewer can
+# see and spend against, which is what makes "submit before you run out" in
+# .claude/agents/reviewer.md a budget rather than a hope. 80 is what
+# claude-review.yml grants.
+: "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
 
 # ------------------------------------------------------------- per-worktree
 # The prefix every derived compose project name carries, and the thing reap.sh

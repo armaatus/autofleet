@@ -22,7 +22,8 @@
 #                                 halves checked against each other rather than
 #                                 each against its own idea of the marker.
 #   test_review_mode.sh unmarked  ...and a reviewer that submits WITHOUT the
-#                                 marker leaves merge_gate refusing the PR. This
+#                                 marker leaves merge_gate refusing the PR, and
+#                                 review.sh reports 5 rather than success. This
 #                                 is the row that would go green if the marker
 #                                 became decorative.
 #   test_review_mode.sh silent    the reviewer runs, exits 0, submits nothing ->
@@ -31,6 +32,10 @@
 #   test_review_mode.sh skips     a review is already on this head -> exit 8, no
 #                                 second reviewer. Idempotence comes from asking
 #                                 merge_gate, not from a marker file.
+#   test_review_mode.sh stale     a stale review that does NOT count is on the
+#                                 head and the next reviewer is silent -> still
+#                                 exit 5. The post-check asks merge_gate the same
+#                                 question the pre-check did, not a weaker one.
 #   test_review_mode.sh timeout   the reviewer wedges -> killed at
 #                                 AUTOFLEET_REVIEW_TIMEOUT and exit 7, rather
 #                                 than holding the worktree until the time-box.
@@ -154,6 +159,10 @@ STUB
   export AUTOFLEET_REVIEW_CMD=fake-reviewer
 }
 
+# How many review records the PR has. Six copies of this one-liner is five too
+# many, and the copies were what made it easy to assert the wrong thing.
+n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$GH_REVIEWS"; }
+
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
 # `review_open_prs` needs fleet.sh's own state, so it is sourced rather than run.
 in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; for fn in "$@"; do "$fn"; done); }
@@ -226,7 +235,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 4 ] || fail "github mode did not exit 4 (got $rc)"
   ok "github mode exits 4"
-  [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 0 ] \
+  [ "$(n_reviews)" = 0 ] \
     || fail "github mode submitted a review anyway"
   ok "...and submits nothing"
   ;;
@@ -238,7 +247,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 3 ] || fail "a stopped fleet did not exit 3 (got $rc)"
   ok "a stopped fleet exits 3"
-  [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 0 ] \
+  [ "$(n_reviews)" = 0 ] \
     || fail "a stopped fleet submitted a review"
   ok "...and nothing goes out"
   ;;
@@ -259,12 +268,14 @@ import merge_gate; print(merge_gate.review_mode())'); }
   unmarked)
   make_fixture; stub_reviewer unmarked
   run_it 42 >"$WORK/out" 2>&1; rc=$?
-  # review.sh is happy: a review IS on the head. The gate is not, and that
-  # difference is deliberate -- review.sh checks that something was submitted,
-  # merge_gate.py decides whether it counts.
-  [ "$rc" = 0 ] || fail "review.sh did not see the submitted review (got $rc)"
   gate_counts local && fail "an unmarked self-review counted as independent" || true
   ok "an unmarked self-review does not count, so the marker is load-bearing"
+  # ...and review.sh says so rather than reporting success. It asks merge_gate
+  # the same question the gate will ask, so "a review record exists" is never
+  # mistaken for "this PR has been reviewed". A run reporting 0 here would leave
+  # the PR blocked with the dispatcher log saying it was fine.
+  [ "$rc" = 5 ] || { cat "$WORK/out" >&2; fail "an unmarked review was reported as done (got $rc)"; }
+  ok "...and review.sh reports 5, not a review it can count"
   ;;
 
 # -------------------------------------------------------------------- silent
@@ -273,7 +284,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 5 ] || { cat "$WORK/out" >&2; fail "a silent reviewer did not exit 5 (got $rc)"; }
   ok "a reviewer that submits nothing exits 5 rather than 0"
-  grep -q "submitted NO review" "$WORK/out" || fail "the silence was not named"
+  grep -q "NO counting review" "$WORK/out" || fail "the silence was not named"
   ok "...and says so, because this is the failure that blocks a PR invisibly"
   ;;
 
@@ -285,7 +296,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 8 ] || { cat "$WORK/out" >&2; fail "a second run did not exit 8 (got $rc)"; }
   ok "a head that already has a review exits 8"
-  [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 1 ] \
+  [ "$(n_reviews)" = 1 ] \
     || fail "a second review was submitted on the same head"
   ok "...and no second review is submitted"
   [ "$before" -gt 0 ] || fail "the stub was never called"
@@ -327,10 +338,10 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # The reviewer is a background child of a subshell that has since exited, so
   # wait for the review it was started to produce rather than for the pid.
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 1 ] && break
+    [ "$(n_reviews)" = 1 ] && break
     sleep 1
   done
-  [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 1 ] \
+  [ "$(n_reviews)" = 1 ] \
     || fail "local mode did not review the open PR"
   ok "...and reviews an open non-draft PR of our own in local mode"
 
@@ -338,12 +349,35 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # why the marker file is a courtesy rather than the correctness argument.
   in_poll review_open_prs >/dev/null 2>&1
   sleep 2
-  [ "$(python3 -c 'import json;print(len(json.load(open("'"$GH_REVIEWS"'"))))')" = 1 ] \
+  [ "$(n_reviews)" = 1 ] \
     || fail "a second pass submitted a second review"
   ok "...and a second pass over the same head adds nothing"
   ;;
 
+# ------------------------------------------------------------------- stale
+  stale)
+  # The silence detector's blind spot, and the reason review.sh asks
+  # merge_gate the SAME question before and after the run.
+  #
+  # Round one submits a review with no marker: real record, real body, not a
+  # review the gate counts. Round two therefore correctly starts a reviewer --
+  # and that reviewer submits nothing. A post-check that counted review
+  # RECORDS on the head would see the stale one, report success, and leave the
+  # PR blocked with nothing anywhere saying so. Found by the local review of
+  # the change that added this.
+  make_fixture; stub_reviewer unmarked
+  run_it 42 >/dev/null 2>&1
+  [ "$(n_reviews)" = 1 ] || fail "the unmarked review was not submitted"
+  stub_reviewer silent
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 5 ] || { cat "$WORK/out" >&2; fail "a stale unmarked review masked the silence (got $rc)"; }
+  ok "a stale non-counting review does not make a silent run look successful"
+  grep -q "independent-review: local" "$WORK/out" \
+    || fail "the message does not name the likely cause"
+  ok "...and the message names the missing trailer, the likely cause"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|timeout|queue" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|timeout|queue" >&2
   exit 2 ;;
 esac

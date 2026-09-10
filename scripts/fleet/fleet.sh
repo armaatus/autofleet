@@ -577,13 +577,31 @@ review_open_prs() {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
 
+  # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
+  # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
+  # child it has. A marker truncated by a crash between the `>` and the write is
+  # enough to reach it. `kill -0 0` also SUCCEEDS, so the same default on the
+  # reaping path below made an empty marker immortal and its PR never reviewed
+  # again. Both found by the local review of the change that added this.
+  #
+  # A marker whose first field is not a number is treated as gone, which is what
+  # it is: nothing here can signal a process it cannot name.
+  local marker held
+  reviewer_alive() {
+    case "${1:-}" in
+      ""|*[!0-9]*) return 1 ;;
+      0) return 1 ;;
+    esac
+    kill -0 "$1" 2>/dev/null
+  }
+
   # First: forget the reviewers that have finished, so the count below is of
   # what is actually running and a crashed one does not hold its PR forever.
-  local marker held
   for marker in "$REVIEWING_DIR"/*; do
     [ -e "$marker" ] || continue
+    held=""
     read -r held _ <"$marker" 2>/dev/null || true
-    kill -0 "${held:-0}" 2>/dev/null || rm -f "$marker"
+    reviewer_alive "$held" || rm -f "$marker"
   done
 
   local running; running="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
@@ -604,6 +622,7 @@ for p in prs:
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
     if [ -e "$marker" ]; then
+      held=""; for_head=""
       read -r held for_head <"$marker" 2>/dev/null || true
       if [ "${for_head:-}" = "$head" ]; then
         continue                      # one is running, on this very commit
@@ -613,8 +632,13 @@ for p in prs:
       # ignore it and the round would be spent for nothing. Kill it and let the
       # next pass start one on what is there now.
       say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
-      kill "${held:-0}" 2>/dev/null
+      reviewer_alive "$held" && kill "$held" 2>/dev/null
       rm -f "$marker"
+      # ...and it is no longer running, so it must not keep occupying a slot.
+      # Without this, three reviewers whose heads all moved in one pass are all
+      # killed and none replaced, costing a whole poll interval out of the
+      # time-box of the very agents that are waiting on them.
+      [ "${running:-0}" -gt 0 ] && running=$((running - 1))
     fi
     # Bounded by the same number as the worktrees, for the same reason: three is
     # what a person can still read the output of.
@@ -628,7 +652,7 @@ for p in prs:
     # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
     # carrying the remaining PRs, and a background child inheriting it can eat
     # them. The second PR in a two-PR pass then silently never gets reviewed.
-    ./scripts/fleet/review.sh "$pr" >>"$LOG" 2>&1 </dev/null &
+    "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"
     running=$((running + 1))
     say "reviewing PR #$pr at ${head:0:8} (pid $!)"

@@ -134,17 +134,75 @@ for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 # nowhere -- which is the exact failure the mode's whole design is built to
 # avoid. So a freshly seeded config is normalised back to the strong default and
 # the change is printed. A config the host already had is never touched.
-if ! $had_config && ! $DRY && [ -f "$TARGET/.autofleet/config" ]; then
-  if grep -q '^AUTOFLEET_REVIEW_MODE=local' "$TARGET/.autofleet/config"; then
-    # `.bak` and then removed, because BSD sed and GNU sed disagree about
-    # `-i` with no argument and this has to run on both.
-    sed -i.bak 's/^AUTOFLEET_REVIEW_MODE=local/AUTOFLEET_REVIEW_MODE=github/' \
-      "$TARGET/.autofleet/config"
-    rm -f "$TARGET/.autofleet/config.bak"
-    echo "   .autofleet/config  (review mode set to github, the strong default --"
-    echo "                       step 6 below is where you choose otherwise)"
-  fi
-fi
+#
+# THE WHOLE BLOCK, not just the assignment. The lines above it in autofleet's own
+# config explain why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on
+# this repository", "the mode it runs itself on" -- and a host repo that read
+# that over a `github` setting would be reading a paragraph about somebody else's
+# repository. Found by the local review of the change that added this.
+#
+# In PYTHON, not sed: this has to match every spelling `merge_gate.review_mode()`
+# accepts, including `export`, quotes and the `: "${X:=local}"` form. A
+# normalisation pinned to one spelling silently ships `local` the day the line is
+# reworded, which is the outcome this exists to prevent.
+normalise_review_mode() {
+  # Under --dry-run the seed has not been written, so there is nothing in the
+  # target to read: report against the file that WOULD be copied. A dry run
+  # silent about a rewrite the real install performs is the bug commit f5817b8
+  # existed to fix, one file over.
+  local cfg="$TARGET/.autofleet/config"
+  $DRY && cfg="$SOURCE/.autofleet/config"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" "$DRY" <<'PYEOF'
+import re, sys
+path, dry = sys.argv[1], sys.argv[2] == "true"
+lines = open(path).read().splitlines()
+
+# The same shapes merge_gate.REVIEW_MODE_RE reads -- `export`, quotes, and the
+# `: "${X:=local}"` form -- because a normalisation pinned to one spelling
+# silently ships `local` the day the line is reworded, which is the outcome this
+# exists to prevent. evals/lint.sh asserts the two stay in step.
+ASSIGN = re.compile(
+    r"""^[ \t]*(?:export[ \t]+)?(?::[ \t]*["']?\$\{)?"""
+    r"""AUTOFLEET_REVIEW_MODE:?=[ \t]*["']?local\b""",
+    re.I,
+)
+hit = next((i for i, ln in enumerate(lines) if ASSIGN.match(ln)), None)
+if hit is None:
+    raise SystemExit(0)
+if dry:
+    print("   would set .autofleet/config review mode to github (the strong default)")
+    raise SystemExit(0)
+
+# THE WHOLE BLOCK, not just the assignment. The comment lines above it explain
+# why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on this
+# repository", "the mode it runs itself on" -- and a host repo reading that over
+# a `github` setting is reading a paragraph about somebody else's repository.
+# Walk back over the contiguous comment block that introduces it.
+top = hit
+while top > 0 and lines[top - 1].lstrip().startswith("#"):
+    top -= 1
+while top > 0 and not lines[top - 1].strip():
+    top -= 1
+
+replacement = """# Where the independent review runs -- `github` or `local`.
+#
+# `github` is the default and the strong one, and it needs a
+# CLAUDE_CODE_OAUTH_TOKEN secret on this repository (`claude setup-token`).
+# WITHOUT that secret .github/workflows/claude-review.yml no-ops with a green
+# check and every pull request blocks forever on a review that cannot arrive.
+#
+# `local` runs the reviewer on the machine instead, with a weaker independence
+# guarantee that docs/CONFIGURATION.md spells out in full. Choose deliberately.
+AUTOFLEET_REVIEW_MODE=github""".splitlines()
+
+out = lines[:top] + [""] + replacement + lines[hit + 1:]
+open(path, "w").write("\n".join(out).rstrip("\n") + "\n")
+print("   .autofleet/config  (review mode set to github, the strong default --")
+print("                       the next steps below are where you choose otherwise)")
+PYEOF
+}
+$had_config || normalise_review_mode
 
 # ---------------------------------------------------------------- the plugin
 # `mattpocock-skills` is not decoration and it is not optional. The agent brief

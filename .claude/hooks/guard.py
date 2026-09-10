@@ -593,6 +593,54 @@ def check_bash(command, cwd=""):
                     "do not do\n"
                     'on this repo (CLAUDE.md, "Finishing a task"). A human merges.'
                 )
+            # ...and the REST spelling of submitting a review, which is the same
+            # act as `gh pr review` above and was reachable while that rule
+            # matched only the porcelain.
+            #
+            # THIS IS NOT SYMMETRY FOR ITS OWN SAKE. In `local` review mode the
+            # marker in a review body is the only thing separating the reviewer's
+            # verdict from the author's, and `Bash(gh api:*)` is on the agent
+            # allowlist -- so `gh api --method POST repos/O/R/pulls/N/reviews -f
+            # body='...<!-- independent-review: local <sha> -->'` was a live way
+            # for an agent to write its own. docs/CONFIGURATION.md claimed the
+            # marker was out of the author's reach; until this it was not.
+            #
+            # Both review passes on the PR that introduced local mode found this
+            # independently, which is what two axes are for.
+            #
+            # A GET is left alone: reading the reviews on a PR is how
+            # `review-status.sh` and `await-review.sh` answer "has this been
+            # reviewed yet", and refusing that would break the loop this guards.
+            if rest[:1] == ["api"] and any(
+                re.search(r"/pulls/\d+/reviews", w) for w in rest
+            ) and _fleet_owns_this_worktree():
+                method = ""
+                for i, w in enumerate(rest):
+                    if w in ("-X", "--method") and i + 1 < len(rest):
+                        method = rest[i + 1].upper()
+                    elif w.startswith("--method="):
+                        method = w.split("=", 1)[1].upper()
+                # `gh api` defaults to GET, and to POST as soon as a field is
+                # given -- so "no -X" is not "harmless read". -f/-F/--raw-field
+                # /--input all make it a write.
+                writes = any(
+                    w in ("-f", "-F", "--field", "--raw-field", "--input")
+                    or w.startswith(("-f", "-F", "--field=", "--raw-field=", "--input="))
+                    for w in rest[1:]
+                )
+                if method in ("POST", "PUT", "PATCH") or (not method and writes):
+                    deny(
+                        "Blocked: `gh api .../pulls/N/reviews` with a body is submitting a "
+                        "review,\n"
+                        "and this worktree was opened by the fleet. An agent does not submit "
+                        "the\n"
+                        "independent review of its own pull request -- see the `gh pr review` "
+                        "refusal;\n"
+                        "this is the same act by its REST name.\n"
+                        "\n"
+                        "The dispatcher runs the reviewer for you:  "
+                        "./scripts/fleet/await-review.sh"
+                    )
 
         # A force-push to main rewrites the commit chain, which is this
         # project's audit trail: who asked for what, what the agent produced,
@@ -952,6 +1000,16 @@ def _stateful_checks():
         # No stop, not fleet-owned: nothing in the way.
         expect(0, {"command": "git push origin HEAD"}, "an ordinary push is not gated")
         expect(0, {"command": "gh pr create --title x"}, "...nor opening a PR")
+        # The permitted half of the review rule, and it is not decoration: drop
+        # the `_fleet_owns_this_worktree()` conjunct from it and every deny row
+        # below stays green while `scripts/fleet/review.sh` -- which runs from
+        # the repo root -- can no longer submit anything, so every PR on a
+        # local-mode repository blocks forever. Found by the local review of the
+        # change that added the rule.
+        expect(0, {"command": "gh pr review 7 --comment --body x"},
+               "...nor reviewing a PR from a worktree the fleet does not own")
+        expect(0, {"command": "gh api --method POST repos/o/r/pulls/7/reviews -f body=x"},
+               "...nor its REST spelling from there")
         expect(0, {"file_path": os.path.join(_repo_root() or "/w", HOOK_REL)},
                "the guards are editable by hand, where a person is watching", tool="Edit")
 
@@ -998,6 +1056,19 @@ def _stateful_checks():
                        because="does not submit")
                 expect(0, {"command": "gh pr view 7 --json body"},
                        "...but reading the PR is not reviewing it")
+                # The REST spelling. `gh pr merge` has had one of these since it
+                # was written; `gh pr review` did not, and `Bash(gh api:*)` is on
+                # the agent allowlist -- so this was the live way to forge the
+                # marker local review mode depends on.
+                expect(2, {"command": "gh api --method POST repos/o/r/pulls/7/reviews -f body=x"},
+                       "...nor by its REST name", because="REST name")
+                expect(2, {"command": "gh api -X POST repos/o/r/pulls/7/reviews -f event=COMMENT"},
+                       "...nor with -X and the short flag", because="REST name")
+                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews -f body=x"},
+                       "...nor with no method at all, which gh turns into a POST",
+                       because="REST name")
+                expect(0, {"command": "gh api repos/o/r/pulls/7/reviews"},
+                       "...but READING the reviews is what await-review.sh does")
                 expect(2, {"file_path": os.path.join(root, HOOK_REL)},
                        "a fleet worktree cannot rewrite its own guards", tool="Edit",
                        because="enforcement layer")

@@ -101,8 +101,14 @@ LOCAL_REVIEW_RE = re.compile(
 # its defaults in. Deliberately a regex and not a shell parse: this runs in CI
 # over a file from the base ref, and sourcing it would be running the host
 # project's shell code inside the gate that judges the host project.
+# `export X=v` and `X='v'` are both ordinary lines in a file config.sh SOURCES,
+# so a spelling this cannot see is a repository whose shell side runs the local
+# reviewer while the gate discards what it submits -- every PR blocked forever on
+# a review that has already been written, which is the exact failure this mode
+# exists to prevent. Found by the local review of the change that added it.
 REVIEW_MODE_RE = re.compile(
-    r'^[ \t]*(?::[ \t]*"?\$\{)?AUTOFLEET_REVIEW_MODE:?=[ \t]*"?([A-Za-z][A-Za-z0-9_-]*)',
+    r"""^[ \t]*(?:export[ \t]+)?(?::[ \t]*["']?\$\{)?"""
+    r"""AUTOFLEET_REVIEW_MODE:?=[ \t]*["']?([A-Za-z][A-Za-z0-9_-]*)""",
     re.M,
 )
 REVIEW_MODES = ("github", "local")
@@ -158,12 +164,19 @@ def review_mode(root=None):
             text = fh.read()
     except OSError:
         return "github"
-    # The LAST assignment, because that is what a shell would be left holding.
+    # THE LAST ASSIGNMENT, and then judged -- not the last RECOGNISED one.
+    #
+    # Searching backwards for something valid diverges from the shell in the
+    # permissive direction: `...=local` followed by `...=gihtub` leaves every
+    # shell consumer holding `gihtub` (so no reviewer ever runs) while this
+    # returned `local` (so the gate would accept a marked self-review). Nothing
+    # would produce one, but the rule judging the PR would be the weaker one.
+    # Found by the local review of the change that added this.
     found = REVIEW_MODE_RE.findall(text)
-    for value in reversed(found):
-        if value.lower() in REVIEW_MODES:
-            return value.lower()
-    return "github"
+    if not found:
+        return "github"
+    value = found[-1].lower()
+    return value if value in REVIEW_MODES else "github"
 
 
 def independent_reviews(pull_request, head_sha):
@@ -411,10 +424,22 @@ def evaluate(head_sha, pull_request, changed_files):
             "review job to actually submit its findings."
         )
     if not on_head:
+        # The last sentence depends on the mode, and it is read at exactly the
+        # moment somebody is working out why their review did not count. In
+        # `local` mode "a review by the author does not count" is false and sends
+        # them to the wrong conclusion -- the missing marker is the likely cause.
+        # Found by the local review of the change that added the mode.
+        if review_mode() == "local":
+            why = ("A review by this PR's own author counts here only if its body "
+                   "ends with `<!-- independent-review: local " + head_sha[:8] +
+                   "... -->`, which `scripts/fleet/review.sh` writes and nothing "
+                   "else does.")
+        else:
+            why = "A review by this PR's own author does not count."
         problems.append(
             f"no independent review has been submitted against the current head "
             f"({head_sha[:8]}). Pushing a fix invalidates the previous one -- "
-            "re-request review. A review by this PR's own author does not count."
+            "re-request review. " + why
         )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
