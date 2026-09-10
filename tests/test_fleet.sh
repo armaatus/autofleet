@@ -402,6 +402,9 @@ case "$1 ${2:-}" in
     # regression this mode exists for. Same reasoning as the `set` branch below.
     [ "$mode" = create_fails ] && {
       echo "fatal: a branch named '44-a-second-issue' already exists" >&2; exit 1; }
+    # A create that SUCCEEDS and is chatty on stderr -- a relayed git
+    # `Preparing worktree`, a keychain warning. The JSON still has to parse.
+    [ "$mode" = create_warns ] && echo "Preparing worktree (new branch '44-x')" >&2
     for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
     python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
 import json, os, sys
@@ -1141,6 +1144,26 @@ case "${1:-}" in
     grep -q "already exists" <<<"$out" \
       || fail "the runtime said why on stderr and the driver dropped it, so the log cannot tell a refused branch name from an app that is not running: $out"
     echo "ok: a refused worktree creation carries the runtime's own reason"
+    ;;
+  create_warns)
+    # The other half of create_says, and the one the fix for it introduced: the
+    # driver relays the runtime's own words on failure AND parses its JSON on
+    # success, so a merged stderr broke every create by a CLI that says anything
+    # at all while succeeding. The worktree exists either way -- it is on the
+    # runner's list, it counts against the cap of three, and `in_flight` believes
+    # the issue is running -- but a `launch` that could not read the path back
+    # owns nothing: no card, no started marker, no time-box, and neither reap
+    # iterates it because both walk OWNED_DIR. A slot held forever by a worktree
+    # the fleet cannot see. Found by the independent review.
+    make_fixture create_warns
+    out="$(in_fleet launch 44 "a second issue" 2>&1)"
+    grep -q "reported no path" <<<"$out" \
+      && fail "a warning on stderr broke the JSON parse, so the fleet created a worktree it does not own and cannot reap: $out"
+    grep -q "#44 is running in" <<<"$out" \
+      || fail "the created worktree was not tracked: $out"
+    [ -e "$AUTOFLEET_DIR/worktrees/44" ] \
+      || fail "nothing owns the worktree that was just created, so no reap will ever look at it: $out"
+    echo "ok: a create that warns on stderr is still parsed, owned and carded"
     ;;
   card_says)
     make_fixture set_fails
@@ -2567,6 +2590,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved" >&2
     exit 2 ;;
 esac

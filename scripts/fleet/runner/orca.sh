@@ -135,21 +135,21 @@ runner_dispatcher_hint() {
 
 # Open a worktree for one issue, printing its path.
 #
-# On failure, prints the runtime's own words instead -- the caller shows them,
-# because "could not create it" with nothing after it is the same message
-# whether the app is down or the branch already exists.
+# On failure, prints the runtime's own words instead -- capped at three lines
+# like every other relay -- because "could not create it" with nothing after it
+# is the same message whether the app is down or the branch already exists.
 #
-# Which needs FLEET_RUN_CAPTURE_STDERR, and did not have it: a CLI says why on
-# stderr, so without the prefix `launch` printed "could not create it:" followed
-# by nothing at all -- word for word the message this function exists to avoid.
-# `main` had the same omission at the callsite; it became a broken promise when
-# docs/RUNNERS.md started stating it, and a second driver reading that page would
-# have implemented it correctly while the reference driver did not. Found by the
-# independent review.
+# stderr goes to its OWN file, not merged into $out. This is the one driver
+# function that both relays a failure and parses a success, and merging broke the
+# parse for any CLI that succeeded while writing anything at all to stderr: the
+# worktree existed, counted against the cap, and nothing owned it -- no card, no
+# time-box, and neither reap iterates it, because both walk OWNED_DIR. A slot
+# held forever by a worktree the fleet cannot see. Found by the independent
+# review; lib.sh states the rule this broke, in this change's own words.
 runner_worktree_create() {
   local repo="$1" name="$2" issue="$3" agent="$4" prompt="$5" comment="$6"
-  local out rc; out="$(mktemp)"
-  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
+  local out err rc; out="$(mktemp)"; err="$(mktemp)"
+  FLEET_RUN_STDERR="$err" orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
     --repo "path:$repo" \
     --name "$name" \
     --issue "$issue" \
@@ -159,7 +159,11 @@ runner_worktree_create() {
     --comment "$comment" \
     --json
   rc=$?
-  if [ "$rc" != 0 ]; then cat "$out"; rm -f "$out"; return "$rc"; fi
+  if [ "$rc" != 0 ]; then
+    cat "$out" "$err" | sed -n '1,3p'
+    rm -f "$out" "$err"
+    return "$rc"
+  fi
   python3 -c '
 import json,sys
 try:
@@ -167,7 +171,7 @@ try:
 except Exception:
     print("")
 ' <"$out"
-  rm -f "$out"
+  rm -f "$out" "$err"
   return 0
 }
 

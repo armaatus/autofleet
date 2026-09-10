@@ -217,7 +217,7 @@ echo $$ >"$PIDFILE"
 grace_polls=$(( (GRACE_SECONDS + POLL_SECONDS - 1) / POLL_SECONDS ))
 [ "$grace_polls" -ge 1 ] || grace_polls=1
 
-echo "==> watching for the prompt Orca drafted from issue $issue"
+echo "==> watching for the prompt the runner drafted from issue $issue"
 waited=0
 while [ "$waited" -lt "$DEADLINE_SECONDS" ]; do
   attempt && exit 0

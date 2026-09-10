@@ -41,6 +41,13 @@ both are load-bearing rather than stylistic:
 Nothing below returns JSON. A caller that parses JSON has hardcoded one runner,
 which is the thing this seam exists to prevent.
 
+The tab-separated shapes assume **paths contain no literal tab**. One would shift
+every column and the fleet would read a branch name as an issue number — the JSON
+these replaced was immune to that, and this is the honest cost of the seam. A tab
+in a worktree path is legal on unix and vanishingly rare; a backslash is not
+rare, and the drivers handle it (see `runner_agent_terminal`). Raised by the
+independent review.
+
 Where a function relays **the runtime's own words** on failure, it relays **at
 most the first three lines**. That bound is the driver's, not the caller's: the
 dispatcher used to cap them itself and gave that up when the calls moved, so a

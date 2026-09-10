@@ -118,16 +118,32 @@ fleet_ports() {
 # enough to its 60s ctest timeout to go red on a loaded machine.
 #
 # Returns the command's status, or 124 when the deadline was hit.
-# $2 gets stdout only, unless FLEET_RUN_CAPTURE_STDERR=1 is set for the call --
-# `VAR=1 fleet_run_with_deadline ...`, which bash scopes to that call alone.
+#
+# $2 gets stdout only. Two variables change that, both scoped to one call by
+# `VAR=1 fleet_run_with_deadline ...`:
+#
+#   FLEET_RUN_CAPTURE_STDERR=1  merge stderr into $2
+#   FLEET_RUN_STDERR=<file>     put stderr in a SEPARATE file
 #
 # Off by default because most callers parse $2 as JSON, and a warning landing in
-# it is a parse error. On for the ones that report a FAILURE: a CLI says why on
-# stderr, so dropping it leaves "it failed" with nothing after it -- and "the
-# app is not running" and "that worktree is gone" then look identical.
+# it is a parse error. Merging is on for the ones that report a FAILURE and
+# nothing else: a CLI says why on stderr, so dropping it leaves "it failed" with
+# nothing after it -- and "the app is not running" and "that worktree is gone"
+# then look identical.
+#
+# The separate file exists for the ONE caller that needs both: `worktree create`
+# reports a failure in the runtime's own words AND parses its success. Merging
+# there meant a CLI that succeeded while writing anything at all to stderr -- a
+# relayed `Preparing worktree (new branch ...)`, a keychain warning -- broke the
+# parse, and the fleet then had a worktree it had created, that counted against
+# its cap, that nothing owned and neither reap could ever see. Found by the
+# independent review, which also noted `main` did not have this shape: the
+# capture prefix arrived when the callsite moved into the driver.
 fleet_run_with_deadline() {
   local seconds="$1" out="$2"; shift 2
-  if [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
+  if [ -n "${FLEET_RUN_STDERR:-}" ]; then
+    "$@" >"$out" 2>"$FLEET_RUN_STDERR" &
+  elif [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
     "$@" >"$out" 2>&1 &
   else
     "$@" >"$out" 2>/dev/null &

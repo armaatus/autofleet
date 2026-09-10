@@ -1986,10 +1986,21 @@ cmd_stop() {
       echo "  interrupting agents..."
       local handle path
       if [ "$mode" = "--all" ]; then
-        runner_agent_terminals | cut -f1 | while read -r handle; do
-          [ -n "$handle" ] || continue
-          runner_terminal_interrupt "$handle" && echo "    interrupted $handle"
-        done
+        # The listing's rc is READ, not piped away. A runtime that would not
+        # answer prints the same "interrupting agents..." followed by nothing as
+        # a machine with no agents on it -- and `--all` is the hammer somebody
+        # reaches for when they need every agent stopped NOW. The one case where
+        # a false "there were none" is worst. Found by the independent review.
+        local listing
+        if listing="$(runner_agent_terminals)"; then
+          printf '%s\n' "$listing" | cut -f1 | while read -r handle; do
+            [ -n "$handle" ] || continue
+            runner_terminal_interrupt "$handle" && echo "    interrupted $handle"
+          done
+        else
+          echo "    the runner would not list its agents -- NONE were interrupted,"
+          echo "    which is not the same as there being none. Stop them by hand."
+        fi
       else
         for f in "$OWNED_DIR"/*; do
           [ -e "$f" ] || continue
