@@ -424,7 +424,7 @@ is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 # one and `count_startable` takes a third -- so the "one answer per poll"
 # convention this follows within itself is not yet followed across the three.
 # Caching `live_worktrees` itself is the fix and it belongs to all three callers
-# rather than to this one; #30 has it. Named here rather than left as a comment
+# rather than to this one; armaatus/autofleet#30 has it. Named here rather than left as a comment
 # that quietly overstates. Found by the independent review.
 #
 # ...and it SAYS SO ONCE, not once per poll, which is a different question from
@@ -481,7 +481,8 @@ foundation_in_flight() {
   #
   # The premise is older than this function: `in_flight` and `count_startable`
   # share it, where it merely inflated a count. Here it is newly fatal rather
-  # than merely inaccurate, which is why it is written down. #31 has the fix.
+  # than merely inaccurate, which is why it is written down.
+  # armaatus/autofleet#31 has the fix.
   # Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
     # `-` is `live_worktrees` saying this worktree has no linked issue at all,
@@ -497,6 +498,14 @@ foundation_in_flight() {
         "  foundation issue cannot be answered -- launching nothing"
       return 0
     fi
+    # The STATE half of the answer, not just the labels. A foundation issue that
+    # has been closed -- merged, and its worktree not yet reaped -- is finished,
+    # and holding the whole fleet for it until the reap catches up is a stall
+    # with no reason left behind it. `poll_issue` returns both halves and this
+    # used only one. Found by the independent review.
+    case "$(issue_state_in "$answer")" in
+      CLOSED|closed) continue ;;
+    esac
     labels="$(issue_labels_in "$answer")"
     if is_foundation "$labels"; then
       printf 'hold' >"$cached" 2>/dev/null || true
@@ -508,8 +517,20 @@ foundation_in_flight() {
   done <<<"$list"
 
   printf 'no' >"$cached" 2>/dev/null || true
-  # The hold is over, so the next one is news again.
-  rm -f "$FOUNDATION_HOLD_SAID"
+  # NOT cleared here, and that is the fix rather than an omission.
+  #
+  # This function runs first on every iteration, so the only way the OTHER hold
+  # -- a foundation CANDIDATE declining to join ordinary worktrees -- is ever
+  # reached is by this one falling through to here. Clearing the marker on the
+  # way past deleted it one step before `foundation_hold_say "waiting-$n"` read
+  # it, so that marker was write-only and the line it guards printed every poll:
+  # exactly the 180-lines-per-three-hours the marker exists to prevent, restored
+  # by the change that claimed to prevent it. Found by the independent review,
+  # which also noted that no phase covered that branch -- which is why it
+  # survived.
+  #
+  # `launch` clears it instead: a hold announcement is stale once the fleet has
+  # actually moved, and until then repeating it says nothing new.
   return 1
 }
 
@@ -643,6 +664,10 @@ launch() {
   # iteration see the worktree this launch is about to create -- which is the
   # half of the rule that stops anything starting behind a foundation issue.
   rm -f "$POLL_CACHE/foundation"
+  # ...and the "already said it" marker, because the fleet is moving again: the
+  # next hold, whichever of the two it is, is news. See foundation_in_flight for
+  # why it is cleared HERE and not on its no-hold path.
+  rm -f "$FOUNDATION_HOLD_SAID"
   local num="$1" title="$2"
   local name; name="$(slug "$num-$title")"
 

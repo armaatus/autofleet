@@ -1160,6 +1160,51 @@ JSON
     stop_dispatcher
     ;;
 
+  foundation_waiting_once)
+    # THE OTHER HOLD: a foundation CANDIDATE declining to join ordinary
+    # worktrees. It is the older of the two and it had no phase at all, which is
+    # how a fix for its noise shipped broken -- `foundation_in_flight` runs first
+    # every iteration, so the only route to this branch is that function falling
+    # through, and it cleared the marker on the way past. The marker was
+    # write-only and the line printed every poll. Found by the independent
+    # review.
+    make_fixture ok
+    # An ORDINARY worktree in flight, so foundation_in_flight says no...
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    # ...and the only startable issue is a foundation one, which is the branch.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
+JSON
+    start_dispatcher --auto
+    wait_for_log "waiting for the other"
+    # It said it once. Give it several more passes and it must not say it again.
+    before="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    sleep 3
+    after="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    [ "$before" = "$after" ] \
+      || fail "the waiting hold is announced every poll ($before then $after in three seconds)"
+    echo "ok: a foundation candidate waiting its turn is announced once, not once per poll"
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      && fail "it announced the wait and launched the foundation issue anyway"
+    echo "ok: ...and it does not launch alongside the ordinary worktree"
+    stop_dispatcher
+    ;;
+
+  foundation_closed_frees)
+    # A foundation issue that has CLOSED -- merged, worktree not yet reaped --
+    # is finished, and holding the whole fleet for it until the reap catches up
+    # is a stall with nothing left behind it. `poll_issue` returns state and
+    # labels; this used only the labels. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 1
+    issue_labels "ready,foundation"
+    issue_state CLOSED
+    in_fleet foundation_in_flight >/dev/null 2>&1 \
+      && fail "a closed foundation issue still held the launch loop"
+    echo "ok: a closed foundation issue holds nothing"
+    ;;
+
   foundation_said_once)
     # A three-hour foundation issue against a 60-second poll is 180 identical
     # lines in fleet.log. The repo's idiom for "once" is a marker in $STATE_DIR
@@ -1174,14 +1219,21 @@ JSON
     grep -q "lands alone" <<<"$again" \
       && fail "the hold is announced once per poll, which is 180 lines for a three-hour issue: $again"
     echo "ok: a standing hold is said once, not once per poll"
-    # ...and it is news again when the hold ends and a new one begins.
-    issue_labels "ready,docs"
-    in_poll forget_poll_answers foundation_in_flight >/dev/null 2>&1
-    issue_labels "ready,foundation"
+    # ...and it is news again when a DIFFERENT issue holds. The marker is keyed
+    # on what the hold is for, so a hold that moves is announced.
+    #
+    # Deliberately not "the labels flapped and came back": the marker is cleared
+    # by `launch`, not by the hold lifting, because the independent review found
+    # that clearing it on the no-hold path deleted it one step before the other
+    # hold could read it. A standing hold that briefly stopped being one, with
+    # nothing launched in between, has told the reader nothing new -- so it stays
+    # quiet, and that is the trade this phase records rather than papers over.
+    worktree_on_issue 2
     third="$(in_poll forget_poll_answers foundation_in_flight 2>&1)"
     grep -q "lands alone" <<<"$third" \
-      || fail "a hold that ended and began again was never announced: $third"
-    echo "ok: ...and a new hold is announced again"
+      || fail "a hold for a different issue was never announced: $third"
+    grep -q "#2" <<<"$third" || fail "it announced the hold but named the wrong issue: $third"
+    echo "ok: ...and a hold that moves to another issue is announced again"
     ;;
 
   foundation_one_lookup)
@@ -2150,6 +2202,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
