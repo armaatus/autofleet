@@ -145,6 +145,31 @@ fleet_run_with_deadline() {
   wait "$child"
 }
 
+# The one contract function with no runner in it: the agent terminal in ONE
+# worktree, filtered out of the machine-wide listing the driver does provide.
+# Defined HERE, above the driver source, so a driver whose runtime can answer it
+# directly still wins by defining its own -- and so that every driver does not
+# ship the same four lines. The stub driver in tests/test_fleet.sh carried a
+# verbatim copy of it until the independent review said so.
+#
+# The path arrives through the ENVIRONMENT rather than through `awk -v`, because
+# a worktree path can contain anything a filename can and `-v` REINTERPRETS what
+# it is given: `/Users/joe/my\dir` becomes `/Users/joe/mydir`, the comparison is
+# false, and the caller is told this worktree has no agent. That is the silent
+# half of two failures -- `stop` never interrupting the agent, and
+# `agent-autostart.sh` giving up after two minutes with the prompt unsent. The
+# python this replaced took it as `sys.argv` and was immune; `ENVIRON[]` is the
+# awk equivalent. Found by the independent review.
+#
+# Non-zero only when the listing could not be read; no output means there is no
+# agent there, which is a real answer.
+runner_agent_terminal() {
+  local list
+  list="$(runner_agent_terminals)" || return 1
+  printf '%s\n' "$list" \
+    | AUTOFLEET_AWK_PATH="$1" awk -F'\t' '$2 == ENVIRON["AUTOFLEET_AWK_PATH"] { print $1; exit }'
+}
+
 # The runner driver: everything about creating a worktree, opening a terminal
 # in it, and asking the runtime what it is doing. `orca` is the only one that
 # ships, and it is the WHOLE of the dependency -- nothing outside

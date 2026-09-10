@@ -4,8 +4,8 @@ A **runner** is whatever creates a worktree, opens a terminal in it, and can be
 asked what it is doing. `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` is the
 driver, sourced by `lib.sh`.
 
-Today there is exactly one that ships: `orca`. It is no longer load-bearing
-anywhere else — `scripts/fleet/runner/` is the whole of the dependency, and
+Today there is exactly one that ships: `orca`. No code outside
+`scripts/fleet/runner/` calls its CLI, and
 
 ```sh
 grep -rn 'ORCA_CLI\|orca ' scripts/fleet --include='*.sh' \
@@ -14,6 +14,11 @@ grep -rn 'ORCA_CLI\|orca ' scripts/fleet --include='*.sh' \
 
 returning nothing is what keeps it that way. A second runner is a second file in
 that directory.
+
+Orca is still *named* outside it — `orca.yaml` is where a worktree's hooks are
+wired, and the hooks it points at explain Orca's behaviour in their comments.
+["What autofleet still assumes about the runtime"](#what-autofleet-still-assumes-about-the-runtime)
+below is the honest list of what that leaves a second driver to answer.
 
 ## The contract
 
@@ -39,8 +44,9 @@ which is the thing this seam exists to prevent.
 ### Is it there
 
 ```sh
-runner_available          # 0 if this runner can be used at all
-runner_dispatcher_hint    # one line: how a person starts the dispatcher visibly
+runner_available           # 0 if this runner can be used at all
+runner_dispatcher_hint     # one line: how a person starts the dispatcher visibly
+runner_set_deadline <secs> # for calls from this process
 ```
 
 `runner_available` **says why on stderr when it cannot** — only the driver knows
@@ -50,6 +56,17 @@ dispatcher can write for an arbitrary runner. The caller adds the consequence.
 `runner_dispatcher_hint` is the one human-facing string that is runner-specific;
 `fleet.sh`'s usage prints it rather than hardcoding a command line that is wrong
 for every other driver.
+
+`runner_set_deadline` exists so a caller that needs a shorter one can ask
+**without knowing which driver it has**. `agent-autostart.sh` is that caller: it
+polls every three seconds, and a watcher that can block for thirty of them
+inside one poll has stopped watching. A driver with no deadline to set may do
+nothing, but it must DEFINE the function — a missing one is `command not found`
+on a script that does not set `-e`, which is a silently un-shortened watcher.
+`evals/lint.sh` fails a driver that omits any function the fleet calls, so this
+is checked rather than trusted. Creating a worktree is exempt by
+convention — nobody polls a create, and a short deadline on a call that
+legitimately takes minutes is a failed launch rather than a shorter wait.
 
 ### Worktrees
 
@@ -85,14 +102,14 @@ runner_worktree_remove <path> [<deadline>]
   acts on the difference: a refusal is a decision about this worktree and is not
   worth retrying, while a deadline is the runtime restarting and says nothing
   about the worktree at all. It must not run the runner's own teardown hooks —
-  see the comment on the Orca implementation for what that cost (#163).
+  see the comment on the Orca implementation for what that cost
+  (armaatus/rommsync-nx#163).
 
 ### Agents and terminals
 
 ```sh
 runner_agent_states       # `path<TAB>state` lines
 runner_agent_terminals    # `handle<TAB>worktree-path` lines
-runner_agent_terminal <path>
 runner_terminal_draft <handle>
 runner_terminal_send <handle> <text>
 runner_terminal_enter <handle>
@@ -113,6 +130,12 @@ runner_terminal_interrupt <handle>
   caller reads the text back to decide whether the runtime drafted a real prompt
   or only the issue URL, and the length is what makes a paste caught half way
   through comparable to the same paste once it has landed.
+`runner_agent_terminal <path>` — the agent terminal in ONE worktree — is **not**
+a driver's job: `lib.sh` provides it as a filter over `runner_agent_terminals`,
+above the line that sources the driver, so a runtime that can answer it directly
+still wins by defining its own. Every driver shipping the same four lines is how
+a copy of it ended up in the test stub.
+
 - **`runner_terminal_send`** types without submitting; **`runner_terminal_enter`**
   submits. They are separate because `agent-autostart.sh` appends to a draft
   before pressing Return, and a driver that only had "send this text" could not
@@ -121,10 +144,12 @@ runner_terminal_interrupt <handle>
 ## Writing a second driver
 
 `tests/test_fleet.sh runner_stub` is the worked example and the regression
-guard: it defines all fourteen functions over three text files, points
-`AUTOFLEET_RUNNER` at them, and then drives the dispatcher, both worktree hooks
-and the reap through it — asserting at the end that the `orca` CLI was never
-asked anything. A driver that satisfies that phase satisfies the fleet.
+guard: it defines the whole contract over five text files, points
+`AUTOFLEET_RUNNER` at them, and then drives the dispatcher, the reap,
+`issue-command.sh`, `agent-autostart.sh` and `board.sh` through it — asserting at
+the end that the `orca` CLI was never asked anything, with an `orca` planted on
+`PATH` that records anything reaching for it. A driver that satisfies that phase
+satisfies the fleet.
 
 A plain-`git worktree` + tmux driver satisfies all of it, and would drop the
 macOS-only dependency entirely. Two things it would have to answer that Orca

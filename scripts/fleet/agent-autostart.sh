@@ -49,12 +49,12 @@ case "${1:-}" in
   *) echo "usage: $0 [--watch]" >&2; exit 2 ;;
 esac
 
-# The driver's deadline, for this process only. A watcher polls, so it wants a
-# shorter one than the dispatcher's: waiting 30s for a `terminal read` inside a
-# 3-second poll loop is a watcher that has stopped watching.
+# The driver's deadline, for this process only, ASKED FOR through the contract
+# rather than set by a variable this script happens to know the driver reads. A
+# watcher polls, so it wants a shorter one than the dispatcher's: waiting 30s for
+# one read inside a 3-second poll loop is a watcher that has stopped watching.
 CLI_SECONDS="${AGENT_AUTOSTART_CLI_SECONDS:-20}"
-export AUTOFLEET_RUNNER_DEADLINE="$CLI_SECONDS"
-export AUTOFLEET_RUNNER_SEND_DEADLINE="$CLI_SECONDS"
+runner_set_deadline "$CLI_SECONDS"
 POLL_SECONDS="${AGENT_AUTOSTART_POLL_SECONDS:-3}"
 # Long enough for an agent to finish starting on a cold machine. It does not
 # need to be longer: what is being waited for is a paste Orca performs as part

@@ -38,6 +38,16 @@ esac
 
 runner_available || { echo "board.sh: no runner answers here; the card is unchanged" >&2; exit 1; }
 
+# The card is addressed by PATH, and $REPO_ROOT is bash's logical pwd -- it keeps
+# whatever symlinked prefix the agent's shell had. If that differs from the path
+# the runtime recorded for this worktree, every update from inside it fails. The
+# assumption is not new: `agent-autostart.sh` has matched the runtime's
+# `worktreePath` against this same derivation since it was written, in every
+# worktree the fleet has opened. It is written down because the failure would
+# otherwise look like a runner problem, and because the previous form -- the
+# runner resolving "the active worktree" from the calling terminal -- could not
+# be wrong. Raised by the independent review; the refusal below is loud for it.
+
 # Status and comment in ONE call, which is why the driver takes pairs: sent
 # separately, a failure between them leaves the board carrying a new status with
 # the previous line under it.

@@ -637,8 +637,8 @@ in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
 
 # A runner driver that is NOT Orca: plain files, no CLI, nothing that could
 # reach the app even if it were running. Everything the fleet knows about
-# worktrees, agents and terminals has to arrive through the fourteen functions
-# below, so a callsite that still reaches for `orca` produces a dispatcher that
+# worktrees, agents and terminals has to arrive through the functions below, so
+# a callsite that still reaches for `orca` produces a dispatcher that
 # cannot see its own worktrees -- or, with the `orca` planted on PATH beside it,
 # a recorded call that was not supposed to happen.
 #
@@ -653,50 +653,53 @@ stub_runner() {
   export STUB_DIR STUB_CALLS
   cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
 #!/usr/bin/env bash
-# A runner backed by three text files. Records every call it is asked to make.
-stub_say() { printf '%s
-' "$*" >>"$STUB_CALLS"; }
+# A runner backed by text files. Records every call it is asked to make.
+#
+# runner_agent_terminal is NOT here: lib.sh provides it over
+# runner_agent_terminals, and a copy would test the copy.
+stub_say() { printf '%s\n' "$*" >>"$STUB_CALLS"; }
 
-runner_available()        { stub_say available; return 0; }
-runner_dispatcher_hint()  { echo "tmux new-session -s fleet"; }
+runner_available()       { stub_say available; return 0; }
+runner_dispatcher_hint() { echo "tmux new-session -s fleet"; }
+runner_set_deadline()    { stub_say "set deadline $1"; return 0; }
 
 runner_worktree_create() {
-  local repo="$1" name="$2" issue="$3" path="$STUB_DIR/wt-$3"
+  local name="$2" issue="$3" path="$STUB_DIR/wt-$3"
   stub_say "worktree create $name $issue"
   mkdir -p "$path"
-  printf '%s	%s	%s
-' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
-  printf '%s
-' "$path"
+  printf '%s\t%s\t%s\n' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
+  printf '%s\n' "$path"
 }
 runner_worktree_list()  { stub_say "worktree list"; cat "$STUB_DIR/worktrees"; }
 runner_worktree_issue() {
   stub_say "worktree issue"
+  # 1 is "the runtime would not say", 2 is "there is no linked issue". Three
+  # answers, because a caller that reads 1 as 2 announces that a worktree the
+  # fleet linked to an issue has none.
+  [ -e "$STUB_DIR/blind" ] && return 1
   [ -s "$STUB_DIR/issue" ] || return 2
   cat "$STUB_DIR/issue"
 }
-runner_worktree_set()   { stub_say "worktree set $*"; return 0; }
+runner_worktree_set() {
+  stub_say "worktree set $*"
+  [ $# -lt 3 ] || [ $(( ($# - 1) % 2 )) != 0 ] && return 2
+  return 0
+}
 runner_worktree_remove() {
   stub_say "worktree remove $1"
   rm -rf "$1"
   [ -d "$1" ] && return 1
   return 0
 }
-runner_agent_states()    { stub_say "agent states"; cat "$STUB_DIR/states"; }
+runner_agent_states()    { stub_say "agent states";    cat "$STUB_DIR/states"; }
 runner_agent_terminals() { stub_say "agent terminals"; cat "$STUB_DIR/terminals"; }
-runner_agent_terminal() {
-  local list; list="$(runner_agent_terminals)" || return 1
-  printf '%s
-' "$list" | awk -F'	' -v p="$1" '$2 == p { print $1; exit }'
-}
 runner_terminal_draft() {
   stub_say "terminal draft $1"
   [ -s "$STUB_DIR/draft" ] || return 0
-  printf '%s %s
-' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
+  printf '%s %s\n' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
 }
-runner_terminal_send()      { stub_say "terminal send $1"; return 0; }
-runner_terminal_enter()     { stub_say "terminal enter $1"; return 0; }
+runner_terminal_send()      { stub_say "terminal send $1";      return 0; }
+runner_terminal_enter()     { stub_say "terminal enter $1";     return 0; }
 runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
 STUBDRIVER
   export AUTOFLEET_RUNNER=stub
@@ -905,6 +908,34 @@ revert_on_origin() {
 }
 
 case "${1:-}" in
+  runner_unresolved)
+    # A driver function called before anything probed the runtime. The fleet's
+    # own scripts all call runner_available first, but the CONTRACT does not
+    # oblige a caller to, and the driver used to answer that with
+    # `ORCA_CLI: unbound variable` from four frames down -- which names a shell
+    # variable rather than saying the app is not answering, and only on a script
+    # running `set -u`, which is most of them. Found by smoke-testing the driver
+    # from a bare shell.
+    #
+    # lib.sh rather than fleet.sh, and deliberately: fleet.sh resolves the runner
+    # at source time, so through it this call can never be the first one. The
+    # hooks that source lib.sh alone are where it can.
+    make_fixture ok
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      runner_worktree_list >/dev/null; echo "list rc=$?"
+      runner_agent_states  >/dev/null; echo "states rc=$?"
+    ' 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "the driver died on a shell variable instead of answering: $out"
+    grep -q "list rc=0" <<<"$out" \
+      || fail "a driver call that resolved its own CLI still did not answer: $out"
+    grep -q "states rc=0" <<<"$out" \
+      || fail "a driver call that resolved its own CLI still did not answer: $out"
+    echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
+    ;;
   runner_stub)
     # THE acceptance for #1, and the only assertion that keeps holding once the
     # move has been made: with a driver that is not Orca, a dispatcher, a
@@ -962,6 +993,39 @@ case "${1:-}" in
       || fail "agent-autostart.sh could not read or submit the draft through the driver: $out"
     grep -q "terminal enter t2" "$STUB_CALLS" \
       || fail "the prompt was not submitted through the driver: $(cat "$STUB_CALLS")"
+    grep -q "set deadline 20" "$STUB_CALLS" \
+      || fail "the watcher's shorter deadline was not asked for through the contract, so only an Orca driver would honour it: $(cat "$STUB_CALLS")"
+
+    # A worktree path with a BACKSLASH in it. `awk -v` reinterprets what it
+    # assigns, so the comparison went false and the answer came back "there is no
+    # agent in that worktree" -- which is indistinguishable from the truth, and
+    # is `stop` never interrupting an agent plus a watcher that gives up with the
+    # prompt unsent. Found by the independent review.
+    weird="$STUB_DIR/we\\ird"
+    printf '%s\t%s\n' t3 "$weird" >>"$STUB_DIR/terminals"
+    [ "$(in_fleet runner_agent_terminal "$weird")" = t3 ] \
+      || fail "a worktree path with a backslash in it has no agent, as far as the fleet can tell"
+
+    # Design note 2 of the issue, on the one function that has THREE answers:
+    # "could not tell" and "there is none" must not reach a person as the same
+    # sentence. They did for a year, and it cost three worktrees a night.
+    : >"$STUB_DIR/blind"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
+    grep -q "would not say" <<<"$out" \
+      || fail "a runner that could not answer was reported as a worktree with no linked issue: $out"
+    rm -f "$STUB_DIR/blind"
+    printf '' >"$STUB_DIR/issue"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
+    grep -q "no linked issue" <<<"$out" \
+      || fail "a worktree that really has no linked issue stopped saying so: $out"
+    printf '42' >"$STUB_DIR/issue"
+
+    # board.sh is the line issue-command.sh hands EVERY agent, so it is where the
+    # seam is asserted by the brief rather than by the dispatcher.
+    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
+      || fail "board.sh could not set this worktree's card through the driver: $out"
+    grep -q "worktree set $WORK/repo workspace-status in-review comment #42: PR #7" "$STUB_CALLS" \
+      || fail "board.sh did not send the status and the comment in ONE call: $(cat "$STUB_CALLS")"
 
     # The whole point. Not "the fleet still works" -- the fleet works and the CLI
     # was never asked anything.
@@ -2394,6 +2458,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved" >&2
     exit 2 ;;
 esac

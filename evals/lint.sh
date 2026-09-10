@@ -447,6 +447,56 @@ else
   fail "install.sh ships files that link to documents it does not (above); those links 404 in every host repo"
 fi
 
+# 4b. The runner seam, asserted rather than believed.
+#
+#    Two ways it rots, and only something reading BOTH files can see either:
+#    a `runner_*` the fleet calls that no driver defines is a dispatcher that
+#    dies the first time it takes that path, and a driver function that
+#    docs/RUNNERS.md does not describe is a contract a second driver cannot
+#    implement -- which is the whole of armaatus/autofleet#1. The drafted
+#    contract had already drifted from the code by three functions before it was
+#    made real. Found by the independent review.
+#
+#    lib.sh may PROVIDE a contract function (runner_agent_terminal is a filter
+#    over runner_agent_terminals, with nothing runner-specific in it), so it
+#    counts as a definition; a driver that defines its own still wins, because
+#    lib.sh defines it before it sources the driver.
+if python3 - <<'PYEOF'; then
+import re, sys, glob
+
+def defined(path):
+    return set(re.findall(r"^(runner_[a-z_]+)\(\)", open(path).read(), re.M))
+
+drivers = sorted(glob.glob("scripts/fleet/runner/*.sh"))
+if not drivers:
+    sys.exit("no runner driver ships; scripts/fleet/runner/ is empty")
+
+provided = defined("scripts/fleet/lib.sh")
+called = set()
+for path in glob.glob("scripts/fleet/*.sh"):
+    called |= set(re.findall(r"\brunner_[a-z_]+", open(path).read()))
+called -= provided
+
+doc = open("docs/RUNNERS.md").read()
+documented = set(re.findall(r"\brunner_[a-z_]+", doc)) - {"runner_stub"}
+
+bad = []
+for driver in drivers:
+    defines = defined(driver)
+    for name in sorted(called - defines):
+        bad.append(f"{name} is called by the fleet and {driver} does not define it")
+    for name in sorted(defines - documented):
+        bad.append(f"{driver} defines {name} and docs/RUNNERS.md never names it")
+for name in sorted(provided - documented):
+    bad.append(f"lib.sh provides {name} and docs/RUNNERS.md never names it")
+if bad:
+    sys.exit("the runner contract and the code disagree:\n  " + "\n  ".join(bad))
+PYEOF
+  ok "every runner_* the fleet calls is defined by every driver, and documented"
+else
+  fail "the runner contract has drifted from the code (above); a second driver cannot be written against a page that is wrong"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then

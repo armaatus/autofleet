@@ -4,9 +4,11 @@
 # default and today the only driver that ships.
 #
 # THE CONTRACT A SECOND DRIVER HAS TO MEET is in docs/RUNNERS.md, and this file
-# is now the whole of it: nothing outside this directory names `orca`, reads
+# is now the whole of it: no code outside this directory CALLS the CLI, reads
 # $ORCA_CLI, or parses a line of Orca's JSON. A tmux + `git worktree` driver is
-# a second file here and nothing else.
+# a second file here and nothing else. Orca is still NAMED outside it -- in
+# orca.yaml, and in the comments of the hooks orca.yaml points at -- and
+# docs/RUNNERS.md lists what those hooks still assume about the runtime.
 #
 # Two properties hold for every function below, and they are the reason the
 # seam is worth having rather than a convention:
@@ -21,14 +23,26 @@
 #      arrived. Where that needs more than two codes it is spelled out on the
 #      function.
 #
-# The deadlines are the ones each callsite used before the move, and they are
-# overridable per-process rather than per-call so a caller with a different
-# tolerance -- agent-autostart.sh polls, so it wants a shorter one -- can say so
-# once. Read at CALL time, not at source time: agent-autostart sources lib.sh
-# before it has computed its own.
-runner_deadline()        { printf '%s' "${AUTOFLEET_RUNNER_DEADLINE:-30}"; }
-runner_send_deadline()   { printf '%s' "${AUTOFLEET_RUNNER_SEND_DEADLINE:-20}"; }
-runner_create_deadline() { printf '%s' "${AUTOFLEET_RUNNER_CREATE_DEADLINE:-240}"; }
+# The deadlines are the ones each callsite used before the move.
+ORCA_DEADLINE=30
+ORCA_SEND_DEADLINE=20
+ORCA_CREATE_DEADLINE=240
+
+# `runner_set_deadline <seconds>` -- part of the contract, because a caller that
+# needs a shorter one has to be able to ask WITHOUT knowing which driver it has.
+# agent-autostart.sh is that caller: it polls every three seconds, and a watcher
+# that can block for thirty of them inside one poll has stopped watching. It
+# used to say so by exporting a variable only this file reads, which is a caller
+# outside runner/ assuming how the driver works -- the exact thing the seam
+# exists to stop. Found by the independent review.
+#
+# Creating a worktree keeps its own, deliberately: nobody polls a create, and a
+# 20-second deadline on a call that legitimately takes minutes is not a shorter
+# wait, it is a failed launch.
+runner_set_deadline() {
+  ORCA_DEADLINE="$1"
+  ORCA_SEND_DEADLINE="$1"
+}
 
 # The Orca CLI this machine can actually run, in $ORCA_CLI.
 #
@@ -52,8 +66,9 @@ runner_create_deadline() { printf '%s' "${AUTOFLEET_RUNNER_CREATE_DEADLINE:-240}
 # then never answers would hang worktree provisioning at the one point where
 # nothing has printed a reason yet.
 #
-# Orca-named and Orca-private. The failure it works around belongs to this app
-# (armaatus/rommsync-nx), so a second driver inherits none of it.
+# Orca-named and Orca-private. The broken symlink is Orca's own install, not any
+# project's -- armaatus/rommsync-nx is only where the fleet first ran into it --
+# so a second driver inherits none of this.
 #
 # Returns non-zero when nothing answers, so a caller can say so in one line
 # instead of making its first real call and reading the silence as data.
@@ -75,12 +90,26 @@ orca_cli_resolve() {
   return 1
 }
 
+# Every call goes through one of these two, and BOTH resolve first.
+#
+# A driver function is allowed to be called before `runner_available` -- the
+# fleet's own scripts all probe, but the contract does not oblige a caller to,
+# and `orca_cli_resolve` returns instantly once $ORCA_CLI is set. Without this
+# the failure was `ORCA_CLI: unbound variable` from inside the driver on any
+# script running `set -u`, which is the least useful sentence available: it
+# names a variable rather than saying the app is not answering. Found by
+# smoke-testing the driver from a bare shell.
+orca_cli() {
+  orca_cli_resolve || return 1
+  fleet_run_with_deadline "$1" "$2" "$ORCA_CLI" "${@:3}"
+}
+
 # One `orca ... --json` call, its stdout in $1, on the ordinary deadline.
 # Private: a caller outside this file passing its own subcommand would be the
 # seam leaking through a hole in the middle of it.
 orca_json() {
   local out="$1"; shift
-  fleet_run_with_deadline "$(runner_deadline)" "$out" "$ORCA_CLI" "$@" --json
+  orca_cli "$ORCA_DEADLINE" "$out" "$@" --json
 }
 
 # ------------------------------------------------------------ the contract ---
@@ -112,7 +141,7 @@ runner_dispatcher_hint() {
 runner_worktree_create() {
   local repo="$1" name="$2" issue="$3" agent="$4" prompt="$5" comment="$6"
   local out rc; out="$(mktemp)"
-  fleet_run_with_deadline "$(runner_create_deadline)" "$out" "$ORCA_CLI" worktree create \
+  orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
     --repo "path:$repo" \
     --name "$name" \
     --issue "$issue" \
@@ -204,15 +233,26 @@ raise SystemExit(2)
 # caller decides how loud that is; on this board it is said rather than
 # swallowed, because a card that did not update is a status surface showing
 # something that is not true.
+#
+# An odd number of arguments is REFUSED rather than rounded down. A caller that
+# means `comment "..."` and passes `comment` alone would otherwise get a board
+# update that silently did less than it was asked for -- and on a status surface
+# that is the same failure as not updating at all, minus the message. It is also
+# what keeps the expansion below safe on bash 3.2, where `"${args[@]}"` on an
+# empty array under `set -u` is a fatal "unbound variable" rather than nothing.
 runner_worktree_set() {
   local path="$1"; shift
   local args=() rc out
+  if [ $# -lt 2 ] || [ $(($# % 2)) != 0 ]; then
+    echo "runner_worktree_set: expected key/value pairs, got: $*"
+    return 2
+  fi
   while [ $# -ge 2 ]; do
     args+=("--$1" "$2"); shift 2
   done
   out="$(mktemp)"
-  FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "$(runner_deadline)" "$out" \
-    "$ORCA_CLI" worktree set --worktree "path:$path" "${args[@]}" --json
+  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_DEADLINE" "$out" \
+    worktree set --worktree "path:$path" "${args[@]}" --json
   rc=$?
   [ "$rc" = 0 ] || sed -n '1,3p' "$out"
   rm -f "$out"
@@ -238,7 +278,7 @@ runner_worktree_set() {
 # Forcing is safe HERE specifically: every caller checks the worktree holds
 # nothing first. --force forces the worktree removal, not the branch deletion.
 #
-# ## Why the archive hook does not run through the CLI (#163)
+# ## Why the archive hook does not run through the CLI (armaatus/rommsync-nx#163)
 #
 # `orca worktree rm --run-hooks` runs orca.yaml's archive hook -- archive.sh,
 # which takes the stack and its volumes down -- and it runs it BEFORE Orca
@@ -261,13 +301,13 @@ runner_worktree_set() {
 runner_worktree_remove() {
   local path="$1" deadline="${2:-180}" out rc
   out="$(mktemp)"
-  FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "$deadline" "$out" \
-    "$ORCA_CLI" worktree rm --worktree "path:$path" --json
+  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$deadline" "$out" \
+    worktree rm --worktree "path:$path" --json
   rc=$?
   if [ ! -d "$path" ]; then rm -f "$out"; return 0; fi
   if [ "$rc" != 124 ]; then
-    FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "$deadline" "$out" \
-      "$ORCA_CLI" worktree rm --worktree "path:$path" --force --json
+    FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$deadline" "$out" \
+      worktree rm --worktree "path:$path" --force --json
     rc=$?
     if [ ! -d "$path" ]; then rm -f "$out"; return 0; fi
   fi
@@ -331,15 +371,6 @@ for t in terminals:
   return $rc
 }
 
-# The agent terminal in ONE worktree, if it has one. The path is an argument
-# rather than a substitution into the filter, because a worktree path can
-# contain anything a filename can.
-runner_agent_terminal() {
-  local list
-  list="$(runner_agent_terminals)" || return 1
-  printf '%s\n' "$list" | awk -F'\t' -v p="$1" '$2 == p { print $1; exit }'
-}
-
 # The composer text an agent has NOT sent, as a single comparable line: its
 # length, a space, then the text with newlines flattened.
 #
@@ -371,20 +402,20 @@ if draft and str(draft).strip():
 
 # Type text into a terminal without submitting it.
 runner_terminal_send() {
-  fleet_run_with_deadline "$(runner_send_deadline)" /dev/null \
-    "$ORCA_CLI" terminal send --terminal "$1" --text "$2" --json
+  orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
+    terminal send --terminal "$1" --text "$2" --json
 }
 
 # Submit whatever is in the composer.
 runner_terminal_enter() {
-  fleet_run_with_deadline "$(runner_send_deadline)" /dev/null \
-    "$ORCA_CLI" terminal send --terminal "$1" --enter --json
+  orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
+    terminal send --terminal "$1" --enter --json
 }
 
 # Interrupt the agent in a terminal. Both callers are about to take something
 # away from it, and an agent that is not told keeps working against a rig that
 # is going or already gone.
 runner_terminal_interrupt() {
-  fleet_run_with_deadline "$(runner_send_deadline)" /dev/null \
-    "$ORCA_CLI" terminal send --terminal "$1" --interrupt --json >/dev/null 2>&1
+  orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
+    terminal send --terminal "$1" --interrupt --json >/dev/null 2>&1
 }

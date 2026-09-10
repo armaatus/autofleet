@@ -188,8 +188,9 @@ card() {
   rc=$?
   if [ "$rc" != 0 ]; then
     say "  board update FAILED (rc $rc) for $path: $*"
-    # The runner's own words, capped: they are the difference between "the app is
-    # not running" and "that worktree is gone", and both look like silence.
+    # The runner's own words -- the driver caps them, this only relays them.
+    # They are the difference between "the app is not running" and "that
+    # worktree is gone", and both look like silence.
     while IFS= read -r line; do
       [ -n "$line" ] && say "    $line"
     done <"$out"
@@ -229,13 +230,17 @@ owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
 # `disown_issue`, which is what stopped `stalled-` leaking one small file per
 # issue that ever stalled. That is the root fix; the two exits in
 # enforce_timebox tidying up after themselves is the belt.
+#
+# `orca-blind-` is the name `runner-blind-` had before the runner seam, and it is
+# swept rather than dropped: a fleet upgraded mid-flight has some on disk, and a
+# marker nothing clears is one small file per issue that ever went blind, forever.
 clear_issue_markers() {
   rm -f "$STATE_DIR/stalled-$1" "$STATE_DIR/stall-labels-$1" \
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/merge-blind-$1" "$STATE_DIR/merge-held-$1" \
-        "$STATE_DIR/runner-blind-$1" \
+        "$STATE_DIR/runner-blind-$1" "$STATE_DIR/orca-blind-$1" \
         "$STATE_DIR/git-blind-$1" "$STATE_DIR/warned-$1" \
         "$STATE_DIR/reason-blind-$1"
 }
@@ -1409,7 +1414,12 @@ notice_stalled() {
     [ -e "$f" ] || continue
     num="$(basename "$f")"; path="$(cat "$f")"
     [ -d "$path" ] || continue
-    state="$(printf '%s' "$listing" | awk -F'\t' -v p="$path" '$1 == p { print $2; exit }')"
+    # Through the environment, not `awk -v`, which reinterprets backslashes in
+    # what it assigns -- a worktree path with one in it would never match, and
+    # this watcher would report every agent in it as not waiting, forever. See
+    # runner_agent_terminal in lib.sh, which had the same defect.
+    state="$(printf '%s' "$listing" \
+      | AUTOFLEET_AWK_PATH="$path" awk -F'\t' '$1 == ENVIRON["AUTOFLEET_AWK_PATH"] { print $2; exit }')"
     [ "$state" = "waiting" ] || {
       rm -f "$STATE_DIR/stalled-$num" "$STATE_DIR/stall-labels-$num"; continue; }
     # Once per stall, not once per poll -- and checked before the lookup, so a

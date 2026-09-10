@@ -17,9 +17,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/scripts/fleet/lib.sh"
 
 ref="${1:-}"
-# `|| true` twice over, because `set -e` is on and BOTH "no runner" and "no
-# linked issue" are ordinary answers here: the argument form is the one the
-# agent uses, and the fallback exists for a person running this by hand.
+# Neither half may kill the script, because `set -e` is on and BOTH "no runner"
+# and "no linked issue" are ordinary answers here: the argument form is the one
+# the agent uses, and this fallback exists for a person running it by hand. The
+# `if` condition is what makes a failing `runner_available` harmless; the
+# `|| true` is what makes a failing `runner_worktree_issue` harmless.
 if [ -z "$ref" ] && runner_available 2>/dev/null; then
   ref="$(runner_worktree_issue || true)"
 fi

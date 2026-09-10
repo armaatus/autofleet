@@ -37,12 +37,13 @@ decides whether that is allowed.
 
 ## Start it
 
-Run the dispatcher in an Orca terminal, so it is as visible as the work it
-starts:
+Run the dispatcher in a terminal the runner opens, so it is as visible as the
+work it starts. The exact command is the runner's, so ask the fleet for it
+rather than reading one off this page — a host project on a different
+`AUTOFLEET_RUNNER` gets a different line:
 
 ```bash
-orca terminal create --worktree active --title fleet \
-  --command "./scripts/fleet/fleet.sh run --auto"
+./scripts/fleet/fleet.sh          # prints it, under "Run it in a terminal..."
 ```
 
 Or directly:
