@@ -422,9 +422,14 @@ foundation_hold_say() {
   # that MOVES to a different issue is announced again.
   local what="$1"; shift
   local said_at now stale=false
-  said_at="$(fleet_mtime "$FOUNDATION_HOLD_SAID")"
+  said_at="$(fleet_mtime "$FOUNDATION_HOLD_SAID")" || said_at=""
   now="$(date +%s)"
-  [ -n "$said_at" ] && [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true
+  # Guarded, because an mtime this could not read must degrade to "say it" and
+  # never to an arithmetic error inside the dispatcher's poll.
+  case "$said_at" in
+    ''|*[!0-9]*) stale=true ;;
+    *) [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true ;;
+  esac
   if $stale || [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
     printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
     local line
