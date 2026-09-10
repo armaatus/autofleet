@@ -66,6 +66,30 @@ LOG_DIR="$FLEET_DIR/reviews"
 # three two-second exits could hold every slot forever and a fourth pull request
 # was never reviewed at all. Found by the independent review.
 #
+# ...and the record of a head this run is DONE with, which is a different thing
+# from the lock above and must not be released the same way.
+#
+# The marker is a LOCK: "a reviewer is running", released on every exit. The
+# dispatcher decides whether to start a reviewer from its presence -- so an exit
+# meaning "there is nothing to do here" released the lock, and the next poll,
+# finding none, started another. Once a head had its review that repeated once
+# per poll until the agent pushed again: fourteen spawns in thirteen minutes on
+# PR #32's first head, each exiting 8 two API calls later. Cheap individually,
+# and it buried the dispatcher log.
+#
+# So: a second file, a RECORD -- "this head has been handled". Written only on
+# the exits where that is true, 0 and 8, and never on 5 or 7, where nothing was
+# submitted or the reviewer was killed and trying again is correct. Getting that
+# asymmetry backwards turns this fix into the silent block the whole mode exists
+# to remove. armaatus/autofleet#33.
+DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
+record_done() {
+  [ -n "$DONE_MARKER" ] || return 0
+  printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
+  # The attempt count belongs to heads that got NO verdict. This head got one.
+  rm -f "${AUTOFLEET_REVIEW_MARKER}.tries" 2>/dev/null || true
+}
+
 # Empty when a person ran this by hand, and then dropping it does nothing.
 #
 # There is exactly ONE EXIT trap in this file, installed here and extended once
@@ -162,7 +186,8 @@ PY
 
 counting_review
 case $? in
-  0) echo "PR #$pr already has a counting review on ${head:0:8}; nothing to do."; exit 8 ;;
+  0) echo "PR #$pr already has a counting review on ${head:0:8}; nothing to do."
+     record_done; exit 8 ;;
   2) echo "Fix merge_gate.py, then run this again." >&2; exit 2 ;;
 esac
 
@@ -337,6 +362,7 @@ wait "$reviewer"; rc=$?
 # The SAME question as before the run, deliberately -- see counting_review().
 if counting_review; then
   echo "==> a counting review is on ${head:0:8}"
+  record_done
   exit 0
 fi
 

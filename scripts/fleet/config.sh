@@ -77,6 +77,15 @@
 # .claude/agents/reviewer.md a budget rather than a hope. 80 is what
 # claude-review.yml grants.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
+# How many times one head may be handed to a reviewer that submits nothing.
+#
+# A reviewer that runs and submits nothing is retried, because that is usually
+# transient -- and unbounded, it is a full-budget reviewer started every poll
+# against a head that will never get a verdict, until the agent pushes or its
+# three-hour time-box expires. `claude-review.yml` bounds the same case at ONE
+# more attempt per head and then leaves a comment saying a person decides. This
+# is that bound.
+: "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
 
 # ------------------------------------------------------------- per-worktree
 # The prefix every derived compose project name carries, and the thing reap.sh

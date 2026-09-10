@@ -48,6 +48,15 @@
 #                                 of ours is never signalled, and a marker naming
 #                                 a dead pid is cleared. This is the second place
 #                                 the fleet signals a pid it read out of a file.
+#   test_review_mode.sh once       a head that already has a counting review is
+#                                 not handed to a second reviewer, on this poll
+#                                 or any later one -- and a push invalidates
+#                                 that. Fourteen spawns in thirteen minutes on
+#                                 PR #32's first head is what this stops.
+#   test_review_mode.sh retries    ...while a reviewer that submitted NOTHING is
+#                                 tried again. The asymmetry is the whole fix:
+#                                 backwards, it is the silent block the mode
+#                                 exists to remove.
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
@@ -213,6 +222,10 @@ n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))
 # -- a reviewer can run and submit nothing -- and "was one started at all" is the
 # question the queue phase is really asking.
 n_started() { grep -c . "$REVIEWER_CALLS" 2>/dev/null || echo 0; }
+# Whether a reviewer still holds PR 42's lock. A poll taken while one is running
+# is CORRECTLY skipped, so a phase that polls again immediately is testing the
+# dedup rather than the thing it means to.
+lock_held() { [ -e "$AUTOFLEET_DIR/reviewing/42" ] && echo yes || echo no; }
 
 # Wait until `$1` prints `$2`, or give up after `$3` seconds and say what it was.
 #
@@ -421,6 +434,77 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and so is what it had started"
   ;;
 
+# ---------------------------------------------------------------------- once
+  once)
+    make_fixture; stub_reviewer marked
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_started 1 || fail "the first pass started no reviewer"
+    await n_reviews 1 || fail "the first reviewer submitted nothing"
+    await lock_held no || fail "the first reviewer never released its lock"
+    # ...and now every later poll must start nothing, because the head is done.
+    for _ in 1 2 3; do poll_review_open_prs; done
+    sleep 2
+    [ "$(n_started)" = 1 ] \
+      || fail "three further polls started $(n_started) reviewers on a head that already has one"
+    ok "a head with a counting review is not handed to another reviewer"
+
+    # A push invalidates it: new head, new review.
+    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m push)
+    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_started 2 || fail "a new head did not get a reviewer"
+    ok "...and a push starts one again"
+    ;;
+
+# ------------------------------------------------------------------- retries
+  retries)
+    # The asymmetry. A reviewer that submitted NOTHING must be tried again --
+    # exit 5 is a transient failure, and recording it as handled would turn this
+    # fix into a PR nobody ever reviews, which is the failure local mode exists
+    # to remove.
+    make_fixture; stub_reviewer silent
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_started 1 || fail "the first pass started no reviewer"
+    # ...and let it finish. Polling while it runs is correctly skipped, which is
+    # a different property and one the `once` phase already covers.
+    await lock_held no || fail "the first reviewer never released its lock"
+    # It submitted nothing. The next pass must try again.
+    poll_review_open_prs
+    await n_started 2 \
+      || fail "a reviewer that submitted nothing was recorded as done; that PR is never reviewed"
+    ok "a reviewer that submitted nothing is tried again"
+    [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
+      && fail "exit 5 wrote the done record, which is the silent-block direction"
+    ok "...and no done record was written for it"
+    ;;
+
+# --------------------------------------------------------------------- capped
+  capped)
+    # ...and the retry is bounded. Unbounded, a head that never gets a verdict
+    # gets a full-budget reviewer every poll until the agent's three-hour
+    # time-box expires. claude-review.yml bounds the same case at one more
+    # attempt and then says a person decides.
+    make_fixture; stub_reviewer silent
+    export AUTOFLEET_REVIEW_MAX_TRIES=2
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    n=0
+    while [ "$n" -lt 5 ]; do
+      poll_review_open_prs
+      await lock_held no >/dev/null 2>&1 || true
+      n=$((n + 1))
+    done
+    [ "$(n_started)" = 2 ] \
+      || fail "five polls started $(n_started) reviewers against a cap of 2"
+    ok "a head that never gets a verdict stops being retried at the cap"
+    out="$(poll_review_open_prs 2>&1; cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+    grep -q "submitted nothing, which is the cap" <<<"$out" \
+      || fail "it stopped retrying without saying so: $out"
+    ok "...and says so, rather than going quiet"
+    ;;
+
 # --------------------------------------------------------------------- queue
   queue)
   make_fixture; stub_reviewer marked
@@ -551,6 +635,6 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
+  echo "usage: $0 once|retries|capped|mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
   exit 2 ;;
 esac

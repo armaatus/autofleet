@@ -794,6 +794,10 @@ stop_reviewers() {
   [ -d "$REVIEWING_DIR" ] || return 0
   for marker in "$REVIEWING_DIR"/*; do
     [ -e "$marker" ] || continue
+    # The records go too: a dispatcher starting fresh re-derives what has been
+    # reviewed from the pull request itself, which is the only source that
+    # cannot be stale.
+    case "$marker" in *.done|*.tries) rm -f "$marker"; continue ;; esac
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
     if reviewer_alive "$held"; then
@@ -854,6 +858,9 @@ review_open_prs() {
     local m p n=0
     for m in "$REVIEWING_DIR"/*; do
       [ -e "$m" ] || continue
+      # `<pr>.done` is a record, not a lock: it holds a head, not a pid, and
+      # reaping it as a dead reviewer would put the re-spawn loop straight back.
+      case "$m" in *.done|*.tries) continue ;; esac
       p=""
       read -r p _ <"$m" 2>/dev/null || true
       reviewer_alive "$p"; local is=$?
@@ -882,6 +889,32 @@ for p in prs:
 ' | while IFS="$(printf '\t')" read -r pr head; do
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
+    # ...and the record of a head already handled, which is not the same
+    # question as "is a reviewer running". Without it, a head that HAS its
+    # review had a reviewer started for it every poll -- each exiting 8 two API
+    # calls later, once a minute, until the agent pushed. Per head, so a push
+    # invalidates it. armaatus/autofleet#33.
+    if [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ]; then
+      continue
+    fi
+    rm -f "$marker.done"
+
+    # ...and a head that has had its attempts. A reviewer that submits nothing
+    # is retried -- that is usually transient -- but not forever: unbounded, it
+    # is a full-budget reviewer started every poll against a head that will
+    # never get a verdict. claude-review.yml bounds the same case at one more
+    # attempt and then says a person decides; this says the same thing.
+    local tries_head tries_n
+    tries_head=""; tries_n=0
+    read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
+    [ "${tries_head:-}" = "$head" ] || tries_n=0
+    if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
+      foundation_hold_say "review-gaveup-$pr-$head" \
+        "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
+        "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
+        "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."
+      continue
+    fi
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""
@@ -948,6 +981,7 @@ for p in prs:
     # next candidate in this loop, so the slot is held for one iteration rather
     # than leaked. An earlier version of this comment claimed the marker was
     # written first; found by the independent review.
+    printf '%s %s\n' "$head" "$(( ${tries_n:-0} + 1 ))" >"$marker.tries"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"
