@@ -798,7 +798,7 @@ And what comes back from the change re-enters at stage 1:
 
 ## Where to look
 
-Everything runs through Orca, so the board is the status surface. `fleet.sh`
+Everything runs through the runner, so its board is the status surface. `fleet.sh`
 drives it: **`in-progress`** while a worktree builds, **`in-review`** once the
 agent has opened its PR, **`completed`** on merge, and a one-line comment on each
 card saying what it is waiting for. From inside a worktree an agent sets its own

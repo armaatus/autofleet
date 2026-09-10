@@ -160,7 +160,13 @@ runner_worktree_create() {
     --json
   rc=$?
   if [ "$rc" != 0 ]; then
-    cat "$out" "$err" | sed -n '1,3p'
+    # stderr FIRST. The three-line budget is the contract's, written for drivers
+    # that do not exist yet, and a runtime that prints an error object on stdout
+    # would push the actual reason off the end -- reintroducing the empty
+    # "could not create it:" against a driver that is obeying the page. Orca
+    # writes nothing to stdout on a failed --json call, so this costs nothing
+    # here and is the whole fix elsewhere. Found by the independent review.
+    cat "$err" "$out" | sed -n '1,3p'
     rm -f "$out" "$err"
     return "$rc"
   fi

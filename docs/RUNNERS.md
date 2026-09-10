@@ -50,9 +50,9 @@ independent review.
 
 Where a function relays **the runtime's own words** on failure, it relays **at
 most the first three lines**. That bound is the driver's, not the caller's: the
-dispatcher used to cap them itself and gave that up when the calls moved, so a
-driver relaying a verbose runtime unchecked would flood `fleet.log` with nothing
-left to stop it. Three lines is what the first line of a refusal plus its
+dispatcher used to cap them itself at each callsite and gave that up when the
+calls moved, so a driver relaying a verbose runtime unchecked would flood
+`fleet.log` with nothing left to stop it. Three lines is what the first line of a refusal plus its
 context has always taken. Raised by the independent review.
 
 ### Is it there

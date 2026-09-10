@@ -204,9 +204,20 @@ card() {
 # its whole directory -- and an agent that is not told keeps working against a rig
 # that is going or already gone. `cmd_stop` spells this out for itself instead: it
 # reports each interrupt it managed, which needs the exit code this swallows.
+#
+# A listing that could not be READ is said, once per call, rather than read as
+# "there is no agent there". All three callers -- `cmd_stop`, `enforce_timebox`
+# and `reap_abandoned` -- are about to take something away from that agent, and
+# the two answers are opposite instructions to whoever is watching the log: one
+# means nobody was working in there, the other means somebody is still working
+# against a rig that is going. Design note 2, on the sibling of the `--all` path.
+# Found by the independent review.
 interrupt_agent_in() {
   local handle
-  handle="$(runner_agent_terminal "$1")"
+  if ! handle="$(runner_agent_terminal "$1")"; then
+    say "  the runner would not say whether an agent is in $1 -- none was interrupted"
+    return 0
+  fi
   [ -n "$handle" ] || return 0
   runner_terminal_interrupt "$handle"
   return 0
@@ -686,7 +697,7 @@ launch() {
     "$(agent_brief "$num")" "starting #$num" >"$out"
   if [ $? != 0 ]; then
     say "  could not create it:"
-    sed 's/^/    /' "$out" | head -5 | tee -a "$LOG"
+    sed 's/^/    /' "$out" | tee -a "$LOG"
     rm -f "$out"
     return 1
   fi

@@ -514,6 +514,25 @@ else
   fail "the runner contract has drifted from the code (above); a second driver cannot be written against a page that is wrong"
 fi
 
+# 4c. The acceptance line of armaatus/autofleet#1, run rather than quoted.
+#
+#    CLAUDE.md hard rule 4 states this grep AS the rule, docs/RUNNERS.md says
+#    "returning nothing is what keeps it that way", and runner/README.md calls it
+#    "checkable rather than aspirational" -- and nothing checked it. 4b above
+#    cross-checks runner_* NAMES, which is a different question; `runner_stub`
+#    covers only the paths it drives, so stop.sh, setup.sh, env.sh, reap.sh,
+#    review.sh, await-review.sh, answer-review.sh and record-review.sh could all
+#    reintroduce a `$ORCA_CLI` and ship green through both. Hard rule 3 is that a
+#    rule with no assertion is not shipped, and this is the change that turned
+#    the convention into a rule. Found by the independent review.
+if leak="$(grep -rn 'ORCA_CLI\|orca ' scripts/fleet --include='*.sh' \
+             | grep -v '^scripts/fleet/runner/')"; then
+  fail "the runner seam is broken -- these reach for one runner's CLI from outside scripts/fleet/runner/:
+$(printf '%s\n' "$leak" | sed 's/^/    /')"
+else
+  ok "nothing outside scripts/fleet/runner/ reaches for the orca CLI"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then
