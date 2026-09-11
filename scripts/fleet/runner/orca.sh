@@ -158,7 +158,15 @@ runner_worktree_create() {
   # is explicit that a caller is not obliged to probe first. Found by the
   # independent review.
   orca_cli_resolve || {
-    echo "no orca CLI answers here; is the Orca app running?" >&2
+    # STDOUT, not stderr, and that distinction is the whole of the fix. `launch`
+    # captures stdout only -- `fleet.sh:702` is `runner_worktree_create ... >"$out"`
+    # -- and it has to, because stdout is where the worktree path comes back. A
+    # reason on stderr goes to the terminal and never into `$out`, so
+    # "  could not create it:" printed nothing, which is what round five thought
+    # it had fixed. docs/RUNNERS.md says this function prints "the runtime's own
+    # words on failure", and the CLI-failure branch below already relays them on
+    # stdout. Found by the review OF the round-five fix.
+    echo "no orca CLI answers here; is the Orca app running?"
     return 1
   }
   local out err rc; out="$(mktemp)"; err="$(mktemp)"
@@ -284,6 +292,14 @@ runner_worktree_set() {
   while [ $# -ge 2 ]; do
     args+=("--$1" "$2"); shift 2
   done
+  # Same reason as create, one function up: `card` logs
+  # "board update FAILED (rc $rc)" and then whatever this printed, so a failed
+  # resolve that says nothing is a refusal with no cause under it. `orca_cli`
+  # returns before it writes $out, so the relay below has nothing to relay.
+  orca_cli_resolve || {
+    echo "no orca CLI answers here; is the Orca app running?"
+    return 1
+  }
   out="$(mktemp)"
   FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_DEADLINE" "$out" \
     worktree set --worktree "path:$path" "${args[@]}" --json

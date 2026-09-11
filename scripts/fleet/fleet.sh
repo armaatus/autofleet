@@ -2045,7 +2045,8 @@ cmd_stop() {
         if [ "$unreadable" = 1 ]; then
           echo "    the runner would not list its agents -- some or NONE were"
           echo "    interrupted, which is not the same as there being none."
-          echo "    Stop them by hand, or re-run with --all."
+          echo "    Stop them by hand; --all reads the same listing and would"
+          echo "    not do better."
         fi
       fi
       # ...and the local reviewers, which are children of the dispatcher rather

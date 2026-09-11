@@ -588,9 +588,23 @@ fi
 #    What the rule forbids is CODE outside the driver reaching for the runtime.
 #    `config.sh` is the one exception, and the only one: it is where the default
 #    driver is chosen, so naming one there is the choice rather than a leak.
+#
+#    The comment is STRIPPED rather than the line skipped, because a `grep -v`
+#    on a leading `#` only sees whole-line comments. `AUTOFLEET_RUNNER=tmux  #
+#    not orca` is code plus prose, and skipping-on-leading-# failed it as a
+#    broken seam while permitting the identical words a line higher -- which is
+#    the opposite of the rule in all three places that state it. Latent when it
+#    was found (lint was green); it would have fired on the first person to
+#    annotate a line instead of a block. Found by the review of the round-five
+#    fix.
 if leak="$(grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
              | grep -v '^scripts/fleet/runner/' \
-             | grep -v ':[0-9]*: *#' \
+             | awk '{
+                 code = $0
+                 sub(/^[^:]*:[0-9]+:/, "", code)
+                 sub(/#.*/, "", code)
+                 if (code ~ /ORCA_/ || code ~ /orca([^A-Za-z0-9_]|$)/) print
+               }' \
              | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$')"; then
   fail "the runner seam is broken -- these reach for one runner's CLI from outside scripts/fleet/runner/:
 $(printf '%s\n' "$leak" | sed 's/^/    /')"

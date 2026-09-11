@@ -1009,17 +1009,30 @@ case "${1:-}" in
     # the message `create_says` exists to prevent, on the one path that phase
     # does not cover. Both neighbours already said why. Found by the independent
     # review.
+    # STDERR IS DISCARDED, and that is the assertion rather than an accident:
+    # `launch` captures stdout only (`fleet.sh:702`, `... >"$out"`), because
+    # stdout is where the worktree path comes back. Capturing `2>&1` here passes
+    # with the reason on either stream and pins nothing -- which is how the first
+    # attempt at this fix shipped with the `echo` still going to stderr, and
+    # `launch` still printing "could not create it:" and then nothing. Found by
+    # the review of that fix; the same shape is asserted for
+    # `runner_worktree_set`, whose caller `card` reads the same way.
     out="$( cd "$WORK/repo" && bash -c '
       set -uo pipefail
       REPO_ROOT="$PWD"
       . ./scripts/fleet/lib.sh
       orca_cli_resolve() { return 1; }
       runner_worktree_create "$PWD" name 42 agent prompt comment; echo "create rc=$?"
-    ' 2>&1 )"
+      runner_worktree_set "$PWD" workspace-status in-review;      echo "set rc=$?"
+    ' 2>/dev/null )"
     grep -q "^create rc=1$" <<<"$out" \
       || fail "a create against an unreachable runner did not answer 1, which is what launch leaves the issue queued on: $out"
     grep -q "orca CLI" <<<"$out" \
-      || fail "launch would print 'could not create it:' and then nothing, because the driver relayed a failure it had not yet made: $out"
+      || fail "launch would print 'could not create it:' and then nothing: the driver's reason never reached the one stream launch captures: $out"
+    grep -q "^set rc=1$" <<<"$out" \
+      || fail "a board update against an unreachable runner did not answer 1: $out"
+    [ "$(grep -c "orca CLI" <<<"$out")" = 2 ] \
+      || fail "card would log 'board update FAILED' with no cause under it, for the same reason create did: $out"
 
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
     ;;

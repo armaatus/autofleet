@@ -559,11 +559,18 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # `.autofleet/run/reviewed-<sha>` exists, and record-review.sh is the only
   # thing that writes it. It was making `.orca` -- the directory the marker lived
   # in before it moved -- and then writing into `.autofleet/run`, which
-  # .gitignore keeps out of the tree. So on a worktree the fleet had just opened
-  # the redirect failed, the marker never appeared, and the agent could not push
-  # the branch it had finished. Nothing asserted it because nothing ran this
-  # script at all. Found while widening the runner-seam grep, which is what saw
-  # the `.orca`.
+  # .gitignore keeps out of the tree, so the redirect failed and the marker never
+  # appeared.
+  #
+  # NOT on a worktree the fleet opened, and the first version of this comment
+  # claimed otherwise: `env.sh` and `agent-autostart.sh` both `mkdir -p
+  # .autofleet/run`, and `setup.sh` runs `env.sh`, so a fleet-provisioned
+  # worktree had the directory before any agent reached this script. What it
+  # breaks is every other way in -- a fresh clone, a worktree made by hand, a
+  # host project running this before its first fleet pass -- where the answer to
+  # "I have reviewed, let me push" is a redirect error. The correction came from
+  # the review of the fix. Nothing asserted any of it because nothing ran this
+  # script at all; the `.orca` itself was found by widening the runner-seam grep.
   make_fixture
   [ -e "$WORK/repo/.autofleet/run" ] \
     && fail "the fixture already has the directory under test, so this asserts nothing"
