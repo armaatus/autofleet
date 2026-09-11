@@ -178,8 +178,8 @@ runner_worktree_remove <path> [<deadline>]
   main worktree and archived ones — the fleet counts these to decide whether it
   may launch, and neither of those is a slot. Scoping is the DRIVER's job, and
   it is a property of this contract rather than an optimisation: the fleet
-  resolves every
-  issue number this returns against its own repository, so one worktree belonging
+  resolves every issue number this returns against its own repository, so one
+  worktree belonging
   to another project takes a slot from `MAX_WORKTREES`, its issue number can
   answer `in_flight` for one of ours, and — because a foundation issue waits for
   the count to reach zero, and `foundation_in_flight` cannot read a foreign

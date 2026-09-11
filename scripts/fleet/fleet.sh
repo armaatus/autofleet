@@ -285,6 +285,21 @@ disown_issue() {
   clear_issue_markers "$1"
 }
 
+# `issue<TAB>path`, which is the driver's `path<TAB>branch<TAB>issue` with the two
+# columns this dispatcher reads brought to the front and the branch dropped: a
+# column no caller reads is one the next caller reads wrong. Four callers depend
+# on that order -- `waiting_worktrees`, `in_flight`, `foundation_in_flight` and
+# `cmd_status` -- and it is stated here because the `awk` alone does not say it.
+#
+# NON-ZERO WHEN THE ANSWER COULD NOT BE READ, which is not the same as "nothing
+# is running": reading a failed call as zero live worktrees is how one transient
+# hiccup turns into three duplicate worktrees for issues that already have one,
+# because `in_flight` goes blind at the same moment and from the same list.
+#
+# (These ten lines were removed with the selector's comment block and re-homed
+# here by the independent review. The selector prose had to go -- it named a
+# runner's flag in the file hard rule 2 says may not know one. This half names
+# no runtime and was collateral.)
 live_worktrees() {
   local list
   list="$(runner_worktree_list)" || return 1

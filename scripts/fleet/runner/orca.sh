@@ -261,7 +261,16 @@ runner_worktree_list() {
   # `live`, and `foundation_in_flight` asked about an issue number that does not
   # exist here, could not read its labels, and held the fleet indefinitely after
   # a single line in the log. armaatus/autofleet#31.
-  orca_json "$out" worktree list --repo "$ORCA_REPO_SELECTOR" || { rm -f "$out"; return 1; }
+  orca_json "$out" worktree list --repo "$ORCA_REPO_SELECTOR" || {
+    # NAMES THE SELECTOR IT ASKED WITH, on stderr, which the dispatcher's log
+    # captures. A refused selector and an app that is down both surface as "could
+    # not read the worktree list", and they need opposite responses -- one is
+    # `repo_not_found` on a path, the other is a runtime to restart. The pre-#1
+    # branch named the selector in `fleet.sh`'s own message; that string is a
+    # runner's, so hard rule 2 moved it here rather than losing it. Found by the
+    # independent review of the rebase that lost it.
+    echo "orca: could not list worktrees for $ORCA_REPO_SELECTOR" >&2
+    rm -f "$out"; return 1; }
   python3 -c '
 import json, sys
 try:
