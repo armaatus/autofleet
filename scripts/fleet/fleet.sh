@@ -293,22 +293,37 @@ disown_issue() {
 # the bug (#46). That fallback is not itself an error path: it returns a
 # selector like any other, and if it does not name a repo the CLI is what
 # refuses it, which fails the listing rather than widening it.
-# Answered once per process rather than once per listing: $REPO_ROOT does not
-# move under a running dispatcher, and this file's convention is one answer per
-# poll for anything repeated. It is also why the `git` call needs no deadline of
-# its own -- a local rev-parse, made once, outside the CLI calls
-# `orca_run_with_deadline` guards. Found by the local review.
-REPO_SELECTOR=""
-repo_selector() {
-  [ -n "$REPO_SELECTOR" ] && { printf '%s\n' "$REPO_SELECTOR"; return 0; }
-  local common
+# Resolved ONCE, when this file is sourced, and not memoised inside the
+# function: both callsites spell it `"$(repo_selector)"`, which runs in a
+# command-substitution subshell, so anything assigned in there is discarded the
+# moment it returns. A cache written that way is dead code, and the comment
+# claiming one answer per process was simply false. $REPO_ROOT does not move
+# under a running dispatcher, so the answer is fixed for the process either way.
+# It is also why the `git` call needs no deadline: a local rev-parse, made once,
+# outside the CLI calls `orca_run_with_deadline` guards. Found by the local
+# review.
+resolve_repo_selector() {
+  local common root
   common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
-              --git-common-dir 2>/dev/null)" \
-    && [ -n "$common" ] \
-    && REPO_SELECTOR="path:$(dirname "$common")"
-  [ -n "$REPO_SELECTOR" ] || REPO_SELECTOR="path:$REPO_ROOT"
-  printf '%s\n' "$REPO_SELECTOR"
+              --git-common-dir 2>/dev/null)" || common=""
+  # THE GUARD IS ON WHAT `dirname` PRODUCED, not on the string built from it.
+  # git before 2.31 does not know `--path-format`: it echoes the unrecognised
+  # argument back as a flag and still exits 0, so `common` comes back as
+  # `--path-format=absolute` + `.git`, `dirname` refuses the leading `--`, and
+  # a guard reading the already-assigned `path:$(dirname ...)` sees the
+  # non-empty literal `path:` and lets it through. The CLI answers
+  # `repo_not_found`, every listing fails, and the dispatcher skips every pass
+  # forever -- the same permanent stall #46 was, arriving through its own fix.
+  # Found by the local review.
+  if [ -n "$common" ]; then
+    root="$(dirname "$common" 2>/dev/null)" || root=""
+    case "$root" in ''|-*) root="" ;; esac
+    [ -n "$root" ] && { printf 'path:%s\n' "$root"; return 0; }
+  fi
+  printf 'path:%s\n' "$REPO_ROOT"
 }
+REPO_SELECTOR="$(resolve_repo_selector)"
+repo_selector() { printf '%s\n' "$REPO_SELECTOR"; }
 
 # Non-zero when the answer could not be read, which is NOT the same as "nothing
 # is running". Reading a failed CLI call as zero live worktrees is how one
@@ -577,8 +592,8 @@ foundation_in_flight() {
 
   if ! list="$(live_worktrees)"; then
     foundation_hold "$cached" "list-unreadable" \
-      "could not read the worktree list, so whether a foundation issue is in flight" \
-      "  cannot be answered -- launching nothing rather than guessing"
+      "could not read the worktree list for $(repo_selector), so whether a foundation" \
+      "  issue is in flight cannot be answered -- launching nothing rather than guessing"
     return 0
   fi
 
@@ -2406,7 +2421,7 @@ while that one is up."
 
     local live live_list
     if ! live_list="$(live_worktrees)"; then
-      say "could not read the worktree list; skipping this pass rather than guessing"
+      say "could not read the worktree list for $(repo_selector); skipping this pass rather than guessing"
       sleep "$POLL_SECONDS"
       continue
     fi

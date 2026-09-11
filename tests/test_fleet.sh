@@ -2376,6 +2376,31 @@ JSON
     echo "ok: another repo's worktree neither holds a foundation issue nor stops the fleet"
     ;;
 
+  selector_git_unusable)
+    make_fixture ok
+    # "git answered, but unusably." git before 2.31 does not know
+    # `--path-format`: it echoes the unrecognised argument back as a flag and
+    # still exits 0, so the answer is one git could not give. `dirname` then
+    # refuses the leading `--` and produces nothing -- and a guard that reads
+    # the string already built from it sees `path:` and lets it through, which
+    # the CLI refuses with repo_not_found on every listing, forever. The two
+    # phases that reach the fallback do so by git FAILING; this is the other
+    # way in. Found by the local review.
+    real_git="$(command -v git)"
+    cat >"$WORK/bin/git" <<GITSTUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in --path-format=*) printf '%s\n.git\n' "\$a"; exit 0 ;; esac
+done
+exec "$real_git" "\$@"
+GITSTUB
+    chmod +x "$WORK/bin/git"
+    sel="$(in_fleet repo_selector 2>&1)"
+    [ "$sel" = "path:$WORK/repo" ] \
+      || fail "an unusable answer from git was passed to the CLI as a selector: [$sel]"
+    echo "ok: git answering unusably falls back to this checkout, not to a selector the CLI refuses"
+    ;;
+
   create_scoped)
     make_fixture ok
     make_repo_git
@@ -2413,6 +2438,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh create_scoped|live_scoped|foundation_foreign|status_worktree_scope|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
