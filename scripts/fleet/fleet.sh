@@ -279,14 +279,56 @@ disown_issue() {
   clear_issue_markers "$1"
 }
 
+# Which repository to scope a worktree listing to, as the CLI's `path:` selector.
+#
+# `path:` names a repository ROOT, and this script does not always run from one:
+# `fleet.sh status` is run from wherever you are, which CLAUDE.md means to be a
+# fleet worktree. Handed a worktree path the CLI answers `repo_not_found` and
+# exits 1 -- and a failed listing makes `in_flight` answer "could not tell" for
+# every issue, so `status` would offer work that is already running.
+#
+# `--git-common-dir` is the resolution: in a linked worktree it is the main
+# checkout's `.git`, and in the main checkout it is its own. If git cannot say,
+# fall back to this checkout rather than to an unscoped listing -- unscoped is
+# the bug (#46). That fallback is not itself an error path: it returns a
+# selector like any other, and if it does not name a repo the CLI is what
+# refuses it, which fails the listing rather than widening it.
+repo_selector() {
+  local common
+  common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
+              --git-common-dir 2>/dev/null)" \
+    && [ -n "$common" ] \
+    && { printf 'path:%s\n' "$(dirname "$common")"; return 0; }
+  printf 'path:%s\n' "$REPO_ROOT"
+}
+
 # Non-zero when the answer could not be read, which is NOT the same as "nothing
 # is running". Reading a failed CLI call as zero live worktrees is how one
 # transient hiccup turns into three duplicate worktrees for issues that already
 # have one: `in_flight` goes blind at the same moment, because it reads the same
 # list.
+#
+# SCOPED TO THIS REPOSITORY, and every caller depends on it. Unscoped, the CLI
+# answers for the whole machine: a worktree belonging to another repo took a
+# slot from MAX_WORKTREES, its issue NUMBER could answer `in_flight` for one of
+# ours, and -- because a foundation issue waits for this count to reach 0 -- it
+# stalled every foundation issue permanently, since nothing this fleet does can
+# close another repo's worktree. Worse, `foundation_in_flight` resolves each
+# linked number against THIS repository, so a foreign worktree on a number that
+# does not exist here fails the lookup and holds the fleet fail-closed: on
+# 2026-09-11 this repo's own dispatcher launched nothing while a rommsync-nx
+# worktree on #198 was open (#46, and #31 from the other end).
+#
+# Scope through the CLI rather than by filtering paths: `workspaces/<repo>/...`
+# is a naming convention, and two repos sharing a name prefix would defeat a
+# string match, whereas `path:` is the runtime's own answer to which repo a
+# worktree belongs to. The flag is an Orca one and this is a callsite that still
+# holds `$ORCA_CLI` directly, which #1 is moving behind the runner driver --
+# `docs/RUNNERS.md` says scoping is the driver's job once it does.
 live_worktrees() {
   local out; out="$(mktemp)"
-  orca_run_with_deadline 30 "$out" "$ORCA_CLI" worktree list --json || {
+  orca_run_with_deadline 30 "$out" \
+    "$ORCA_CLI" worktree list --json --repo "$(repo_selector)" || {
     rm -f "$out"; return 1; }
   python3 -c '
 import json, sys
@@ -506,16 +548,16 @@ foundation_in_flight() {
     return 0
   fi
 
-  # THE LIST IS MACHINE-WIDE, and this is where that starts to matter. `orca
-  # worktree list` is not scoped to a repository, while `poll_issue "$n"`
-  # resolves the number against THIS one -- so an unrelated Orca worktree whose
-  # linked issue number happens to match a `foundation` issue here stops the
-  # fleet launching anything, indefinitely, after a single line in the log.
+  # Every number below is resolved against THIS repository, which is safe only
+  # because `live_worktrees` is scoped to it. It was not, and an unrelated Orca
+  # worktree whose linked number matched a `foundation` issue here -- or matched
+  # nothing here at all, which fails the lookup and holds fail-closed -- stopped
+  # the fleet launching anything, indefinitely, after a single line in the log.
   #
-  # The premise is older than this function: `in_flight` and `count_startable`
-  # share it, where it merely inflated a count. Here it is newly fatal rather
-  # than merely inaccurate, which is why it is written down.
-  # armaatus/autofleet#31 has the fix.
+  # The premise was older than this function: `in_flight` and `count_startable`
+  # shared it, where it merely inflated a count. Here it was fatal rather than
+  # inaccurate, which is why it is written down. Fixed in #46; see
+  # `live_worktrees`, which is where all three callers get the scope at once.
   # Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
     # `-` is `live_worktrees` saying this worktree has no linked issue at all,

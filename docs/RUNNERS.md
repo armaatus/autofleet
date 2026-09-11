@@ -57,13 +57,29 @@ runner_terminal_read <id> <lines>
 runner_terminal_send <id> <text>
 ```
 
-Two properties matter more than the shapes:
+Three properties matter more than the shapes:
 
 1. **Every call has a deadline.** A driver that can block forever takes the
    worktree with it.
 2. **"I could not tell" is not "nothing".** Every one of these must distinguish a
    negative answer from a failed question. Conflating them is how a dispatcher
    waits out its whole time-box and then reports that nothing arrived.
+3. **`runner_worktree_list` answers for THIS repository, and scoping it is the
+   driver's job.** One machine runs one fleet per repository -- that is what
+   `.autofleet/config` is for -- and a runtime that knows about all of them will
+   answer for all of them unless asked otherwise. The caller may not do the
+   filtering: it holds an issue NUMBER and a path, and both collide across
+   repositories, while the runtime is the only thing that knows which repository
+   a worktree belongs to. Orca's answer is `worktree list --repo path:<root>`;
+   a `git worktree` driver's is `git -C <root> worktree list`. Get this wrong
+   and another repository's worktree takes a slot, answers `in_flight` for an
+   issue of ours, and holds every `foundation` issue forever -- #46, which
+   stopped this repo's own fleet for a day.
+
+   `path:` names a repository ROOT, and the dispatcher is not always run from
+   one: `fleet.sh status` is run from a fleet worktree. `repo_selector` in
+   `fleet.sh` resolves that through `git --git-common-dir`, and until the list
+   moves behind `runner_worktree_list` (#1) it passes the flag at the callsite.
 
 A plain-`git worktree` + tmux driver satisfies all of it, and would drop the
 macOS-only dependency entirely.
