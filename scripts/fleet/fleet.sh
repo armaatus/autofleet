@@ -113,10 +113,11 @@ POLL_SECONDS="${AUTOFLEET_POLL:-60}"
 # task that was never going to work.
 TIMEBOX_SECONDS="${AUTOFLEET_TIMEBOX:-10800}"
 FOUNDATION_LABEL="${AUTOFLEET_FOUNDATION_LABEL:-foundation}"
-# The human's thumb on the queue -- see "What it picks" above. Read in exactly
-# one place (`ready_issues`), because an override that also changed what may
-# START would be a second way to bypass `blocked`, and this fleet has one set of
-# rules about what is startable.
+# The human's thumb on the queue -- see "What it picks" above. Read in exactly one
+# place that can change what STARTS (`ready_issues`, where it only sorts), plus
+# `cmd_status`, which reports. That split is the point: an override that also
+# decided what may start would be a second way past `blocked`, and this fleet has
+# one set of rules about what is startable.
 PRIORITY_LABEL="${AUTOFLEET_PRIORITY_LABEL:-priority}"
 # An issue whose LAST step is outward, irreversible and the maintainer's --
 # tagging a release, touching real hardware, signing something. The fleet may not

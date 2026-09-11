@@ -32,10 +32,17 @@ too.
 ### The labels
 
 `unblock.yml` maintains the first two and `fleet.sh` reads them; the other three
-a person applies. Rename them here if your repo already uses other words for the
-same ideas — but create the labels first, because an issue can carry no label
-that does not exist, and `install.sh` prints the `gh label create` lines for all
-five.
+a person applies. `install.sh` prints the `gh label create` line for all five —
+create them before anything can carry one.
+
+**Renaming works for three of the five today.** `AUTOFLEET_FOUNDATION_LABEL`,
+`AUTOFLEET_HUMAN_STEP_LABEL` and `AUTOFLEET_PRIORITY_LABEL` are read through the
+variable. `AUTOFLEET_READY_LABEL` is not — `ready` is a literal in the
+dispatcher's queue filter, and `unblock.yml` writes both `ready` and `blocked` by
+name in JavaScript — so renaming that one gives you a dispatcher looking for a
+label nothing writes: an empty queue, forever, with nothing on screen saying why.
+That is [#57](https://github.com/armaatus/autofleet/issues/57). Until it lands,
+keep `ready` and `blocked`.
 
 `AUTOFLEET_READY_LABEL` (`ready`), `AUTOFLEET_BLOCKED_LABEL` (`blocked`),
 `AUTOFLEET_FOUNDATION_LABEL` (`foundation`),
