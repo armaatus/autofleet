@@ -592,7 +592,8 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "record-review.sh writes the push gate's marker on a worktree that has no run dir yet"
 
   # ...and the marker is the one the HOOK reads, asked of the hook rather than
-  # restated here -- the whole of #183 was two programs disagreeing about one
+  # restated here -- the whole of armaatus/rommsync-nx#183 was two programs
+  # disagreeing about one
   # directory.
   owned="$WORK/fleet/worktrees"
   mkdir -p "$owned"

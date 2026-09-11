@@ -763,13 +763,61 @@ fi
 #    of the prose: CLAUDE.md describes the rule and points at docs/RUNNERS.md for
 #    the command. This check fails if a command comes back, which is the only
 #    form of drift that can mislead. Found by the independent review.
-if restated="$(grep -nE "grep -rn[i]? .orca|ORCA_\\\\\|orca" CLAUDE.md 2>/dev/null)"; then
-  fail "CLAUDE.md restates the seam pipeline:
-$(printf '%s\n' "$restated" | sed 's/^/    /')
-  It is prose, so 4d cannot check it, and it has gone stale twice. Describe the
-  rule there and let docs/RUNNERS.md carry the command."
-else
+#    ANCHORED ON "a grep that mentions orca", not on a spelling. The first
+#    version matched `grep -rn` or `grep -rni` followed by `orca`, plus the
+#    literal `ORCA_\|orca` -- the two spellings the rule had HAD. A restatement
+#    as `grep -rIni 'orca' scripts/fleet` or `grep -rn --include='*.sh' -i orca`
+#    matched neither, and 4e would print its ok line while the pipeline sat back
+#    in the one file every agent reads first. That is exactly the defect 4d
+#    fixed in itself one round earlier, in the sibling that did not get the same
+#    treatment. Found by the independent review.
+#
+#    A line carrying both `grep` and `orca` is the shape of a restatement and
+#    nothing else: hard rule 4's prose says "shells out to `orca`" on one line
+#    and "runs the grep that says so" on another, and neither carries both.
+#    `.` and not `[^\n]`: grep is line-based, so `.` cannot cross a newline
+#    anyway -- while `[^\n]` in a bracket expression excludes the literal letter
+#    `n`, which every spelling of the flags contains (`-rni`). The first version
+#    of this widening matched nothing at all for that reason, and said ok.
+#    IN PYTHON, like 4b and 4d, and not because the shell could not do it: three
+#    layers of quoting -- python heredoc into a shell string into an ERE -- ate
+#    the backslashes twice while this check was being written, and each time the
+#    result was a check that printed `ok` and matched nothing. A guard whose
+#    escaping is hard to read is a guard nobody notices has stopped guarding,
+#    which is the whole of hard rule 3.
+if python3 - <<'PYEOF'
+import re, sys
+
+# Two shapes, because the rule has been restated as both already:
+#   1. a grep command line that mentions orca, in either order;
+#   2. the bare PATTERN, with its BRE alternation next to orca -- which is what
+#      the paragraph carried for four rounds, with no `grep` on the line at all.
+#
+# Prose naming `ORCA_DEADLINE` or `orca_cli_resolve` as EXAMPLES is not a
+# restatement, and must not match: what distinguishes the pattern form is the
+# `\|` alternation beside the word, not the word.
+SHAPES = (
+    re.compile(r"grep.*orca|orca.*grep", re.I),
+    re.compile(r"orca[^ ]*\\\||\\\|[^ ]*orca", re.I),
+)
+
+try:
+    lines = open("CLAUDE.md").read().splitlines()
+except OSError as e:
+    sys.exit(f"could not read CLAUDE.md, so hard rule 4's wording is unchecked: {e}")
+
+bad = [f"{n}: {ln.strip()}" for n, ln in enumerate(lines, 1)
+       if any(sh.search(ln) for sh in SHAPES)]
+if bad:
+    sys.exit("CLAUDE.md restates the seam pipeline:\n    "
+             + "\n    ".join(bad)
+             + "\n  It is prose, so 4d cannot check it, and it has gone stale twice."
+               "\n  Describe the rule there and let docs/RUNNERS.md carry the command.")
+PYEOF
+then
   ok "CLAUDE.md describes hard rule 4 without restating the command 4d guards"
+else
+  fail "hard rule 4's own paragraph carries the command again (above)"
 fi
 
 # 5. The dispatcher is what runs it. review.sh existing and never being called is

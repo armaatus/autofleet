@@ -180,7 +180,9 @@ runner_worktree_remove <path> [<deadline>]
   keys the fleet uses are `workspace-status` and `comment`. Silent on success,
   the runtime's own words on failure, **on stdout by convention** — both callers
   merge the streams, so unlike `create` this one is not load-bearing; see "which
-  stream" above. Any non-zero means the card was not updated; `2` specifically means the CALLER passed something that is not a pair
+  stream" above. Like `create`, it relays **stderr first** within the three-line
+  bound, so a runtime that prints an error object on stdout cannot push the real
+  reason off the end. Any non-zero means the card was not updated; `2` specifically means the CALLER passed something that is not a pair
   list, which is a bug in the caller rather than a statement about the runtime —
   an odd argument count is refused rather than rounded down, because a dropped
   key is a board update that silently did less than it was asked for.

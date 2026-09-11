@@ -309,11 +309,23 @@ runner_worktree_set() {
     orca_unavailable_says
     return 1
   }
+  # STDERR TO ITS OWN FILE, and relayed FIRST -- the same shape
+  # `runner_worktree_create` was given, for the same reason. With
+  # `FLEET_RUN_CAPTURE_STDERR=1` the two streams arrive merged in the CLI's own
+  # order, so a runtime that prints an error object on stdout pushes the real
+  # reason past the three-line budget `docs/RUNNERS.md` states as an obligation
+  # on drivers that do not exist yet. Orca writes nothing to stdout on a failed
+  # `--json` call, so this costs nothing here -- and it means the page's two
+  # relays behave the same way rather than being parallel only on paper. Found
+  # by the independent review, which noted this was the one relay that could not
+  # honour the ordering half of its own contract.
+  local err; err="$(mktemp)"
   out="$(mktemp)"
-  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_DEADLINE" "$out" \
+  FLEET_RUN_STDERR="$err" orca_cli "$ORCA_DEADLINE" "$out" \
     worktree set --worktree "path:$path" "${args[@]}" --json
   rc=$?
-  [ "$rc" = 0 ] || sed -n '1,3p' "$out"
+  [ "$rc" = 0 ] || cat "$err" "$out" | sed -n '1,3p'
+  rm -f "$err"
   rm -f "$out"
   return $rc
 }
