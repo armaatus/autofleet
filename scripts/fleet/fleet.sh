@@ -419,7 +419,8 @@ count_parked_owned() {
   # Surviving a pass costs one poll of waiting on a worktree that really is
   # parked, and costs nothing at all on `stuck-`, which is still there next pass.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-    if ! why_parked "$n" >/dev/null; then
+    local reason
+    if ! reason="$(why_parked "$n")"; then
       rm -f "$STATE_DIR/parked-since-$n"
       continue
     fi
@@ -446,13 +447,28 @@ count_parked_owned() {
     # "Could not tell" does NOT count, which is design note 2: a listing that
     # would not read is not an empty one, and the safe reading here is that
     # somebody may still be in there.
-    if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
-      local handle
-      if ! handle="$(runner_agent_terminal "$(owned_path "$n")")" || [ -n "$handle" ]; then
-        rm -f "$STATE_DIR/parked-since-$n"
-        continue
-      fi
-    fi
+    # ON THE REASON `why_parked` RETURNED, not on marker presence. Keying on the
+    # files meant a worktree whose reason is "its removal was refused" -- which
+    # needs no agent check at all -- was still gated on a stale `held-` beside
+    # it, and a `held-` can outlive everything: `park_worktree` writes `stuck-`
+    # without clearing it, and from then on both reaps return early, so nothing
+    # ever removes it. `parked` stayed 0 with `owned` 1 and the drain polled
+    # forever -- #37 verbatim, in the PR that closes #37. Found by the
+    # independent review.
+    case "$reason" in
+      *"holds uncommitted work"|*"git could not say what it holds")
+        # ...and only for the two REAP_ABANDONED reasons, which are the ones
+        # written while the agent is left running. The `merged, and ...` ones
+        # come from `reap_merged`, where the PR has landed, so they are not
+        # gated even though their sentences end the same way.
+        if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
+          local handle
+          if ! handle="$(runner_agent_terminal "$(owned_path "$n")")" || [ -n "$handle" ]; then
+            rm -f "$STATE_DIR/parked-since-$n"
+            continue
+          fi
+        fi ;;
+    esac
     if [ -e "$STATE_DIR/parked-since-$n" ]; then
       parked=$((parked + 1))
     else
@@ -1317,6 +1333,14 @@ park_worktree() {
   fi
   rm -f "$STATE_DIR/runner-blind-$num"
   : >"$STATE_DIR/stuck-$num"
+  # ...and the two re-derived markers go with it. After a refused removal they
+  # describe a question already answered: `held-` and `git-blind-` mean "the
+  # worktree holds something, or git would not say", and a removal that git
+  # itself refused has settled that. Left behind they are PERMANENT -- both reaps
+  # return early on `stuck-`, so nothing ever clears them -- and they then gate
+  # a worktree that is plainly waiting for a person. Found by the independent
+  # review.
+  rm -f "$STATE_DIR/held-$num" "$STATE_DIR/git-blind-$num"
   say "  could not remove it; it keeps its slot until you do: $byhand"
   card "$path" comment "#$num: $what, but the removal refused -- still here, still counted"
   return 0

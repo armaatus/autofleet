@@ -1593,6 +1593,32 @@ case "${1:-}" in
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
       || fail "a terminal listing that could not be read was treated as 'no agent there'"
     echo "ok: ...and an unreadable listing is not an empty one"
+
+    # CASE (a): `stuck-` plus a stale `held-`, which nothing could ever clear.
+    # The gate keyed on marker PRESENCE, so a worktree whose reason is "its
+    # removal was refused" -- needing no agent check at all -- was still gated
+    # on a `held-` beside it. And `held-` outlived everything: `park_worktree`
+    # wrote `stuck-` without clearing it, after which both reaps return early.
+    # `parked` 0, `owned` 1, the drain polls forever: #37 verbatim, in the PR
+    # that closes #37. Found by the independent review.
+    agent_state working
+    : >"$AUTOFLEET_DIR/stuck-42"
+    : >"$AUTOFLEET_DIR/held-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+      || fail "a refused removal was gated on a stale held- beside it, so the drain never ends"
+    echo "ok: a refused removal counts whatever else is beside it"
+
+    # ...and `park_worktree` clears the pair when it writes `stuck-`, so the
+    # stale marker cannot arise in the first place.
+    rm -f "$AUTOFLEET_DIR"/stuck-42 "$AUTOFLEET_DIR"/held-42
+    : >"$AUTOFLEET_DIR/held-42"
+    in_fleet park_worktree 42 "$WORK/wt" 1 "the stub refuses" >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/held-42" ] \
+      && fail "park_worktree left held-42 behind; nothing else ever clears it and it gates the worktree forever"
+    echo "ok: ...and parking clears the markers a refusal has answered"
+    rm -f "$AUTOFLEET_DIR"/stuck-42
+    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
     # ...and put the listing back, or every assertion after this one is testing
     # a runner that cannot answer rather than the thing it is about.
     printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
