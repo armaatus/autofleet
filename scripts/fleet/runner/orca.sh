@@ -223,51 +223,18 @@ except Exception:
 # hiccup turns into three duplicate worktrees for issues that already have one.
 runner_worktree_list() {
   local out rc; out="$(mktemp)"
-  # `--repo`, because `orca worktree list` is MACHINE-WIDE and every caller
-  # resolves the issue numbers against THIS repository. Another project's
-  # worktree inflated `live`, and `foundation_in_flight` asked `poll_issue`
-  # about an issue number that does not exist here, got "could not read its
-  # labels", and held the fleet -- indefinitely, after one line in the log.
-  # Observed: a rommsync-nx worktree on its issue 195 stopped autofleet
-  # launching anything. armaatus/autofleet#31.
-  #
-  # The flag is verified honoured rather than accepted-and-ignored (Orca,
-  # 2026-09-10), and `runner_worktree_create` already passes the same selector
-  # -- so this was a missed callsite rather than a new idea.
-  orca_json "$out" worktree list --repo "path:$REPO_ROOT" || { rm -f "$out"; return 1; }
+  orca_json "$out" worktree list || { rm -f "$out"; return 1; }
   python3 -c '
-import json, os, sys
+import json, sys
 try:
     worktrees = json.load(open(sys.argv[1]))["result"]["worktrees"]
 except Exception:
     raise SystemExit(1)
-
-# ...AND THE ANSWER IS CHECKED, because a runtime that does not know the flag
-# accepts it and returns everything. That failure is silent and is exactly the
-# one the flag is here to prevent, so it is refused rather than trusted: the
-# caller`s non-zero already means "skip this pass and say so".
-#
-# Ours is the repoId on the main worktree whose path is this repo. Not finding
-# ourselves is a refusal ONLY when the payload carries repoIds and none is ours
-# -- a runtime that reports no repoId at all, and an empty list, are unfiltered
-# answers that are already correct, and refusing those turns a one-project
-# machine into a dispatcher that skips every pass forever.
-here = os.path.realpath(sys.argv[2])
-mine = None
 for w in worktrees:
-    if w.get("isMainWorktree") and os.path.realpath(w.get("path") or "") == here:
-        mine = w.get("repoId")
-        break
-if mine is None and any(w.get("repoId") for w in worktrees):
-    raise SystemExit(1)
-
-for w in worktrees:
-    if mine is not None and w.get("repoId") != mine:
-        continue
     if w.get("isMainWorktree") or w.get("isArchived"):
         continue
     print(w["path"], w.get("branch") or "-", w.get("linkedIssue") or "-", sep="\t")
-' "$out" "$REPO_ROOT"
+' "$out"
   rc=$?
   rm -f "$out"
   return $rc

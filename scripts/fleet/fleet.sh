@@ -323,17 +323,6 @@ disown_issue() {
 # rather than carried: nothing here has ever needed it, and a column no caller
 # reads is one the next caller reads wrong.
 live_worktrees() {
-  # SCOPED TO THIS REPOSITORY, and that is the driver's job rather than this
-  # function's: `--repo` is an Orca flag and hard rule 2 forbids naming one here.
-  # See runner_worktree_list in the driver, and docs/RUNNERS.md, which states the
-  # scoping as part of the contract so a second driver cannot omit it silently.
-  #
-  # Why it matters here: every caller resolves the issue numbers this returns
-  # against THIS repo, so another project's worktree inflated `live` and
-  # `foundation_in_flight` asked `poll_issue` about an issue number that does not
-  # exist here, got "could not read its labels", and held the fleet. Observed: a
-  # rommsync-nx worktree on its issue 195 stopped autofleet launching anything,
-  # indefinitely, with one line in the log. armaatus/autofleet#31.
   local list
   list="$(runner_worktree_list)" || return 1
   printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }'

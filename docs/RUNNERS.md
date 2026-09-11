@@ -174,15 +174,8 @@ runner_worktree_remove <path> [<deadline>]
   cannot address — so a driver must not turn an unparseable answer into rc 0
   with a made-up path, and need not invent a new code for it either.
 - **`runner_worktree_list`** emits `path<TAB>branch<TAB>issue`, `-` where the
-  runner has no answer for a field, **scoped to THIS repository**, excluding the
-  main worktree and archived ones. Scoping is the DRIVER's job and not the
-  caller's: the fleet resolves every issue number this returns against its own
-  repository, so one foreign worktree inflates the count and — through
-  `foundation_in_flight`, which cannot read a foreign issue's labels — stops the
-  dispatcher launching anything at all, indefinitely. A driver whose runtime
-  cannot scope the query must filter the answer itself, and must return non-zero
-  rather than an unscoped list: "could not tell" costs a pass, an unscoped list
-  costs the fleet — the fleet counts these to decide whether it may launch, and neither of
+  runner has no answer for a field, excluding the main worktree and archived
+  ones — the fleet counts these to decide whether it may launch, and neither of
   those is a slot. **Non-zero when the list could not be read**, which is not
   the same as "nothing is running": reading a failed call as zero live worktrees
   is how one transient hiccup turns into three duplicate worktrees.

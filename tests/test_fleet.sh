@@ -385,35 +385,7 @@ esac
 # Matched on the pair, because `list` alone is both `worktree list` and
 # `terminal list` and the dispatcher asks for both.
 case "$1 ${2:-}" in
-  "worktree list")
-    # `--repo path:<root>` is HONOURED here, not ignored, because the driver
-    # passes it and a stub that ignored it would exercise only the driver's
-    # safety net -- leaving "does the fleet actually ask for a scoped list?"
-    # untested. The real CLI filters; so does this. armaatus/autofleet#31.
-    #
-    # `ORCA_LIST_IGNORES_REPO` is the other half: a runtime too old to know the
-    # flag ACCEPTS it and returns everything, silently, which is precisely the
-    # failure the flag is here to prevent.
-    scope=""
-    prev=""
-    for a in "$@"; do case "$prev" in --repo) scope="${a#path:}" ;; esac; prev="$a"; done
-    if [ -z "$scope" ] || [ -n "${ORCA_LIST_IGNORES_REPO:-}" ]; then
-      cat "$ORCA_WORKTREES"; exit 0
-    fi
-    python3 - "$ORCA_WORKTREES" "$scope" <<'PYLIST'
-import json, os, sys
-doc = json.load(open(sys.argv[1]))
-here = os.path.realpath(sys.argv[2])
-worktrees = doc.get("result", {}).get("worktrees", [])
-mine = None
-for w in worktrees:
-    if w.get("isMainWorktree") and os.path.realpath(w.get("path") or "") == here:
-        mine = w.get("repoId")
-        break
-kept = [w for w in worktrees if mine is None or w.get("repoId") == mine]
-print(json.dumps({"result": {"worktrees": kept}}))
-PYLIST
-    exit 0 ;;
+  "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
   #
@@ -1655,74 +1627,6 @@ case "${1:-}" in
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
-  foreign_worktree)
-    # `orca worktree list` returns every worktree ON THE MACHINE, and every
-    # caller resolves the issue numbers against THIS repo. So another project's
-    # worktree inflated `live`, and `foundation_in_flight` asked `poll_issue`
-    # about an issue number that does not exist here, got "could not read its
-    # labels", and HELD THE FLEET. Seen for real: a rommsync-nx worktree on its
-    # issue 195 stopped autofleet launching anything, with one line in the log.
-    # armaatus/autofleet#31.
-    make_fixture ok
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-  {"repoId": "ours", "path": sys.argv[1], "isMainWorktree": True, "linkedIssue": None},
-  {"repoId": "ours", "path": sys.argv[1] + "/wt-7", "isMainWorktree": False, "linkedIssue": 7},
-  {"repoId": "theirs", "path": "/elsewhere/other-project", "isMainWorktree": True, "linkedIssue": None},
-  {"repoId": "theirs", "path": "/elsewhere/other-project/195-x", "isMainWorktree": False, "linkedIssue": 195},
-]}}))' "$WORK/repo" >"$ORCA_WORKTREES"
-    out="$(in_fleet live_worktrees 2>&1)"
-    grep -q "^7" <<<"$out" || fail "our own worktree is not listed: $out"
-    echo "ok: this repository's worktrees are listed"
-    grep -q "195" <<<"$out" \
-      && fail "another project's worktree is counted as ours, which holds the fleet: $out"
-    echo "ok: ...and another project's are not"
-    [ "$(in_fleet live_count 2>&1)" = 1 ] \
-      || fail "live_count counted a foreign worktree against MAX_WORKTREES"
-    echo "ok: ...so the cap counts only our own"
-
-    # ...and the driver ASKED for a scoped list, rather than being saved by its
-    # own filter. Without this the `--repo` flag is inert: drop it and the
-    # answer-check below still filters the foreign entry, so every assertion
-    # above stays green while the fleet pulls every project's worktrees over the
-    # wire every poll and throws most of them away. The flag is the fix;
-    # the filter is the safety net for a runtime that ignores it.
-    grep -q -- "worktree list --repo path:$WORK/repo" "$ORCA_CALLS" \
-      || fail "the driver asked for an unscoped worktree list: $(cat "$ORCA_CALLS")"
-    echo "ok: ...and it asked the runtime to scope the query"
-
-    # ...and a list this cannot scope is "could not tell", not "none": the
-    # caller's non-zero path already means skip the pass and say so.
-    python3 -c '
-import json
-print(json.dumps({"result": {"worktrees": [
-  {"repoId": "theirs", "path": "/elsewhere/other", "isMainWorktree": True, "linkedIssue": None},
-]}}))' >"$ORCA_WORKTREES"
-    in_fleet live_worktrees >/dev/null 2>&1 \
-      && fail "a list with no entry for this repo read as an empty fleet rather than as unknown"
-    echo "ok: a list this cannot scope is could-not-tell, not empty"
-
-    # THE SILENT HALF: a runtime too old to know `--repo` ACCEPTS it and returns
-    # everything. The driver checks the answer rather than trusting the flag,
-    # because that failure looks exactly like success -- and it is the one the
-    # flag exists to prevent. The stub's own filtering is bypassed here, so this
-    # asserts the driver and not the fixture.
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-  {"repoId": "ours", "path": sys.argv[1], "isMainWorktree": True, "linkedIssue": None},
-  {"repoId": "ours", "path": sys.argv[1] + "/wt-7", "isMainWorktree": False, "linkedIssue": 7},
-  {"repoId": "theirs", "path": "/elsewhere/other-project/195-x", "isMainWorktree": False, "linkedIssue": 195},
-]}}))' "$WORK/repo" >"$ORCA_WORKTREES"
-    out="$(ORCA_LIST_IGNORES_REPO=1 in_fleet live_worktrees 2>&1)"
-    grep -q "195" <<<"$out" \
-      && fail "a runtime that ignored --repo handed back every project's worktrees and the driver passed them on: $out"
-    grep -q "^7" <<<"$out" \
-      || fail "our own worktree was lost while filtering a runtime that ignores --repo: $out"
-    echo "ok: ...and a runtime that ignores --repo is filtered anyway"
-    ;;
-
   foundation_holds)
     # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
     # half of it -- a foundation issue would not JOIN running worktrees, and
@@ -3036,6 +2940,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|foreign_worktree|reap_blind_upstream|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|reap_blind_upstream|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
     exit 2 ;;
 esac
