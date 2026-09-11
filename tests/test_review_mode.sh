@@ -79,6 +79,14 @@
 #                                 came to disagree with the other two. Also: a
 #                                 poll leaves an open PR's records alone and
 #                                 sweeps a closed PR's.
+#   test_review_mode.sh records   record-review.sh writes the marker guard.py's
+#                                 push gate reads, on a worktree with no
+#                                 `.autofleet/run` yet -- and it is asked of the
+#                                 HOOK rather than restated here. It was making
+#                                 `.orca`, the directory the marker lived in
+#                                 before it moved, so every way in other than a
+#                                 fleet-provisioned worktree answered "I have
+#                                 reviewed, let me push" with a redirect error.
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
@@ -157,7 +165,9 @@ STUB
   # ------------------------------------------------------------- the orca stub
   #
   # `fleet.sh` resolves the runner AT SOURCE TIME and `die`s if nothing answers
-  # (fleet.sh: `orca_cli_resolve || die "no orca CLI answers here"`). This file
+  # (fleet.sh: `runner_available || die ...`, and the Orca driver is what prints
+  # "no orca CLI answers here" underneath it -- which is what the two phases
+  # below grep for as a canary that fleet.sh sourced at all). This file
   # sources it -- `in_poll` does -- so on a machine with no Orca the subshell
   # exited before running the function under test, and the phases that hid that
   # behind `>/dev/null 2>&1` reported the CONSEQUENCE instead: "the stale marker
@@ -822,7 +832,59 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and the message names the missing trailer, the likely cause"
   ;;
 
+# ------------------------------------------------------------------- records
+  records)
+  # The OTHER half of local review mode, and the one with no pull request in it:
+  # guard.py refuses a push from a fleet worktree until
+  # `.autofleet/run/reviewed-<sha>` exists, and record-review.sh is the only
+  # thing that writes it. It was making `.orca` -- the directory the marker lived
+  # in before it moved -- and then writing into `.autofleet/run`, which
+  # .gitignore keeps out of the tree, so the redirect failed and the marker never
+  # appeared.
+  #
+  # NOT on a worktree the fleet opened, and the first version of this comment
+  # claimed otherwise: `env.sh` and `agent-autostart.sh` both `mkdir -p
+  # .autofleet/run`, and `setup.sh` runs `env.sh`, so a fleet-provisioned
+  # worktree had the directory before any agent reached this script. What it
+  # breaks is every other way in -- a fresh clone, a worktree made by hand, a
+  # host project running this before its first fleet pass -- where the answer to
+  # "I have reviewed, let me push" is a redirect error. The correction came from
+  # the review of the fix. Nothing asserted any of it because nothing ran this
+  # script at all; the `.orca` itself was found by widening the runner-seam grep.
+  make_fixture
+  [ -e "$WORK/repo/.autofleet/run" ] \
+    && fail "the fixture already has the directory under test, so this asserts nothing"
+  out="$( cd "$WORK/repo" && ./scripts/fleet/record-review.sh --none 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] || fail "record-review.sh could not record a review on a fresh worktree (rc $rc): $out"
+  marker="$WORK/repo/.autofleet/run/reviewed-$PR_HEAD"
+  [ -s "$marker" ] \
+    || fail "the marker guard.py reads was not written, so an agent that HAS reviewed still cannot push: $out"
+  [ -e "$WORK/repo/.orca" ] \
+    && fail "it still makes the directory the marker moved out of"
+  ok "record-review.sh writes the push gate's marker on a worktree that has no run dir yet"
+
+  # ...and the marker is the one the HOOK reads, asked of the hook rather than
+  # restated here -- the whole of armaatus/rommsync-nx#183 was two programs
+  # disagreeing about one
+  # directory.
+  owned="$WORK/fleet/worktrees"
+  mkdir -p "$owned"
+  printf '%s\n' "$WORK/repo" >"$owned/7"
+  asks() {
+    ( cd "$WORK/repo" \
+        && printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push origin HEAD\"}}" \
+        | AUTOFLEET_DIR="$WORK/fleet" python3 "$REPO_ROOT/.claude/hooks/guard.py" >/dev/null 2>&1 )
+    printf '%s' "$?"
+  }
+  [ "$(asks)" = 0 ] \
+    || fail "the hook still refuses the push with the review recorded, so the two disagree about the marker"
+  mv "$marker" "$marker.parked"
+  [ "$(asks)" = 2 ] \
+    || fail "the hook allows the push with no marker at all, so the gate this records for is off"
+  ok "...and it is the marker the push gate actually reads"
+  ;;
+
   *)
-  echo "usage: $0 holds|once|retries|capped|mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records|holds|once|retries|capped" >&2
   exit 2 ;;
 esac
