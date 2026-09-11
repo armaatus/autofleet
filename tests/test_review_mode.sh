@@ -240,6 +240,13 @@ PY
   # it running. The sleep is given a distinctive duration so a test can tell the
   # wrapper's death from the work's.
   hang)   sleep 3607 ;;
+  # NOTE: no default arm, deliberately-for-now. An unknown mode falls through and
+  # behaves like `silent`, which is how `stub_reviewer submits` -- a mode that
+  # was never defined -- read as the opposite of what it did. Adding
+  # `*) exit 64` is the obvious fix and it wedges the suite: several phases pass
+  # modes this case does not name and rely on the fall-through. Recorded rather
+  # than half-done; the callsite that was wrong is fixed, and the sharp edge is
+  # in armaatus/autofleet#71 with the other guards aimed slightly off.
 esac
 exit 0
 STUB
@@ -432,6 +439,13 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # 1 instead of 2 and refunds nothing.
   rm -f "$AUTOFLEET_DIR/STOP"
   printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42.tries"
+  # SAVED, because the restore below has to put back the real thing. The first
+  # version called `make_gh_stub`, which does not exist anywhere in this
+  # repository -- and `2>/dev/null || true` swallowed the 127, so the line read
+  # as "put the working stub back" and put nothing back. Every assertion after
+  # it would have run against a `gh` that answers nothing while claiming to test
+  # something else. Found by the independent review.
+  cp "$WORK/bin/gh" "$WORK/bin/gh.working"
   cat >"$WORK/bin/gh" <<'GHSTUB'
 #!/usr/bin/env bash
 case "$*" in
@@ -442,7 +456,7 @@ GHSTUB
   chmod +x "$WORK/bin/gh"
   out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
             ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
-  make_gh_stub 2>/dev/null || true
+  mv -f "$WORK/bin/gh.working" "$WORK/bin/gh"
   grep -q "unbound variable" <<<"$out" \
     && fail "a gh that could not name the repository died on a shell variable: $out"
   [ "$rc" = 2 ] \
@@ -684,7 +698,7 @@ GHSTUB
     "$PR_HEAD" "$PR_HEAD" >"$GH_PRLIST"
   printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/43.done"
   printf '%s 1\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/43.tries"
-  stub_reviewer submits
+  stub_reviewer marked
   poll_review_open_prs
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     || fail "a poll reaped 43.done, so PR 43's reviewed head gets a reviewer again every minute -- the loop this PR exists to remove"
