@@ -366,6 +366,50 @@ if grep -q 'addPullRequestReview' .claude/hooks/guard.py; then
 else
   fail 'guard.py does not refuse the addPullRequestReview mutation, the one review spelling with no URL in it'
 fi
+#    ...and the three that came with it. Each was shipped with selftest rows and
+#    no wiring assertion, which is the state this very block was added to fix one
+#    change earlier -- "It had selftest rows and no wiring assertion, alone among
+#    the three." Found by the independent review, correctly, one PR later.
+if grep -q 'dismissPullRequestReview' .claude/hooks/guard.py; then
+  ok '...and dismissPullRequestReview, which clears both merge_gate conditions at once'
+else
+  fail 'guard.py does not refuse dismissPullRequestReview; dismissing the review that found something clears the changes-requested block AND the answer requirement'
+fi
+if grep -q 'mergePullRequest' .claude/hooks/guard.py; then
+  ok '...and mergePullRequest, the third name for an act blocked in two others'
+else
+  fail 'guard.py does not refuse mergePullRequest, so merging has two spellings blocked and one open'
+fi
+#    The body-carrying flags, by NAME. This one is a list rather than a rule
+#    name, and a list is what silently loses an entry.
+if python3 - <<'PYEOF'; then
+import sys
+src = open(".claude/hooks/guard.py").read()
+# Sliced rather than matched with a pattern: a regex written here needs escapes
+# that this file is generated through, and one of them arrived as a real newline
+# and made the whole check a SyntaxError -- which `fail` then reported as the
+# rule having lost a spelling. A check that cannot tell its own breakage from the
+# breakage it looks for is worse than none.
+try:
+    head = src.index("_indirect = False")
+    tail = src.index("if sub_cmd", head)
+except ValueError:
+    sys.exit("guard.py no longer builds an `_indirect` predicate; the rule that "
+             "refuses a body this hook cannot read has changed shape")
+block = src[head:tail]
+for needle, why in [
+    ('"--input"', "`gh api --input <file>` takes a plain path with no @ at all"),
+    ('"--input="', "the equals spelling of the same"),
+    ('startswith("@")', "a bare @file value"),
+    ("=@", "the name=@file value form"),
+]:
+    if needle not in block:
+        sys.exit("the indirect-body rule no longer covers " + needle + ": " + why)
+PYEOF
+  ok '...and it refuses every body-carrying spelling, not just the @ ones'
+else
+  fail 'guard.py: the rule refusing a body it cannot read has lost a spelling (above)'
+fi
 
 #    THE SUBMIT GRANT. Drop or misspell `Bash(gh pr review:*)` in review.sh's
 #    tool list and the reviewer starts, reads the diff, spends its whole turn

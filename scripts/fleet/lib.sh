@@ -289,10 +289,12 @@ fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
 fleet_mtime() {
   [ -e "${1:-}" ] || return 1
   local m
-  m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)"
-  case "$m" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
+  # main fixed this in parallel (ac34813) by validating each answer separately
+  # rather than the end of an `||` chain; that is the stronger shape and it is
+  # the one kept, so the merge leaves one spelling and not two.
+  m="$(stat -c %Y "$1" 2>/dev/null)"
+  case "$m" in ''|*[!0-9]*) m="$(stat -f %m "$1" 2>/dev/null)" ;; esac
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
   printf '%s\n' "$m"
 }
 
