@@ -121,6 +121,16 @@ reader checking it. The truth is three cases:
 - **`runner_available` uses stderr**, because it is a probe whose output nobody
   captures, and the caller adds the consequence.
 
+- **`runner_worktree_remove` relays too, on rc 1** — "answered and REFUSED" is
+  the one answer a person has to act on, and `remove_worktree` has no other
+  source for the cause: it prints `the removal refused: <line>` straight from
+  what the driver wrote. A driver that returns 1 silently leaves only
+  `nothing was torn down -- its stack is still up`, and nobody can tell a
+  submodule refusal from a dirty working tree on the one path where a stack and
+  its ports are still running. Its caller merges the streams, so like `set` this
+  is convention rather than load-bearing — but **relaying at all is not
+  optional here**.
+
 Two things the rule deliberately does not cover. A message about the CALLER
 being malformed is not a runtime failure and goes to stderr on either function —
 `runner_worktree_set`'s rc 2 for a bad pair list is the one that exists.  And

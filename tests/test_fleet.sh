@@ -364,7 +364,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# $1 is the CLI stub's mode: ok, set_fails, rm_needs_force, rm_never_works,
+# $1 is the CLI stub's mode: ok, set_fails, set_noisy, rm_needs_force, rm_never_works,
 # rm_hangs.
 make_fixture() {
   WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
@@ -433,6 +433,21 @@ case "$2" in
     # under test is that the reason reaches the log, and a stub that printed it
     # on stdout would pass a card() that drops stderr on the floor.
     [ "$mode" = set_fails ] && { echo "Unable to determine Orca.app path from symlink" >&2; exit 1; }
+    # BOTH STREAMS, so the ORDER is testable. A CLI that prints an error object
+    # on stdout and its reason on stderr is exactly the case the three-line bound
+    # exists for: merged, the stdout object arrives first and pushes the reason
+    # past line three. `runner_worktree_create` was given a separate `$err` and a
+    # stderr-first relay for that; `runner_worktree_set` was given the same
+    # shape, and nothing drove it -- the stub above writes to stderr ONLY, so
+    # merged and stderr-first were indistinguishable and reverting the hunk left
+    # the suite green. Found by the independent review.
+    [ "$mode" = set_noisy ] && {
+      echo '{"error":{"code":1,'
+      echo '  "detail": "a runtime that narrates on stdout",'
+      echo '  "more": "three lines of it, which is the whole budget",'
+      echo '  "and": "a fourth"}'
+      echo "the real reason: worktree is not registered" >&2
+      exit 1; }
     echo '{"ok":true}'; exit 0 ;;
   rm)
     # A CLI that is there but never answers -- Orca.app restarting. The
@@ -1295,6 +1310,18 @@ case "${1:-}" in
     grep -q "in-progress" <<<"$out" \
       || fail "the log does not say which update was lost: $out"
     echo "ok: a board update that failed is in the dispatcher log"
+
+    # ...and STDERR FIRST within the three-line bound, which is what
+    # docs/RUNNERS.md publishes for this function as of this PR. The CLI here
+    # prints two lines on stdout before the reason reaches stderr, so a merged
+    # stream puts the reason on line three at best and past it at worst. This
+    # fails against the `FLEET_RUN_CAPTURE_STDERR=1` form the separate `$err`
+    # replaced.
+    make_fixture set_noisy
+    out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
+    grep -q "the real reason: worktree is not registered" <<<"$out" \
+      || fail "the runtime's reason was pushed past the three-line bound by its own stdout, which is what relaying stderr first prevents: $out"
+    echo "ok: ...and the reason is relayed before the runtime's stdout, inside the bound"
     ;;
   card_quiet)
     make_fixture ok
