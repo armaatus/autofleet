@@ -1772,7 +1772,7 @@ JSON
     wait_for_log "it waits for"
     # NAMED, not counted: "waiting for the other 2 worktree(s)" named nothing a
     # person could go and land, and the two are never equivalent -- one may be
-    # ours and the other a worktree nobody here can close. That was 47 minutes
+    # ours and the other a worktree nobody here can close. That repeated indefinitely
     # of armaatus/autofleet#46 read from the outside.
     grep -q "waits for #4" "$WORK/run.log" \
       || fail "the hold counted what it waits on instead of naming it: $(grep 'foundation issue' "$WORK/run.log")"

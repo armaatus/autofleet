@@ -285,31 +285,6 @@ disown_issue() {
   clear_issue_markers "$1"
 }
 
-# Which repository to scope a worktree listing to, as the CLI's `path:` selector.
-#
-# `path:` names a repository ROOT, and this script does not always run from one:
-# `fleet.sh status` is run from wherever you are, which CLAUDE.md means to be a
-# fleet worktree. Handed a worktree path the CLI answers `repo_not_found` and
-# exits 1 -- and a failed listing makes `in_flight` answer "could not tell" for
-# every issue, so `status` would offer work that is already running.
-#
-# `--git-common-dir` is the resolution: in a linked worktree it is the main
-# checkout's `.git`, and in the main checkout it is its own. If git cannot say,
-# fall back to this checkout rather than to an unscoped listing -- unscoped is
-# the bug (#46). That fallback is not itself an error path: it returns a
-# selector like any other, and if it does not name a repo the CLI is what
-# refuses it, which fails the listing rather than widening it.
-#
-# Non-zero when the answer could not be read, which is NOT the same as "nothing
-# is running". Reading a failed CLI call as zero live worktrees is how one
-# transient hiccup turns into three duplicate worktrees for issues that already
-# have one: `in_flight` goes blind at the same moment, because it reads the same
-# list.
-#
-# `issue<TAB>path`, which is the driver's `path<TAB>branch<TAB>issue` with the
-# columns this dispatcher reads brought to the front. The branch is dropped
-# rather than carried: nothing here has ever needed it, and a column no caller
-# reads is one the next caller reads wrong.
 live_worktrees() {
   local list
   list="$(runner_worktree_list)" || return 1
@@ -333,7 +308,7 @@ count_worktrees() { printf '%s\n' "$1" | grep -c . || true; }
 # worktree is linked to an issue and a basename where it is not. A count alone
 # names nothing a person can go and land -- and the two are not equivalent, since
 # one may be this repo's in-flight work and the other a worktree nobody here can
-# close. armaatus/autofleet#46 was 47 minutes of a line that could not say which.
+# close. armaatus/autofleet#46 was a line that could not say which, repeating indefinitely.
 #
 # $1 is the listing the caller already has, for the reason above.
 #
@@ -553,10 +528,9 @@ foundation_in_flight() {
   #
   # The premise was older than this function: `in_flight` and `count_startable`
   # shared it, where it merely inflated a count. Here it was fatal rather than
-  # inaccurate, which is why it is written down. Fixed in armaatus/autofleet#46;
-  # see
-  # `live_worktrees`, which is where all three callers get the scope at once.
-  # Found by the independent review.
+  # inaccurate, which is why it is written down. Fixed in
+  # armaatus/autofleet#46, in `runner_worktree_list` -- the driver scopes the
+  # query, so all three callers get it at once. Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
     # `-` is `live_worktrees` saying this worktree has no linked issue at all,
     # which is a worktree somebody opened by hand. That is an ANSWER, not a

@@ -175,8 +175,10 @@ runner_worktree_remove <path> [<deadline>]
   with a made-up path, and need not invent a new code for it either.
 - **`runner_worktree_list`** emits `path<TAB>branch<TAB>issue`, `-` where the
   runner has no answer for a field, **scoped to THIS repository**, excluding the
-  main worktree and archived ones. Scoping is the DRIVER's job, and it is a
-  property of this contract rather than an optimisation: the fleet resolves every
+  main worktree and archived ones — the fleet counts these to decide whether it
+  may launch, and neither of those is a slot. Scoping is the DRIVER's job, and
+  it is a property of this contract rather than an optimisation: the fleet
+  resolves every
   issue number this returns against its own repository, so one worktree belonging
   to another project takes a slot from `MAX_WORKTREES`, its issue number can
   answer `in_flight` for one of ours, and — because a foundation issue waits for
@@ -193,10 +195,12 @@ runner_worktree_remove <path> [<deadline>]
   a selector built from the caller's cwd names the wrong thing and the runtime
   answers "no such repository" — the same permanent stall, through the fix for
   it. The Orca driver resolves the root with `git rev-parse --git-common-dir`
-  and falls back to the checkout it was given — the fleet counts these to decide whether it may launch, and neither of
-  those is a slot. **Non-zero when the list could not be read**, which is not
-  the same as "nothing is running": reading a failed call as zero live worktrees
-  is how one transient hiccup turns into three duplicate worktrees.
+  and falls back to the checkout it was given.
+
+  **Non-zero when the list could not be read**, which is not the same as
+  "nothing is running": reading a failed call as zero live worktrees is how one
+  transient hiccup turns into three duplicate worktrees. That clause is the
+  contract's, not Orca's, and applies to every driver.
 - **`runner_worktree_issue`** has THREE answers, and the middle one is why it is
   not a boolean: `0` with the issue on stdout, `2` for "there is no linked
   issue", `1` for "the runtime would not say". A hook that reads 1 as 2

@@ -180,7 +180,7 @@ runner_worktree_create() {
   }
   local out err rc; out="$(mktemp)"; err="$(mktemp)"
   FLEET_RUN_STDERR="$err" orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
-    --repo "$ORCA_REPO_SELECTOR" \
+    --repo "$(orca_resolve_repo_selector "$repo")" \
     --name "$name" \
     --issue "$issue" \
     --no-parent \
@@ -211,16 +211,6 @@ except Exception:
   return 0
 }
 
-# Every worktree the runner is managing, as `path<TAB>branch<TAB>issue` lines.
-# `-` where the runner has no answer for a field; nothing here may be JSON,
-# because a caller that parses JSON has hardcoded this runner.
-#
-# The main worktree and archived ones are left out: the fleet counts these to
-# decide whether it may launch, and neither of those is a slot.
-#
-# NON-ZERO WHEN THE ANSWER COULD NOT BE READ, which is not the same as "nothing
-# is running". Reading a failed call as zero live worktrees is how one transient
-# hiccup turns into three duplicate worktrees for issues that already have one.
 # WHICH REPOSITORY THIS DRIVER IS SCOPED TO, resolved once at source time.
 #
 # `--repo path:<p>` names a repository ROOT, and half of scripts/fleet/ runs from
@@ -238,18 +228,32 @@ except Exception:
 # `.git`, `dirname` refuses the leading `--`, and a guard reading the assembled
 # `path:$(dirname ...)` sees a non-empty literal `path:` and lets it through.
 orca_resolve_repo_selector() {
-  local common root
-  common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
+  # `$1` is the checkout to resolve FROM, defaulting to this one. It exists so
+  # `runner_worktree_create` can pass the `<repo>` its contract gives it rather
+  # than having the parameter go dead -- the caller names the repository, the
+  # driver turns that into whatever selector its runtime speaks.
+  local from="${1:-$REPO_ROOT}" common root
+  common="$(git -C "$from" rev-parse --path-format=absolute \
               --git-common-dir 2>/dev/null)" || common=""
   if [ -n "$common" ]; then
     root="$(dirname "$common" 2>/dev/null)" || root=""
     case "$root" in ''|-*) root="" ;; esac
     [ -n "$root" ] && { printf 'path:%s\n' "$root"; return 0; }
   fi
-  printf 'path:%s\n' "$REPO_ROOT"
+  printf 'path:%s\n' "$from"
 }
-ORCA_REPO_SELECTOR="${ORCA_REPO_SELECTOR:-$(orca_resolve_repo_selector)}"
+ORCA_REPO_SELECTOR="$(orca_resolve_repo_selector)"
 
+# Every worktree the runner is managing, as `path<TAB>branch<TAB>issue` lines.
+# `-` where the runner has no answer for a field; nothing here may be JSON,
+# because a caller that parses JSON has hardcoded this runner.
+#
+# The main worktree and archived ones are left out: the fleet counts these to
+# decide whether it may launch, and neither of those is a slot.
+#
+# NON-ZERO WHEN THE ANSWER COULD NOT BE READ, which is not the same as "nothing
+# is running". Reading a failed call as zero live worktrees is how one transient
+# hiccup turns into three duplicate worktrees for issues that already have one.
 runner_worktree_list() {
   local out rc; out="$(mktemp)"
   # SCOPED. `orca worktree list` is machine-wide, and every caller resolves the
