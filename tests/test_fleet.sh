@@ -1565,34 +1565,45 @@ case "${1:-}" in
       || fail "a held- that came and went across two passes was counted"
     echo "ok: ...and a marker that comes and goes never counts"
 
-    # ...AND THE TWO RE-DERIVED MARKERS NEED THE AGENT TO BE GONE. `held-` and
-    # `git-blind-` are written by `reap_abandoned`, which deliberately leaves the
-    # agent alone -- so the worktree is not waiting for a person, somebody is
-    # still working in it. Counted, the dispatcher exits with an agent mid-write
-    # and the farewell tells a person to discard what is in there. Found by the
-    # independent review.
+    # ...AND THE TWO RE-DERIVED MARKERS NEED THE AGENT TO BE IDLE, not merely
+    # to have no terminal. `reap_abandoned` writes `held-` and `continue`s
+    # without ever reaching `remove_worktree`, so the terminal it left behind
+    # outlives the agent -- and gating on terminal EXISTENCE meant the worktree
+    # was never counted, the drain never ended, and `status` never said idle.
+    # #37 verbatim, through the door the gate was added to close.
+    #
+    # The first version of this phase could not tell the two apart either:
+    # `agent_state` writes $ORCA_PS and $ORCA_TERMINALS together, and the
+    # terminal it writes is byte-identical whatever state is passed -- so
+    # `agent_state idle` passed the "a live agent is not waiting" assertion
+    # exactly as `working` did. The phase read as one thing and asserted
+    # another. Found by the independent review.
     agent_state working
     : >"$AUTOFLEET_DIR/held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
-      || fail "held-42 counted as waiting for a person while an agent is still working in that worktree"
-    echo "ok: a worktree with a live agent is not waiting for a person"
+      || fail "held-42 counted as waiting for a person while its agent is WORKING"
+    echo "ok: a worktree whose agent is working is not waiting for a person"
 
-    # ...and once the agent is gone it does count, or the drain never ends --
-    # which is the opposite failure, and the reason these two are counted at all.
-    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
+    # ...and the SAME terminal, with the agent no longer working, does count --
+    # which is what the old gate could not see, and why the drain hung.
+    agent_state idle
     in_fleet count_parked_owned >/dev/null 2>&1
     [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
-      || fail "held-42 with no agent left did not count, so the drain waits on it forever"
-    echo "ok: ...and it does once the agent is gone"
+      || fail "held-42 with its agent idle did not count -- the terminal outlives the agent, so the drain waits forever"
+    echo "ok: ...and the same terminal with an idle agent does count"
 
-    # "Could not tell" is not "no agent": a listing that would not read leaves
-    # the worktree uncounted, because somebody may still be in there.
-    printf 'not json' >"$ORCA_TERMINALS"
+    # "Could not tell" is not "idle": a listing that would not read leaves the
+    # worktree uncounted, because somebody may still be in there.
+    printf 'not json' >"$ORCA_PS"
     in_fleet count_parked_owned >/dev/null 2>&1
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
-      || fail "a terminal listing that could not be read was treated as 'no agent there'"
-    echo "ok: ...and an unreadable listing is not an empty one"
+      || fail "an agent-state listing that could not be read was treated as 'nobody is working'"
+    echo "ok: ...and an unreadable listing is not an idle one"
+    # ...and leave the listing readable and the agent idle, or every assertion
+    # after this one tests a runner that cannot answer rather than its subject.
+    agent_state idle
+    rm -f "$AUTOFLEET_DIR/held-42"
 
     # CASE (a): `stuck-` plus a stale `held-`, which nothing could ever clear.
     # The gate keyed on marker PRESENCE, so a worktree whose reason is "its
@@ -1617,12 +1628,12 @@ case "${1:-}" in
     [ -e "$AUTOFLEET_DIR/held-42" ] \
       && fail "park_worktree left held-42 behind; nothing else ever clears it and it gates the worktree forever"
     echo "ok: ...and parking clears the markers a refusal has answered"
-    rm -f "$AUTOFLEET_DIR"/stuck-42
-    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
-    # ...and put the listing back, or every assertion after this one is testing
-    # a runner that cannot answer rather than the thing it is about.
-    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
-    rm -f "$AUTOFLEET_DIR/held-42"
+    rm -f "$AUTOFLEET_DIR"/stuck-42 "$AUTOFLEET_DIR/held-42"
+    # ...and hand the next block an IDLE agent. Case (a) above set it working to
+    # prove the gate is not consulted for a refused removal; the block below is
+    # about the two reasons that ARE gated, so a working agent there would make
+    # it assert the opposite of its own message.
+    agent_state idle
 
     # ...and the two reap_abandoned keeps, which an earlier comment asserted did
     # not exist. Uncounted, `owned` never reaches 0 and the drain never ends --
@@ -1633,7 +1644,7 @@ case "${1:-}" in
     in_fleet count_parked_owned >/dev/null 2>&1   # the pass that records them
     out="$(in_fleet count_parked_owned 2>&1)"
     [ "$out" = 2 ] \
-      || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever: $out"
+      || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever:: $out"
     echo "ok: ...and all five keep-markers count"
 
     # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
@@ -1663,6 +1674,41 @@ print(json.dumps({"result": {"worktrees": [
         || fail "status did not name #42 as waiting for a person with $reason-42 set: $status_out"
     done
     echo "ok: ...and status names every one of the five"
+
+    # ...AND STATUS AGREES WITH THE COUNT. `cmd_status` called `why_parked` raw
+    # while the counter wrapped it in the agent gate, so a worktree the counter
+    # deliberately refused to call parked was printed by `status` as parked --
+    # and handed a person a recovery line for a directory an agent is writing
+    # to. Same crack, opposite direction. One predicate now. Found by the
+    # independent review.
+    rm -f "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/merge-held-* \
+          "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
+          "$AUTOFLEET_DIR"/git-blind-*
+    : >"$AUTOFLEET_DIR/held-42"
+    agent_state working
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "waiting for you" <<<"$out" \
+      && fail "status called #42 'waiting for you' while its agent is working, and told a person to go and discard what is in there: $out"
+    echo "ok: status does not call a worktree parked while its agent works"
+    agent_state idle
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "waiting for you" <<<"$out" \
+      || fail "status stopped naming a genuinely parked worktree once the gate was shared: $out"
+    echo "ok: ...and still names it once the agent is idle"
+
+    # EVERY park reason is cleared on release. Not driven from a list -- there
+    # is none, deliberately, see why_parked -- but asserted for all five, because
+    # a marker outliving its release gates the NEXT worktree for that issue with
+    # the last one's state.
+    for reason in stuck merge-held merge-blind held git-blind; do
+      : >"$AUTOFLEET_DIR/$reason-42"
+    done
+    in_fleet clear_issue_markers 42 >/dev/null 2>&1
+    for reason in stuck merge-held merge-blind held git-blind; do
+      [ -e "$AUTOFLEET_DIR/$reason-42" ] \
+        && fail "$reason-42 outlived the release, so the next worktree for #42 is gated by the last one's marker"
+    done
+    echo "ok: ...and releasing an issue clears every park reason in the list"
 
     # ...and the RECOVERY LINE is not `--force` for the reasons where forcing
     # destroys exactly what the line above says is in there. #37: "what must NOT

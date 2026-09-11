@@ -281,8 +281,10 @@ clear_issue_markers() {
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/merge-held-$1" "$STATE_DIR/warned-$1" \
-        "$STATE_DIR/parked-since-$1"
+        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1"
+  # ...and the two park reasons the names above do not already cover. The
+  # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
+  rm -f "$STATE_DIR/merge-held-$1"
   # ONLY the `*` is unquoted. $STATE_DIR is `${AUTOFLEET_DIR:-$HOME/.autofleet}`,
   # both user-supplied paths: leaving the whole word bare word-splits a directory
   # with a space in it into two operands that match nothing, and the markers are
@@ -331,7 +333,17 @@ disown_issue() {
 # `why_parked <issue>` prints the reason, or nothing when that issue is not
 # parked. Order is deliberate where two can coexist: a refused removal is the
 # one a person acts on, so it wins over "git could not say".
-PARK_REASONS="stuck merge-held merge-blind held git-blind"
+# THERE IS NO `PARK_REASONS` LIST, and that is deliberate. One was added here
+# under a comment promising "one list, three readers", and it had NO reader:
+# `why_parked`, `how_to_release` and the phase each enumerated the five by hand,
+# so the list was the drift it was added to prevent, one indirection later. An
+# attempt to make it load-bearing through `clear_issue_markers` failed too --
+# that function's existing `*-blind-` glob and explicit names already cover all
+# five, so removing a reason from the list changed nothing.
+#
+# `why_parked` below IS the single source: it is the only place that knows what
+# parks a worktree and what a person is told about it, and the three readers ask
+# IT rather than a list beside it. Found by the independent review.
 why_parked() {
   local n="$1"
   [ -e "$STATE_DIR/stuck-$n" ]       && { printf 'its removal was refused\n'; return 0; }
@@ -399,6 +411,31 @@ how_to_release() {
 # Still clamped, and now it should be unreachable: `parked` counts distinct
 # owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
 # ends the dispatcher with work in flight, and a clamp is cheaper than that.
+# Is this issue's worktree waiting for a PERSON, rather than for an agent?
+#
+# `why_parked` answers "does it carry a keep-marker", which is not the same
+# question: the two `reap_abandoned` markers are written while the agent is
+# deliberately left running. `count_parked_owned` wrapped that predicate in an
+# agent gate and `cmd_status` called it raw, so a worktree the counter refused
+# to call parked was printed by `status` as parked -- and told a person to go
+# and discard what is in a directory somebody is writing to. Same crack,
+# opposite direction. One predicate now. Found by the independent review.
+#
+# Prints the reason, or nothing. Non-zero when it is not waiting for a person.
+parked_for_person() {
+  local n="$1" reason listing state
+  reason="$(why_parked "$n")" || return 1
+  case "$reason" in
+    *"holds uncommitted work"|*"git could not say what it holds")
+      if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
+        listing="$(runner_agent_states)" || return 1
+        state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
+        case "$state" in working) return 1 ;; esac
+      fi ;;
+  esac
+  printf '%s\n' "$reason"
+}
+
 count_parked_owned() {
   local parked=0 n
   # Over OWNED issues rather than over markers: one worktree can carry two
@@ -419,56 +456,16 @@ count_parked_owned() {
   # Surviving a pass costs one poll of waiting on a worktree that really is
   # parked, and costs nothing at all on `stuck-`, which is still there next pass.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-    local reason
-    if ! reason="$(why_parked "$n")"; then
+    if ! why_parked "$n" >/dev/null; then
       rm -f "$STATE_DIR/parked-since-$n"
       continue
     fi
-    # THE TWO RE-DERIVED MARKERS NEED THE AGENT TO BE GONE, and surviving a pass
-    # is not enough for them. The other three are written after the agent has
-    # already been stopped or the work has already landed: `stuck-` only after
-    # `reap_abandoned` called `interrupt_agent_in`, and the two `merge-` ones by
-    # `reap_merged`, where the PR is merged. `held-` and `git-blind-` are the
-    # exception -- `reap_abandoned` writes them and DELIBERATELY leaves the agent
-    # alone ("leaving it"), so the worktree is not waiting for a person at all.
-    # Somebody is still working in it.
-    #
-    # Counted, the dispatcher signs off "1 worktree(s) are waiting for you" and
-    # exits with an agent mid-write: no time-box, no reap when its PR merges, its
-    # stack up under `restart: unless-stopped`, and its $OWNED_DIR entry
-    # inherited by the next dispatcher. That is the harm #36 is about, in the PR
-    # that closes #36 -- and the farewell then tells a person to `git status` and
-    # "discard what is there" in a directory being written to.
-    #
-    # The survive-a-pass rule bounds a flicker shorter than one poll; a `blocked`
-    # label that stands for three minutes is not a flicker. Found by the
-    # independent review.
-    #
-    # "Could not tell" does NOT count, which is design note 2: a listing that
-    # would not read is not an empty one, and the safe reading here is that
-    # somebody may still be in there.
-    # ON THE REASON `why_parked` RETURNED, not on marker presence. Keying on the
-    # files meant a worktree whose reason is "its removal was refused" -- which
-    # needs no agent check at all -- was still gated on a stale `held-` beside
-    # it, and a `held-` can outlive everything: `park_worktree` writes `stuck-`
-    # without clearing it, and from then on both reaps return early, so nothing
-    # ever removes it. `parked` stayed 0 with `owned` 1 and the drain polled
-    # forever -- #37 verbatim, in the PR that closes #37. Found by the
-    # independent review.
-    case "$reason" in
-      *"holds uncommitted work"|*"git could not say what it holds")
-        # ...and only for the two REAP_ABANDONED reasons, which are the ones
-        # written while the agent is left running. The `merged, and ...` ones
-        # come from `reap_merged`, where the PR has landed, so they are not
-        # gated even though their sentences end the same way.
-        if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
-          local handle
-          if ! handle="$(runner_agent_terminal "$(owned_path "$n")")" || [ -n "$handle" ]; then
-            rm -f "$STATE_DIR/parked-since-$n"
-            continue
-          fi
-        fi ;;
-    esac
+    # ...and the agent gate, through the shared predicate so `status` cannot
+    # disagree with this count about the same worktree.
+    if ! parked_for_person "$n" >/dev/null; then
+      rm -f "$STATE_DIR/parked-since-$n"
+      continue
+    fi
     if [ -e "$STATE_DIR/parked-since-$n" ]; then
       parked=$((parked + 1))
     else
@@ -2209,7 +2206,10 @@ cmd_status() {
   # this line to tell the two apart; the change that fixed the drain did not.
   # Found by the independent review.
   live_worktrees | while IFS="$(printf '\t')" read -r num path; do
-    why="$(why_parked "$num")" && why="waiting for you -- $why" || why=""
+    # `parked_for_person`, not `why_parked`: a worktree whose agent is still
+    # working is not waiting for anybody, and printing the recovery line for it
+    # tells a person to discard what is being written.
+    why="$(parked_for_person "$num")" && why="waiting for you -- $why" || why=""
     if [ -n "$why" ]; then
       printf '  #%-5s %s\n' "$num" "$path"
       printf '         %s\n' "$why"
