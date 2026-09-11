@@ -174,9 +174,13 @@ fi
 
 fleet_owner_repo || {
   echo "could not read this repository's name from gh; nothing here can ask about the PR" >&2
-  # Refunded: no reviewer ran, so this is not an attempt at a verdict. Three gh
-  # blips a poll apart would otherwise retire the head until a push.
-  unspent_try
+  # `unspent_try_any`, NOT `unspent_try`: `head` is not assigned for another
+  # twelve lines, so the head-matching form returns at its own `[ -n "${head:-}" ]`
+  # guard and refunds nothing. This was the one pre-head exit still using it --
+  # the exact bug the commit before this was written to fix, left standing on
+  # one path, and the comment at the unreadable-head exit already states the rule
+  # it broke. Found by the independent review.
+  unspent_try_any
   exit 2; }
 
 # The head GitHub holds, not the local one. The marker binds the review to a

@@ -447,7 +447,16 @@ GHSTUB
     && fail "a gh that could not name the repository died on a shell variable: $out"
   [ "$rc" = 2 ] \
     || fail "gh failing to name the repository exited $rc rather than 2: $out"
-  ok "...and a gh that cannot name the repository exits 2 without dying on \$head"
+  # ...AND IT REFUNDED. Asserting only the exit code let the wrong refund
+  # function stand: `unspent_try` matches on a head this path has not read yet,
+  # so it returned without doing anything and three gh outages a poll apart
+  # still retired the head -- which is the failure this whole knob exists to
+  # avoid, and which docs/CONFIGURATION.md and config.sh both promise against.
+  # Found by the independent review.
+  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  [ "${n:-}" = 1 ] \
+    || fail "a gh that cannot name the repository spent a try; three outages a poll apart retire the head (tries now ${n:-gone})"
+  ok "...and a gh that cannot name the repository exits 2 and refunds"
   [ "$(n_reviews)" = 0 ] \
     || fail "a stopped fleet submitted a review"
   ok "...and nothing goes out"
@@ -580,6 +589,25 @@ GHSTUB
     [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
       && fail "exit 5 wrote the done record, which is the silent-block direction"
     ok "...and no done record was written for it"
+
+    # EXIT 7 TOO, which is the other half of #33's Acceptance -- "a reviewer that
+    # submitted nothing (exit 5) OR WAS KILLED (exit 7) is retried" -- and the
+    # half nothing pinned. The pre-existing `timeout` phase is the only exit-7
+    # coverage and it calls `run_it`, which sets no AUTOFLEET_REVIEW_MARKER: with
+    # DONE_MARKER empty `record_done` returns at its first line, so that phase
+    # cannot observe the record either way. Add `record_done` to the exit-7
+    # branch and the whole suite stays green -- which is the silent-block
+    # direction #33 calls "the whole of this issue". Found by the independent
+    # review.
+    rm -f "$AUTOFLEET_DIR/reviewing/42.done" "$AUTOFLEET_DIR/reviewing/42.tries"
+    stub_reviewer hang
+    out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+              AUTOFLEET_REVIEW_TIMEOUT=1 ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+    [ "$rc" = 7 ] \
+      || fail "a reviewer past its deadline exited $rc rather than 7: $out"
+    [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
+      && fail "a reviewer KILLED at the deadline wrote the done record, so that head is never reviewed again -- the silent block #33 exists to remove"
+    ok "...and a reviewer killed at the deadline is not recorded as done"
     ;;
 
 # --------------------------------------------------------------------- capped
