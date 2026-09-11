@@ -515,10 +515,21 @@ drivers = sorted(glob.glob("scripts/fleet/runner/*.sh"))
 if not drivers:
     sys.exit("no runner driver ships; scripts/fleet/runner/ is empty")
 
+# COMMENTS ARE STRIPPED, for the same reason 4c strips them and found by the
+# same review: this check read every `runner_[a-z_]+` token in the file,
+# including the ones inside prose, so a comment that merely NAMES a function the
+# fleet does not call failed the check as a contract the drivers had broken. It
+# fired the moment a comment in issue-command.sh explained why a local variable
+# must not be called `runner_rc` -- the check tripping over its own
+# documentation. A function that appears only in a comment is not called, so
+# stripping can only shrink the required set, never hide real drift.
+def code_only(text):
+    return "\n".join(re.sub(r"#.*", "", line) for line in text.splitlines())
+
 provided = defined("scripts/fleet/lib.sh")
 called = set()
 for path in glob.glob("scripts/fleet/*.sh"):
-    called |= set(re.findall(r"\brunner_[a-z_]+", open(path).read()))
+    called |= set(re.findall(r"\brunner_[a-z_]+", code_only(open(path).read())))
 called -= provided
 
 # Only the ```sh CONTRACT FENCES count as documentation. Any mention anywhere in
@@ -610,6 +621,55 @@ if leak="$(grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
 $(printf '%s\n' "$leak" | sed 's/^/    /')"
 else
   ok "nothing outside scripts/fleet/runner/ reaches for the orca CLI"
+fi
+
+# 4d. ...and the two pages that PRINT that pipeline print the one that runs.
+#
+#    Both `docs/RUNNERS.md` and `scripts/fleet/runner/README.md` reproduce 4c's
+#    command in a ```sh fence, and CLAUDE.md hard rule 4 now says "the exact
+#    pipeline is in docs/RUNNERS.md" -- so those fences are the authoritative
+#    statement of the rule, not a decoration. They drifted immediately: 4c was
+#    fixed to STRIP the comment and both pages went on publishing the version
+#    that SKIPPED whole-line comments, which disagrees with 4c on exactly the
+#    line round six's finding was about (`AUTOFLEET_RUNNER=tmux  # not orca` is
+#    a leak to the page and clean to the check). Both pages ship -- RUNNERS.md
+#    in install.sh's PAYLOAD, README.md inside scripts/fleet -- so a host repo
+#    got the wrong pipeline and a maintainer running it by hand got a different
+#    verdict from CI.
+#
+#    4b cannot see this: it compares runner_* NAMES. Found by the independent
+#    review of the change that fixed 4c.
+if python3 - <<'PYEOF'
+import re, sys
+
+def core(text):
+    """The command, with comments and whitespace normalised away."""
+    text = re.sub(r"#[^\n]*", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+lint = open("evals/lint.sh").read()
+m = re.search(r"if leak=\"\$\((.*?)\)\"; then", lint, re.S)
+if not m:
+    sys.exit("could not find 4c's own pipeline in evals/lint.sh; this check now asserts nothing")
+want = core(m.group(1))
+
+bad = []
+for path in ("docs/RUNNERS.md", "scripts/fleet/runner/README.md"):
+    doc = open(path).read()
+    fence = re.search(r"```sh\n(grep -rn 'ORCA_.*?)```", doc, re.S)
+    if not fence:
+        bad.append(f"{path} no longer prints the seam grep at all")
+        continue
+    if core(fence.group(1)) != want:
+        bad.append(f"{path} prints a different pipeline from the one 4c runs")
+if bad:
+    sys.exit("the published seam check has drifted from the one that runs:\n  "
+             + "\n  ".join(bad))
+PYEOF
+then
+  ok "both pages print the seam check that evals/lint.sh actually runs"
+else
+  fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
 fi
 
 # 5. The dispatcher is what runs it. review.sh existing and never being called is

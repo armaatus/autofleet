@@ -179,10 +179,20 @@ fleet_run_with_deadline() {
 # this file writes. Only the path is attacker-shaped. Merging the two copies was
 # the independent review's suggestion, so the next such lookup cannot
 # reintroduce it.
+# `fleet_field_for_path <match-column> <print-column> <path>`. The two callers
+# pass `2 1` and `1 2` -- opposite orders over the same helper, because their
+# listings put the path in different columns -- and bare integers carry no clue
+# which is which, so swapping them is silent and the answer becomes "there is
+# nothing there". The two wrappers below are what the callers use; this stays
+# private to them. Found by the independent review.
 fleet_field_for_path() {
   AUTOFLEET_AWK_PATH="$3" awk -F'\t' -v k="$1" -v v="$2" \
     '$k == ENVIRON["AUTOFLEET_AWK_PATH"] { print $v; exit }'
 }
+# `handle<TAB>path` -- match column 2, print column 1.
+fleet_handle_for_path() { fleet_field_for_path 2 1 "$1"; }
+# `path<TAB>state` -- match column 1, print column 2.
+fleet_state_for_path()  { fleet_field_for_path 1 2 "$1"; }
 
 # The one contract function with no runner in it: the agent terminal in ONE
 # worktree, filtered out of the machine-wide listing the driver does provide.
@@ -196,7 +206,7 @@ fleet_field_for_path() {
 runner_agent_terminal() {
   local list
   list="$(runner_agent_terminals)" || return 1
-  printf '%s\n' "$list" | fleet_field_for_path 2 1 "$1"
+  printf '%s\n' "$list" | fleet_handle_for_path "$1"
 }
 
 # The runner driver: everything about creating a worktree, opening a terminal

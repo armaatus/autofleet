@@ -23,7 +23,28 @@ ref="${1:-}"
 # `if` condition is what makes a failing `runner_available` harmless; the
 # `|| true` is what makes a failing `runner_worktree_issue` harmless.
 if [ -z "$ref" ] && runner_available 2>/dev/null; then
-  ref="$(runner_worktree_issue || true)"
+  # THE THREE-WAY ANSWER, kept apart here too. `|| true` mapped rc 1 ("the
+  # runtime would not say") and rc 2 ("there is no linked issue") onto the same
+  # empty `$ref`, and the message below then reported the same thing for both --
+  # which is design note 2, at the last callsite of it that had neither a branch
+  # nor an assertion. `agent-autostart.sh` got its `case` for exactly this.
+  #
+  # Neither answer may kill the script: `set -e` is on and BOTH are ordinary
+  # here, since the argument form is what the agent uses and this fallback is for
+  # a person running it by hand. So the rc is read into a variable rather than
+  # left to `&&`. Found by the independent review.
+  # NOT named `runner_rc`: evals/lint.sh check 4b reads every `runner_[a-z_]+`
+  # token in scripts/fleet/*.sh as a contract function the drivers must define,
+  # and a local variable that happens to match the pattern fails the check as a
+  # phantom function. Caught by the lint the moment it was written, which is the
+  # check doing its job.
+  ref="$(runner_worktree_issue)" || issue_rc=$?
+  case "${issue_rc:-0}" in
+    0|2) ;;
+    *)   echo "issue-command: the runner would not say whether this worktree has a" >&2
+         echo "  linked issue -- which is not the same as it having none. Pass the" >&2
+         echo "  issue number or URL as an argument." >&2 ;;
+  esac
 fi
 
 # Accept a bare number or any .../issues/<n>[...] URL.

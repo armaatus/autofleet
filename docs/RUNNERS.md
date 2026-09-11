@@ -10,11 +10,18 @@ Today there is exactly one that ships: `orca`. No code outside
 ```sh
 grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
   | grep -v '^scripts/fleet/runner/' \
-  | grep -v ':[0-9]*: *#' \
+  | awk '{
+      code = $0
+      sub(/^[^:]*:[0-9]+:/, "", code)   # drop path:lineno:
+      sub(/#.*/, "", code)               # drop the comment, do not skip the line
+      if (code ~ /ORCA_/ || code ~ /orca([^A-Za-z0-9_]|$)/) print
+    }' \
   | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```
 
-returning nothing is what keeps it that way — `evals/lint.sh` runs exactly that,
+returning nothing is what keeps it that way — and this is byte-for-byte what
+`evals/lint.sh` check 4c runs, which is the only reason it is worth printing here.
+If the two ever differ, `evals/lint.sh` is the definition and this page is wrong.
 so the rule is asserted rather than quoted. Comments are excluded on purpose:
 Orca is *named* outside the driver all over this repo, which is the rule above
 rather than a violation of it. What the grep forbids is **code** outside the
@@ -102,7 +109,15 @@ runner_worktree_remove <path> [<deadline>]
 
 - **`runner_worktree_create`** prints the new worktree's path on success, and the
   runtime's own words on failure — "could not create it" with nothing after it
-  reads the same whether the app is down or the branch already exists.
+  reads the same whether the app is down or the branch already exists. Those
+  words go on **stdout**, not stderr: `launch` captures stdout only, because
+  that is where the path comes back, so a reason on stderr never reaches the log.
+  **Rc 0 with empty stdout is a THIRD state, not a success**: it means the
+  runtime answered and the driver could not find a path in the answer. The
+  dispatcher depends on that being distinguishable — it says "created, but the
+  runner reported no path" and keeps the slot rather than owning a worktree it
+  cannot address — so a driver must not turn an unparseable answer into rc 0
+  with a made-up path, and need not invent a new code for it either.
 - **`runner_worktree_list`** emits `path<TAB>branch<TAB>issue`, `-` where the
   runner has no answer for a field, excluding the main worktree and archived
   ones — the fleet counts these to decide whether it may launch, and neither of

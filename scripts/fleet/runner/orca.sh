@@ -119,9 +119,18 @@ orca_json() {
 # It SAYS why on stderr when it cannot, because only the driver knows what to
 # check next -- "is the Orca app running?" is not a sentence the dispatcher can
 # write for an arbitrary runner. The caller adds the consequence.
+# The sentence, once. It was written three times in three separate review rounds
+# -- and on two different streams, which is precisely what the last of those
+# rounds had to fix -- so the third copy was a fourth chance to pick the wrong
+# one. WHICH STREAM stays with the callsite, because that is genuinely per-caller:
+# `runner_available` is a probe nobody captures, while `runner_worktree_create`
+# and `runner_worktree_set` print where their callers read. Found by the
+# independent review.
+orca_unavailable_says() { printf 'no orca CLI answers here; is the Orca app running?\n'; }
+
 runner_available() {
   orca_cli_resolve && return 0
-  echo "no orca CLI answers here; is the Orca app running?" >&2
+  orca_unavailable_says >&2
   return 1
 }
 
@@ -166,7 +175,7 @@ runner_worktree_create() {
     # it had fixed. docs/RUNNERS.md says this function prints "the runtime's own
     # words on failure", and the CLI-failure branch below already relays them on
     # stdout. Found by the review OF the round-five fix.
-    echo "no orca CLI answers here; is the Orca app running?"
+    orca_unavailable_says
     return 1
   }
   local out err rc; out="$(mktemp)"; err="$(mktemp)"
@@ -297,7 +306,7 @@ runner_worktree_set() {
   # resolve that says nothing is a refusal with no cause under it. `orca_cli`
   # returns before it writes $out, so the relay below has nothing to relay.
   orca_cli_resolve || {
-    echo "no orca CLI answers here; is the Orca app running?"
+    orca_unavailable_says
     return 1
   }
   out="$(mktemp)"

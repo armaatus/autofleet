@@ -1445,7 +1445,7 @@ notice_stalled() {
     # runner_agent_terminal's are the same one with the columns swapped, and they
     # had the same `awk -v` defect, fixed in both at once. The reason lives on
     # the helper now, in one place.
-    state="$(printf '%s' "$listing" | fleet_field_for_path 1 2 "$path")"
+    state="$(printf '%s' "$listing" | fleet_state_for_path "$path")"
     [ "$state" = "waiting" ] || {
       rm -f "$STATE_DIR/stalled-$num" "$STATE_DIR/stall-labels-$num"; continue; }
     # Once per stall, not once per poll -- and checked before the lookup, so a
@@ -2479,8 +2479,11 @@ while that one is up."
   notify "fleet down" "$reason. $opened worktree(s) opened."
 }
 
-# Sourced by tests/test_orca_fleet.sh, which exercises one function against a
-# stubbed CLI. Executed, it dispatches as usual.
+# Sourced by tests/test_fleet.sh, which exercises one function at a time against
+# a stubbed runner. Executed, it dispatches as usual. (It said
+# `tests/test_orca_fleet.sh` until the independent review of this change: that
+# file was renamed with the runner seam and the sweep that fixed the sibling
+# reference in `remove_worktree` passed over this one.)
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
