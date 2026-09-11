@@ -1600,6 +1600,44 @@ case "${1:-}" in
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
       || fail "an agent-state listing that could not be read was treated as 'nobody is working'"
     echo "ok: ...and an unreadable listing is not an idle one"
+
+    # ...AND IT SAYS SO. Taking the safe direction silently is #37's own
+    # complaint -- "nothing says the drain has become unbounded". One unreadable
+    # `worktree ps` is a hiccup; a persistent one means this worktree never
+    # counts, `owned` never reaches 0, and the operator has no way to learn why.
+    # `live_worktrees` already says the equivalent for its own call, and these
+    # are two different runner calls that fail independently. Found by the
+    # independent review.
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    : >"$AUTOFLEET_DIR/held-42"
+    printf 'not json' >"$ORCA_PS"
+    # THE LOG, not stdout: `count_parked_owned` discards the predicate's stdout
+    # (it wants the rc, not the reason), and `say` tees to the log regardless --
+    # which is the channel an operator actually reads.
+    : >"$AUTOFLEET_DIR/fleet.log"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    grep -q "could not read the agent states" "$AUTOFLEET_DIR/fleet.log" \
+      || fail "a runner that would not say what its agents are doing left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
+    echo "ok: ...and says so rather than stalling in silence"
+
+    # MERGE-HELD AND MERGE-BLIND ARE GATED TOO. They were reached only when a
+    # `held-`/`git-blind-` marker was also on disk, so they were counted with no
+    # agent check -- and `reap_merged`'s own comment says why that tree is dirty:
+    # "auto-merge fires the moment the last check passes, so review fixes made
+    # after it sit uncommitted here". That is an agent mid-work.
+    agent_state working
+    rm -f "$AUTOFLEET_DIR"/held-42 "$AUTOFLEET_DIR"/git-blind-*
+    : >"$AUTOFLEET_DIR/merge-held-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "merge-held-42 counted as waiting for a person while its agent is making review fixes, which is exactly when that marker is written"
+    echo "ok: a merged worktree with a working agent is not waiting for a person"
+    agent_state idle
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+      || fail "merge-held-42 with an idle agent did not count, so the drain waits forever"
+    echo "ok: ...and does once the agent is idle"
+    rm -f "$AUTOFLEET_DIR/merge-held-42"
     # ...and leave the listing readable and the agent idle, or every assertion
     # after this one tests a runner that cannot answer rather than its subject.
     agent_state idle

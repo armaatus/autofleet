@@ -425,13 +425,44 @@ how_to_release() {
 parked_for_person() {
   local n="$1" reason listing state
   reason="$(why_parked "$n")" || return 1
+  # EVERY reason that means "there is something in there" is gated, not just the
+  # two `reap_abandoned` writes. The gate used to be reached only when a `held-`
+  # or `git-blind-` marker was on disk, so `merge-held-` and `merge-blind-`
+  # matched the pattern, failed that test, and were counted with no agent check
+  # at all -- and `reap_merged`'s own comment says why the tree is dirty there:
+  # "auto-merge fires the moment the last check passes, so review fixes made
+  # after it sit uncommitted here". That is an agent mid-work, in the window
+  # CLAUDE.md step 6 exists for. The last worktree's PR auto-merges while its
+  # agent is making review fixes, and two passes later the dispatcher signs off
+  # with it still writing.
+  #
+  # `stuck-` is the exception and stays ungated: a refused removal is the
+  # dispatcher having already ASKED and been told no, and gating it on a stale
+  # marker beside it is how the drain hung two rounds ago. Found by the
+  # independent review.
   case "$reason" in
     *"holds uncommitted work"|*"git could not say what it holds")
-      if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
-        listing="$(runner_agent_states)" || return 1
-        state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
-        case "$state" in working) return 1 ;; esac
-      fi ;;
+      if ! listing="$(runner_agent_states)"; then
+        # SAID, once per pass. Taking the safe direction silently is #37's own
+        # complaint -- "nothing says the drain has become unbounded". One
+        # unreadable `worktree ps` is a hiccup; a persistent one means this
+        # worktree never counts, `owned` never reaches 0 and the drain never
+        # ends, and the operator has no way to know why. `live_worktrees`
+        # already says the equivalent for its own call. Found by the independent
+        # review.
+        # The `*-blind-` family idiom: one marker per issue, said once, and
+        # swept with the rest when the issue is released.
+        if [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
+          : >"$STATE_DIR/ps-blind-$n"
+          say "  could not read the agent states, so whether #$n is still being"
+          say "  worked in cannot be answered -- it is NOT counted as waiting for"
+          say "  you, and a drain will not end while that stays true"
+        fi
+        return 1
+      fi
+      rm -f "$STATE_DIR/ps-blind-$n"
+      state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
+      case "$state" in working) return 1 ;; esac ;;
   esac
   printf '%s\n' "$reason"
 }
