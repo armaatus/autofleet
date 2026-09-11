@@ -975,15 +975,6 @@ for p in prs:
     tries_head=""; tries_n=0
     read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
     [ "${tries_head:-}" = "$head" ] || tries_n=0
-    if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
-      # Its OWN marker, per pull request: sharing the foundation one made the
-      # two holds overwrite each other every poll.
-      hold_say_into "$REVIEWING_DIR/$pr.said" "gaveup-$head" \
-        "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
-        "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
-        "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."
-      continue
-    fi
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""
@@ -1014,6 +1005,25 @@ for p in prs:
       # killed and none replaced, costing a whole poll interval out of the
       # time-box of the very agents that are waiting on them.
       [ "${running:-0}" -gt 0 ] && running=$((running - 1))
+    fi
+    # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding. Checked
+    # before it, the branch was taken while the LAST reviewer was still running:
+    # the count is incremented before the spawn, so with a cap of 3 the third
+    # spawn leaves `.tries` at 3 and every poll for the rest of that reviewer's
+    # timeout announced "3 reviewers submitted nothing, which is the cap". Only
+    # two had. The third might still submit -- and a person acting on the line
+    # starts a second full-budget reviewer on a head that already has one, while
+    # `.said` keeps the claim unrepeated and uncorrected even after the running
+    # one succeeds. Below the lock check the message is true whenever it prints.
+    # Found by the independent review.
+    if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
+      # Its OWN marker, per pull request: sharing the foundation one made the
+      # two holds overwrite each other every poll.
+      hold_say_into "$REVIEWING_DIR/$pr.said" "gaveup-$head" \
+        "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
+        "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
+        "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."
+      continue
     fi
     # Bounded by the same number as the worktrees. NOT the same pool, and the
     # difference is worth knowing before you raise either: at the cap this is

@@ -403,6 +403,27 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 3 ] || fail "a stopped fleet did not exit 3 (got $rc)"
   ok "a stopped fleet exits 3"
+
+  # ...AS THE DISPATCHER CALLS IT, which is the only way the refund path is
+  # reached at all. `run_it` sets no AUTOFLEET_REVIEW_MARKER, so `TRIES_MARKER`
+  # is empty and `unspent_try` returns at its first line -- which is why the bug
+  # this asserts survived the suite: with the marker set, the same path read
+  # `$head` before it was assigned, and `set -u` terminated the script with
+  # `head: unbound variable` and exit 1 instead of the documented 3. The try the
+  # dispatcher had already spent was then never refunded, which is the opposite
+  # of what the call is there for. Found by the independent review.
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42.tries"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$rc" = 3 ] \
+    || fail "called the way the dispatcher calls it, a stopped fleet exited $rc rather than 3: $out"
+  grep -q "unbound variable" <<<"$out" \
+    && fail "the stopped path died on a shell variable instead of exiting 3: $out"
+  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  [ "${n:-}" = 1 ] \
+    || fail "a stopped run did not refund the try the dispatcher spent before the spawn (tries now ${n:-gone})"
+  ok "...and refunds the try the dispatcher spent, with the marker set"
   [ "$(n_reviews)" = 0 ] \
     || fail "a stopped fleet submitted a review"
   ok "...and nothing goes out"
