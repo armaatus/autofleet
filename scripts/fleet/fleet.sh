@@ -867,7 +867,33 @@ prune_review_logs() {
   local answered="${2:-no}"
   [ "$answered" = yes ] || return 0
   [ -d "$dir" ] || return 0
-  local removed=0
+  # WHICH PRs ARE ELIGIBLE, decided per PULL REQUEST and in two steps, because
+  # one step has the bug twice over: collect the closed numbers FIRST, then ask
+  # about each one's marker. Done in a single pass, the first transcript of a PR
+  # creates `.closed-N` and the second finds it already there -- so the PR is
+  # "graced" on the same pass it was recorded, and every transcript but the
+  # first goes in the same breath as the merge. That is the failure the grace
+  # exists to prevent, and it survived one attempt at fixing it. Found by the
+  # independent review.
+  local removed=0 graced="" closed="" num_seen
+  for f in "$dir"/pr-*.log; do
+    [ -e "$f" ] || continue
+    num_seen="$(basename "$f")"; num_seen="${num_seen#pr-}"; num_seen="${num_seen%%-*}"
+    case " $open_prs " in *" $num_seen "*) continue ;; esac
+    # A PR with a reviewer still writing is not eligible for anything: the
+    # deleting loop skips it, and granting grace here would mean the pass after
+    # the reviewer finishes deletes with no grace at all.
+    [ -e "$REVIEWING_DIR/$num_seen" ] && continue
+    case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
+  done
+  for num_seen in $closed; do
+    if [ -e "$dir/.closed-$num_seen" ]; then
+      graced="$graced$num_seen "
+    else
+      : >"$dir/.closed-$num_seen"
+    fi
+  done
+
   for f in "$dir"/pr-*.log; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
@@ -882,18 +908,20 @@ prune_review_logs() {
     case " $open_prs " in
       *" $num "*) rm -f "$dir/.closed-$num"; continue ;;   # still open
     esac
-    # A GRACE PASS, which is #70's own Acceptance: "nothing is removed on the
-    # pass it becomes eligible", and its Design note "a PR that merges at 16:02
-    # still has its logs at 16:03". `reap_merged` runs immediately before this,
-    # so a PR that merged THIS pass has already dropped off `gh pr list --state
-    # open` and would otherwise lose every transcript in the same breath as the
-    # merge -- which is exactly when somebody is most likely to want them. Found
-    # by the independent review; the Plan listed three mitigations and this was
-    # not one of them.
-    if [ ! -e "$dir/.closed-$num" ]; then
-      : >"$dir/.closed-$num"
-      continue
-    fi
+    # PER PR, DECIDED BEFORE THIS LOOP. The marker used to be created inside it:
+    # iteration one for a PR made `.closed-N` and continued, and iteration two
+    # onward found it already there and deleted immediately -- so on the very
+    # pass a PR dropped off the open list, ALL BUT ONE of its transcripts went,
+    # and the survivor was whichever head-sha sorted first. #70 measured
+    # thirteen transcripts on one PR; twelve would have gone in the same breath
+    # as the merge, which is exactly what the grace exists to prevent and what
+    # its own comment claimed it did. The `sweeps` phase could not catch it
+    # because no PR there ever had two transcripts alive at once. Found by the
+    # independent review.
+    case " $graced " in
+      *" $num "*) ;;                # eligible since a previous pass: sweep it
+      *) continue ;;                # first pass seeing it closed: keep them all
+    esac
     rm -f "$f" && removed=$((removed + 1))
   done
   # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which

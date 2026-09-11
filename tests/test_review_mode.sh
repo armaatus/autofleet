@@ -487,6 +487,34 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ -e "$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log" ] \
     && fail "a transcript for a PR that is no longer open survived the grace pass"
   ok "...and goes on the next one"
+
+  # THE GRACE IS PER PULL REQUEST, not per transcript. The marker used to be
+  # created inside the deleting loop, so a PR's FIRST transcript bought the
+  # grace and every other one was deleted on that same pass -- all but one, in
+  # the same breath as the merge, which is exactly what the grace exists to
+  # prevent. #70 measured thirteen transcripts on one PR. The earlier phase
+  # could not catch it because no PR here ever had two alive at once. Found by
+  # the independent review.
+  rm -f "$AUTOFLEET_DIR/reviews"/.closed-* "$AUTOFLEET_DIR/reviews"/pr-*.log
+  for h in aaaa1111 bbbb2222 cccc3333; do
+    : >"$AUTOFLEET_DIR/reviews/pr-96-$h.log"
+  done
+  AUTOFLEET_KEEP_REVIEWS=5 poll_review_open_prs
+  n="$(ls "$AUTOFLEET_DIR/reviews"/pr-96-*.log 2>/dev/null | grep -c .)"
+  [ "$n" = 3 ] \
+    || fail "the grace pass kept $n of 3 transcripts for a PR that just closed; it protects the pull request, not one file"
+  ok "a closed PR keeps ALL its transcripts for the grace pass"
+  AUTOFLEET_KEEP_REVIEWS=5 poll_review_open_prs
+  n="$(ls "$AUTOFLEET_DIR/reviews"/pr-96-*.log 2>/dev/null | grep -c .)"
+  [ "$n" = 0 ] \
+    || fail "$n transcripts survived the pass after the grace, so the sweep does not finish what it starts"
+  ok "...and all of them go on the next pass"
+  # ...and hand the next assertion back the fixture it needs: this block cleared
+  # the directory to get a clean per-PR grace, including PR 42's transcripts.
+  for h in aaaaaaaa bbbbbbbb cccccccc dddddddd; do
+    : >"$AUTOFLEET_DIR/reviews/pr-42-$h.log"; sleep 0.01
+  done
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   n="$(ls "$AUTOFLEET_DIR/reviews"/pr-42-*.log 2>/dev/null | grep -c .)"
   [ "$n" = 2 ] \
     || fail "an open PR kept $n transcripts rather than AUTOFLEET_KEEP_REVIEWS=2"
