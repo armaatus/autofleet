@@ -322,6 +322,55 @@ disown_issue() {
 # columns this dispatcher reads brought to the front. The branch is dropped
 # rather than carried: nothing here has ever needed it, and a column no caller
 # reads is one the next caller reads wrong.
+# How many OWNED worktrees are waiting for a person rather than for an agent.
+#
+# EVERY reason a worktree waits for a person, and there are FIVE. `stuck-`
+# is a refused removal; `merge-held-` a merged worktree still holding
+# uncommitted work; `merge-blind-` one whose git could not say what it holds
+# -- which the change that added this counter also made permanent, since
+# nothing recreates a pruned upstream. `reap_abandoned` keeps two more, and
+# an earlier version of this comment asserted they did not exist: `held-`,
+# when the issue is closed, blocked or timed out and the worktree holds
+# uncommitted work, and `git-blind-`, when its git state could not be read.
+# Neither is exotic -- an agent whose issue goes `blocked` with one commit in
+# its worktree reaches `held-` -- and uncounted, `owned` never reaches 0 and
+# the drain never ends. That is #37's unbounded drain through a different
+# door, in the PR that closes #37. Found by the independent review.
+#
+# COUNTED PER ISSUE, not per marker, which is the other half of the same
+# finding. One worktree can carry two of these at once: `reap_merged` writes
+# `merge-blind-42` and keeps it owned, then `reap_abandoned` runs on that
+# same entry in the same pass -- its own header wrongly assumes a merged
+# worktree has been disowned by now -- reads `origin/main` rather than `@{u}`
+# so it CAN answer, finds nothing held, and a refused removal writes
+# `stuck-42` beside it. Two markers, one worktree, `parked` over-counts by
+# one, and `owned` goes to 0 with another worktree mid-work: the dispatcher
+# exits, its stack up under `restart: unless-stopped`. The `-lt 0` clamp is
+# what made that a silent wrong answer instead of a visible one.
+  # ...and only the ones that are actually OWNED. The two counts come from
+  # different directories, and a stale marker with no owned entry would make
+  # `owned` under-count and the dispatcher exit with a worktree still in
+  # flight -- the failure the drain bound exists to prevent, inverted.
+  # `disown_issue` -> `clear_issue_markers` keeps the pair together on
+  # release, and `reap_merged`'s `[ -d "$path" ] || disown_issue` self-heals
+  # a missing directory, so this test is what closes the remaining gap.
+# Still clamped, and now it should be unreachable: `parked` counts distinct
+# owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
+# ends the dispatcher with work in flight, and a clamp is cheaper than that.
+count_parked_owned() {
+  local parked=0 m n seen=" "
+  for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-* \
+           "$STATE_DIR"/held-* "$STATE_DIR"/git-blind-*; do
+    [ -e "$m" ] || continue
+    n="${m##*-}"
+    [ -e "$OWNED_DIR/$n" ] || continue
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    parked=$((parked + 1))
+  done
+  printf '%s\n' "$parked"
+}
+
 live_worktrees() {
   local list
   list="$(runner_worktree_list)" || return 1
@@ -2546,38 +2595,11 @@ while that one is up."
     # forever, `status` never said idle, and `cmd_run` refuses a second
     # dispatcher while one is alive. `stop.sh` promises "exits once nothing is
     # left". armaatus/autofleet#37.
-    # EVERY reason a worktree waits for a person, not just a refused removal.
-    # `stuck-` is one of three: `merge-held-` keeps a merged worktree that still
-    # holds uncommitted work, and `merge-blind-` keeps one whose git could not
-    # say what it holds -- which the same change that added this counter also
-    # made permanent, since nothing recreates a pruned upstream. Counting only
-    # `stuck-` left two ways for the drain to wedge, one of them introduced
-    # alongside the fix. Found by the independent review.
-    local parked
-    parked="$(ls "$STATE_DIR" 2>/dev/null | grep -c -E '^(stuck|merge-held|merge-blind)-' || true)"
-    # ...and only the ones that are actually OWNED. The two counts come from
-    # different directories, and a stale marker with no owned entry would make
-    # `owned` under-count and the dispatcher exit with a worktree still in
-    # flight -- which is the failure the drain bound exists to prevent, inverted.
-    #
-    # WHY THE SUBTRACTION IS SAFE, since the two directories could in principle
-    # disagree: the `[ -e "$OWNED_DIR/$n" ]` test below is what makes it safe,
-    # and it is not belt-and-braces. `disown_issue` calls `clear_issue_markers`,
-    # so a release takes the marker with it and the pair cannot come apart in
-    # that direction; `reap_merged`'s `[ -d "$path" ] || disown_issue` self-heals
-    # a worktree whose directory is gone. What is left is a marker outliving its
-    # owned entry through some path neither of those covers -- and the test drops
-    # it, so `parked` can only ever count worktrees `owned` also counted. The
-    # review could not construct a case that breaks it either; this is the line
-    # it asked for saying why.
-    local held_owned=0 m n
-    for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-*; do
-      [ -e "$m" ] || continue
-      n="${m##*-}"
-      [ -e "$OWNED_DIR/$n" ] && held_owned=$((held_owned + 1))
-    done
-    parked="$held_owned"
-    [ "${parked:-0}" -gt 0 ] && owned=$(( owned - parked ))
+    local parked; parked="$(count_parked_owned)"
+    [ "$parked" -gt 0 ] && owned=$(( owned - parked ))
+    # Still clamped, and now it should be unreachable: `parked` counts distinct
+    # owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
+    # ends the dispatcher with work in flight, and a clamp is cheaper than that.
     [ "${owned:-0}" -lt 0 ] && owned=0
     # THE DRAIN COMES FIRST, and in BOTH modes. Under a drain nothing launches,
     # so what is still queued cannot keep the dispatcher alive -- only what it

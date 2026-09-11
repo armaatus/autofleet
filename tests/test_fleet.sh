@@ -1401,6 +1401,36 @@ case "${1:-}" in
     echo "ok: ...and says so, rather than keeping it silently"
     ;;
 
+  drain_parked_counted_once)
+    # Two markers, ONE worktree. `reap_merged` keeps a merged worktree owned as
+    # `merge-blind-42` when its upstream was pruned, and `reap_abandoned` can
+    # then write `stuck-42` beside it in the same pass. Counting markers rather
+    # than issues made `parked` 2 for one worktree, so `owned` dropped to 0 with
+    # #99 still mid-work and the dispatcher exited -- #36's failure, re-created
+    # by the fix for #37. The `-lt 0` clamp turned it from a visible wrong answer
+    # into a silent one. Found by the independent review.
+    make_fixture ok
+    mkdir -p "$AUTOFLEET_DIR/worktrees" "$AUTOFLEET_DIR"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
+    : >"$AUTOFLEET_DIR/merge-blind-42"
+    : >"$AUTOFLEET_DIR/stuck-42"
+    out="$(in_fleet count_parked_owned 2>&1)"
+    [ "$out" = 1 ] \
+      || fail "two markers on one worktree counted as $out parked; #99 is still in flight and the drain would exit: $out"
+    echo "ok: a worktree with two keep-markers is one parked worktree"
+
+    # ...and the two reap_abandoned keeps, which an earlier comment asserted did
+    # not exist. Uncounted, `owned` never reaches 0 and the drain never ends --
+    # #37's unbounded drain through a different door, in the PR that closes #37.
+    rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
+    : >"$AUTOFLEET_DIR/held-42"
+    : >"$AUTOFLEET_DIR/git-blind-99"
+    out="$(in_fleet count_parked_owned 2>&1)"
+    [ "$out" = 2 ] \
+      || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever: $out"
+    echo "ok: ...and all five keep-markers count"
+    ;;
   drain_ends_with_parked)
     # `park_worktree` keeps a worktree owned when its removal was refused, which
     # is right. But the run loop exits only on `owned == 0`, and under a drain
@@ -2940,6 +2970,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|reap_blind_upstream|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|reap_blind_upstream|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
     exit 2 ;;
 esac
