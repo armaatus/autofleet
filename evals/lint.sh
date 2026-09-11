@@ -917,6 +917,27 @@ if [ -f .github/workflows/ci.yml ]; then
   ok "main's builds are never cancelled by the next merge"
 fi
 
+echo "== the labels a host has to create"
+# config.sh names every label the dispatcher reads; install.sh's next-steps are
+# the only place a host is TOLD to create them, and a label that does not exist
+# is a label no issue can carry. A default added to one file and not the other
+# is not a crash -- it is a queue that silently never orders anything the way the
+# docs say it does, on somebody else's repo, where nobody here will see it.
+#
+# Only the install half is asserted. AUTOFLEET_READY_LABEL and
+# AUTOFLEET_BLOCKED_LABEL are read by nothing today (the word is a literal in
+# ready_issues) -- that is #57, and asserting the read half here would go red on
+# a defect this file cannot fix.
+labels_ok=1
+while read -r var default; do
+  [ -n "$var" ] || continue
+  grep -q "gh label create $default " install.sh \
+    || { fail "$var defaults to \`$default\`, and install.sh never tells a host to create that label"
+         labels_ok=0; }
+done < <(sed -n 's/^: "${\(AUTOFLEET_[A-Z_]*_LABEL\):=\([^}]*\)}"/\1 \2/p' scripts/fleet/config.sh)
+[ "$labels_ok" = 1 ] \
+  && ok "every label config.sh defaults is one install.sh tells a host to create"
+
 echo "== the cross-reference conventions"
 # `Closes #N` and `Blocked by #N` are read by three parsers -- GitHub itself,
 # unblock.yml, and fleet.sh via merge_gate.py's neighbour -- and every way they

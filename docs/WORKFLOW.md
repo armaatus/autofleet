@@ -71,6 +71,12 @@ used to be to invent a dependency. A person applies that label; it reorders the
 ready list and changes nothing else, so a `blocked` or `needs-human-step` issue
 is no more startable for carrying it. `fleet.sh status` marks those rows.
 
+It does not lift a foundation hold, and it can delay one: a `priority` issue that
+starts first holds a worktree, and a foundation issue will not join work already
+in flight — so the foundation issue waits for it. Nothing it depends on can start
+in the meantime (those are `blocked`), but the order is worth meaning rather than
+discovering.
+
 `--auto` never pauses; it stops when the queue empties, at `--until`/`--for`, or
 after `--max-prs`, and says which.
 

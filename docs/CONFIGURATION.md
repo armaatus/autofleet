@@ -31,22 +31,31 @@ too.
 
 ### The labels
 
-`unblock.yml` maintains the first three and `fleet.sh` reads them. Rename them
-here if your repo already uses other words for the same ideas — but create the
-labels first, because an issue can carry no label that does not exist.
+`unblock.yml` maintains the first two and `fleet.sh` reads them; the other three
+a person applies. Rename them here if your repo already uses other words for the
+same ideas — but create the labels first, because an issue can carry no label
+that does not exist, and `install.sh` prints the `gh label create` lines for all
+five.
 
 `AUTOFLEET_READY_LABEL` (`ready`), `AUTOFLEET_BLOCKED_LABEL` (`blocked`),
 `AUTOFLEET_FOUNDATION_LABEL` (`foundation`),
 `AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`),
 `AUTOFLEET_PRIORITY_LABEL` (`priority`).
 
-`priority` is the one a person applies by hand, and the only ordering the
-tracker cannot derive: an issue carrying it goes to the front of the ready list,
-ahead of whatever frees the most other work. It reorders and nothing more — it
-cannot start a `blocked` issue, cannot start a `needs-human-step` one, and does
-not lift a foundation hold. Label several and the ordinary ordering decides
-between them. `fleet.sh status` marks the rows that carry it, so a queue that
-looks reordered says why.
+`priority` is the only one that says *when* rather than *what*, and the only
+ordering the tracker cannot derive: an issue carrying it goes to the front of the
+ready list, ahead of whatever frees the most other work. It reorders and nothing
+more — it cannot start a `blocked` issue, cannot start a `needs-human-step` one,
+and does not lift a foundation hold. Label several and the ordinary ordering
+decides between them. `fleet.sh status` marks the rows that carry it, so a queue
+that looks reordered says why.
+
+One consequence worth knowing before you use it: a `priority` issue can start
+ahead of a `ready` foundation issue, and while it runs the foundation issue
+waits, because a foundation issue will not join worktrees already in flight.
+Nothing about "a foundation issue lands alone" is weakened — what depends on it
+is `blocked` either way — but the foundation work starts later than it would
+have. If that is not what you meant, the foundation issue is the one to label.
 
 ### The review
 

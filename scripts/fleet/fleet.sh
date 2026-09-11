@@ -32,7 +32,12 @@
 # cannot express "this one first" -- the only way to say it before was to file
 # fake dependencies on issues that did not have them. It reorders the ready list
 # and nothing else: a `blocked` or `needs-human-step` issue is no more startable
-# for carrying it, and a foundation issue that is holding still holds.
+# for carrying it, and a foundation issue that is holding still holds. It can
+# DELAY one, though, and that is the only surprise in it: a priority issue picked
+# first occupies a worktree, and `foundation_in_flight` will not let a foundation
+# issue join work already in flight, so the foundation issue starts later than it
+# would have. Nothing that depends on it could have started either way -- those
+# are `blocked` -- so the rule holds; the wait is real all the same.
 #
 # ## Stopping
 #
@@ -2038,7 +2043,7 @@ cmd_status() {
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
   echo "         'unblocks' is how many issues it frees, and a row marked"
   echo "         $PRIORITY_LABEL goes ahead of that ordering):"
-  printf '  %-6s %-9s %-9s %s\n' "issue" "unblocks" "" "title"
+  printf '  %-6s %-9s %-9s %s\n' "issue" "unblocks" "ahead" "title"
   # The label column ready_issues already prints is what says which rows are
   # ahead of the queue: a `next up` list reordered with nothing on screen saying
   # why reads as a bug in the ordering, which is the report this marker exists

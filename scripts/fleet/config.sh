@@ -34,12 +34,12 @@
 : "${AUTOFLEET_FOUNDATION_LABEL:=foundation}"
 # An issue whose last step is a person's. The fleet opens no worktree for it.
 : "${AUTOFLEET_HUMAN_STEP_LABEL:=needs-human-step}"
-# Work that goes before the queue's own ordering. The only label here a person
-# applies by hand: the other three are derived (`unblock.yml` writes two of them,
-# and a foundation issue is a property of the issue, not of the week). It moves
-# an issue to the FRONT of the ready list and does nothing else -- it cannot
-# start a blocked issue, cannot start a `needs-human-step` one, and cannot run
-# alongside a foundation issue that is holding.
+# Work that goes before the queue's own ordering. The only one of these labels
+# that says WHEN rather than WHAT: the other four are properties of the issue
+# (two of them derived by `unblock.yml`, two applied by a person), and this one
+# is a property of the week. It moves an issue to the FRONT of the ready list and
+# does nothing else -- it cannot start a blocked issue, cannot start a
+# `needs-human-step` one, and does not lift a foundation hold.
 : "${AUTOFLEET_PRIORITY_LABEL:=priority}"
 
 # ---------------------------------------------------------------- the runner
