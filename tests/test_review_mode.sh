@@ -552,7 +552,51 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and the message names the missing trailer, the likely cause"
   ;;
 
+# ------------------------------------------------------------------- records
+  records)
+  # The OTHER half of local review mode, and the one with no pull request in it:
+  # guard.py refuses a push from a fleet worktree until
+  # `.autofleet/run/reviewed-<sha>` exists, and record-review.sh is the only
+  # thing that writes it. It was making `.orca` -- the directory the marker lived
+  # in before it moved -- and then writing into `.autofleet/run`, which
+  # .gitignore keeps out of the tree. So on a worktree the fleet had just opened
+  # the redirect failed, the marker never appeared, and the agent could not push
+  # the branch it had finished. Nothing asserted it because nothing ran this
+  # script at all. Found while widening the runner-seam grep, which is what saw
+  # the `.orca`.
+  make_fixture
+  [ -e "$WORK/repo/.autofleet/run" ] \
+    && fail "the fixture already has the directory under test, so this asserts nothing"
+  out="$( cd "$WORK/repo" && ./scripts/fleet/record-review.sh --none 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] || fail "record-review.sh could not record a review on a fresh worktree (rc $rc): $out"
+  marker="$WORK/repo/.autofleet/run/reviewed-$PR_HEAD"
+  [ -s "$marker" ] \
+    || fail "the marker guard.py reads was not written, so an agent that HAS reviewed still cannot push: $out"
+  [ -e "$WORK/repo/.orca" ] \
+    && fail "it still makes the directory the marker moved out of"
+  ok "record-review.sh writes the push gate's marker on a worktree that has no run dir yet"
+
+  # ...and the marker is the one the HOOK reads, asked of the hook rather than
+  # restated here -- the whole of #183 was two programs disagreeing about one
+  # directory.
+  owned="$WORK/fleet/worktrees"
+  mkdir -p "$owned"
+  printf '%s\n' "$WORK/repo" >"$owned/7"
+  asks() {
+    ( cd "$WORK/repo" \
+        && printf '%s' "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git push origin HEAD\"}}" \
+        | AUTOFLEET_DIR="$WORK/fleet" python3 "$REPO_ROOT/.claude/hooks/guard.py" >/dev/null 2>&1 )
+    printf '%s' "$?"
+  }
+  [ "$(asks)" = 0 ] \
+    || fail "the hook still refuses the push with the review recorded, so the two disagree about the marker"
+  mv "$marker" "$marker.parked"
+  [ "$(asks)" = 2 ] \
+    || fail "the hook allows the push with no marker at all, so the gate this records for is off"
+  ok "...and it is the marker the push gate actually reads"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records" >&2
   exit 2 ;;
 esac

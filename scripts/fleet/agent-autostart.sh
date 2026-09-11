@@ -153,8 +153,8 @@ attempt() {
     echo "==> the drafted prompt is only a link ($text); pointing it at the spec"
     runner_terminal_send "$handle" "$completion" || {
         echo "    the runner would not extend it; the agent would start from a bare URL"
-        echo "    press Return in the agent tab yourself, or trust orca.yaml in Orca's"
-        echo "    repository-hooks settings so the issueCommand template is used"
+        echo "    press Return in the agent tab yourself, or configure the runner to"
+        echo "    deliver this repository's issue command as the opening prompt"
         return 0
       }
   fi

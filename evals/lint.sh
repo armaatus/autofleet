@@ -569,8 +569,29 @@ fi
 #    reintroduce a `$ORCA_CLI` and ship green through both. Hard rule 3 is that a
 #    rule with no assertion is not shipped, and this is the change that turned
 #    the convention into a rule. Found by the independent review.
-if leak="$(grep -rn 'ORCA_CLI\|orca ' scripts/fleet --include='*.sh' \
-             | grep -v '^scripts/fleet/runner/')"; then
+#    The PATTERN is `ORCA_\|orca\b`, not `ORCA_CLI\|orca `, and the widening is
+#    the finding rather than a tidy-up. `ORCA_CLI\|orca ` could not see
+#    `ORCA_DEADLINE`, `ORCA_SEND_DEADLINE` or `ORCA_CREATE_DEADLINE` -- the
+#    driver's own knobs -- nor `orca` at end of line: `command -v orca`,
+#    `exec orca`, `mkdir -p .orca`. Round two's finding ON THIS PR was
+#    agent-autostart.sh exporting a variable only the driver reads; spelled
+#    `ORCA_DEADLINE=20` it shipped green through the old pattern, and 4b does not
+#    see it either because 4b asks about runner_* NAMES. The tighter pattern
+#    found two live ones: `mkdir -p .orca` in record-review.sh and await-review.sh,
+#    left behind when the review marker moved to .autofleet/run -- so
+#    record-review.sh made a directory nothing uses and wrote into one nothing
+#    made.
+#
+#    COMMENTS ARE EXCLUDED, and that is a real narrowing rather than a
+#    convenience: this repo's comments cite `orca.yaml` and the app by name all
+#    over, on purpose -- hard rule 4 is that the dependency is NAMED, not hidden.
+#    What the rule forbids is CODE outside the driver reaching for the runtime.
+#    `config.sh` is the one exception, and the only one: it is where the default
+#    driver is chosen, so naming one there is the choice rather than a leak.
+if leak="$(grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
+             | grep -v '^scripts/fleet/runner/' \
+             | grep -v ':[0-9]*: *#' \
+             | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$')"; then
   fail "the runner seam is broken -- these reach for one runner's CLI from outside scripts/fleet/runner/:
 $(printf '%s\n' "$leak" | sed 's/^/    /')"
 else

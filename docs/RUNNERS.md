@@ -8,11 +8,19 @@ Today there is exactly one that ships: `orca`. No code outside
 `scripts/fleet/runner/` calls its CLI, and
 
 ```sh
-grep -rn 'ORCA_CLI\|orca ' scripts/fleet --include='*.sh' \
-  | grep -v '^scripts/fleet/runner/'
+grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
+  | grep -v '^scripts/fleet/runner/' \
+  | grep -v ':[0-9]*: *#' \
+  | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```
 
-returning nothing is what keeps it that way. A second runner is a second file in
+returning nothing is what keeps it that way — `evals/lint.sh` runs exactly that,
+so the rule is asserted rather than quoted. Comments are excluded on purpose:
+Orca is *named* outside the driver all over this repo, which is the rule above
+rather than a violation of it. What the grep forbids is **code** outside the
+driver reaching for the runtime. `scripts/fleet/config.sh` is the one exception,
+allowed by name: it is where the default driver is chosen, so naming one there
+is the choice. A second runner is a second file in
 that directory.
 
 Orca is still *named* outside it — `orca.yaml` is where a worktree's hooks are

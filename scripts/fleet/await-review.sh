@@ -61,7 +61,7 @@ head="$(git rev-parse HEAD)"
 [ -n "$pr" ] || pr="$(fleet_pr_for_branch)" || {
   echo "no open PR for branch $branch" >&2; exit 2; }
 
-mkdir -p "$REPO_ROOT/.orca"
+mkdir -p "$REPO_ROOT/.autofleet/run"
 round=0
 seen_head=""
 seen_stamp=""

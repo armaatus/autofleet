@@ -2018,13 +2018,35 @@ cmd_stop() {
           echo "    which is not the same as there being none. Stop them by hand."
         fi
       else
+        # The rc is read HERE TOO, and this is the branch `stop --now` actually
+        # takes -- CLAUDE.md describes `--now` as the form that "also freezes the
+        # agents". `runner_agent_terminal` is non-zero ONLY when the listing
+        # could not be read; empty output means there is genuinely no agent in
+        # that worktree, which is a real answer. Collapsing the two printed
+        # "interrupting agents..." and then nothing: byte-for-byte what a machine
+        # with no agents on it prints, while three agents kept writing against a
+        # rig that was going down. Design note 2 of #1, on the third and last
+        # callsite of it. Found by the independent review.
+        #
+        # Said ONCE, after the loop, rather than per worktree: one unreadable
+        # listing is one fact about the runtime, and repeating it per owned issue
+        # buries the interrupts that did land above it.
+        local unreadable=0
         for f in "$OWNED_DIR"/*; do
           [ -e "$f" ] || continue
           path="$(cat "$f")"
-          handle="$(runner_agent_terminal "$path")"
+          if ! handle="$(runner_agent_terminal "$path")"; then
+            unreadable=1
+            continue
+          fi
           [ -n "$handle" ] || continue
           runner_terminal_interrupt "$handle" && echo "    interrupted #$(basename "$f")"
         done
+        if [ "$unreadable" = 1 ]; then
+          echo "    the runner would not list its agents -- some or NONE were"
+          echo "    interrupted, which is not the same as there being none."
+          echo "    Stop them by hand, or re-run with --all."
+        fi
       fi
       # ...and the local reviewers, which are children of the dispatcher rather
       # than agents in a worktree, so the terminal interrupts above do not reach

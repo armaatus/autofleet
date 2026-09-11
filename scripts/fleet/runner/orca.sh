@@ -148,6 +148,19 @@ runner_dispatcher_hint() {
 # review; lib.sh states the rule this broke, in this change's own words.
 runner_worktree_create() {
   local repo="$1" name="$2" issue="$3" agent="$4" prompt="$5" comment="$6"
+  # Resolved explicitly, and SAID, because `orca_cli` answers a failed resolve
+  # with `orca_cli_resolve || return 1` BEFORE anything is written to $err or
+  # $out -- so the relay below had nothing to relay and `launch` printed
+  # "  could not create it:" followed by nothing. Word for word the message
+  # `create_says` exists to prevent, on the one path that phase did not cover.
+  # Both neighbours already do this: `runner_worktree_remove` resolves for its
+  # own three-way answer, `runner_available` says why on stderr. docs/RUNNERS.md
+  # is explicit that a caller is not obliged to probe first. Found by the
+  # independent review.
+  orca_cli_resolve || {
+    echo "no orca CLI answers here; is the Orca app running?" >&2
+    return 1
+  }
   local out err rc; out="$(mktemp)"; err="$(mktemp)"
   FLEET_RUN_STDERR="$err" orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
     --repo "path:$repo" \

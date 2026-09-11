@@ -688,7 +688,12 @@ runner_worktree_issue() {
   [ -s "$STUB_DIR/issue" ] || return 2
   cat "$STUB_DIR/issue"
 }
-runner_worktree_set() { stub_say "worktree set $*"; return 0; }
+runner_worktree_set() {
+  stub_say "worktree set $*"
+  # Answered and REFUSED, which is the branch board.sh's loud refusal is for.
+  [ -e "$STUB_DIR/set-fails" ] && { echo "the stub refuses"; return 1; }
+  return 0
+}
 runner_worktree_remove() {
   stub_say "worktree remove $1"
   # 2 is "nobody answered", 1 is "answered and refused". The dispatcher parks a
@@ -701,7 +706,13 @@ runner_worktree_remove() {
   return 0
 }
 runner_agent_states()    { stub_say "agent states";    cat "$STUB_DIR/states"; }
-runner_agent_terminals() { stub_say "agent terminals"; cat "$STUB_DIR/terminals"; }
+runner_agent_terminals() {
+  stub_say "agent terminals"
+  # Non-zero is "the listing could not be READ", which is not the same answer as
+  # an empty listing -- and every caller of it has to keep them apart.
+  [ -e "$STUB_DIR/term-blind" ] && return 1
+  cat "$STUB_DIR/terminals"
+}
 runner_terminal_draft() {
   stub_say "terminal draft $1"
   [ -s "$STUB_DIR/draft" ] || return 0
@@ -991,6 +1002,25 @@ case "${1:-}" in
     grep -q "^odd rc=2$" <<<"$out" \
       || fail "a key with no value was rounded down instead of refused, so the update silently did less than it was asked: $out"
 
+    # ...and the one function that answered an unresolved CLI with a bare rc and
+    # NO WORDS. `orca_cli` returns 1 from `orca_cli_resolve || return 1` before
+    # anything is written to the stdout or stderr files the relay reads, so
+    # `launch` printed "  could not create it:" and then nothing -- word for word
+    # the message `create_says` exists to prevent, on the one path that phase
+    # does not cover. Both neighbours already said why. Found by the independent
+    # review.
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_create "$PWD" name 42 agent prompt comment; echo "create rc=$?"
+    ' 2>&1 )"
+    grep -q "^create rc=1$" <<<"$out" \
+      || fail "a create against an unreachable runner did not answer 1, which is what launch leaves the issue queued on: $out"
+    grep -q "orca CLI" <<<"$out" \
+      || fail "launch would print 'could not create it:' and then nothing, because the driver relayed a failure it had not yet made: $out"
+
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
     ;;
   runner_stub)
@@ -1124,6 +1154,42 @@ case "${1:-}" in
       || fail "board.sh could not set this worktree's card through the driver: $out"
     grep -q "worktree set $WORK/repo workspace-status in-review comment #42: PR #7" "$STUB_CALLS" \
       || fail "board.sh did not send the status and the comment in ONE call: $(cat "$STUB_CALLS")"
+
+    # ...and the REFUSAL, which is the whole of what makes board.sh's written-down
+    # $REPO_ROOT assumption acceptable rather than quiet: if the path the agent's
+    # shell has does not match the one the runtime recorded, every update from
+    # inside that worktree fails, and the answer to that is a card named as stale
+    # rather than a board update reported and not made. Nothing drove this branch
+    # -- the stub returned 0 unconditionally, so only board.sh:65 was ever
+    # reached. Hard rule 3. Found by the independent review.
+    : >"$STUB_DIR/set-fails"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
+      && fail "a board update the runner REFUSED was reported as done, so the card is stale and nobody knows: $out"
+    rm -f "$STUB_DIR/set-fails"
+    grep -q "the card was NOT updated" <<<"$out" \
+      || fail "board.sh did not name the card as stale, which is the only thing bounding the cost of its path assumption: $out"
+
+    # Design note 2 again, on the callsite `stop --now` actually takes. An
+    # unreadable listing and a machine with no agents on it printed the same
+    # thing: "interrupting agents..." and then nothing. CLAUDE.md calls --now the
+    # form that "also freezes the agents", so this is the log an operator reads
+    # while three agents keep writing against a rig that is going down.
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    : >"$STUB_DIR/term-blind"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    rm -f "$STUB_DIR/term-blind"
+    grep -q "not the same as there being none" <<<"$out" \
+      || fail "stop --now read a listing it could not read as 'there are no agents', so nobody was told none were interrupted: $out"
+    in_fleet cmd_resume >/dev/null 2>&1
+    # ...and the other way, so the message is not simply always printed: the same
+    # stop with a listing that answers says nothing of the sort, and interrupts.
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    in_fleet cmd_resume >/dev/null 2>&1
+    rm -f "$AUTOFLEET_DIR/worktrees/42"
+    grep -q "not the same as there being none" <<<"$out" \
+      && fail "a listing that answered perfectly well was reported as unreadable: $out"
+    grep -q "interrupted #42" <<<"$out" \
+      || fail "stop --now did not interrupt the agent the listing names: $out"
 
     # The whole point. Not "the fleet still works" -- the fleet works and the CLI
     # was never asked anything.
