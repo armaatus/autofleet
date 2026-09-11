@@ -1093,6 +1093,27 @@ case "${1:-}" in
     out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
     grep -q "Closes #42" <<<"$out" \
       || fail "issue-command.sh could not resolve this worktree's issue through the driver: $out"
+
+    # ...and its THREE-WAY read, which is the branch this change added and the
+    # one branch it did not assert. `|| true` mapped rc 1 ("the runtime would not
+    # say") and rc 2 ("there is no linked issue") onto one empty `$ref`, so the
+    # by-hand path reported the same thing for both. The stub answers 1 on
+    # demand, and `agent-autostart.sh`'s sibling branch is already driven through
+    # that same knob in both directions. Found by the independent review, whose
+    # point was that this PR had fixed the same class twice already.
+    : >"$STUB_DIR/blind"
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"; rc=$?
+    rm -f "$STUB_DIR/blind"
+    [ "$rc" != 0 ] \
+      || fail "issue-command.sh claimed success with no issue resolved at all: $out"
+    grep -q "would not say" <<<"$out" \
+      || fail "a runner that could not answer was reported as a worktree with no linked issue, which is the conflation design note 2 is about: $out"
+    # ...and the other answer still reads as itself.
+    printf '' >"$STUB_DIR/issue"
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
+    printf '42' >"$STUB_DIR/issue"
+    grep -q "would not say" <<<"$out" \
+      && fail "a worktree that really has no linked issue was reported as a runner that would not answer: $out"
     out="$( cd "$WORK/repo" && AGENT_AUTOSTART_POLL_SECONDS=0 \
               ./scripts/fleet/agent-autostart.sh --once 2>&1 )"
     grep -q "sent." <<<"$out" \

@@ -31,12 +31,17 @@ grep -rni 'orca' scripts/fleet --include='*.sh' \
 ```
 
 returning nothing is what keeps it that way — and this is byte-for-byte what
-`evals/lint.sh` check 4c runs, which is the only reason it is worth printing here.
-If the two ever differ, `evals/lint.sh` is the definition and this page is wrong.
-so the rule is asserted rather than quoted. Comments are excluded on purpose:
+`evals/lint.sh` check 4c runs, which is the only reason it is worth printing
+here: the rule is asserted rather than quoted, and check 4d fails the build if
+this fence and that check ever stop matching. If they do differ,
+`evals/lint.sh` is the definition and this page is the bug.
+
+The comment is truncated rather than the line skipped, and that is deliberate:
 Orca is *named* outside the driver all over this repo, which is the rule above
 rather than a violation of it. What the grep forbids is **code** outside the
-driver reaching for the runtime. `scripts/fleet/config.sh` is the one exception,
+driver reaching for the runtime — so a trailing `# not orca` is prose, while
+`ORCA_DEADLINE=20  # a knob` is a leak, and a `"#$num: ..."` string in the
+middle of a line does not hide the rest of it. `scripts/fleet/config.sh` is the one exception,
 allowed by name: it is where the default driver is chosen, so naming one there
 is the choice. A second runner is a second file in
 that directory.

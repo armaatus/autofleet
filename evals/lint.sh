@@ -523,8 +523,38 @@ if not drivers:
 # must not be called `runner_rc` -- the check tripping over its own
 # documentation. A function that appears only in a comment is not called, so
 # stripping can only shrink the required set, never hide real drift.
+def strip_comment(line):
+    """The line with a trailing shell comment removed, quotes respected.
+
+    `re.sub(r"#.*", "", line)` cut at the first `#` ANYWHERE, and fleet.sh is
+    full of `"#$num: ..."` strings -- so everything after one was invisible.
+    Round eight fixed that in 4c's awk; this is the same fix in 4b, which had it
+    too. The direction it matters in is the FALSE NEGATIVE: a real call after a
+    `"#..."` string on the same line was invisible, so `say "#7: x"; runner_nope`
+    passed.
+
+    Quoted spans are deliberately NOT removed, even though a `runner_*` name
+    inside a message string is not a call and will be reported as one. Removing
+    them would be worse: `list="$(runner_agent_terminals)"` is a call INSIDE
+    double quotes, and command substitution in a quoted string is how most of
+    this file reaches the driver. A false positive here says "the contract and
+    the code disagree" and is fixed by rewording one message; a false negative
+    lets a driver ship without a function the fleet calls.
+    """
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
 def code_only(text):
-    return "\n".join(re.sub(r"#.*", "", line) for line in text.splitlines())
+    return "\n".join(strip_comment(line) for line in text.splitlines())
 
 provided = defined("scripts/fleet/lib.sh")
 called = set()
@@ -669,8 +699,17 @@ if python3 - <<'PYEOF'
 import re, sys
 
 def core(text):
-    """The command, with comments and whitespace normalised away."""
-    text = re.sub(r"#[^\n]*", "", text)
+    """The command, with whitespace normalised away and NOTHING ELSE.
+
+    This used to strip comments before comparing -- which normalised the awk's
+    own comment-handling line to a stub on BOTH sides, so a page publishing a
+    different comment regex there compared equal. That line is precisely the
+    stage whose semantics were the drift 4d exists to catch, so 4d had a hole
+    exactly where it mattered. Comparing the text verbatim means a page has to
+    carry the explanatory comments too -- which is right: they are the reason
+    the fence is readable, and a maintainer running it by hand gets them.
+    Found by the independent review.
+    """
     return re.sub(r"\s+", " ", text).strip()
 
 lint = open("evals/lint.sh").read()

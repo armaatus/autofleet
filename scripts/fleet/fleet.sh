@@ -959,7 +959,8 @@ for p in prs:
 # runner's own archive hook is never asked for. What is left here is the ORDER,
 # which is this dispatcher's decision rather than the runner's.
 #
-# #27 logged "could not remove it" at 02:08 and kept the slot; the very same
+# armaatus/rommsync-nx#27 logged "could not remove it" at 02:08 and kept the
+# slot; the very same
 # command, run again by hand, removed it and printed
 # `warning: local branch "..." was kept because Git could not safely delete it`.
 # A non-zero exit has meant both "nothing happened" and "it worked, with a

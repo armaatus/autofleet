@@ -20,8 +20,9 @@ ref="${1:-}"
 # Neither half may kill the script, because `set -e` is on and BOTH "no runner"
 # and "no linked issue" are ordinary answers here: the argument form is the one
 # the agent uses, and this fallback exists for a person running it by hand. The
-# `if` condition is what makes a failing `runner_available` harmless; the
-# `|| true` is what makes a failing `runner_worktree_issue` harmless.
+# `if` condition is what makes a failing `runner_available` harmless; what makes
+# a failing `runner_worktree_issue` harmless is below, and it is no longer a
+# `|| true` -- see the three-way read, which replaced it.
 if [ -z "$ref" ] && runner_available 2>/dev/null; then
   # THE THREE-WAY ANSWER, kept apart here too. `|| true` mapped rc 1 ("the
   # runtime would not say") and rc 2 ("there is no linked issue") onto the same
