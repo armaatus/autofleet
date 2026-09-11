@@ -586,17 +586,16 @@ print(json.dumps({"result": {"terminals": [
 ' "$WORK/wt" >"$ORCA_TERMINALS"
 }
 
-# A live worktree the dispatcher owns, linked to issue $1. `live_worktrees`
-# reads `linkedIssue`, which is the field the foundation check keys on -- a
-# fixture that set only `path` would make every issue answer "-" and the check
-# vacuously true.
-worktree_on_issue() {
-  python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"linkedIssue": sys.argv[1], "path": sys.argv[2]}]}}))
-' "$1" "$WORK/wt" >"$ORCA_WORKTREES"
-}
+# A live worktree the dispatcher owns, linked to issue $1, at the path every
+# other helper here calls `$WORK/wt`. `live_worktrees` reads `linkedIssue`,
+# which is the field the foundation check keys on -- a fixture that set only
+# `path` would make every issue answer "-" and the check vacuously true.
+#
+# Delegated rather than written out: two writers disagreed on the TYPE of
+# `linkedIssue` (a string here, an int there), and a fixture that differs from
+# the one every other phase uses can hide a real parsing bug. Found by the local
+# review.
+worktree_on_issue() { worktree_list "$1:wt"; }
 
 # The worktree listing Orca answers, from `issue:path-suffix` pairs -- `-` for a
 # worktree linked to no issue, and a third field naming a repo other than the
@@ -1296,14 +1295,20 @@ JSON
 [{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
 JSON
     start_dispatcher --auto
-    wait_for_log "waiting for the other"
+    wait_for_log "it waits for"
+    # NAMED, not counted: "waiting for the other 2 worktree(s)" named nothing a
+    # person could go and land, and the two are never equivalent -- one may be
+    # ours and the other a worktree nobody here can close. That was 47 minutes
+    # of armaatus/autofleet#46 read from the outside.
+    grep -q "waits for #4" "$WORK/run.log" \
+      || fail "the hold counted what it waits on instead of naming it: $(grep 'foundation issue' "$WORK/run.log")"
     # It said it once. Give it several more passes and it must not say it again.
-    before="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    before="$(grep -c "it waits for" "$WORK/run.log" || true)"
     sleep 3
-    after="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    after="$(grep -c "it waits for" "$WORK/run.log" || true)"
     [ "$before" = "$after" ] \
       || fail "the waiting hold is announced every poll ($before then $after in three seconds)"
-    echo "ok: a foundation candidate waiting its turn is announced once, not once per poll"
+    echo "ok: a foundation candidate waiting its turn names what it waits on, once"
     grep -q "^worktree create" "$ORCA_CALLS" \
       && fail "it announced the wait and launched the foundation issue anyway"
     echo "ok: ...and it does not launch alongside the ordinary worktree"
@@ -2350,7 +2355,7 @@ JSON
     # number that does not exist here makes the lookup FAIL -- and the hold is
     # fail-closed, so the dispatcher launches nothing at all. That is what
     # stopped this repo's own fleet on 2026-09-11 with `labels-198` in the
-    # holding marker, #198 being a rommsync-nx issue.
+    # holding marker, #198 being armaatus/rommsync-nx#198.
     cat >"$GH_ISSUES" <<'JSON'
 [{"number":196,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
 JSON
@@ -2369,6 +2374,22 @@ JSON
     grep -q "^196" <<<"$out" \
       || fail "the foundation issue stopped being startable for some other reason, so the gate above proves nothing: $out"
     echo "ok: another repo's worktree neither holds a foundation issue nor stops the fleet"
+    ;;
+
+  create_scoped)
+    make_fixture ok
+    make_repo_git
+    older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
+    # The OTHER selector callsite. `worktree create` carried a raw
+    # `path:$REPO_ROOT` while the listing resolved one properly, so the same
+    # `repo_not_found` that blinded `status` stopped `fleet.sh run` from a
+    # worktree opening anything at all -- and the two callsites could name
+    # different repositories. Found by the local review.
+    printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
+    in_fleet_at "$WORK/wt2" launch 4 "a title" >/dev/null 2>&1
+    grep "^worktree create" "$ORCA_CALLS" | grep -q -- "--repo path:$WORK/repo" \
+      || fail "the create names the caller's checkout, not the repository root: $(grep '^worktree create' "$ORCA_CALLS")"
+    echo "ok: creating a worktree scopes to the repository root, from a worktree too"
     ;;
 
   status_worktree_scope)
@@ -2392,6 +2413,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh live_scoped|foundation_foreign|status_worktree_scope|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh create_scoped|live_scoped|foundation_foreign|status_worktree_scope|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

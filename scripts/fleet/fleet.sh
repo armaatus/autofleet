@@ -293,13 +293,21 @@ disown_issue() {
 # the bug (#46). That fallback is not itself an error path: it returns a
 # selector like any other, and if it does not name a repo the CLI is what
 # refuses it, which fails the listing rather than widening it.
+# Answered once per process rather than once per listing: $REPO_ROOT does not
+# move under a running dispatcher, and this file's convention is one answer per
+# poll for anything repeated. It is also why the `git` call needs no deadline of
+# its own -- a local rev-parse, made once, outside the CLI calls
+# `orca_run_with_deadline` guards. Found by the local review.
+REPO_SELECTOR=""
 repo_selector() {
+  [ -n "$REPO_SELECTOR" ] && { printf '%s\n' "$REPO_SELECTOR"; return 0; }
   local common
   common="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
               --git-common-dir 2>/dev/null)" \
     && [ -n "$common" ] \
-    && { printf 'path:%s\n' "$(dirname "$common")"; return 0; }
-  printf 'path:%s\n' "$REPO_ROOT"
+    && REPO_SELECTOR="path:$(dirname "$common")"
+  [ -n "$REPO_SELECTOR" ] || REPO_SELECTOR="path:$REPO_ROOT"
+  printf '%s\n' "$REPO_SELECTOR"
 }
 
 # Non-zero when the answer could not be read, which is NOT the same as "nothing
@@ -316,8 +324,9 @@ repo_selector() {
 # close another repo's worktree. Worse, `foundation_in_flight` resolves each
 # linked number against THIS repository, so a foreign worktree on a number that
 # does not exist here fails the lookup and holds the fleet fail-closed: on
-# 2026-09-11 this repo's own dispatcher launched nothing while a rommsync-nx
-# worktree on #198 was open (#46, and #31 from the other end).
+# 2026-09-11 this repo's own dispatcher launched nothing while a worktree on
+# armaatus/rommsync-nx#198 was open (armaatus/autofleet#46, and #31 from the
+# other end).
 #
 # Scope through the CLI rather than by filtering paths: `workspaces/<repo>/...`
 # is a naming convention, and two repos sharing a name prefix would defeat a
@@ -350,7 +359,32 @@ for w in worktrees:
 live_count() {
   local list
   list="$(live_worktrees)" || return 1
-  printf '%s\n' "$list" | grep -c . || true
+  count_worktrees "$list"
+}
+
+# How many worktrees a listing holds. Split out because the launch loop needs
+# the count AND the names from ONE listing: two calls would let the count that
+# shut the gate and the names printed beside it disagree.
+count_worktrees() { printf '%s\n' "$1" | grep -c . || true; }
+
+# What a held foundation issue is actually waiting for, as `#N` where the
+# worktree is linked to an issue and a basename where it is not. A count alone
+# names nothing a person can go and land -- and the two are not equivalent, since
+# one may be this repo's in-flight work and the other a worktree nobody here can
+# close. armaatus/autofleet#46 was 47 minutes of a line that could not say which.
+#
+# $1 is the listing the caller already has, for the reason above.
+#
+# Sorted, because the caller keys its say-once marker on this string: unsorted,
+# two unchanged worktrees coming back in the other order read as news and
+# reprint the line every poll. `-V` rather than a plain sort -- lexically `#42`
+# comes before `#7`, which is the wrong order for the one question a person asks
+# of it.
+waiting_worktrees() {
+  printf '%s\n' "$1" | while IFS="$(printf '\t')" read -r num path; do
+    [ -n "$path" ] || continue
+    if [ "$num" = "-" ]; then printf '%s\n' "$(basename "$path")"; else printf '#%s\n' "$num"; fi
+  done | sort -V | tr '\n' ' ' | sed 's/ $//'
 }
 
 # --------------------------------------------------------------- the queue ---
@@ -556,7 +590,8 @@ foundation_in_flight() {
   #
   # The premise was older than this function: `in_flight` and `count_startable`
   # shared it, where it merely inflated a count. Here it was fatal rather than
-  # inaccurate, which is why it is written down. Fixed in #46; see
+  # inaccurate, which is why it is written down. Fixed in armaatus/autofleet#46;
+  # see
   # `live_worktrees`, which is where all three callers get the scope at once.
   # Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
@@ -743,7 +778,7 @@ launch() {
   say "opening a worktree for #$num -- $title"
   local out; out="$(mktemp)"
   orca_run_with_deadline 240 "$out" "$ORCA_CLI" worktree create \
-    --repo "path:$REPO_ROOT" \
+    --repo "$(repo_selector)" \
     --name "$name" \
     --issue "$num" \
     --no-parent \
@@ -2369,12 +2404,13 @@ while that one is up."
     reap_abandoned
     prune_gaveup
 
-    local live
-    if ! live="$(live_count)"; then
+    local live live_list
+    if ! live_list="$(live_worktrees)"; then
       say "could not read the worktree list; skipping this pass rather than guessing"
       sleep "$POLL_SECONDS"
       continue
     fi
+    live="$(count_worktrees "$live_list")"
 
     while ! $drain_mode && [ "$live" -lt "$MAX_WORKTREES" ]; do
       # `break`, not `break 2`: this is the drain arriving MID-PASS, after the
@@ -2466,8 +2502,12 @@ while that one is up."
             # as the other one. The same rule announced every poll from here
             # would have put back the 180 lines per three hours that the marker
             # exists to prevent. Found by the independent review.
-            foundation_hold_say "waiting-$n" \
-              "#$n is a foundation issue; waiting for the other $live worktree(s) to land"
+            # NAMED, not counted. The marker carries the names too, so the line
+            # comes back when what it waits on CHANGES -- which is news -- and
+            # stays quiet while it does not.
+            local waiting_on; waiting_on="$(waiting_worktrees "$live_list")"
+            foundation_hold_say "waiting-$n-$waiting_on" \
+              "#$n is a foundation issue; it lands alone, so it waits for $waiting_on to land"
             break
           fi
           picked="$n"; title="$t"; labels="$l"
@@ -2507,7 +2547,8 @@ while that one is up."
         say "  leaving #$picked in the queue to try again"
         break
       fi
-      live="$(live_count)" || break
+      live_list="$(live_worktrees)" || break
+      live="$(count_worktrees "$live_list")"
     done
 
     # Nothing left to launch, and nothing left to look after: done. Reaching

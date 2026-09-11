@@ -77,9 +77,11 @@ Three properties matter more than the shapes:
    stopped this repo's own fleet for a day.
 
    `path:` names a repository ROOT, and the dispatcher is not always run from
-   one: `fleet.sh status` is run from a fleet worktree. `repo_selector` in
-   `fleet.sh` resolves that through `git --git-common-dir`, and until the list
-   moves behind `runner_worktree_list` (#1) it passes the flag at the callsite.
+   one: `fleet.sh status` is run from a fleet worktree, and so is `fleet.sh
+   run`. `repo_selector` in `fleet.sh` resolves that through
+   `git --git-common-dir`; until the calls move behind the driver (#1), both
+   callsites that name a repository -- the listing and `worktree create` -- pass
+   what it returns rather than `$REPO_ROOT`.
 
 A plain-`git worktree` + tmux driver satisfies all of it, and would drop the
 macOS-only dependency entirely.
