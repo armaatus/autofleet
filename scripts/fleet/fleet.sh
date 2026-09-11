@@ -281,7 +281,8 @@ clear_issue_markers() {
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/merge-held-$1" "$STATE_DIR/warned-$1"
+        "$STATE_DIR/merge-held-$1" "$STATE_DIR/warned-$1" \
+        "$STATE_DIR/parked-since-$1"
   # ONLY the `*` is unquoted. $STATE_DIR is `${AUTOFLEET_DIR:-$HOME/.autofleet}`,
   # both user-supplied paths: leaving the whole word bare word-splits a directory
   # with a space in it into two operands that match nothing, and the markers are
@@ -341,6 +342,28 @@ why_parked() {
   return 1
 }
 
+# ...and what to DO about it, which is not the same line for all five.
+#
+# `BY_HAND_REMOVAL` is `git worktree remove --force`, and it was printed from one
+# place -- `park_worktree`, on the one path where the dispatcher had already
+# established that nothing goes with the worktree. Printed for every reason it
+# tells a person to discard exactly what the line above it says is in there:
+# "it holds uncommitted work", then `--force`. #37's Design notes are explicit --
+# "what must NOT happen is releasing the worktree to make the loop terminate:
+# the whole reason it is parked is that removing it would destroy something" --
+# and the dispatcher kept that promise itself while breaking it through the
+# operator, two lines apart. Found by the independent review.
+how_to_release() {
+  local n="$1" path="$2"
+  if [ -e "$STATE_DIR/stuck-$n" ]; then
+    printf "$BY_HAND_REMOVAL" "$path"
+    return 0
+  fi
+  # Everything else is "there is something in there", or "git would not say
+  # whether there is". Look first; the removal is the operator's call afterwards.
+  printf 'git -C %s status --short   # then commit, move or discard what is there' "$path"
+}
+
 # How many OWNED worktrees are waiting for a person rather than for an agent.
 #
 # EVERY reason a worktree waits for a person, and there are FIVE. `stuck-`
@@ -381,9 +404,30 @@ count_parked_owned() {
   # Over OWNED issues rather than over markers: one worktree can carry two
   # reasons at once, and counting markers made `parked` exceed the worktrees it
   # described. `why_parked` is the same predicate `status` and the farewell use.
+  #
+  # A MARKER MUST SURVIVE A PASS BEFORE IT COUNTS, and that is the difference
+  # between ending a drain and ending it too early. `stuck-` is terminal --
+  # written once on a refused removal and never retried. `held-` and
+  # `git-blind-` are RE-DERIVED every pass and cleared the moment the reason
+  # goes away, which is routine: `unblock.yml` rewrites `blocked` on every merged
+  # PR, so an issue can go blocked, be warned, come off `blocked` when its
+  # dependency lands, and go blocked again. Counting those the pass they appear
+  # let one transient label -- or one `worktree_holdings` hiccup -- drop `owned`
+  # to 0 and sign the dispatcher off with an agent still writing in there. That
+  # is #36's failure through a fifth door, opened by the fix for #37.
+  #
+  # Surviving a pass costs one poll of waiting on a worktree that really is
+  # parked, and costs nothing at all on `stuck-`, which is still there next pass.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-    why_parked "$n" >/dev/null || continue
-    parked=$((parked + 1))
+    if ! why_parked "$n" >/dev/null; then
+      rm -f "$STATE_DIR/parked-since-$n"
+      continue
+    fi
+    if [ -e "$STATE_DIR/parked-since-$n" ]; then
+      parked=$((parked + 1))
+    else
+      : >"$STATE_DIR/parked-since-$n"
+    fi
   done
   printf '%s\n' "$parked"
 }
@@ -2115,7 +2159,7 @@ cmd_status() {
     if [ -n "$why" ]; then
       printf '  #%-5s %s\n' "$num" "$path"
       printf '         %s\n' "$why"
-      printf '         %s\n' "$(printf "$BY_HAND_REMOVAL" "$path")"
+      printf '         %s\n' "$(how_to_release "$num" "$path")"
     else
       printf '  #%-5s %s\n' "$num" "$path"
     fi
@@ -2698,7 +2742,7 @@ while that one is up."
         for n in $(ls "$OWNED_DIR" 2>/dev/null); do
           why="$(why_parked "$n")" || continue
           say "  #$n -- $why"
-          say "    $(printf "$BY_HAND_REMOVAL" "$(owned_path "$n")")"
+          say "    $(how_to_release "$n" "$(owned_path "$n")")"
         done
       fi
       if $drain_mode; then

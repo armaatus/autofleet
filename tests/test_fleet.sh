@@ -1468,10 +1468,30 @@ case "${1:-}" in
     printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
     : >"$AUTOFLEET_DIR/merge-blind-42"
     : >"$AUTOFLEET_DIR/stuck-42"
+    # TWO passes, because a marker must survive one before it counts -- the
+    # first pass records it, the second counts it. See count_parked_owned.
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "a marker counted on the pass it appeared; a transient one would end the drain with an agent still working"
+    echo "ok: a marker does not count on the pass it appears"
     out="$(in_fleet count_parked_owned 2>&1)"
     [ "$out" = 1 ] \
       || fail "two markers on one worktree counted as $out parked; #99 is still in flight and the drain would exit: $out"
     echo "ok: a worktree with two keep-markers is one parked worktree"
+
+    # ...and a marker that goes away before the next pass never counts, which is
+    # the failure this rule exists for: `held-` and `git-blind-` are re-derived
+    # every pass, and one transient `blocked` label would otherwise sign the
+    # dispatcher off with an agent still writing.
+    rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "a marker that cleared still counted as a worktree waiting for a person"
+    : >"$AUTOFLEET_DIR/held-42"
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "a transient held- counted on its first pass"
+    rm -f "$AUTOFLEET_DIR/held-42"
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "a held- that came and went across two passes was counted"
+    echo "ok: ...and a marker that comes and goes never counts"
 
     # ...and the two reap_abandoned keeps, which an earlier comment asserted did
     # not exist. Uncounted, `owned` never reaches 0 and the drain never ends --
@@ -1479,6 +1499,7 @@ case "${1:-}" in
     rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-42"
     : >"$AUTOFLEET_DIR/git-blind-99"
+    in_fleet count_parked_owned >/dev/null 2>&1   # the pass that records them
     out="$(in_fleet count_parked_owned 2>&1)"
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever: $out"
@@ -1511,6 +1532,33 @@ print(json.dumps({"result": {"worktrees": [
         || fail "status did not name #42 as waiting for a person with $reason-42 set: $status_out"
     done
     echo "ok: ...and status names every one of the five"
+
+    # ...and the RECOVERY LINE is not `--force` for the reasons where forcing
+    # destroys exactly what the line above says is in there. #37: "what must NOT
+    # happen is releasing the worktree to make the loop terminate: the whole
+    # reason it is parked is that removing it would destroy something." The
+    # dispatcher kept that promise and broke it through the operator, two lines
+    # apart. Found by the independent review.
+    for reason in merge-held held merge-blind git-blind; do
+      rm -f "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/merge-held-* \
+            "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
+            "$AUTOFLEET_DIR"/git-blind-*
+      : >"$AUTOFLEET_DIR/$reason-42"
+      advice="$(in_fleet how_to_release 42 /some/worktree 2>&1)"
+      grep -q -- "--force" <<<"$advice" \
+        && fail "$reason-42 says the worktree holds something and then tells a person to --force it away: $advice"
+    done
+    echo "ok: ...and only a refused removal is answered with --force"
+
+    # ...while the one path where the dispatcher HAS established that nothing
+    # goes with the worktree still gets the removal.
+    rm -f "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/held-* \
+          "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/git-blind-*
+    : >"$AUTOFLEET_DIR/stuck-42"
+    advice="$(in_fleet how_to_release 42 /some/worktree 2>&1)"
+    grep -q -- "--force" <<<"$advice" \
+      || fail "a refused removal no longer tells a person how to remove it: $advice"
+    echo "ok: ...and a refused removal still does"
     ;;
   drain_ends_with_parked)
     # `park_worktree` keeps a worktree owned when its removal was refused, which
