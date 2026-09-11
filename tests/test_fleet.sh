@@ -364,7 +364,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# $1 is the CLI stub's mode: ok, set_fails, rm_needs_force, rm_never_works,
+# $1 is the CLI stub's mode: ok, set_fails, set_noisy, rm_needs_force, rm_never_works,
 # rm_hangs.
 make_fixture() {
   WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
@@ -385,7 +385,37 @@ esac
 # Matched on the pair, because `list` alone is both `worktree list` and
 # `terminal list` and the dispatcher asks for both.
 case "$1 ${2:-}" in
-  "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
+  "worktree list")
+    # The real CLI takes `--repo <selector>` and answers only that repo's
+    # worktrees; without it the answer is machine-wide (#46). The fixture
+    # carries a `repoPath` per entry so a phase can say "this one belongs to
+    # some other repo", and this reproduces the filter rather than restating
+    # its outcome. An entry with no `repoPath` belongs to whatever was asked
+    # for, so every fixture written before the scope existed still answers.
+    sel=""
+    for arg in "$@"; do
+      case "$arg" in path:*) sel="${arg#path:}" ;; esac
+    done
+    # A `path:` that is not a repo ROOT -- a worktree of it, say -- is what the
+    # real CLI refuses, and refusing it here is what lets a phase catch a caller
+    # that passes the wrong one. $ORCA_REPO_ROOTS lists the paths that resolve;
+    # empty means every selector does, which is what fixtures written before
+    # this arm existed assume.
+    if [ -n "$sel" ] && [ -s "${ORCA_REPO_ROOTS:-/dev/null}" ] \
+       && ! grep -qxF "$sel" "$ORCA_REPO_ROOTS"; then
+      echo '{"ok": false, "error": {"code": "repo_not_found", "message": "repo_not_found"}}'
+      exit 1
+    fi
+    ORCA_REPO_SELECTOR="$sel" python3 -c '
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+sel = os.environ.get("ORCA_REPO_SELECTOR", "")
+if sel:
+    doc["result"]["worktrees"] = [
+        w for w in doc["result"]["worktrees"] if w.get("repoPath", sel) == sel]
+print(json.dumps(doc))
+' "$ORCA_WORKTREES"
+    exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
   #
@@ -397,6 +427,14 @@ case "$1 ${2:-}" in
   # dispatcher went back to opening #1, #4 and #7 in eleven seconds. Found by the
   # independent review of the change that added it.
   "worktree create")
+    # On STDERR, where a CLI actually reports a failure -- a stub that printed it
+    # on stdout would pass a driver that drops stderr on the floor, which is the
+    # regression this mode exists for. Same reasoning as the `set` branch below.
+    [ "$mode" = create_fails ] && {
+      echo "fatal: a branch named '44-a-second-issue' already exists" >&2; exit 1; }
+    # A create that SUCCEEDS and is chatty on stderr -- a relayed git
+    # `Preparing worktree`, a keychain warning. The JSON still has to parse.
+    [ "$mode" = create_warns ] && echo "Preparing worktree (new branch '44-x')" >&2
     for a in "$@"; do case "$prev" in --issue) created_issue="$a" ;; esac; prev="$a"; done
     python3 - "$ORCA_WORKTREES" "${created_issue:-}" "$WORK_FOR_STUB/created" <<'PYWT'
 import json, os, sys
@@ -425,6 +463,21 @@ case "$2" in
     # under test is that the reason reaches the log, and a stub that printed it
     # on stdout would pass a card() that drops stderr on the floor.
     [ "$mode" = set_fails ] && { echo "Unable to determine Orca.app path from symlink" >&2; exit 1; }
+    # BOTH STREAMS, so the ORDER is testable. A CLI that prints an error object
+    # on stdout and its reason on stderr is exactly the case the three-line bound
+    # exists for: merged, the stdout object arrives first and pushes the reason
+    # past line three. `runner_worktree_create` was given a separate `$err` and a
+    # stderr-first relay for that; `runner_worktree_set` was given the same
+    # shape, and nothing drove it -- the stub above writes to stderr ONLY, so
+    # merged and stderr-first were indistinguishable and reverting the hunk left
+    # the suite green. Found by the independent review.
+    [ "$mode" = set_noisy ] && {
+      echo '{"error":{"code":1,'
+      echo '  "detail": "a runtime that narrates on stdout",'
+      echo '  "more": "three lines of it, which is the whole budget",'
+      echo '  "and": "a fourth"}'
+      echo "the real reason: worktree is not registered" >&2
+      exit 1; }
     echo '{"ok":true}'; exit 0 ;;
   rm)
     # A CLI that is there but never answers -- Orca.app restarting. The
@@ -506,6 +559,9 @@ STUB
   # PR, no labels. Each test overrides only the one it is about.
   ORCA_PS="$WORK/ps";               echo '{"result":{"worktrees":[]}}' >"$ORCA_PS"
   ORCA_WORKTREES="$WORK/wtlist";    echo '{"result":{"worktrees":[]}}' >"$ORCA_WORKTREES"
+  # Which `path:` selectors the stub CLI resolves. Empty is "all of them", so
+  # only a phase that is ABOUT the selector has to say anything.
+  ORCA_REPO_ROOTS="$WORK/repo-roots"; : >"$ORCA_REPO_ROOTS"
   ORCA_TERMINALS="$WORK/terminals"; echo '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
   GH_PRS="$WORK/prs";               echo '[]' >"$GH_PRS"
   GH_ISSUES="$WORK/issues";         echo '[]' >"$GH_ISSUES"
@@ -517,6 +573,7 @@ STUB
   GH_MERGED="$WORK/merged";         echo 7 >"$GH_MERGED"
   WORK_FOR_STUB="$WORK"; mkdir -p "$WORK/created"
   export ORCA_CALLS ORCA_MODE GH_CALLS ORCA_PS ORCA_WORKTREES ORCA_TERMINALS \
+         ORCA_REPO_ROOTS \
          GH_PRS GH_ISSUES GH_LABELS GH_STATE GH_MERGED WORK_FOR_STUB REAP_CALLS
   # cmd_run sleeps between passes; a test that reached one would otherwise sit
   # for a minute before failing.
@@ -552,16 +609,39 @@ print(json.dumps({"result": {"terminals": [
 ' "$WORK/wt" >"$ORCA_TERMINALS"
 }
 
-# A live worktree the dispatcher owns, linked to issue $1. `live_worktrees`
-# reads `linkedIssue`, which is the field the foundation check keys on -- a
-# fixture that set only `path` would make every issue answer "-" and the check
-# vacuously true.
-worktree_on_issue() {
-  python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"linkedIssue": sys.argv[1], "path": sys.argv[2]}]}}))
-' "$1" "$WORK/wt" >"$ORCA_WORKTREES"
+# A live worktree the dispatcher owns, linked to issue $1, at the path every
+# other helper here calls `$WORK/wt`. `live_worktrees` reads `linkedIssue`,
+# which is the field the foundation check keys on -- a fixture that set only
+# `path` would make every issue answer "-" and the check vacuously true.
+#
+# Delegated rather than written out: two writers disagreed on the TYPE of
+# `linkedIssue` (a string here, an int there), and a fixture that differs from
+# the one every other phase uses can hide a real parsing bug. Found by the local
+# review.
+worktree_on_issue() { worktree_list "$1:wt"; }
+
+# The worktree listing Orca answers, from `issue:path-suffix` pairs -- `-` for a
+# worktree linked to no issue, and a third field naming a repo other than the
+# fixture's. `worktree_on_issue` is the one-entry form and stays; this is what a
+# machine running two fleets looks like, which is the case #46 is about.
+worktree_list() {
+  local spec; spec="$(printf '%s\n' "$@")"
+  WORKTREE_SPEC="$spec" WORKTREE_WORK="$WORK" python3 -c '
+import json, os
+out = []
+for line in os.environ["WORKTREE_SPEC"].splitlines():
+    if not line.strip():
+        continue
+    parts = line.split(":")
+    num, suffix = parts[0], parts[1]
+    repo = parts[2] if len(parts) > 2 else "repo"
+    work = os.environ["WORKTREE_WORK"]
+    out.append({"path": work + "/" + suffix,
+                "linkedIssue": None if num == "-" else int(num),
+                "repoPath": work + "/" + repo,
+                "isMainWorktree": False, "isArchived": False})
+print(json.dumps({"result": {"worktrees": out}}))
+' >"$ORCA_WORKTREES"
 }
 
 # The two halves of what one `gh issue view N --json state,labels` would print.
@@ -634,6 +714,94 @@ assert_no_box_markers() {
 # fleet.sh returns instead of dispatching when it is sourced, so one function can
 # be exercised without starting a dispatcher.
 in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
+
+# A runner driver that is NOT Orca: plain files, no CLI, nothing that could
+# reach the app even if it were running. Everything the fleet knows about
+# worktrees, agents and terminals has to arrive through the functions below, so
+# a callsite that still reaches for `orca` produces a dispatcher that
+# cannot see its own worktrees -- or, with the `orca` planted on PATH beside it,
+# a recorded call that was not supposed to happen.
+#
+# Deliberately the shape a tmux + `git worktree` driver would have, down to the
+# three-way answers: `could not tell` here is a missing backing file rather than
+# a deadline, but the codes the dispatcher reads are the same ones.
+stub_runner() {
+  STUB_DIR="$WORK/stub"
+  mkdir -p "$STUB_DIR"
+  : >"$STUB_DIR/worktrees"; : >"$STUB_DIR/states"; : >"$STUB_DIR/terminals"
+  STUB_CALLS="$STUB_DIR/calls"; : >"$STUB_CALLS"
+  export STUB_DIR STUB_CALLS
+  cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
+#!/usr/bin/env bash
+# A runner backed by text files. Records every call it is asked to make.
+#
+# runner_agent_terminal is NOT here: lib.sh provides it over
+# runner_agent_terminals, and a copy would test the copy.
+stub_say() { printf '%s\n' "$*" >>"$STUB_CALLS"; }
+
+runner_available()       { stub_say available; return 0; }
+runner_dispatcher_hint() { echo "tmux new-session -s fleet"; }
+runner_set_deadline()    { stub_say "set deadline $1"; return 0; }
+
+runner_worktree_create() {
+  local name="$2" issue="$3" path="$STUB_DIR/wt-$3"
+  stub_say "worktree create $name $issue"
+  # A failure path, which this stub did not have -- so the contract's "the
+  # runtime's own words on failure, on STDOUT" was asserted only against the
+  # Orca CLI stub, by `create_says`. On stdout deliberately: `launch` captures
+  # stdout only, and a driver that answers on stderr reproduces "could not
+  # create it:" followed by nothing. Found by the independent review.
+  [ -e "$STUB_DIR/create-fails" ] && { echo "the stub refuses to create"; return 1; }
+  mkdir -p "$path"
+  printf '%s\t%s\t%s\n' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
+  printf '%s\n' "$path"
+}
+runner_worktree_list()  { stub_say "worktree list"; cat "$STUB_DIR/worktrees"; }
+runner_worktree_issue() {
+  stub_say "worktree issue"
+  # 1 is "the runtime would not say", 2 is "there is no linked issue". Three
+  # answers, because a caller that reads 1 as 2 announces that a worktree the
+  # fleet linked to an issue has none.
+  [ -e "$STUB_DIR/blind" ] && return 1
+  [ -s "$STUB_DIR/issue" ] || return 2
+  cat "$STUB_DIR/issue"
+}
+runner_worktree_set() {
+  stub_say "worktree set $*"
+  # Answered and REFUSED, which is the branch board.sh's loud refusal is for.
+  [ -e "$STUB_DIR/set-fails" ] && { echo "the stub refuses"; return 1; }
+  return 0
+}
+runner_worktree_remove() {
+  stub_say "worktree remove $1"
+  # 2 is "nobody answered", 1 is "answered and refused". The dispatcher parks a
+  # slot on 1 and retries on 2, so a driver that returns the wrong one costs a
+  # worktree for good.
+  [ -e "$STUB_DIR/rm-blind" ]   && return 2
+  [ -e "$STUB_DIR/rm-refuses" ] && { echo "the stub refuses"; return 1; }
+  rm -rf "$1"
+  [ -d "$1" ] && return 1
+  return 0
+}
+runner_agent_states()    { stub_say "agent states";    cat "$STUB_DIR/states"; }
+runner_agent_terminals() {
+  stub_say "agent terminals"
+  # Non-zero is "the listing could not be READ", which is not the same answer as
+  # an empty listing -- and every caller of it has to keep them apart.
+  [ -e "$STUB_DIR/term-blind" ] && return 1
+  cat "$STUB_DIR/terminals"
+}
+runner_terminal_draft() {
+  stub_say "terminal draft $1"
+  [ -s "$STUB_DIR/draft" ] || return 0
+  printf '%s %s\n' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
+}
+runner_terminal_send()      { stub_say "terminal send $1";      return 0; }
+runner_terminal_enter()     { stub_say "terminal enter $1";     return 0; }
+runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
+STUBDRIVER
+  export AUTOFLEET_RUNNER=stub
+}
 
 # What .claude/hooks/guard.py answers about one command, against THIS phase's
 # fleet dir: 0 allowed, 2 blocked.
@@ -838,9 +1006,360 @@ revert_on_origin() {
 }
 
 case "${1:-}" in
+  runner_unresolved)
+    # A driver function called before anything probed the runtime. The fleet's
+    # own scripts all call runner_available first, but the CONTRACT does not
+    # oblige a caller to, and the driver used to answer that with
+    # `ORCA_CLI: unbound variable` from four frames down -- which names a shell
+    # variable rather than saying the app is not answering, and only on a script
+    # running `set -u`, which is most of them. Found by smoke-testing the driver
+    # from a bare shell.
+    #
+    # lib.sh rather than fleet.sh, and deliberately: fleet.sh resolves the runner
+    # at source time, so through it this call can never be the first one. The
+    # hooks that source lib.sh alone are where it can.
+    make_fixture ok
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      runner_worktree_list >/dev/null; echo "list rc=$?"
+      runner_agent_states  >/dev/null; echo "states rc=$?"
+    ' 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "the driver died on a shell variable instead of answering: $out"
+    grep -q "list rc=0" <<<"$out" \
+      || fail "a driver call that resolved its own CLI still did not answer: $out"
+    grep -q "states rc=0" <<<"$out" \
+      || fail "a driver call that resolved its own CLI still did not answer: $out"
+
+    # ...and the ONE function whose rc is not a plain yes/no. `orca_cli` answers
+    # a failed resolve with 1 like every other call, and 1 through
+    # `runner_worktree_remove` is the documented "answered and REFUSED" -- a
+    # decision about this worktree, which the dispatcher parks a slot on rather
+    # than retrying. So an Orca that is not running cost a worktree for good, in
+    # the function added to stop exactly that kind of blindness.
+    #
+    # The resolve is stubbed out rather than starved: whether it can find a CLI
+    # depends on the machine, and what is under test here is the MAPPING.
+    mkdir -p "$WORK/still-here"
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_remove "$1" 1; echo "here rc=$?"
+      runner_worktree_remove "$2" 1; echo "gone rc=$?"
+    ' _ "$WORK/still-here" "$WORK/never-existed" 2>&1 )"
+    grep -q "^here rc=2$" <<<"$out" \
+      || fail "a runner that could not be reached at all was reported as a refusal to remove this worktree, which parks its slot for good: $out"
+    # ...and the other way: a worktree that is already gone IS gone, and saying
+    # so needs no runtime. Answered 2 here and the reap cannot release a slot
+    # with nothing left in it for as long as the app is down.
+    grep -q "^gone rc=0$" <<<"$out" \
+      || fail "a worktree that no longer exists was not reported as removed while the runner was unreachable: $out"
+
+    # The arity refusal, which docs/RUNNERS.md promotes to the contract -- rc 2
+    # means the CALLER is malformed -- and which nothing asserted in either
+    # place. Delete the guard and `args` is empty; `"${args[@]}"` under `set -u`
+    # on bash 3.2 is a fatal unbound variable INSIDE the driver, so the whole
+    # `card` call dies differently and the suite stays green either way. Found by
+    # the independent review.
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_set /some/worktree;         echo "none rc=$?"
+      runner_worktree_set /some/worktree comment; echo "odd rc=$?"
+    ' 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "a malformed pair list killed the caller from inside the driver instead of being refused: $out"
+    grep -q "^none rc=2$" <<<"$out" \
+      || fail "a board update with no key/value pairs at all was not refused: $out"
+    grep -q "^odd rc=2$" <<<"$out" \
+      || fail "a key with no value was rounded down instead of refused, so the update silently did less than it was asked: $out"
+
+    # ...and the one function that answered an unresolved CLI with a bare rc and
+    # NO WORDS. `orca_cli` returns 1 from `orca_cli_resolve || return 1` before
+    # anything is written to the stdout or stderr files the relay reads, so
+    # `launch` printed "  could not create it:" and then nothing -- word for word
+    # the message `create_says` exists to prevent, on the one path that phase
+    # does not cover. Both neighbours already said why. Found by the independent
+    # review.
+    # STDERR IS DISCARDED, and that is the assertion rather than an accident:
+    # `launch` captures stdout only (`fleet.sh:702`, `... >"$out"`), because
+    # stdout is where the worktree path comes back. Capturing `2>&1` here passes
+    # with the reason on either stream and pins nothing -- which is how the first
+    # attempt at this fix shipped with the `echo` still going to stderr, and
+    # `launch` still printing "could not create it:" and then nothing. Found by
+    # the review of that fix; the same shape is asserted for
+    # `runner_worktree_set`, whose caller `card` reads the same way.
+    out="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh
+      orca_cli_resolve() { return 1; }
+      runner_worktree_create "$PWD" name 42 agent prompt comment; echo "create rc=$?"
+      runner_worktree_set "$PWD" workspace-status in-review;      echo "set rc=$?"
+    ' 2>/dev/null )"
+    grep -q "^create rc=1$" <<<"$out" \
+      || fail "a create against an unreachable runner did not answer 1, which is what launch leaves the issue queued on: $out"
+    grep -q "orca CLI" <<<"$out" \
+      || fail "launch would print 'could not create it:' and then nothing: the driver's reason never reached the one stream launch captures: $out"
+    grep -q "^set rc=1$" <<<"$out" \
+      || fail "a board update against an unreachable runner did not answer 1: $out"
+    [ "$(grep -c "orca CLI" <<<"$out")" = 2 ] \
+      || fail "card would log 'board update FAILED' with no cause under it, for the same reason create did: $out"
+
+    echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
+    ;;
+  runner_stub)
+    # THE acceptance for #1, and the only assertion that keeps holding once the
+    # move has been made: with a driver that is not Orca, a dispatcher, a
+    # worktree hook and the brief resolver all do their whole job, and the CLI
+    # is never touched. Every callsite that regressed out from behind the driver
+    # would show up here as a recorded `orca` call.
+    make_fixture ok
+    make_worktree
+    add_origin
+    stub_runner
+    # An `orca` ON PATH as well as the one the fixture exports: the claim is that
+    # nothing reaches for the CLI, not that nothing reaches for it by the one
+    # name a test happened to set. Both record into $ORCA_CALLS.
+    cp "$WORK/bin/orca-stub" "$WORK/bin/orca"
+
+    printf '%s\t%s\t%s\n' "$WORK/wt" work 42 >"$STUB_DIR/worktrees"
+    printf '%s\t%s\n' "$WORK/wt" waiting >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    printf '%s\t%s\n' t2 "$WORK/repo" >>"$STUB_DIR/terminals"
+    printf '42' >"$STUB_DIR/issue"
+    printf 'read the issue and get to work' >"$STUB_DIR/draft"
+
+    [ "$(in_fleet live_count)" = 1 ] \
+      || fail "the dispatcher could not count its own worktrees through a non-Orca driver"
+
+    # The stall watcher: the agent state and the board, one poll of each.
+    issue_labels "ready"
+    out="$(in_fleet notice_stalled 2>&1)"
+    grep -q "waiting for input" <<<"$out" \
+      || fail "the agent state never arrived through the driver: $out"
+    grep -q "worktree set" "$STUB_CALLS" \
+      || fail "the board update did not go through the driver: $(cat "$STUB_CALLS")"
+
+    # The launch, and then the release: create, set, remove, sweep.
+    in_fleet launch 44 "a second issue" >/dev/null 2>&1 \
+      || fail "launch failed against a driver that answers everything"
+    grep -q "worktree create" "$STUB_CALLS" \
+      || fail "the worktree was not created through the driver: $(cat "$STUB_CALLS")"
+    in_fleet interrupt_agent_in "$WORK/wt" >/dev/null 2>&1
+    grep -q "terminal interrupt t1" "$STUB_CALLS" \
+      || fail "the interrupt did not find this worktree's agent through the driver: $(cat "$STUB_CALLS")"
+    out="$(in_fleet reap_merged 2>&1)"
+    [ -d "$WORK/wt" ] && fail "the merged worktree was not removed through the driver: $out"
+    grep -q -- "--yes" "$REAP_CALLS" \
+      || fail "the stack of a worktree the driver really removed was never swept: $out"
+
+    # ...and the two hooks that run INSIDE a worktree, which reach the runtime
+    # by a different path and were the other half of the grep.
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
+    grep -q "Closes #42" <<<"$out" \
+      || fail "issue-command.sh could not resolve this worktree's issue through the driver: $out"
+
+    # ...and its THREE-WAY read, which is the branch this change added and the
+    # one branch it did not assert. `|| true` mapped rc 1 ("the runtime would not
+    # say") and rc 2 ("there is no linked issue") onto one empty `$ref`, so the
+    # by-hand path reported the same thing for both. The stub answers 1 on
+    # demand, and `agent-autostart.sh`'s sibling branch is already driven through
+    # that same knob in both directions. Found by the independent review, whose
+    # point was that this PR had fixed the same class twice already.
+    : >"$STUB_DIR/blind"
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"; rc=$?
+    rm -f "$STUB_DIR/blind"
+    [ "$rc" != 0 ] \
+      || fail "issue-command.sh claimed success with no issue resolved at all: $out"
+    grep -q "would not say" <<<"$out" \
+      || fail "a runner that could not answer was reported as a worktree with no linked issue, which is the conflation design note 2 is about: $out"
+    # ...and the other answer still reads as itself.
+    printf '' >"$STUB_DIR/issue"
+    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
+    printf '42' >"$STUB_DIR/issue"
+    grep -q "would not say" <<<"$out" \
+      && fail "a worktree that really has no linked issue was reported as a runner that would not answer: $out"
+    out="$( cd "$WORK/repo" && AGENT_AUTOSTART_POLL_SECONDS=0 \
+              ./scripts/fleet/agent-autostart.sh --once 2>&1 )"
+    grep -q "sent." <<<"$out" \
+      || fail "agent-autostart.sh could not read or submit the draft through the driver: $out"
+    grep -q "terminal enter t2" "$STUB_CALLS" \
+      || fail "the prompt was not submitted through the driver: $(cat "$STUB_CALLS")"
+    grep -q "set deadline 20" "$STUB_CALLS" \
+      || fail "the watcher's shorter deadline was not asked for through the contract, so only an Orca driver would honour it: $(cat "$STUB_CALLS")"
+
+    # A worktree path with a BACKSLASH in it. `awk -v` reinterprets what it
+    # assigns, so the comparison went false and the answer came back "there is no
+    # agent in that worktree" -- which is indistinguishable from the truth, and
+    # is `stop` never interrupting an agent plus a watcher that gives up with the
+    # prompt unsent. Found by the independent review.
+    weird="$STUB_DIR/we\\ird"
+    printf '%s\t%s\n' t3 "$weird" >>"$STUB_DIR/terminals"
+    [ "$(in_fleet runner_agent_terminal "$weird")" = t3 ] \
+      || fail "a worktree path with a backslash in it has no agent, as far as the fleet can tell"
+    # ...and the SAME filter in notice_stalled, which had the same defect and
+    # would otherwise be a fix with no assertion. A worktree whose agent is
+    # `waiting` is reported as not waiting, forever.
+    printf '%s\t%s\n' "$weird" waiting >>"$STUB_DIR/states"
+    mkdir -p "$weird"
+    printf '%s\n' "$weird" >"$AUTOFLEET_DIR/worktrees/43"
+    out="$(in_fleet notice_stalled 2>&1)"
+    rm -f "$AUTOFLEET_DIR/worktrees/43"
+    grep -q "#43 is waiting" <<<"$out" \
+      || fail "an agent waiting in a worktree whose path has a backslash was reported as not waiting: $out"
+
+    # Design note 2 of the issue, on the one function that has THREE answers:
+    # "could not tell" and "there is none" must not reach a person as the same
+    # sentence. They did for a year, and it cost three worktrees a night.
+    : >"$STUB_DIR/blind"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
+    grep -q "would not say" <<<"$out" \
+      || fail "a runner that could not answer was reported as a worktree with no linked issue: $out"
+    rm -f "$STUB_DIR/blind"
+    printf '' >"$STUB_DIR/issue"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
+    grep -q "no linked issue" <<<"$out" \
+      || fail "a worktree that really has no linked issue stopped saying so: $out"
+    printf '42' >"$STUB_DIR/issue"
+
+    # A removal nobody answered is NOT a refusal. The dispatcher parks a slot for
+    # good on a refusal and retries on silence, so this is a worktree lost per
+    # runtime restart if the driver conflates them -- and `orca_cli` answering a
+    # failed resolve with 1, like every other call, is exactly how it did.
+    mkdir -p "$STUB_DIR/wt-blind"
+    printf '%s\n' "$STUB_DIR/wt-blind" >"$AUTOFLEET_DIR/worktrees/44"
+    : >"$STUB_DIR/rm-blind"
+    out="$(in_fleet remove_worktree "$STUB_DIR/wt-blind" 2>&1)"; rc=$?
+    rm -f "$STUB_DIR/rm-blind" "$AUTOFLEET_DIR/worktrees/44"
+    [ "$rc" = 2 ] || fail "a removal nobody answered was not reported as 'could not ask' (rc $rc): $out"
+    grep -q "not a refusal" <<<"$out" \
+      || fail "it did not say the difference, which is the whole of it: $out"
+
+    # Every `*-blind-` marker for an issue goes when a fresh worktree takes it,
+    # whatever it is called -- including the name the marker had before the
+    # runner seam, which a fleet upgraded mid-flight still has on disk.
+    # Through a fleet directory with a SPACE in it, which is the whole reason the
+    # glob line quotes everything except the `*`: bare, the path word-splits into
+    # two operands that match nothing and every marker survives, silently.
+    spaced="$WORK/my fleet"
+    mkdir -p "$spaced"
+    : >"$spaced/orca-blind-77"
+    : >"$spaced/runner-blind-77"
+    : >"$spaced/git-blind-77"
+    ( cd "$WORK/repo" && AUTOFLEET_DIR="$spaced" bash -c \
+        '. ./scripts/fleet/fleet.sh && clear_issue_markers 77' ) >/dev/null 2>&1
+    for legacy in orca-blind-77 runner-blind-77 git-blind-77; do
+      [ -e "$spaced/$legacy" ] \
+        && fail "$legacy outlived the worktree that wrote it, and nothing will ever clear it"
+    done
+
+    # board.sh is the line issue-command.sh hands EVERY agent, so it is where the
+    # seam is asserted by the brief rather than by the dispatcher.
+    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
+      || fail "board.sh could not set this worktree's card through the driver: $out"
+    grep -q "worktree set $WORK/repo workspace-status in-review comment #42: PR #7" "$STUB_CALLS" \
+      || fail "board.sh did not send the status and the comment in ONE call: $(cat "$STUB_CALLS")"
+
+    # ...and the REFUSAL, which is the whole of what makes board.sh's written-down
+    # $REPO_ROOT assumption acceptable rather than quiet: if the path the agent's
+    # shell has does not match the one the runtime recorded, every update from
+    # inside that worktree fails, and the answer to that is a card named as stale
+    # rather than a board update reported and not made. Nothing drove this branch
+    # -- the stub returned 0 unconditionally, so only board.sh:65 was ever
+    # reached. Hard rule 3. Found by the independent review.
+    : >"$STUB_DIR/set-fails"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
+      && fail "a board update the runner REFUSED was reported as done, so the card is stale and nobody knows: $out"
+    rm -f "$STUB_DIR/set-fails"
+    grep -q "the card was NOT updated" <<<"$out" \
+      || fail "board.sh did not name the card as stale, which is the only thing bounding the cost of its path assumption: $out"
+
+    # Design note 2 again, on the callsite `stop --now` actually takes. An
+    # unreadable listing and a machine with no agents on it printed the same
+    # thing: "interrupting agents..." and then nothing. CLAUDE.md calls --now the
+    # form that "also freezes the agents", so this is the log an operator reads
+    # while three agents keep writing against a rig that is going down.
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    : >"$STUB_DIR/term-blind"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    rm -f "$STUB_DIR/term-blind"
+    grep -q "not the same as there being none" <<<"$out" \
+      || fail "stop --now read a listing it could not read as 'there are no agents', so nobody was told none were interrupted: $out"
+    in_fleet cmd_resume >/dev/null 2>&1
+    # ...and the other way, so the message is not simply always printed: the same
+    # stop with a listing that answers says nothing of the sort, and interrupts.
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    in_fleet cmd_resume >/dev/null 2>&1
+    rm -f "$AUTOFLEET_DIR/worktrees/42"
+    grep -q "not the same as there being none" <<<"$out" \
+      && fail "a listing that answered perfectly well was reported as unreadable: $out"
+    grep -q "interrupted #42" <<<"$out" \
+      || fail "stop --now did not interrupt the agent the listing names: $out"
+
+    # ...and the contract's STREAM, against a driver that is not Orca. `launch`
+    # captures stdout only, so a driver obeying docs/RUNNERS.md must answer
+    # there; `create_says` asserts this against the Orca CLI stub, which leaves
+    # the page's claim untested for everyone the page is written for.
+    : >"$STUB_DIR/create-fails"
+    out="$(in_fleet launch 45 "a third issue" 2>/dev/null)"
+    rm -f "$STUB_DIR/create-fails"
+    grep -q "could not create it" <<<"$out" \
+      || fail "a create the driver refused was not reported as one: $out"
+    grep -q "the stub refuses to create" <<<"$out" \
+      || fail "launch printed 'could not create it:' and then nothing -- the driver's reason never reached the one stream launch captures: $out"
+    [ -e "$AUTOFLEET_DIR/worktrees/45" ] \
+      && fail "a refused create left the issue owned, so its slot is held by a worktree that does not exist"
+
+    # The whole point. Not "the fleet still works" -- the fleet works and the CLI
+    # was never asked anything.
+    [ -s "$ORCA_CALLS" ] \
+      && fail "something outside scripts/fleet/runner/ still reaches for the orca CLI: $(cat "$ORCA_CALLS")"
+    echo "ok: dispatcher, reap and both worktree hooks run on a driver that is not Orca"
+    ;;
+  create_says)
+    # `launch` printing "could not create it:" and then nothing is the same line
+    # whether the app is down or the branch already exists, and it repeats every
+    # pass with the issue left in the queue. The driver has to relay the
+    # runtime's stderr for that line to be worth anything -- docs/RUNNERS.md says
+    # so, and until the independent review said otherwise nothing asserted it.
+    make_fixture create_fails
+    out="$(in_fleet launch 44 "a second issue" 2>&1)"
+    grep -q "could not create it" <<<"$out" \
+      || fail "a refused worktree creation was not reported at all: $out"
+    grep -q "already exists" <<<"$out" \
+      || fail "the runtime said why on stderr and the driver dropped it, so the log cannot tell a refused branch name from an app that is not running: $out"
+    echo "ok: a refused worktree creation carries the runtime's own reason"
+    ;;
+  create_warns)
+    # The other half of create_says, and the one the fix for it introduced: the
+    # driver relays the runtime's own words on failure AND parses its JSON on
+    # success, so a merged stderr broke every create by a CLI that says anything
+    # at all while succeeding. The worktree exists either way -- it is on the
+    # runner's list, it counts against the cap of three, and `in_flight` believes
+    # the issue is running -- but a `launch` that could not read the path back
+    # owns nothing: no card, no started marker, no time-box, and neither reap
+    # iterates it because both walk OWNED_DIR. A slot held forever by a worktree
+    # the fleet cannot see. Found by the independent review.
+    make_fixture create_warns
+    out="$(in_fleet launch 44 "a second issue" 2>&1)"
+    grep -q "reported no path" <<<"$out" \
+      && fail "a warning on stderr broke the JSON parse, so the fleet created a worktree it does not own and cannot reap: $out"
+    grep -q "#44 is running in" <<<"$out" \
+      || fail "the created worktree was not tracked: $out"
+    [ -e "$AUTOFLEET_DIR/worktrees/44" ] \
+      || fail "nothing owns the worktree that was just created, so no reap will ever look at it: $out"
+    echo "ok: a create that warns on stderr is still parsed, owned and carded"
+    ;;
   card_says)
     make_fixture set_fails
-    out="$(in_fleet card "/some/worktree" --workspace-status in-progress --comment "#42: building" 2>&1)"
+    out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
     grep -qi "board update FAILED" <<<"$out" \
       || fail "a refused board update said nothing: $out"
     grep -q "Unable to determine Orca.app path" <<<"$out" \
@@ -848,10 +1367,22 @@ case "${1:-}" in
     grep -q "in-progress" <<<"$out" \
       || fail "the log does not say which update was lost: $out"
     echo "ok: a board update that failed is in the dispatcher log"
+
+    # ...and STDERR FIRST within the three-line bound, which is what
+    # docs/RUNNERS.md publishes for this function as of this PR. The CLI here
+    # prints two lines on stdout before the reason reaches stderr, so a merged
+    # stream puts the reason on line three at best and past it at worst. This
+    # fails against the `FLEET_RUN_CAPTURE_STDERR=1` form the separate `$err`
+    # replaced.
+    make_fixture set_noisy
+    out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
+    grep -q "the real reason: worktree is not registered" <<<"$out" \
+      || fail "the runtime's reason was pushed past the three-line bound by its own stdout, which is what relaying stderr first prevents: $out"
+    echo "ok: ...and the reason is relayed before the runtime's stdout, inside the bound"
     ;;
   card_quiet)
     make_fixture ok
-    out="$(in_fleet card "/some/worktree" --comment "#42: building" 2>&1)"
+    out="$(in_fleet card "/some/worktree" comment "#42: building" 2>&1)"
     grep -qi "fail" <<<"$out" && fail "a successful board update complained: $out"
     echo "ok: a board update that worked says nothing"
     ;;
@@ -1238,14 +1769,20 @@ JSON
 [{"number":1,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
 JSON
     start_dispatcher --auto
-    wait_for_log "waiting for the other"
+    wait_for_log "it waits for"
+    # NAMED, not counted: "waiting for the other 2 worktree(s)" named nothing a
+    # person could go and land, and the two are never equivalent -- one may be
+    # ours and the other a worktree nobody here can close. That is what
+    # armaatus/autofleet#46 looked like from the outside, repeating indefinitely.
+    grep -q "waits for #4" "$WORK/run.log" \
+      || fail "the hold counted what it waits on instead of naming it: $(grep 'foundation issue' "$WORK/run.log")"
     # It said it once. Give it several more passes and it must not say it again.
-    before="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    before="$(grep -c "it waits for" "$WORK/run.log" || true)"
     sleep 3
-    after="$(grep -c "waiting for the other" "$WORK/run.log" || true)"
+    after="$(grep -c "it waits for" "$WORK/run.log" || true)"
     [ "$before" = "$after" ] \
       || fail "the waiting hold is announced every poll ($before then $after in three seconds)"
-    echo "ok: a foundation candidate waiting its turn is announced once, not once per poll"
+    echo "ok: a foundation candidate waiting its turn names what it waits on, once"
     grep -q "^worktree create" "$ORCA_CALLS" \
       && fail "it announced the wait and launched the foundation issue anyway"
     echo "ok: ...and it does not launch alongside the ordinary worktree"
@@ -2320,7 +2857,128 @@ JSON
       || fail "the takeover does not name the dispatcher's own checkout: $out"
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
+  live_scoped)
+    make_fixture ok
+    # One worktree of ours, one belonging to a different repository entirely --
+    # which is the ordinary state of a machine running more than one fleet.
+    worktree_list "42:wt" "7:foreign:other"
+    n="$(in_fleet live_count 2>&1)"
+    [ "$n" = 1 ] \
+      || fail "counted $n live worktree(s); another repo's worktree is taking a slot from MAX_WORKTREES"
+    grep -q -- "--repo path:$WORK/repo" "$ORCA_CALLS" \
+      || fail "it asked for every worktree on the machine, not this repo's: $(cat "$ORCA_CALLS")"
+    # The same list answers `in_flight`, which matches on an issue NUMBER, so an
+    # unrelated repo's #7 must not answer for ours. 0 = in flight, 1 = free.
+    in_fleet in_flight 7; rc=$?
+    [ "$rc" = 1 ] \
+      || fail "another repo's issue 7 reads as in flight here (in_flight said $rc)"
+    echo "ok: the count, and what is in flight, are this repository's"
+    ;;
+
+  foundation_foreign)
+    make_fixture ok
+    # A foundation issue lands alone, so the dispatcher holds until nothing of
+    # ours is in flight. Unscoped, that never happened: a worktree on another
+    # repo held every foundation issue forever, because nothing this fleet does
+    # can close one.
+    #
+    # And it is worse than a held gate. `foundation_in_flight` resolves each
+    # linked number against THIS repository, so a foreign worktree on an issue
+    # number that does not exist here makes the lookup FAIL -- and the hold is
+    # fail-closed, so the dispatcher launches nothing at all. That is what
+    # stopped this repo's own fleet on 2026-09-11 with `labels-198` in the
+    # holding marker, #198 being armaatus/rommsync-nx#198.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":196,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
+JSON
+    worktree_list "198:foreign:other"
+    n="$(in_fleet live_count 2>&1)"
+    [ "$n" = 0 ] \
+      || fail "counted $n live worktree(s) with only another repo's open, so the foundation gate never opens"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 1 ] \
+      || fail "another repo's worktree holds the launch loop (rc=$rc): $out"
+    grep -q "cannot be answered" <<<"$out" \
+      && fail "the foreign worktree's issue was looked up against this repo, and the failed lookup held the fleet: $out"
+    # ...and the foundation issue is startable for no other reason, so the two
+    # assertions above are about the gate rather than about an empty queue.
+    out="$(in_fleet ready_issues 2>&1)"
+    grep -q "^196" <<<"$out" \
+      || fail "the foundation issue stopped being startable for some other reason, so the gate above proves nothing: $out"
+    echo "ok: another repo's worktree neither holds a foundation issue nor stops the fleet"
+    ;;
+
+  selector_git_unusable)
+    make_fixture ok
+    # "git answered, but unusably." git before 2.31 does not know
+    # `--path-format`: it echoes the unrecognised argument back as a flag and
+    # still exits 0, so the answer is one git could not give. `dirname` then
+    # refuses the leading `--` and produces nothing -- and a guard that reads
+    # the string already built from it sees `path:` and lets it through, which
+    # the CLI refuses with repo_not_found on every listing, forever. The two
+    # phases that reach the fallback do so by git FAILING; this is the other
+    # way in. Found by the local review.
+    real_git="$(command -v git)"
+    cat >"$WORK/bin/git" <<GITSTUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in --path-format=*) printf '%s\n.git\n' "\$a"; exit 0 ;; esac
+done
+exec "$real_git" "\$@"
+GITSTUB
+    chmod +x "$WORK/bin/git"
+    # Through the DRIVER, because that is where the selector lives after #1:
+    # `--repo` is an Orca flag and hard rule 2 forbids `fleet.sh` naming one.
+    # Resolved fresh with the git stub on PATH, since the driver caches it at
+    # source time.
+    sel="$( cd "$WORK/repo" && PATH="$WORK/bin:$PATH" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh >/dev/null 2>&1
+      orca_resolve_repo_selector
+    ' 2>&1 )"
+    [ "$sel" = "path:$WORK/repo" ] \
+      || fail "an unusable answer from git was passed to the CLI as a selector: [$sel]"
+    echo "ok: git answering unusably falls back to this checkout, not to a selector the CLI refuses"
+    ;;
+
+  create_scoped)
+    make_fixture ok
+    make_repo_git
+    older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
+    # The OTHER selector callsite. `worktree create` carried a raw
+    # `path:$REPO_ROOT` while the listing resolved one properly, so the same
+    # `repo_not_found` that blinded `status` stopped `fleet.sh run` from a
+    # worktree opening anything at all -- and the two callsites could name
+    # different repositories. Found by the local review.
+    printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
+    in_fleet_at "$WORK/wt2" launch 4 "a title" >/dev/null 2>&1
+    grep "^worktree create" "$ORCA_CALLS" | grep -q -- "--repo path:$WORK/repo" \
+      || fail "the create names the caller's checkout, not the repository root: $(grep '^worktree create' "$ORCA_CALLS")"
+    echo "ok: creating a worktree scopes to the repository root, from a worktree too"
+    ;;
+
+  status_worktree_scope)
+    make_fixture ok
+    make_repo_git
+    dispatcher_running
+    in_fleet record_dispatcher
+    older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
+    # `--repo path:` names a repository ROOT. `fleet.sh status` is run from
+    # wherever you are -- CLAUDE.md points agents in a fleet worktree at it --
+    # so a selector built from the CALLER's checkout is a worktree path, which
+    # the CLI refuses with repo_not_found. The listing then fails, and a failed
+    # listing makes `in_flight` answer "could not tell" for every issue, so
+    # `status` offers work that is already running.
+    printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
+    worktree_list "42:wt"
+    out="$(in_fleet_at "$WORK/wt2" cmd_status 2>&1)"
+    grep -q "#42" <<<"$out" \
+      || fail "asked from a worktree, it could not list what is running: the repo selector did not resolve: $out"
+    echo "ok: status asked from a worktree still scopes to the repository"
+    ;;
+
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|priority_first|status_priority|priority_renamed|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|priority_first|status_priority|priority_renamed" >&2
     exit 2 ;;
 esac

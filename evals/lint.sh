@@ -491,6 +491,335 @@ else
   fail "install.sh ships files that link to documents it does not (above); those links 404 in every host repo"
 fi
 
+# 4b. The runner seam, asserted rather than believed.
+#
+#    Two ways it rots, and only something reading BOTH files can see either:
+#    a `runner_*` the fleet calls that no driver defines is a dispatcher that
+#    dies the first time it takes that path, and a driver function that
+#    docs/RUNNERS.md does not describe is a contract a second driver cannot
+#    implement -- which is the whole of armaatus/autofleet#1. The drafted
+#    contract had already drifted from the code by three functions before it was
+#    made real. Found by the independent review.
+#
+#    lib.sh may PROVIDE a contract function (runner_agent_terminal is a filter
+#    over runner_agent_terminals, with nothing runner-specific in it), so it
+#    counts as a definition; a driver that defines its own still wins, because
+#    lib.sh defines it before it sources the driver.
+if python3 - <<'PYEOF'; then
+import re, sys, glob
+
+def defined(path):
+    return set(re.findall(r"^(runner_[a-z_]+)\(\)", open(path).read(), re.M))
+
+drivers = sorted(glob.glob("scripts/fleet/runner/*.sh"))
+if not drivers:
+    sys.exit("no runner driver ships; scripts/fleet/runner/ is empty")
+
+# COMMENTS ARE STRIPPED, for the same reason 4c strips them and found by the
+# same review: this check read every `runner_[a-z_]+` token in the file,
+# including the ones inside prose, so a comment that merely NAMES a function the
+# fleet does not call failed the check as a contract the drivers had broken. It
+# fired the moment a comment in issue-command.sh explained why a local variable
+# must not be called `runner_rc` -- the check tripping over its own
+# documentation. A function that appears only in a comment is not called, so
+# stripping can only shrink the required set, never hide real drift.
+def strip_comment(line):
+    """The line with a trailing shell comment removed, quotes respected.
+
+    `re.sub(r"#.*", "", line)` cut at the first `#` ANYWHERE, and fleet.sh is
+    full of `"#$num: ..."` strings -- so everything after one was invisible.
+    Round eight fixed that in 4c's awk; this is the same fix in 4b, which had it
+    too. The direction it matters in is the FALSE NEGATIVE: a real call after a
+    `"#..."` string on the same line was invisible, so `say "#7: x"; runner_nope`
+    passed.
+
+    Quoted spans are deliberately NOT removed, even though a `runner_*` name
+    inside a message string is not a call and will be reported as one. Removing
+    them would be worse: `list="$(runner_agent_terminals)"` is a call INSIDE
+    double quotes, and command substitution in a quoted string is how most of
+    this file reaches the driver. A false positive here says "the contract and
+    the code disagree" and is fixed by rewording one message; a false negative
+    lets a driver ship without a function the fleet calls.
+    """
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+def code_only(text):
+    return "\n".join(strip_comment(line) for line in text.splitlines())
+
+provided = defined("scripts/fleet/lib.sh")
+called = set()
+for path in glob.glob("scripts/fleet/*.sh"):
+    called |= set(re.findall(r"\brunner_[a-z_]+", code_only(open(path).read())))
+called -= provided
+
+# Only the ```sh CONTRACT FENCES count as documentation. Any mention anywhere in
+# the page used to, which made this half of the check vacuous: a function deleted
+# from the contract block still passed because some paragraph further down
+# happened to say its name. The page's job is to be the thing a second driver is
+# written against, and that is the fences. Found by the independent review of the
+# change that added this check.
+doc = open("docs/RUNNERS.md").read()
+documented = set()
+for fence in re.findall(r"```sh\n(.*?)```", doc, re.S):
+    documented |= set(re.findall(r"^runner_[a-z_]+", fence, re.M))
+if not documented:
+    sys.exit("docs/RUNNERS.md has no ```sh contract block; this check now asserts nothing")
+
+bad = []
+for driver in drivers:
+    defines = defined(driver)
+    for name in sorted(called - defines):
+        bad.append(f"{name} is called by the fleet and {driver} does not define it")
+    for name in sorted(defines - documented):
+        bad.append(f"{driver} defines {name} and docs/RUNNERS.md never names it")
+for name in sorted(provided - documented):
+    bad.append(f"lib.sh provides {name} and docs/RUNNERS.md never names it")
+# ...and the other direction, which the check missed on its first pass: a name on
+# the page that nothing defines is a function a second driver would implement for
+# nobody, and it is exactly how the drafted contract came to carry three of them.
+# Found by the independent review of the change that added this check.
+everywhere = provided | set().union(*(defined(d) for d in drivers))
+for name in sorted(documented - everywhere):
+    bad.append(f"docs/RUNNERS.md names {name} and nothing defines it")
+if bad:
+    sys.exit("the runner contract and the code disagree:\n  " + "\n  ".join(bad))
+PYEOF
+  ok "every runner_* the fleet calls is defined by every driver, and documented"
+else
+  fail "the runner contract has drifted from the code (above); a second driver cannot be written against a page that is wrong"
+fi
+
+# 4c. The acceptance line of armaatus/autofleet#1, run rather than quoted.
+#
+#    CLAUDE.md hard rule 4 states this grep AS the rule, docs/RUNNERS.md says
+#    "returning nothing is what keeps it that way", and runner/README.md calls it
+#    "checkable rather than aspirational" -- and nothing checked it. 4b above
+#    cross-checks runner_* NAMES, which is a different question; `runner_stub`
+#    covers only the paths it drives, so stop.sh, setup.sh, env.sh, reap.sh,
+#    review.sh, await-review.sh, answer-review.sh and record-review.sh could all
+#    reintroduce a `$ORCA_CLI` and ship green through both. Hard rule 3 is that a
+#    rule with no assertion is not shipped, and this is the change that turned
+#    the convention into a rule. Found by the independent review.
+#    The PATTERN is a case-insensitive `orca`, and it got there in three steps,
+#    each one a review finding rather than a tidy-up.
+#
+#    `ORCA_CLI\|orca ` could not see the driver's own knobs (`ORCA_DEADLINE`) or
+#    `orca` at end of line (`command -v orca`, `exec orca`, `mkdir -p .orca`).
+#    `ORCA_\|orca\b` could not see `orca_cli_resolve`, `orca_cli` or `orca_json`
+#    AT ALL -- `_` is a word constituent, so `\b` does not match after `orca`,
+#    and `ORCA_` is uppercase-only -- nor the `Orca` spelling in a runtime
+#    message. That was not hypothetical: one of the two leaks this PR removed was
+#    `issue-command.sh`'s `orca_cli_resolve` call, which matched neither pattern,
+#    and `agent-autostart.sh`'s sibling was caught only because its MESSAGE
+#    happened to contain `orca `. `tolower(out) ~ /orca/` sees all of it.
+#
+#    And the comment is truncated by a QUOTE-AWARE scan, not `sub(/#.*/, ...)`:
+#    that cut at the first `#` anywhere, and `fleet.sh` is full of `"#$num: ..."`
+#    strings, so everything after one was invisible to this check. The mirror
+#    image of the false positive round six fixed. `ORCA_CLI\|orca ` could not see
+#    `ORCA_DEADLINE`, `ORCA_SEND_DEADLINE` or `ORCA_CREATE_DEADLINE` -- the
+#    driver's own knobs -- nor `orca` at end of line: `command -v orca`,
+#    `exec orca`, `mkdir -p .orca`. Round two's finding ON THIS PR was
+#    agent-autostart.sh exporting a variable only the driver reads; spelled
+#    `ORCA_DEADLINE=20` it shipped green through the old pattern, and 4b does not
+#    see it either because 4b asks about runner_* NAMES. The tighter pattern
+#    found two live ones: `mkdir -p .orca` in record-review.sh and await-review.sh,
+#    left behind when the review marker moved to .autofleet/run -- so
+#    record-review.sh made a directory nothing uses and wrote into one nothing
+#    made.
+#
+#    COMMENTS ARE EXCLUDED, and that is a real narrowing rather than a
+#    convenience: this repo's comments cite `orca.yaml` and the app by name all
+#    over, on purpose -- hard rule 4 is that the dependency is NAMED, not hidden.
+#    What the rule forbids is CODE outside the driver reaching for the runtime.
+#    `config.sh` is the one exception, and the only one: it is where the default
+#    driver is chosen, so naming one there is the choice rather than a leak.
+#
+#    The comment is STRIPPED rather than the line skipped, because a `grep -v`
+#    on a leading `#` only sees whole-line comments. `AUTOFLEET_RUNNER=tmux  #
+#    not orca` is code plus prose, and skipping-on-leading-# failed it as a
+#    broken seam while permitting the identical words a line higher -- which is
+#    the opposite of the rule in all three places that state it. Latent when it
+#    was found (lint was green); it would have fired on the first person to
+#    annotate a line instead of a block. Found by the review of the round-five
+#    fix.
+if leak="$(grep -rni 'orca' scripts/fleet --include='*.sh' \
+               | grep -v '^scripts/fleet/runner/' \
+               | awk 'BEGIN { sq = sprintf("%c", 39) }
+                 {
+                   code = $0
+                   sub(/^[^:]*:[0-9]+:/, "", code)   # drop path:lineno:
+                   # Truncate at the first # that is NOT inside quotes, so a trailing comment
+                   # is prose and a `"#$num"` in the middle of a line does not hide the rest.
+                   out = ""; q = ""
+                   for (i = 1; i <= length(code); i++) {
+                     c = substr(code, i, 1)
+                     if (q == "") {
+                       if (c == "\"" || c == sq) q = c
+                       else if (c == "#") break
+                     } else if (c == q) q = ""
+                     out = out c
+                   }
+                   if (tolower(out) ~ /orca/) print
+                 }' \
+               | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$')"; then
+  fail "the runner seam is broken -- these reach for one runner's CLI from outside scripts/fleet/runner/:
+$(printf '%s\n' "$leak" | sed 's/^/    /')"
+else
+  ok "nothing outside scripts/fleet/runner/ reaches for the orca CLI"
+fi
+
+# 4d. ...and the two pages that PRINT that pipeline print the one that runs.
+#
+#    Both `docs/RUNNERS.md` and `scripts/fleet/runner/README.md` reproduce 4c's
+#    command in a ```sh fence, and CLAUDE.md hard rule 4 now says "the exact
+#    pipeline is in docs/RUNNERS.md" -- so those fences are the authoritative
+#    statement of the rule, not a decoration. They drifted immediately: 4c was
+#    fixed to STRIP the comment and both pages went on publishing the version
+#    that SKIPPED whole-line comments, which disagrees with 4c on exactly the
+#    line round six's finding was about (`AUTOFLEET_RUNNER=tmux  # not orca` is
+#    a leak to the page and clean to the check). Both pages ship -- RUNNERS.md
+#    in install.sh's PAYLOAD, README.md inside scripts/fleet -- so a host repo
+#    got the wrong pipeline and a maintainer running it by hand got a different
+#    verdict from CI.
+#
+#    4b cannot see this: it compares runner_* NAMES. Found by the independent
+#    review of the change that fixed 4c.
+if python3 - <<'PYEOF'
+import re, sys
+
+def core(text):
+    """The command, with whitespace normalised away and NOTHING ELSE.
+
+    This used to strip comments before comparing -- which normalised the awk's
+    own comment-handling line to a stub on BOTH sides, so a page publishing a
+    different comment regex there compared equal. That line is precisely the
+    stage whose semantics were the drift 4d exists to catch, so 4d had a hole
+    exactly where it mattered. Comparing the text verbatim means a page has to
+    carry the explanatory comments too -- which is right: they are the reason
+    the fence is readable, and a maintainer running it by hand gets them.
+    Found by the independent review.
+    """
+    return re.sub(r"\s+", " ", text).strip()
+
+lint = open("evals/lint.sh").read()
+m = re.search(r"if leak=\"\$\((.*?)\)\"; then", lint, re.S)
+if not m:
+    sys.exit("could not find 4c's own pipeline in evals/lint.sh; this check now asserts nothing")
+want = core(m.group(1))
+
+bad = []
+for path in ("docs/RUNNERS.md", "scripts/fleet/runner/README.md"):
+    doc = open(path).read()
+    # Anchored on `grep -rn`, not on the PATTERN: 4d's own regex named the
+    # pattern it was written against, so widening the pattern made both pages
+    # "no longer print the seam grep at all" -- a check that breaks when the
+    # thing it guards is legitimately edited. It caught the drift, which is the
+    # point, but for the wrong reason.
+    fence = re.search(r"```sh\n(grep -rn.*?)```", doc, re.S)
+    if not fence:
+        bad.append(f"{path} no longer prints the seam grep at all")
+        continue
+    if core(fence.group(1)) != want:
+        bad.append(f"{path} prints a different pipeline from the one 4c runs")
+if bad:
+    sys.exit("the published seam check has drifted from the one that runs:\n  "
+             + "\n  ".join(bad))
+PYEOF
+then
+  ok "both pages print the seam check that evals/lint.sh actually runs"
+else
+  fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
+fi
+
+# 4e. ...and CLAUDE.md does not restate it.
+#
+#    BELOW 4d's `fi`, not inside its success branch -- which is where this was
+#    first written. `fail()` counts and returns rather than exiting, so a failing
+#    4d skipped 4e and the output said nothing about a check not having run: a
+#    guard that silently stops guarding, on a guard added because hard rule 4
+#    went stale in prose twice. Found by the independent review of the commit
+#    that added it.
+#
+#    4d compares FENCES, and CLAUDE.md states hard rule 4 in prose, so it is
+#    structurally outside 4d -- which is exactly where the rule went stale twice.
+#    Round five put the pattern in that paragraph, round eight proved the pattern
+#    blind, and round nine found CLAUDE.md still publishing it: the file every
+#    agent reads first, handing out a grep that returns nothing on the very leak
+#    this PR removed. An agent checking hard rule 4 with it concludes the seam is
+#    intact.
+#
+#    The rule cannot be asserted in prose, so the fix is to keep the pipeline OUT
+#    of the prose: CLAUDE.md describes the rule and points at docs/RUNNERS.md for
+#    the command. This check fails if a command comes back, which is the only
+#    form of drift that can mislead. Found by the independent review.
+#    ANCHORED ON "a grep that mentions orca", not on a spelling. The first
+#    version matched `grep -rn` or `grep -rni` followed by `orca`, plus the
+#    literal `ORCA_\|orca` -- the two spellings the rule had HAD. A restatement
+#    as `grep -rIni 'orca' scripts/fleet` or `grep -rn --include='*.sh' -i orca`
+#    matched neither, and 4e would print its ok line while the pipeline sat back
+#    in the one file every agent reads first. That is exactly the defect 4d
+#    fixed in itself one round earlier, in the sibling that did not get the same
+#    treatment. Found by the independent review.
+#
+#    A line carrying both `grep` and `orca` is the shape of a restatement and
+#    nothing else: hard rule 4's prose says "shells out to `orca`" on one line
+#    and "runs the grep that says so" on another, and neither carries both.
+#    `.` and not `[^\n]`: grep is line-based, so `.` cannot cross a newline
+#    anyway -- while `[^\n]` in a bracket expression excludes the literal letter
+#    `n`, which every spelling of the flags contains (`-rni`). The first version
+#    of this widening matched nothing at all for that reason, and said ok.
+#    IN PYTHON, like 4b and 4d, and not because the shell could not do it: three
+#    layers of quoting -- python heredoc into a shell string into an ERE -- ate
+#    the backslashes twice while this check was being written, and each time the
+#    result was a check that printed `ok` and matched nothing. A guard whose
+#    escaping is hard to read is a guard nobody notices has stopped guarding,
+#    which is the whole of hard rule 3.
+if python3 - <<'PYEOF'
+import re, sys
+
+# Two shapes, because the rule has been restated as both already:
+#   1. a grep command line that mentions orca, in either order;
+#   2. the bare PATTERN, with its BRE alternation next to orca -- which is what
+#      the paragraph carried for four rounds, with no `grep` on the line at all.
+#
+# Prose naming `ORCA_DEADLINE` or `orca_cli_resolve` as EXAMPLES is not a
+# restatement, and must not match: what distinguishes the pattern form is the
+# `\|` alternation beside the word, not the word.
+SHAPES = (
+    re.compile(r"grep.*orca|orca.*grep", re.I),
+    re.compile(r"orca[^ ]*\\\||\\\|[^ ]*orca", re.I),
+)
+
+try:
+    lines = open("CLAUDE.md").read().splitlines()
+except OSError as e:
+    sys.exit(f"could not read CLAUDE.md, so hard rule 4's wording is unchecked: {e}")
+
+bad = [f"{n}: {ln.strip()}" for n, ln in enumerate(lines, 1)
+       if any(sh.search(ln) for sh in SHAPES)]
+if bad:
+    sys.exit("CLAUDE.md restates the seam pipeline:\n    "
+             + "\n    ".join(bad)
+             + "\n  It is prose, so 4d cannot check it, and it has gone stale twice."
+               "\n  Describe the rule there and let docs/RUNNERS.md carry the command.")
+PYEOF
+then
+  ok "CLAUDE.md describes hard rule 4 without restating the command 4d guards"
+else
+  fail "hard rule 4's own paragraph carries the command again (above)"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then
