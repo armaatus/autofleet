@@ -109,8 +109,16 @@ that depends on it starts, even if the labels say several things are ready.
 
 **`priority` is the maintainer's, like the blockers are yours.** It moves an
 issue to the front of the dispatcher's queue and grants nothing else. Do not add
-or remove it: the queue's own ordering is derived from the `Blocked by #N` lines
-and that is the one you maintain.
+or remove it on your own judgement: the queue's own ordering is derived from the
+`Blocked by #N` lines and that is the one you maintain.
+
+The exception is the same one the blockers rule gets, and for the same reason —
+**when the maintainer asks for it, say so where it is visible.** An agent
+labelling its own work `priority` is self-dealing; an agent relaying a decision
+the maintainer made is the tracker doing its job. Name who asked, in the PR body
+or an issue comment, so the next reader can tell the two apart. The label is
+cheap to add and expensive to audit, which is why the trail matters more here
+than the permission does.
 
 ## Finishing a task
 
