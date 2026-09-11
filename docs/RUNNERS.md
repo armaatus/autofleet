@@ -8,13 +8,24 @@ Today there is exactly one that ships: `orca`. No code outside
 `scripts/fleet/runner/` calls its CLI, and
 
 ```sh
-grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
+grep -rni 'orca' scripts/fleet --include='*.sh' \
   | grep -v '^scripts/fleet/runner/' \
-  | awk '{
+  | awk 'BEGIN { sq = sprintf("%c", 39) }
+    {
       code = $0
       sub(/^[^:]*:[0-9]+:/, "", code)   # drop path:lineno:
-      sub(/#.*/, "", code)               # drop the comment, do not skip the line
-      if (code ~ /ORCA_/ || code ~ /orca([^A-Za-z0-9_]|$)/) print
+      # Truncate at the first # that is NOT inside quotes, so a trailing comment
+      # is prose and a `"#$num"` in the middle of a line does not hide the rest.
+      out = ""; q = ""
+      for (i = 1; i <= length(code); i++) {
+        c = substr(code, i, 1)
+        if (q == "") {
+          if (c == "\"" || c == sq) q = c
+          else if (c == "#") break
+        } else if (c == q) q = ""
+        out = out c
+      }
+      if (tolower(out) ~ /orca/) print
     }' \
   | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```
@@ -82,6 +93,16 @@ runner_set_deadline <secs> # for calls from this process
 what to check next, and "is the Orca app running?" is not a sentence the
 dispatcher can write for an arbitrary runner. The caller adds the consequence.
 
+**`runner_available` is the only one that uses stderr, and every other function's
+failure words go on STDOUT.** The reason is the callers: `launch` does
+`runner_worktree_create ... >"$out"` and has to, because stdout is where the new
+worktree's path comes back, and `card` captures `runner_worktree_set` the same
+way to print it under "board update FAILED". A driver that writes its reason to
+stderr produces `  could not create it:` followed by nothing — the defect this
+page exists to prevent, and one the reference driver shipped three times before
+the contract said this out loud. `runner_available` is different only because it
+is a probe whose output nobody captures.
+
 `runner_dispatcher_hint` is the one human-facing string that is runner-specific;
 `fleet.sh`'s usage prints it rather than hardcoding a command line that is wrong
 for every other driver.
@@ -133,8 +154,9 @@ runner_worktree_remove <path> [<deadline>]
   status and the comment explaining it: sent separately, a failure between them
   leaves the board carrying a new status with the previous line under it. The
   keys the fleet uses are `workspace-status` and `comment`. Silent on success,
-  the runtime's own words on failure. Any non-zero means the card was not
-  updated; `2` specifically means the CALLER passed something that is not a pair
+  the runtime's own words on failure, **on stdout** (see above — `card` captures
+  stdout, so a reason on stderr reaches the terminal and never the fleet log).
+  Any non-zero means the card was not updated; `2` specifically means the CALLER passed something that is not a pair
   list, which is a bug in the caller rather than a statement about the runtime —
   an odd argument count is refused rather than rounded down, because a dropped
   key is a board update that silently did less than it was asked for.

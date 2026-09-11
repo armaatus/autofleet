@@ -580,8 +580,23 @@ fi
 #    reintroduce a `$ORCA_CLI` and ship green through both. Hard rule 3 is that a
 #    rule with no assertion is not shipped, and this is the change that turned
 #    the convention into a rule. Found by the independent review.
-#    The PATTERN is `ORCA_\|orca\b`, not `ORCA_CLI\|orca `, and the widening is
-#    the finding rather than a tidy-up. `ORCA_CLI\|orca ` could not see
+#    The PATTERN is a case-insensitive `orca`, and it got there in three steps,
+#    each one a review finding rather than a tidy-up.
+#
+#    `ORCA_CLI\|orca ` could not see the driver's own knobs (`ORCA_DEADLINE`) or
+#    `orca` at end of line (`command -v orca`, `exec orca`, `mkdir -p .orca`).
+#    `ORCA_\|orca\b` could not see `orca_cli_resolve`, `orca_cli` or `orca_json`
+#    AT ALL -- `_` is a word constituent, so `\b` does not match after `orca`,
+#    and `ORCA_` is uppercase-only -- nor the `Orca` spelling in a runtime
+#    message. That was not hypothetical: one of the two leaks this PR removed was
+#    `issue-command.sh`'s `orca_cli_resolve` call, which matched neither pattern,
+#    and `agent-autostart.sh`'s sibling was caught only because its MESSAGE
+#    happened to contain `orca `. `tolower(out) ~ /orca/` sees all of it.
+#
+#    And the comment is truncated by a QUOTE-AWARE scan, not `sub(/#.*/, ...)`:
+#    that cut at the first `#` anywhere, and `fleet.sh` is full of `"#$num: ..."`
+#    strings, so everything after one was invisible to this check. The mirror
+#    image of the false positive round six fixed. `ORCA_CLI\|orca ` could not see
 #    `ORCA_DEADLINE`, `ORCA_SEND_DEADLINE` or `ORCA_CREATE_DEADLINE` -- the
 #    driver's own knobs -- nor `orca` at end of line: `command -v orca`,
 #    `exec orca`, `mkdir -p .orca`. Round two's finding ON THIS PR was
@@ -608,15 +623,26 @@ fi
 #    was found (lint was green); it would have fired on the first person to
 #    annotate a line instead of a block. Found by the review of the round-five
 #    fix.
-if leak="$(grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
-             | grep -v '^scripts/fleet/runner/' \
-             | awk '{
-                 code = $0
-                 sub(/^[^:]*:[0-9]+:/, "", code)
-                 sub(/#.*/, "", code)
-                 if (code ~ /ORCA_/ || code ~ /orca([^A-Za-z0-9_]|$)/) print
-               }' \
-             | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$')"; then
+if leak="$(grep -rni 'orca' scripts/fleet --include='*.sh' \
+               | grep -v '^scripts/fleet/runner/' \
+               | awk 'BEGIN { sq = sprintf("%c", 39) }
+                 {
+                   code = $0
+                   sub(/^[^:]*:[0-9]+:/, "", code)   # drop path:lineno:
+                   # Truncate at the first # that is NOT inside quotes, so a trailing comment
+                   # is prose and a `"#$num"` in the middle of a line does not hide the rest.
+                   out = ""; q = ""
+                   for (i = 1; i <= length(code); i++) {
+                     c = substr(code, i, 1)
+                     if (q == "") {
+                       if (c == "\"" || c == sq) q = c
+                       else if (c == "#") break
+                     } else if (c == q) q = ""
+                     out = out c
+                   }
+                   if (tolower(out) ~ /orca/) print
+                 }' \
+               | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$')"; then
   fail "the runner seam is broken -- these reach for one runner's CLI from outside scripts/fleet/runner/:
 $(printf '%s\n' "$leak" | sed 's/^/    /')"
 else
@@ -656,7 +682,12 @@ want = core(m.group(1))
 bad = []
 for path in ("docs/RUNNERS.md", "scripts/fleet/runner/README.md"):
     doc = open(path).read()
-    fence = re.search(r"```sh\n(grep -rn 'ORCA_.*?)```", doc, re.S)
+    # Anchored on `grep -rn`, not on the PATTERN: 4d's own regex named the
+    # pattern it was written against, so widening the pattern made both pages
+    # "no longer print the seam grep at all" -- a check that breaks when the
+    # thing it guards is legitimately edited. It caught the drift, which is the
+    # point, but for the wrong reason.
+    fence = re.search(r"```sh\n(grep -rn.*?)```", doc, re.S)
     if not fence:
         bad.append(f"{path} no longer prints the seam grep at all")
         continue

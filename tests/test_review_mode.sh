@@ -48,6 +48,14 @@
 #                                 of ours is never signalled, and a marker naming
 #                                 a dead pid is cleared. This is the second place
 #                                 the fleet signals a pid it read out of a file.
+#   test_review_mode.sh records   record-review.sh writes the marker guard.py's
+#                                 push gate reads, on a worktree with no
+#                                 `.autofleet/run` yet -- and it is asked of the
+#                                 HOOK rather than restated here. It was making
+#                                 `.orca`, the directory the marker lived in
+#                                 before it moved, so every way in other than a
+#                                 fleet-provisioned worktree answered "I have
+#                                 reviewed, let me push" with a redirect error.
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.

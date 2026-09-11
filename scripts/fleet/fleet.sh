@@ -970,9 +970,13 @@ for p in prs:
 # and a slot held by a worktree whose work is already merged is a slot that never
 # starts the next issue -- the loop quietly runs at two, then one.
 #
-# The teardown runs AFTER the removal, never before it (#163): a hook run first
-# takes the stack down and then leaves it down when the removal refuses, and
-# #122 lost its RomM mid-ctest exactly that way. A refusal here changes nothing.
+# The teardown runs AFTER the removal, never before it
+# (armaatus/rommsync-nx#163): a hook run first takes the stack down and then
+# leaves it down when the removal refuses, and armaatus/rommsync-nx#122 lost its
+# RomM mid-ctest exactly that way. A refusal here changes nothing. Spelled with
+# the repository because both numbers resolve to unrelated issues in autofleet,
+# which is what CLAUDE.md's citation rule is for -- and a bare `(#163)` was
+# already corrected once on this branch.
 #
 # The sweep is reap.sh, which is exactly the tool for "a stack whose worktree no
 # longer exists" and needs no worktree to run -- the README names it as the manual
@@ -2093,7 +2097,7 @@ cmd_stop() {
         echo "  The dispatcher stays up to reap those worktrees as their PRs land, and"
         echo "  exits once nothing is left. Watch it with: fleet.sh status."
         echo "  Use --now to interrupt the fleet's agents and freeze every outward"
-        echo "  effect, --all to interrupt every agent Orca knows about."
+        echo "  effect, --all to interrupt every agent the runner knows about."
       fi
       # Last, because it is the line that changes what you do next.
       warn_blind_dispatcher ;;

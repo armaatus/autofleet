@@ -66,5 +66,10 @@ if out="$(runner_worktree_set "$REPO_ROOT" "${args[@]}" 2>&1)"; then
   exit 0
 fi
 echo "board.sh: the card was NOT updated -- the board is showing something older" >&2
-[ -n "$out" ] && printf '  %s\n' "$out" >&2
+# Per LINE, like fleet.sh's relay of the same three-line budget: `printf '  %s'`
+# indents the first line and leaves the other two flush left, which reads as the
+# message ending and something else starting. Found by the independent review.
+[ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r l; do
+  printf '  %s\n' "$l" >&2
+done
 exit 1

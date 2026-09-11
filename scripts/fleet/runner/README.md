@@ -7,13 +7,24 @@ Anything in this directory may know about one runner. Nothing outside it may —
 and that is checkable rather than aspirational:
 
 ```sh
-grep -rn 'ORCA_\|orca\b' scripts/fleet --include='*.sh' \
+grep -rni 'orca' scripts/fleet --include='*.sh' \
   | grep -v '^scripts/fleet/runner/' \
-  | awk '{
+  | awk 'BEGIN { sq = sprintf("%c", 39) }
+    {
       code = $0
       sub(/^[^:]*:[0-9]+:/, "", code)   # drop path:lineno:
-      sub(/#.*/, "", code)               # drop the comment, do not skip the line
-      if (code ~ /ORCA_/ || code ~ /orca([^A-Za-z0-9_]|$)/) print
+      # Truncate at the first # that is NOT inside quotes, so a trailing comment
+      # is prose and a `"#$num"` in the middle of a line does not hide the rest.
+      out = ""; q = ""
+      for (i = 1; i <= length(code); i++) {
+        c = substr(code, i, 1)
+        if (q == "") {
+          if (c == "\"" || c == sq) q = c
+          else if (c == "#") break
+        } else if (c == q) q = ""
+        out = out c
+      }
+      if (tolower(out) ~ /orca/) print
     }' \
   | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```

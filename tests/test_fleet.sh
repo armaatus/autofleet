@@ -674,6 +674,12 @@ runner_set_deadline()    { stub_say "set deadline $1"; return 0; }
 runner_worktree_create() {
   local name="$2" issue="$3" path="$STUB_DIR/wt-$3"
   stub_say "worktree create $name $issue"
+  # A failure path, which this stub did not have -- so the contract's "the
+  # runtime's own words on failure, on STDOUT" was asserted only against the
+  # Orca CLI stub, by `create_says`. On stdout deliberately: `launch` captures
+  # stdout only, and a driver that answers on stderr reproduces "could not
+  # create it:" followed by nothing. Found by the independent review.
+  [ -e "$STUB_DIR/create-fails" ] && { echo "the stub refuses to create"; return 1; }
   mkdir -p "$path"
   printf '%s\t%s\t%s\n' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
   printf '%s\n' "$path"
@@ -1203,6 +1209,20 @@ case "${1:-}" in
       && fail "a listing that answered perfectly well was reported as unreadable: $out"
     grep -q "interrupted #42" <<<"$out" \
       || fail "stop --now did not interrupt the agent the listing names: $out"
+
+    # ...and the contract's STREAM, against a driver that is not Orca. `launch`
+    # captures stdout only, so a driver obeying docs/RUNNERS.md must answer
+    # there; `create_says` asserts this against the Orca CLI stub, which leaves
+    # the page's claim untested for everyone the page is written for.
+    : >"$STUB_DIR/create-fails"
+    out="$(in_fleet launch 45 "a third issue" 2>/dev/null)"
+    rm -f "$STUB_DIR/create-fails"
+    grep -q "could not create it" <<<"$out" \
+      || fail "a create the driver refused was not reported as one: $out"
+    grep -q "the stub refuses to create" <<<"$out" \
+      || fail "launch printed 'could not create it:' and then nothing -- the driver's reason never reached the one stream launch captures: $out"
+    [ -e "$AUTOFLEET_DIR/worktrees/45" ] \
+      && fail "a refused create left the issue owned, so its slot is held by a worktree that does not exist"
 
     # The whole point. Not "the fleet still works" -- the fleet works and the CLI
     # was never asked anything.
