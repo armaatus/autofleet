@@ -385,7 +385,37 @@ esac
 # Matched on the pair, because `list` alone is both `worktree list` and
 # `terminal list` and the dispatcher asks for both.
 case "$1 ${2:-}" in
-  "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
+  "worktree list")
+    # The real CLI takes `--repo <selector>` and answers only that repo's
+    # worktrees; without it the answer is machine-wide (#46). The fixture
+    # carries a `repoPath` per entry so a phase can say "this one belongs to
+    # some other repo", and this reproduces the filter rather than restating
+    # its outcome. An entry with no `repoPath` belongs to whatever was asked
+    # for, so every fixture written before the scope existed still answers.
+    sel=""
+    for arg in "$@"; do
+      case "$arg" in path:*) sel="${arg#path:}" ;; esac
+    done
+    # A `path:` that is not a repo ROOT -- a worktree of it, say -- is what the
+    # real CLI refuses, and refusing it here is what lets a phase catch a caller
+    # that passes the wrong one. $ORCA_REPO_ROOTS lists the paths that resolve;
+    # empty means every selector does, which is what fixtures written before
+    # this arm existed assume.
+    if [ -n "$sel" ] && [ -s "${ORCA_REPO_ROOTS:-/dev/null}" ] \
+       && ! grep -qxF "$sel" "$ORCA_REPO_ROOTS"; then
+      echo '{"ok": false, "error": {"code": "repo_not_found", "message": "repo_not_found"}}'
+      exit 1
+    fi
+    ORCA_REPO_SELECTOR="$sel" python3 -c '
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+sel = os.environ.get("ORCA_REPO_SELECTOR", "")
+if sel:
+    doc["result"]["worktrees"] = [
+        w for w in doc["result"]["worktrees"] if w.get("repoPath", sel) == sel]
+print(json.dumps(doc))
+' "$ORCA_WORKTREES"
+    exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
   #
@@ -506,6 +536,9 @@ STUB
   # PR, no labels. Each test overrides only the one it is about.
   ORCA_PS="$WORK/ps";               echo '{"result":{"worktrees":[]}}' >"$ORCA_PS"
   ORCA_WORKTREES="$WORK/wtlist";    echo '{"result":{"worktrees":[]}}' >"$ORCA_WORKTREES"
+  # Which `path:` selectors the stub CLI resolves. Empty is "all of them", so
+  # only a phase that is ABOUT the selector has to say anything.
+  ORCA_REPO_ROOTS="$WORK/repo-roots"; : >"$ORCA_REPO_ROOTS"
   ORCA_TERMINALS="$WORK/terminals"; echo '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
   GH_PRS="$WORK/prs";               echo '[]' >"$GH_PRS"
   GH_ISSUES="$WORK/issues";         echo '[]' >"$GH_ISSUES"
@@ -517,6 +550,7 @@ STUB
   GH_MERGED="$WORK/merged";         echo 7 >"$GH_MERGED"
   WORK_FOR_STUB="$WORK"; mkdir -p "$WORK/created"
   export ORCA_CALLS ORCA_MODE GH_CALLS ORCA_PS ORCA_WORKTREES ORCA_TERMINALS \
+         ORCA_REPO_ROOTS \
          GH_PRS GH_ISSUES GH_LABELS GH_STATE GH_MERGED WORK_FOR_STUB REAP_CALLS
   # cmd_run sleeps between passes; a test that reached one would otherwise sit
   # for a minute before failing.
@@ -562,6 +596,30 @@ import json, sys
 print(json.dumps({"result": {"worktrees": [
     {"linkedIssue": sys.argv[1], "path": sys.argv[2]}]}}))
 ' "$1" "$WORK/wt" >"$ORCA_WORKTREES"
+}
+
+# The worktree listing Orca answers, from `issue:path-suffix` pairs -- `-` for a
+# worktree linked to no issue, and a third field naming a repo other than the
+# fixture's. `worktree_on_issue` is the one-entry form and stays; this is what a
+# machine running two fleets looks like, which is the case #46 is about.
+worktree_list() {
+  local spec; spec="$(printf '%s\n' "$@")"
+  WORKTREE_SPEC="$spec" WORKTREE_WORK="$WORK" python3 -c '
+import json, os
+out = []
+for line in os.environ["WORKTREE_SPEC"].splitlines():
+    if not line.strip():
+        continue
+    parts = line.split(":")
+    num, suffix = parts[0], parts[1]
+    repo = parts[2] if len(parts) > 2 else "repo"
+    work = os.environ["WORKTREE_WORK"]
+    out.append({"path": work + "/" + suffix,
+                "linkedIssue": None if num == "-" else int(num),
+                "repoPath": work + "/" + repo,
+                "isMainWorktree": False, "isArchived": False})
+print(json.dumps({"result": {"worktrees": out}}))
+' >"$ORCA_WORKTREES"
 }
 
 # The two halves of what one `gh issue view N --json state,labels` would print.
@@ -2262,7 +2320,78 @@ JSON
       || fail "the takeover does not name the dispatcher's own checkout: $out"
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
+  live_scoped)
+    make_fixture ok
+    # One worktree of ours, one belonging to a different repository entirely --
+    # which is the ordinary state of a machine running more than one fleet.
+    worktree_list "42:wt" "7:foreign:other"
+    n="$(in_fleet live_count 2>&1)"
+    [ "$n" = 1 ] \
+      || fail "counted $n live worktree(s); another repo's worktree is taking a slot from MAX_WORKTREES"
+    grep -q -- "--repo path:$WORK/repo" "$ORCA_CALLS" \
+      || fail "it asked for every worktree on the machine, not this repo's: $(cat "$ORCA_CALLS")"
+    # The same list answers `in_flight`, which matches on an issue NUMBER, so an
+    # unrelated repo's #7 must not answer for ours. 0 = in flight, 1 = free.
+    in_fleet in_flight 7; rc=$?
+    [ "$rc" = 1 ] \
+      || fail "another repo's issue 7 reads as in flight here (in_flight said $rc)"
+    echo "ok: the count, and what is in flight, are this repository's"
+    ;;
+
+  foundation_foreign)
+    make_fixture ok
+    # A foundation issue lands alone, so the dispatcher holds until nothing of
+    # ours is in flight. Unscoped, that never happened: a worktree on another
+    # repo held every foundation issue forever, because nothing this fleet does
+    # can close one.
+    #
+    # And it is worse than a held gate. `foundation_in_flight` resolves each
+    # linked number against THIS repository, so a foreign worktree on an issue
+    # number that does not exist here makes the lookup FAIL -- and the hold is
+    # fail-closed, so the dispatcher launches nothing at all. That is what
+    # stopped this repo's own fleet on 2026-09-11 with `labels-198` in the
+    # holding marker, #198 being a rommsync-nx issue.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":196,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
+JSON
+    worktree_list "198:foreign:other"
+    n="$(in_fleet live_count 2>&1)"
+    [ "$n" = 0 ] \
+      || fail "counted $n live worktree(s) with only another repo's open, so the foundation gate never opens"
+    out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
+    [ "$rc" = 1 ] \
+      || fail "another repo's worktree holds the launch loop (rc=$rc): $out"
+    grep -q "cannot be answered" <<<"$out" \
+      && fail "the foreign worktree's issue was looked up against this repo, and the failed lookup held the fleet: $out"
+    # ...and the foundation issue is startable for no other reason, so the two
+    # assertions above are about the gate rather than about an empty queue.
+    out="$(in_fleet ready_issues 2>&1)"
+    grep -q "^196" <<<"$out" \
+      || fail "the foundation issue stopped being startable for some other reason, so the gate above proves nothing: $out"
+    echo "ok: another repo's worktree neither holds a foundation issue nor stops the fleet"
+    ;;
+
+  status_worktree_scope)
+    make_fixture ok
+    make_repo_git
+    dispatcher_running
+    in_fleet record_dispatcher
+    older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
+    # `--repo path:` names a repository ROOT. `fleet.sh status` is run from
+    # wherever you are -- CLAUDE.md points agents in a fleet worktree at it --
+    # so a selector built from the CALLER's checkout is a worktree path, which
+    # the CLI refuses with repo_not_found. The listing then fails, and a failed
+    # listing makes `in_flight` answer "could not tell" for every issue, so
+    # `status` offers work that is already running.
+    printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
+    worktree_list "42:wt"
+    out="$(in_fleet_at "$WORK/wt2" cmd_status 2>&1)"
+    grep -q "#42" <<<"$out" \
+      || fail "asked from a worktree, it could not list what is running: the repo selector did not resolve: $out"
+    echo "ok: status asked from a worktree still scopes to the repository"
+    ;;
+
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh live_scoped|foundation_foreign|status_worktree_scope|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
