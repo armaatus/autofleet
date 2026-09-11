@@ -738,8 +738,18 @@ if bad:
 PYEOF
 then
   ok "both pages print the seam check that evals/lint.sh actually runs"
+else
+  fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
+fi
 
 # 4e. ...and CLAUDE.md does not restate it.
+#
+#    BELOW 4d's `fi`, not inside its success branch -- which is where this was
+#    first written. `fail()` counts and returns rather than exiting, so a failing
+#    4d skipped 4e and the output said nothing about a check not having run: a
+#    guard that silently stops guarding, on a guard added because hard rule 4
+#    went stale in prose twice. Found by the independent review of the commit
+#    that added it.
 #
 #    4d compares FENCES, and CLAUDE.md states hard rule 4 in prose, so it is
 #    structurally outside 4d -- which is exactly where the rule went stale twice.
@@ -753,15 +763,13 @@ then
 #    of the prose: CLAUDE.md describes the rule and points at docs/RUNNERS.md for
 #    the command. This check fails if a command comes back, which is the only
 #    form of drift that can mislead. Found by the independent review.
-if grep -nE "grep -rn[i]? .orca|ORCA_\\\\\|orca" CLAUDE.md >/dev/null 2>&1; then
-  fail "CLAUDE.md restates the seam pipeline (above). It is prose, so 4d cannot
-    check it, and it has gone stale twice. Describe the rule there and let
-    docs/RUNNERS.md carry the command."
+if restated="$(grep -nE "grep -rn[i]? .orca|ORCA_\\\\\|orca" CLAUDE.md 2>/dev/null)"; then
+  fail "CLAUDE.md restates the seam pipeline:
+$(printf '%s\n' "$restated" | sed 's/^/    /')
+  It is prose, so 4d cannot check it, and it has gone stale twice. Describe the
+  rule there and let docs/RUNNERS.md carry the command."
 else
   ok "CLAUDE.md describes hard rule 4 without restating the command 4d guards"
-fi
-else
-  fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
 fi
 
 # 5. The dispatcher is what runs it. review.sh existing and never being called is

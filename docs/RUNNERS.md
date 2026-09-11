@@ -30,11 +30,13 @@ grep -rni 'orca' scripts/fleet --include='*.sh' \
   | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```
 
-returning nothing is what keeps it that way — and this is byte-for-byte what
-`evals/lint.sh` check 4c runs, which is the only reason it is worth printing
-here: the rule is asserted rather than quoted, and check 4d fails the build if
-this fence and that check ever stop matching. If they do differ,
-`evals/lint.sh` is the definition and this page is the bug.
+returning nothing is what keeps it that way — and this is the same command
+`evals/lint.sh` check 4c runs, modulo whitespace: 4c's copy is indented inside an
+`if`, so the bytes differ by construction and 4d compares with runs of space
+normalised. That is the only reason this fence is worth printing here — the rule
+is asserted rather than quoted, and 4d fails the build if the fence and the check
+ever stop matching. If they do differ, `evals/lint.sh` is the definition and this
+page is the bug.
 
 The comment is truncated rather than the line skipped, and that is deliberate:
 Orca is *named* outside the driver all over this repo, which is the rule above
@@ -98,15 +100,32 @@ runner_set_deadline <secs> # for calls from this process
 what to check next, and "is the Orca app running?" is not a sentence the
 dispatcher can write for an arbitrary runner. The caller adds the consequence.
 
-**`runner_available` is the only one that uses stderr, and every other function's
-failure words go on STDOUT.** The reason is the callers: `launch` does
-`runner_worktree_create ... >"$out"` and has to, because stdout is where the new
-worktree's path comes back, and `card` captures `runner_worktree_set` the same
-way to print it under "board update FAILED". A driver that writes its reason to
-stderr produces `  could not create it:` followed by nothing — the defect this
-page exists to prevent, and one the reference driver shipped three times before
-the contract said this out loud. `runner_available` is different only because it
-is a probe whose output nobody captures.
+**Which stream a failure's words go on, per function, because the answer is not
+the same for all of them.** An earlier version of this paragraph said "stderr
+for `runner_available`, stdout for everything else" — an absolute rule that the
+reference driver broke in one branch and whose stated reason did not survive a
+reader checking it. The truth is three cases:
+
+- **`runner_worktree_create` MUST use stdout.** `launch` does
+  `runner_worktree_create … >"$out"` and captures stdout *only*, because stdout
+  is where the new worktree's path comes back. A reason on stderr goes to the
+  dispatcher's terminal and never into `$out`, so the log reads
+  `  could not create it:` followed by nothing. This one is load-bearing, and
+  the reference driver shipped it wrong three times before the page said so.
+- **`runner_worktree_set` should use stdout, by convention rather than
+  necessity.** Both of its callers merge the streams — `card` does
+  `runner_worktree_set … >"$out" 2>&1` and `board.sh` does
+  `out="$(runner_worktree_set … 2>&1)"` — so either stream reaches the reader
+  today. Stdout keeps it the same shape as create; nothing breaks if a driver
+  uses stderr.
+- **`runner_available` uses stderr**, because it is a probe whose output nobody
+  captures, and the caller adds the consequence.
+
+Two things the rule deliberately does not cover. A message about the CALLER
+being malformed is not a runtime failure and goes to stderr on either function —
+`runner_worktree_set`'s rc 2 for a bad pair list is the one that exists.  And
+`runner_terminal_send`, `_enter` and `_interrupt` produce no failure words at
+all: their rc is the whole answer, and every caller supplies its own sentence.
 
 `runner_dispatcher_hint` is the one human-facing string that is runner-specific;
 `fleet.sh`'s usage prints it rather than hardcoding a command line that is wrong
@@ -159,9 +178,9 @@ runner_worktree_remove <path> [<deadline>]
   status and the comment explaining it: sent separately, a failure between them
   leaves the board carrying a new status with the previous line under it. The
   keys the fleet uses are `workspace-status` and `comment`. Silent on success,
-  the runtime's own words on failure, **on stdout** (see above — `card` captures
-  stdout, so a reason on stderr reaches the terminal and never the fleet log).
-  Any non-zero means the card was not updated; `2` specifically means the CALLER passed something that is not a pair
+  the runtime's own words on failure, **on stdout by convention** — both callers
+  merge the streams, so unlike `create` this one is not load-bearing; see "which
+  stream" above. Any non-zero means the card was not updated; `2` specifically means the CALLER passed something that is not a pair
   list, which is a bug in the caller rather than a statement about the runtime —
   an odd argument count is refused rather than rounded down, because a dropped
   key is a board update that silently did less than it was asked for.

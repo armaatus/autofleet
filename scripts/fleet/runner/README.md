@@ -34,8 +34,9 @@ prose and `ORCA_DEADLINE=20  # a knob` is a leak. `config.sh`'s
 `AUTOFLEET_RUNNER` default is allowed by name: prose may say `orca`, and the file
 that CHOOSES the driver may name one. Code may not.
 
-This is what `evals/lint.sh` check 4c runs, byte for byte. It is the definition;
-this copy is a convenience.
+This is the same command `evals/lint.sh` check 4c runs, modulo whitespace — 4c's
+copy is indented inside an `if`, so 4d compares with runs of space normalised.
+`evals/lint.sh` is the definition; this copy is a convenience.
 
 `tests/test_fleet.sh runner_stub` is the other half: it drives the whole fleet
 on a driver that is not Orca and fails if anything reaches for the CLI.
