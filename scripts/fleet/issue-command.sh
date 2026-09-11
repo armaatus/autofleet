@@ -17,9 +17,35 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/scripts/fleet/lib.sh"
 
 ref="${1:-}"
-if [ -z "$ref" ] && orca_cli_resolve; then
-  ref="$("$ORCA_CLI" worktree current --json 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["worktree"].get("linkedIssue") or "")' 2>/dev/null || true)"
+# Neither half may kill the script, because `set -e` is on and BOTH "no runner"
+# and "no linked issue" are ordinary answers here: the argument form is the one
+# the agent uses, and this fallback exists for a person running it by hand. The
+# `if` condition is what makes a failing `runner_available` harmless; what makes
+# a failing `runner_worktree_issue` harmless is below, and it is no longer a
+# `|| true` -- see the three-way read, which replaced it.
+if [ -z "$ref" ] && runner_available 2>/dev/null; then
+  # THE THREE-WAY ANSWER, kept apart here too. `|| true` mapped rc 1 ("the
+  # runtime would not say") and rc 2 ("there is no linked issue") onto the same
+  # empty `$ref`, and the message below then reported the same thing for both --
+  # which is design note 2, at the last callsite of it that had neither a branch
+  # nor an assertion. `agent-autostart.sh` got its `case` for exactly this.
+  #
+  # Neither answer may kill the script: `set -e` is on and BOTH are ordinary
+  # here, since the argument form is what the agent uses and this fallback is for
+  # a person running it by hand. So the rc is read into a variable rather than
+  # left to `&&`. Found by the independent review.
+  # NOT named `runner_rc`: evals/lint.sh check 4b reads every `runner_[a-z_]+`
+  # token in scripts/fleet/*.sh as a contract function the drivers must define,
+  # and a local variable that happens to match the pattern fails the check as a
+  # phantom function. Caught by the lint the moment it was written, which is the
+  # check doing its job.
+  ref="$(runner_worktree_issue)" || issue_rc=$?
+  case "${issue_rc:-0}" in
+    0|2) ;;
+    *)   echo "issue-command: the runner would not say whether this worktree has a" >&2
+         echo "  linked issue -- which is not the same as it having none. Pass the" >&2
+         echo "  issue number or URL as an argument." >&2 ;;
+  esac
 fi
 
 # Accept a bare number or any .../issues/<n>[...] URL.
@@ -100,10 +126,9 @@ and what you did about them, any issue you edited and why, and `Closes #__ISSUE_
 The `merge-gate` check reads that body: it looks for the words `/code-review`,
 `mattpocock-skills:code-review` and a closing line, and without any one of them
 the PR cannot merge. The closing line is the one the PR template leaves as a
-placeholder -- fill it in. Then tell the Orca board where the work is:
+placeholder -- fill it in. Then tell the board where the work is:
 
-    orca worktree set --worktree active --workspace-status in-review \
-      --comment "#__ISSUE__: PR #<n>, waiting on review"
+    ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
