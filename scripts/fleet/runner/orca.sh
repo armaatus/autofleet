@@ -180,7 +180,7 @@ runner_worktree_create() {
   }
   local out err rc; out="$(mktemp)"; err="$(mktemp)"
   FLEET_RUN_STDERR="$err" orca_cli "$ORCA_CREATE_DEADLINE" "$out" worktree create \
-    --repo "path:$repo" \
+    --repo "$(orca_resolve_repo_selector "$repo")" \
     --name "$name" \
     --issue "$issue" \
     --no-parent \
@@ -211,6 +211,39 @@ except Exception:
   return 0
 }
 
+# WHICH REPOSITORY THIS DRIVER IS SCOPED TO, resolved once at source time.
+#
+# `--repo path:<p>` names a repository ROOT, and half of scripts/fleet/ runs from
+# a WORKTREE -- so a naive `path:$REPO_ROOT` names the worktree, the CLI answers
+# `repo_not_found`, every listing fails, and the dispatcher skips every pass
+# forever. That is the same permanent stall armaatus/autofleet#31 describes,
+# arriving through its own fix.
+#
+# `git rev-parse --git-common-dir` is the root even from inside a worktree: a
+# worktree's `.git` points at `<root>/.git`, and this resolves it.
+#
+# THE GUARD IS ON WHAT `dirname` PRODUCED, not on the string built from it. git
+# before 2.31 does not know `--path-format`: it echoes the unrecognised argument
+# back and still exits 0, so `common` comes back as `--path-format=absolute` plus
+# `.git`, `dirname` refuses the leading `--`, and a guard reading the assembled
+# `path:$(dirname ...)` sees a non-empty literal `path:` and lets it through.
+orca_resolve_repo_selector() {
+  # `$1` is the checkout to resolve FROM, defaulting to this one. It exists so
+  # `runner_worktree_create` can pass the `<repo>` its contract gives it rather
+  # than having the parameter go dead -- the caller names the repository, the
+  # driver turns that into whatever selector its runtime speaks.
+  local from="${1:-$REPO_ROOT}" common root
+  common="$(git -C "$from" rev-parse --path-format=absolute \
+              --git-common-dir 2>/dev/null)" || common=""
+  if [ -n "$common" ]; then
+    root="$(dirname "$common" 2>/dev/null)" || root=""
+    case "$root" in ''|-*) root="" ;; esac
+    [ -n "$root" ] && { printf 'path:%s\n' "$root"; return 0; }
+  fi
+  printf 'path:%s\n' "$from"
+}
+ORCA_REPO_SELECTOR="$(orca_resolve_repo_selector)"
+
 # Every worktree the runner is managing, as `path<TAB>branch<TAB>issue` lines.
 # `-` where the runner has no answer for a field; nothing here may be JSON,
 # because a caller that parses JSON has hardcoded this runner.
@@ -223,7 +256,21 @@ except Exception:
 # hiccup turns into three duplicate worktrees for issues that already have one.
 runner_worktree_list() {
   local out rc; out="$(mktemp)"
-  orca_json "$out" worktree list || { rm -f "$out"; return 1; }
+  # SCOPED. `orca worktree list` is machine-wide, and every caller resolves the
+  # issue numbers against THIS repository -- so one foreign worktree inflated
+  # `live`, and `foundation_in_flight` asked about an issue number that does not
+  # exist here, could not read its labels, and held the fleet indefinitely after
+  # a single line in the log. armaatus/autofleet#31.
+  orca_json "$out" worktree list --repo "$ORCA_REPO_SELECTOR" || {
+    # NAMES THE SELECTOR IT ASKED WITH, on stderr, which the dispatcher's log
+    # captures. A refused selector and an app that is down both surface as "could
+    # not read the worktree list", and they need opposite responses -- one is
+    # `repo_not_found` on a path, the other is a runtime to restart. The pre-#1
+    # branch named the selector in `fleet.sh`'s own message; that string is a
+    # runner's, so hard rule 2 moved it here rather than losing it. Found by the
+    # independent review of the rebase that lost it.
+    echo "orca: could not list worktrees for $ORCA_REPO_SELECTOR" >&2
+    rm -f "$out"; return 1; }
   python3 -c '
 import json, sys
 try:

@@ -312,16 +312,12 @@ disown_issue() {
   clear_issue_markers "$1"
 }
 
-# Non-zero when the answer could not be read, which is NOT the same as "nothing
-# is running". Reading a failed CLI call as zero live worktrees is how one
-# transient hiccup turns into three duplicate worktrees for issues that already
-# have one: `in_flight` goes blind at the same moment, because it reads the same
-# list.
+# `issue<TAB>path`, which is the driver's `path<TAB>branch<TAB>issue` with the two
+# columns this dispatcher reads brought to the front and the branch dropped: a
+# column no caller reads is one the next caller reads wrong. Four callers depend
+# on that order -- `waiting_worktrees`, `in_flight`, `foundation_in_flight` and
+# `cmd_status` -- and it is stated here because the `awk` alone does not say it.
 #
-# `issue<TAB>path`, which is the driver's `path<TAB>branch<TAB>issue` with the
-# columns this dispatcher reads brought to the front. The branch is dropped
-# rather than carried: nothing here has ever needed it, and a column no caller
-# reads is one the next caller reads wrong.
 # THE PARK REASONS, in one place, with the sentence a person is told for each.
 #
 # There are five, and the count and the two places that REPORT them drifted
@@ -392,6 +388,15 @@ count_parked_owned() {
   printf '%s\n' "$parked"
 }
 
+# NON-ZERO WHEN THE ANSWER COULD NOT BE READ, which is not the same as "nothing
+# is running": reading a failed call as zero live worktrees is how one transient
+# hiccup turns into three duplicate worktrees for issues that already have one,
+# because `in_flight` goes blind at the same moment and from the same list.
+#
+# (These ten lines were removed with the selector's comment block and re-homed
+# here by the independent review. The selector prose had to go -- it named a
+# runner's flag in the file hard rule 2 says may not know one. This half names
+# no runtime and was collateral.)
 live_worktrees() {
   local list
   list="$(runner_worktree_list)" || return 1
@@ -403,7 +408,32 @@ live_worktrees() {
 live_count() {
   local list
   list="$(live_worktrees)" || return 1
-  printf '%s\n' "$list" | grep -c . || true
+  count_worktrees "$list"
+}
+
+# How many worktrees a listing holds. Split out because the launch loop needs
+# the count AND the names from ONE listing: two calls would let the count that
+# shut the gate and the names printed beside it disagree.
+count_worktrees() { printf '%s\n' "$1" | grep -c . || true; }
+
+# What a held foundation issue is actually waiting for, as `#N` where the
+# worktree is linked to an issue and a basename where it is not. A count alone
+# names nothing a person can go and land -- and the two are not equivalent, since
+# one may be this repo's in-flight work and the other a worktree nobody here can
+# close. armaatus/autofleet#46 was a line that could not say which, repeating indefinitely.
+#
+# $1 is the listing the caller already has, for the reason above.
+#
+# Sorted, because the caller keys its say-once marker on this string: unsorted,
+# two unchanged worktrees coming back in the other order read as news and
+# reprint the line every poll. `-V` rather than a plain sort -- lexically `#42`
+# comes before `#7`, which is the wrong order for the one question a person asks
+# of it.
+waiting_worktrees() {
+  printf '%s\n' "$1" | while IFS="$(printf '\t')" read -r num path; do
+    [ -n "$path" ] || continue
+    if [ "$num" = "-" ]; then printf '%s\n' "$(basename "$path")"; else printf '#%s\n' "$num"; fi
+  done | sort -V | tr '\n' ' ' | sed 's/ $//'
 }
 
 # --------------------------------------------------------------- the queue ---
@@ -596,22 +626,23 @@ foundation_in_flight() {
 
   if ! list="$(live_worktrees)"; then
     foundation_hold "$cached" "list-unreadable" \
-      "could not read the worktree list, so whether a foundation issue is in flight" \
-      "  cannot be answered -- launching nothing rather than guessing"
+      "could not read this repository's worktree list, so whether a foundation" \
+      "  issue is in flight cannot be answered -- launching nothing rather than guessing"
     return 0
   fi
 
-  # THE LIST IS MACHINE-WIDE, and this is where that starts to matter.
-  # `runner_worktree_list` is not scoped to a repository, while `poll_issue "$n"`
-  # resolves the number against THIS one -- so an unrelated worktree whose linked
-  # issue number happens to match a `foundation` issue here stops the fleet
-  # launching anything, indefinitely, after a single line in the log.
+  # Every number below is resolved against THIS repository, which is safe only
+  # because `runner_worktree_list` is scoped to it -- see the driver. It was not,
+  # and an unrelated worktree whose linked number matched a `foundation` issue
+  # here -- or matched nothing here at all, which fails the lookup and holds
+  # fail-closed -- stopped the fleet launching anything, indefinitely, after a
+  # single line in the log.
   #
-  # The premise is older than this function: `in_flight` and `count_startable`
-  # share it, where it merely inflated a count. Here it is newly fatal rather
-  # than merely inaccurate, which is why it is written down.
-  # armaatus/autofleet#31 has the fix.
-  # Found by the independent review.
+  # The premise was older than this function: `in_flight` and `count_startable`
+  # shared it, where it merely inflated a count. Here it was fatal rather than
+  # inaccurate, which is why it is written down. Fixed in
+  # armaatus/autofleet#46, in `runner_worktree_list` -- the driver scopes the
+  # query, so all three callers get it at once. Found by the independent review.
   while IFS="$(printf '\t')" read -r n _path; do
     # `-` is `live_worktrees` saying this worktree has no linked issue at all,
     # which is a worktree somebody opened by hand. That is an ANSWER, not a
@@ -2443,12 +2474,13 @@ while that one is up."
     reap_abandoned
     prune_gaveup
 
-    local live
-    if ! live="$(live_count)"; then
-      say "could not read the worktree list; skipping this pass rather than guessing"
+    local live live_list
+    if ! live_list="$(live_worktrees)"; then
+      say "could not read this repository's worktree list; skipping this pass rather than guessing"
       sleep "$POLL_SECONDS"
       continue
     fi
+    live="$(count_worktrees "$live_list")"
 
     while ! $drain_mode && [ "$live" -lt "$MAX_WORKTREES" ]; do
       # `break`, not `break 2`: this is the drain arriving MID-PASS, after the
@@ -2555,8 +2587,12 @@ while that one is up."
             # as the other one. The same rule announced every poll from here
             # would have put back the 180 lines per three hours that the marker
             # exists to prevent. Found by the independent review.
-            foundation_hold_say "waiting-$n" \
-              "#$n is a foundation issue; waiting for the other $live worktree(s) to land"
+            # NAMED, not counted. The marker carries the names too, so the line
+            # comes back when what it waits on CHANGES -- which is news -- and
+            # stays quiet while it does not.
+            local waiting_on; waiting_on="$(waiting_worktrees "$live_list")"
+            foundation_hold_say "waiting-$n-$waiting_on" \
+              "#$n is a foundation issue; it lands alone, so it waits for $waiting_on to land"
             break
           fi
           picked="$n"; title="$t"; labels="$l"
@@ -2596,7 +2632,8 @@ while that one is up."
         say "  leaving #$picked in the queue to try again"
         break
       fi
-      live="$(live_count)" || break
+      live_list="$(live_worktrees)" || break
+      live="$(count_worktrees "$live_list")"
     done
 
     # Nothing left to launch, and nothing left to look after: done. Reaching
