@@ -23,7 +23,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
-mkdir -p .orca
+mkdir -p .autofleet/run
 
 sha="$(git rev-parse HEAD)"
 target=".autofleet/run/reviewed-$sha"

@@ -374,8 +374,101 @@ FAKE
     echo "PASS: teardown activates every compose profile ($(echo $profiles | tr '\n' ' '))"
     ;;
 
+  mtime)
+    # `fleet_mtime` reads a file's mtime with BSD stat or GNU stat, and the two
+    # spell it differently. GNU's `-f` is --file-system, takes no format, and so
+    # reads `%m` as a SECOND FILE: it fails on that one, succeeds on the real
+    # one, and prints a filesystem block to stdout on the way out. The caller
+    # then did arithmetic on a string beginning `File:`, and bash under `set -u`
+    # evaluated `File` as a variable -- so every foundation hold on Linux died
+    # where it should have re-explained itself, and `main` was red for it while
+    # this suite passed on macOS, where the BSD spelling answered first.
+    #
+    # Both halves are asserted here, because the ordering fix alone would have
+    # gone green on the pair that happened to break: a stat whose output is not a
+    # number must be "could not tell", not a string handed onwards.
+    work="$(mktemp -d)"
+    printf 'x' >"$work/f"
+    out="$( REPO_ROOT="$REPO_ROOT" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      fleet_mtime "$1"; echo "rc=$?"
+      fleet_mtime "$1/nope"; echo "missing rc=$?"
+    ' _ "$work" 2>&1 )"
+    grep -qE '^[0-9]+$' <<<"$out" \
+      || fail "fleet_mtime did not answer a plain epoch second for a file that exists: $out"
+    grep -q "^rc=0$" <<<"$out" || fail "fleet_mtime failed on a file that is there: $out"
+    grep -q "^missing rc=1$" <<<"$out" \
+      || fail "fleet_mtime did not say it could not tell for a file that is not there: $out"
+
+    # A stat that answers something that is not a number, whatever the reason.
+    # This is the shape GNU stat produced, reproduced on a machine whose stat
+    # does not: the answer must be REFUSED rather than passed to the caller.
+    stub="$(mktemp -d)"
+    printf '#!/usr/bin/env bash\ncat <<EOF\n  File: "/x"\n    ID: 0 Namelen: 255\nEOF\nexit 0\n' >"$stub/stat"
+    chmod +x "$stub/stat"
+    out="$( REPO_ROOT="$REPO_ROOT" PATH="$stub:$PATH" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      answer="$(fleet_mtime "$1")"; rc=$?
+      echo "rc=$rc answer=[$answer]"
+      now=100
+      [ -n "$answer" ] && echo "arith=$(( now - answer ))"
+    ' _ "$work/f" 2>&1 )"
+    grep -q "unbound variable" <<<"$out" \
+      && fail "a stat that printed prose reached the caller's arithmetic, which is the crash this pins: $out"
+    grep -q "rc=1 answer=\[\]" <<<"$out" \
+      || fail "fleet_mtime passed on a non-numeric answer instead of refusing it: $out"
+
+    # A GNU stat, reproduced on a machine that does not have one. `-f` is
+    # --file-system there, takes no format, and reads `%m` as a SECOND FILE --
+    # so it prints a filesystem block to stdout for the real one AND exits
+    # non-zero. This asserts that `fleet_mtime` still comes back with the
+    # mtime on such a host, which is the Linux failure the function was written
+    # for and the one that was silent.
+    #
+    # IT DOES NOT ASSERT THE ORDER, and it said it did until the independent
+    # review checked. The claim was true of the `||`-chain shape this branch
+    # had -- BSD-first would append the real number to the prose, the capture
+    # would fail validation, and `fleet_mtime` would answer "could not tell"
+    # forever -- and it stopped being true at the merge from `main` (2f4e414),
+    # which took `main`'s spelling: each answer is validated SEPARATELY, so a
+    # `-f` that prints prose falls through to `-c` and a `-c` that is an illegal
+    # option falls through to `-f`. Both orders are green on both platforms, and
+    # swapping the two lines in lib.sh leaves this phase passing -- verified.
+    #
+    # So the order is a preference (ask the likely-right one first) and the
+    # VALIDATION is the property. Left saying so rather than deleted: the phase
+    # still pins the GNU-shaped host, and a comment claiming a load-bearing
+    # order would have the next person defend a line that decides nothing.
+    gnu="$(mktemp -d)"
+    # Answers a FIXED epoch on `-c` rather than shelling out to the platform
+    # `stat`: the point of this stub is to behave the way GNU does regardless of
+    # which stat the machine running the suite actually has, and a `-c` branch
+    # that ran `/usr/bin/stat -f %m` would itself be the BSD spelling -- green
+    # here and red on the Linux CI this phase exists for. Found by the
+    # independent review.
+    cat >"$gnu/stat" <<'GNUSTAT'
+#!/usr/bin/env bash
+if [ "$1" = "-f" ]; then
+  printf '  File: "%s"\n    ID: 0 Namelen: 255\n' "${3:-x}"
+  exit 1
+fi
+[ "$1" = "-c" ] || exit 1
+echo 1234567890
+GNUSTAT
+    chmod +x "$gnu/stat"
+    out="$( REPO_ROOT="$REPO_ROOT" PATH="$gnu:$PATH" bash -c '
+      . "$REPO_ROOT/scripts/fleet/lib.sh"
+      answer="$(fleet_mtime "$1")"; echo "rc=$? answer=[$answer]"
+    ' _ "$work/f" 2>&1 )"
+    grep -q '^rc=0 answer=\[1234567890\]$' <<<"$out" \
+      || fail "against a GNU-shaped stat, fleet_mtime could not read an mtime at all -- which is the Linux failure, silent this time: $out"
+
+    rm -rf "$work" "$stub" "$gnu"
+    echo "PASS: fleet_mtime answers a number, on either stat, or says it could not tell"
+    ;;
+
   *)
-    echo "usage: tests/test_teardown.sh derives|reap|watcher|profiles" >&2
+    echo "usage: tests/test_teardown.sh derives|reap|watcher|profiles|mtime" >&2
     exit 2
     ;;
 esac

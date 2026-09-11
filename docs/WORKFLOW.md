@@ -37,13 +37,19 @@ decides whether that is allowed.
 
 ## Start it
 
-Run the dispatcher in an Orca terminal, so it is as visible as the work it
-starts:
+Run the dispatcher in a terminal the runner opens, so it is as visible as the
+work it starts. The exact command is the runner's, so ask the fleet for it
+rather than reading one off this page — a host project on a different
+`AUTOFLEET_RUNNER` gets a different line:
 
 ```bash
-orca terminal create --worktree active --title fleet \
-  --command "./scripts/fleet/fleet.sh run --auto"
+./scripts/fleet/fleet.sh          # prints it, under "Run it in a terminal..."
 ```
+
+If it answers "the runner is not usable here" instead, that IS the answer: the
+dispatcher checks the runner before it will do anything, and there is no terminal
+for it to open until that is fixed. `docs/RUNNERS.md` says what each driver
+needs.
 
 Or directly:
 
@@ -792,10 +798,12 @@ And what comes back from the change re-enters at stage 1:
 
 ## Where to look
 
-Everything runs through Orca, so the board is the status surface. `fleet.sh`
+Everything runs through the runner, so its board is the status surface. `fleet.sh`
 drives it: **`in-progress`** while a worktree builds, **`in-review`** once the
 agent has opened its PR, **`completed`** on merge, and a one-line comment on each
-card saying what it is waiting for.
+card saying what it is waiting for. From inside a worktree an agent sets its own
+card with `./scripts/fleet/board.sh in-review "<what it is waiting for>"` --
+which goes through the runner driver, so the brief never names one runner's CLI.
 
 You get a macOS notification for the two cases you would otherwise miss: the
 fleet stopping, and an issue giving up on its time-box. Everything else is

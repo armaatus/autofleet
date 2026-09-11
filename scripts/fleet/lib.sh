@@ -95,9 +95,125 @@ fleet_ports() {
   done
 }
 
+# Run a command with a hard deadline, capturing its stdout in $2.
+#
+# Runner-agnostic on purpose, and NOT part of the driver contract: the drivers
+# are its heaviest user, but `finish_removal` runs `reap.sh` through it too, and
+# a `docker compose down` against a wedged daemon has no timeout of its own
+# either. It lived in the Orca driver while it was the only caller, which made
+# every non-Orca use of it read like a layering violation.
+#
+# Why any of this exists: a runtime can accept a connection and then never
+# answer, and orca.yaml's `setupAgentStartupPolicy: wait-for-setup` holds the
+# agent's tab until setup.sh returns -- so a hook that blocks forever costs the
+# whole worktree, which is strictly worse than whatever it was trying to
+# arrange. macOS ships no `timeout`, hence the manual watchdog.
+#
+# Polled in 50ms ticks rather than whole seconds, which is not a micro-
+# optimisation: a child that has already exited is a zombie until bash reaps it,
+# and `kill -0` succeeds on a zombie. With a one-second sleep every call
+# therefore cost a full second even when the command answered instantly.
+# setup.sh makes dozens of these, and `agent-autostart.sh --watch` alone makes
+# two per poll -- which is what turned a test of it into a 21-second one, close
+# enough to its 60s ctest timeout to go red on a loaded machine.
+#
+# Returns the command's status, or 124 when the deadline was hit.
+#
+# $2 gets stdout only. Two variables change that, both scoped to one call by
+# `VAR=1 fleet_run_with_deadline ...`:
+#
+#   FLEET_RUN_CAPTURE_STDERR=1  merge stderr into $2
+#   FLEET_RUN_STDERR=<file>     put stderr in a SEPARATE file
+#
+# Off by default because most callers parse $2 as JSON, and a warning landing in
+# it is a parse error. Merging is on for the ones that report a FAILURE and
+# nothing else: a CLI says why on stderr, so dropping it leaves "it failed" with
+# nothing after it -- and "the app is not running" and "that worktree is gone"
+# then look identical.
+#
+# The separate file exists for the ONE caller that needs both: `worktree create`
+# reports a failure in the runtime's own words AND parses its success. Merging
+# there meant a CLI that succeeded while writing anything at all to stderr -- a
+# relayed `Preparing worktree (new branch ...)`, a keychain warning -- broke the
+# parse, and the fleet then had a worktree it had created, that counted against
+# its cap, that nothing owned and neither reap could ever see. Found by the
+# independent review, which also noted `main` did not have this shape: the
+# capture prefix arrived when the callsite moved into the driver.
+fleet_run_with_deadline() {
+  local seconds="$1" out="$2"; shift 2
+  if [ -n "${FLEET_RUN_STDERR:-}" ]; then
+    "$@" >"$out" 2>"$FLEET_RUN_STDERR" &
+  elif [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
+    "$@" >"$out" 2>&1 &
+  else
+    "$@" >"$out" 2>/dev/null &
+  fi
+  local child=$! ticks=0 limit=$((seconds * 20))
+  while kill -0 "$child" 2>/dev/null; do
+    if [ "$ticks" -ge "$limit" ]; then
+      kill "$child" 2>/dev/null
+      wait "$child" 2>/dev/null
+      return 124
+    fi
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  wait "$child"
+}
+
+# One row out of a `path`-keyed TSV, by path: the $2 column of the first line
+# whose $1 column equals $3, reading the table on stdin.
+#
+# ONE copy of it, because the same lookup exists twice -- the agent terminal in a
+# worktree, and that worktree's agent state -- and it had the SAME BUG in both,
+# fixed in both at once. `awk -v` REINTERPRETS what it assigns, so a worktree
+# path containing a backslash arrived as `/Users/joe/mydir` when it was
+# `/Users/joe/my\dir`, the comparison went false, and the caller was told there
+# is no agent there. That is `stop` never interrupting an agent, and
+# `agent-autostart.sh` giving up after two minutes with the prompt unsent -- both
+# silent, because "no agent in that worktree" is indistinguishable from the
+# truth. The python these replaced took the path as `sys.argv` and were immune;
+# `ENVIRON[]` is awk's equivalent.
+#
+# The COLUMN numbers still go through `-v`, and that is safe: they are integers
+# this file writes. Only the path is attacker-shaped. Merging the two copies was
+# the independent review's suggestion, so the next such lookup cannot
+# reintroduce it.
+# `fleet_field_for_path <match-column> <print-column> <path>`. The two callers
+# pass `2 1` and `1 2` -- opposite orders over the same helper, because their
+# listings put the path in different columns -- and bare integers carry no clue
+# which is which, so swapping them is silent and the answer becomes "there is
+# nothing there". The two wrappers below are what the callers use; this stays
+# private to them. Found by the independent review.
+fleet_field_for_path() {
+  AUTOFLEET_AWK_PATH="$3" awk -F'\t' -v k="$1" -v v="$2" \
+    '$k == ENVIRON["AUTOFLEET_AWK_PATH"] { print $v; exit }'
+}
+# `handle<TAB>path` -- match column 2, print column 1.
+fleet_handle_for_path() { fleet_field_for_path 2 1 "$1"; }
+# `path<TAB>state` -- match column 1, print column 2.
+fleet_state_for_path()  { fleet_field_for_path 1 2 "$1"; }
+
+# The one contract function with no runner in it: the agent terminal in ONE
+# worktree, filtered out of the machine-wide listing the driver does provide.
+# Defined HERE, above the driver source, so a driver whose runtime can answer it
+# directly still wins by defining its own -- and so that every driver does not
+# ship the same filter. The stub driver in tests/test_fleet.sh carried a
+# verbatim copy of it until the independent review said so.
+#
+# Non-zero only when the listing could not be read; no output means there is no
+# agent there, which is a real answer.
+runner_agent_terminal() {
+  local list
+  list="$(runner_agent_terminals)" || return 1
+  printf '%s\n' "$list" | fleet_handle_for_path "$1"
+}
+
 # The runner driver: everything about creating a worktree, opening a terminal
 # in it, and asking the runtime what it is doing. `orca` is the only one that
-# ships; see fleet/runner/README.md for what a second one would have to do.
+# ships, and it is the WHOLE of the dependency -- nothing outside
+# scripts/fleet/runner/ names it. See docs/RUNNERS.md for the contract a second
+# one has to meet.
 #
 # Sourced here rather than by each script because every hook needs it and a
 # hook that silently has no driver looks exactly like a hook whose driver
@@ -165,21 +281,27 @@ fleet_review_mode() {
   esac
 }
 fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
-
-# A file's mtime in epoch seconds, or nothing. BSD stat and GNU stat take
-# different flags and neither is present everywhere, so both are tried -- this
-# repo runs on macOS and its CI runs on Linux, and a helper that works on one is
-# a helper that silently returns empty on the other.
+# A file's mtime in epoch seconds, or non-zero if it cannot be had.
+#
+# GNU first, BSD second, and THE ANSWER IS VALIDATED -- which is not belt and
+# braces, it is the bug. `stat -f %m` is BSD's spelling; GNU's `-f` means
+# --file-system, takes no format, and therefore reads `%m` as a second FILE. It
+# fails on that one and SUCCEEDS on the real one, printing a filesystem block to
+# stdout on the way. The caller then did `$(( now - said_at ))` on a string
+# beginning `File:`, and bash under `set -u` evaluated `File` as a variable:
+#
+#   ./scripts/fleet/fleet.sh: line 407: File: unbound variable
+#
+# So every foundation hold on Linux died where it should have re-explained
+# itself, and the suite was red on `main` for it. Ordering alone would fix
+# today's pair; validating the answer is what makes the next `stat` that prints
+# something unexpected a "could not tell" rather than a crash three frames up.
 fleet_mtime() {
   [ -e "${1:-}" ] || return 1
   local m
-  # GNU first, and the ANSWER is what decides -- not the exit status. `stat -f`
-  # means "file system status" to GNU stat, which SUCCEEDS and prints something
-  # that is not a timestamp, so `stat -f %m || stat -c %Y` never reached the
-  # fallback on Linux and handed its caller a string. `$(( now - "File: ..." ))`
-  # then aborted the arithmetic under `set -u`, which on the dispatcher means the
-  # hourly re-say kills the pass. Green on macOS, broken on every Linux host and
-  # in CI, which is where it was caught.
+  # main fixed this in parallel (ac34813) by validating each answer separately
+  # rather than the end of an `||` chain; that is the stronger shape and it is
+  # the one kept, so the merge leaves one spelling and not two.
   m="$(stat -c %Y "$1" 2>/dev/null)"
   case "$m" in ''|*[!0-9]*) m="$(stat -f %m "$1" 2>/dev/null)" ;; esac
   case "$m" in ''|*[!0-9]*) return 1 ;; esac
