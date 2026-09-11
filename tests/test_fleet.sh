@@ -1430,6 +1430,34 @@ case "${1:-}" in
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever: $out"
     echo "ok: ...and all five keep-markers count"
+
+    # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
+    # worktree as waiting for someone and then never naming it is worse than not
+    # counting it: it is present in the tally and absent from the list that says
+    # what to do about it. `cmd_status` and the farewell both drifted the moment
+    # there were more than three reasons, and `cmd_status`'s block had no test at
+    # all -- delete it and the suite stayed green. Found by the independent
+    # review, which called all three findings one crack.
+    # `cmd_status` lists through `live_worktrees`, so the runner has to report
+    # #42 as well as the fleet owning it.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+  {"path": sys.argv[1], "isMainWorktree": False, "linkedIssue": 42},
+]}}))' "$WORK/wt" >"$ORCA_WORKTREES"
+    for reason in stuck merge-held merge-blind held git-blind; do
+      rm -f "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/merge-held-* \
+            "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
+            "$AUTOFLEET_DIR"/git-blind-*
+      : >"$AUTOFLEET_DIR/$reason-42"
+      out="$(in_fleet why_parked 42 2>&1)"
+      [ -n "$out" ] \
+        || fail "$reason-42 is counted as parked and why_parked says nothing, so status and the farewell cannot name it"
+      status_out="$(in_fleet cmd_status 2>&1)"
+      grep -q "waiting for you" <<<"$status_out" \
+        || fail "status did not name #42 as waiting for a person with $reason-42 set: $status_out"
+    done
+    echo "ok: ...and status names every one of the five"
     ;;
   drain_ends_with_parked)
     # `park_worktree` keeps a worktree owned when its removal was refused, which

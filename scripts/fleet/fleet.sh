@@ -322,6 +322,29 @@ disown_issue() {
 # columns this dispatcher reads brought to the front. The branch is dropped
 # rather than carried: nothing here has ever needed it, and a column no caller
 # reads is one the next caller reads wrong.
+# THE PARK REASONS, in one place, with the sentence a person is told for each.
+#
+# There are five, and the count and the two places that REPORT them drifted
+# apart the moment there were more than three: `count_parked_owned` learned
+# `held-` and `git-blind-` and the farewell list and `cmd_status` did not, so a
+# worktree could be counted as waiting for a person and then never named as one
+# -- present in the tally, absent from the list that says what to do about it.
+# That is worse than not counting it at all. One list, three readers.
+#
+# `why_parked <issue>` prints the reason, or nothing when that issue is not
+# parked. Order is deliberate where two can coexist: a refused removal is the
+# one a person acts on, so it wins over "git could not say".
+PARK_REASONS="stuck merge-held merge-blind held git-blind"
+why_parked() {
+  local n="$1"
+  [ -e "$STATE_DIR/stuck-$n" ]       && { printf 'its removal was refused\n'; return 0; }
+  [ -e "$STATE_DIR/merge-held-$n" ]  && { printf 'merged, and it holds uncommitted work\n'; return 0; }
+  [ -e "$STATE_DIR/held-$n" ]        && { printf 'it holds uncommitted work\n'; return 0; }
+  [ -e "$STATE_DIR/merge-blind-$n" ] && { printf 'merged, and git could not say what it holds\n'; return 0; }
+  [ -e "$STATE_DIR/git-blind-$n" ]   && { printf 'git could not say what it holds\n'; return 0; }
+  return 1
+}
+
 # How many OWNED worktrees are waiting for a person rather than for an agent.
 #
 # EVERY reason a worktree waits for a person, and there are FIVE. `stuck-`
@@ -358,14 +381,12 @@ disown_issue() {
 # owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
 # ends the dispatcher with work in flight, and a clamp is cheaper than that.
 count_parked_owned() {
-  local parked=0 m n seen=" "
-  for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-* \
-           "$STATE_DIR"/held-* "$STATE_DIR"/git-blind-*; do
-    [ -e "$m" ] || continue
-    n="${m##*-}"
-    [ -e "$OWNED_DIR/$n" ] || continue
-    case "$seen" in *" $n "*) continue ;; esac
-    seen="$seen$n "
+  local parked=0 n
+  # Over OWNED issues rather than over markers: one worktree can carry two
+  # reasons at once, and counting markers made `parked` exceed the worktrees it
+  # described. `why_parked` is the same predicate `status` and the farewell use.
+  for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+    why_parked "$n" >/dev/null || continue
     parked=$((parked + 1))
   done
   printf '%s\n' "$parked"
@@ -2059,10 +2080,7 @@ cmd_status() {
   # this line to tell the two apart; the change that fixed the drain did not.
   # Found by the independent review.
   live_worktrees | while IFS="$(printf '\t')" read -r num path; do
-    why=""
-    [ -e "$STATE_DIR/stuck-$num" ]       && why="waiting for you -- its removal was refused"
-    [ -e "$STATE_DIR/merge-held-$num" ]  && why="waiting for you -- merged, and it holds uncommitted work"
-    [ -e "$STATE_DIR/merge-blind-$num" ] && why="waiting for you -- git could not say what it holds"
+    why="$(why_parked "$num")" && why="waiting for you -- $why" || why=""
     if [ -n "$why" ]; then
       printf '  #%-5s %s\n' "$num" "$path"
       printf '         %s\n' "$why"
@@ -2640,15 +2658,8 @@ while that one is up."
         # Named on the way out, every time, because a worktree nobody mentions
         # is one nobody releases.
         say "$parked worktree(s) are waiting for you rather than for an agent:"
-        for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-*; do
-          [ -e "$m" ] || continue
-          n="${m##*-}"
-          [ -e "$OWNED_DIR/$n" ] || continue
-          case "$(basename "$m")" in
-            stuck-*)       why="its removal was refused" ;;
-            merge-held-*)  why="it holds uncommitted work" ;;
-            merge-blind-*) why="git could not say what it holds" ;;
-          esac
+        for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+          why="$(why_parked "$n")" || continue
           say "  #$n -- $why"
           say "    $(printf "$BY_HAND_REMOVAL" "$(owned_path "$n")")"
         done
