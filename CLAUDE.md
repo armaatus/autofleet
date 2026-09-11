@@ -97,6 +97,11 @@ One exception the labels cannot express: **a foundation issue lands alone.** Whe
 an issue defines an interface later issues include, it merges before anything
 that depends on it starts, even if the labels say several things are ready.
 
+**`priority` is the maintainer's, like the blockers are yours.** It moves an
+issue to the front of the dispatcher's queue and grants nothing else. Do not add
+or remove it: the queue's own ordering is derived from the `Blocked by #N` lines
+and that is the one you maintain.
+
 ## Finishing a task
 
 1. `./tests/run.sh` is green, and your change has a test that would have failed

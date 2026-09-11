@@ -27,6 +27,13 @@
 # one. Milestones do not order it: `ready` already means every blocker is closed,
 # and a milestone number is not a claim about what can be built now.
 #
+# Ahead of all of that: anything labelled `priority`. That is the one ordering a
+# person states rather than derives, and it exists because the blocker graph
+# cannot express "this one first" -- the only way to say it before was to file
+# fake dependencies on issues that did not have them. It reorders the ready list
+# and nothing else: a `blocked` or `needs-human-step` issue is no more startable
+# for carrying it, and a foundation issue that is holding still holds.
+#
 # ## Stopping
 #
 # The stop is a FILE, not a signal, and it lives outside every worktree
@@ -101,6 +108,11 @@ POLL_SECONDS="${AUTOFLEET_POLL:-60}"
 # task that was never going to work.
 TIMEBOX_SECONDS="${AUTOFLEET_TIMEBOX:-10800}"
 FOUNDATION_LABEL="${AUTOFLEET_FOUNDATION_LABEL:-foundation}"
+# The human's thumb on the queue -- see "What it picks" above. Read in exactly
+# one place (`ready_issues`), because an override that also changed what may
+# START would be a second way to bypass `blocked`, and this fleet has one set of
+# rules about what is startable.
+PRIORITY_LABEL="${AUTOFLEET_PRIORITY_LABEL:-priority}"
 # An issue whose LAST step is outward, irreversible and the maintainer's --
 # tagging a release, touching real hardware, signing something. The fleet may not
 # finish one, so it does not start one, does not read an agent waiting on one as
@@ -322,8 +334,13 @@ ready_issues() {
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
 import json, sys
 from issue_refs import blocked_by
-human_step = sys.argv[1]
+human_step, priority = sys.argv[1], sys.argv[2]
 issues = json.load(sys.stdin)
+
+
+def has(issue, label):
+    return any(l["name"] == label for l in issue.get("labels", []))
+
 blocks = {}
 for i in issues:
     for n in blocked_by(i.get("body")):
@@ -333,14 +350,21 @@ for i in issues:
 # that prepares it, and stays `ready` with it. #148 was picked up again 18
 # seconds after its own preparatory PR merged, and would have been picked up
 # once per cycle forever, each attempt further from the point.
-ready = [i for i in issues
-         if any(l["name"] == "ready" for l in i.get("labels", []))
-         and not any(l["name"] == human_step for l in i.get("labels", []))]
-# Most-unblocking first, then oldest issue number: predictable inside a tie.
-for i in sorted(ready, key=lambda i: (-blocks.get(i["number"], 0), i["number"])):
+ready = [i for i in issues if has(i, "ready") and not has(i, human_step)]
+# Priority first, then most-unblocking, then oldest issue number: predictable
+# inside a tie. The priority flag is a BOOLEAN in the key and not a weight -- a
+# labelled issue outranks every unlabelled one whatever either unblocks, which is
+# the whole of what a person applying the label is asking for. Within the
+# labelled set the ordinary ordering still decides, so labelling five issues does
+# not throw away what the queue itself says about which of the five goes first.
+# NOTE: no apostrophes anywhere in this block -- it lives inside a single-quoted
+# `python3 -c` string, and one closes it.
+for i in sorted(ready, key=lambda i: (not has(i, priority),
+                                      -blocks.get(i["number"], 0),
+                                      i["number"])):
     labels = ",".join(l["name"] for l in i.get("labels", []))
     print(i["number"], blocks.get(i["number"], 0), labels, i["title"], sep="\t")
-' "$HUMAN_STEP_LABEL"
+' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL"
 }
 
 # `ready` overstates availability: the label stays until the PR merges, so an
@@ -2012,12 +2036,19 @@ cmd_status() {
   done
   echo
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
-  echo "         'unblocks' is how many issues it frees):"
-  printf '  %-6s %-9s %s\n' "issue" "unblocks" "title"
+  echo "         'unblocks' is how many issues it frees, and a row marked"
+  echo "         $PRIORITY_LABEL goes ahead of that ordering):"
+  printf '  %-6s %-9s %-9s %s\n' "issue" "unblocks" "" "title"
+  # The label column ready_issues already prints is what says which rows are
+  # ahead of the queue: a `next up` list reordered with nothing on screen saying
+  # why reads as a bug in the ordering, which is the report this marker exists
+  # to prevent.
   ready_issues | while IFS="$(printf '\t')" read -r num unblocks labels title; do
     in_flight "$num" && continue
     gave_up_on "$num" && continue
-    printf '  #%-5s %-9s %s\n' "$num" "$unblocks" "$title"
+    local mark=""
+    has_label "$labels" "$PRIORITY_LABEL" && mark="$PRIORITY_LABEL"
+    printf '  #%-5s %-9s %-9s %s\n' "$num" "$unblocks" "$mark" "$title"
   done | head -12
 
   # ...and where the ones missing from that list went, since a `ready` issue the

@@ -1381,6 +1381,48 @@ JSON
       && fail "an issue no agent may close is still startable, so the fleet opens a worktree per cycle for it: $out"
     echo "ok: an issue whose last step is yours is not startable"
     ;;
+  priority_first)
+    make_fixture ok
+    # #7 is what the queue would pick on its own: lowest number, and two issues
+    # name it as a blocker. #151 frees nothing and is the highest number here,
+    # so if it comes out first it can only be the label that put it there.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":7,"title":"the queue would pick this","body":"","labels":[{"name":"ready"}]},
+ {"number":9,"title":"blocked by 7","body":"<!-- blockers -->\nBlocked by #7","labels":[{"name":"blocked"}]},
+ {"number":10,"title":"blocked by 7 as well","body":"<!-- blockers -->\nBlocked by #7","labels":[{"name":"blocked"}]},
+ {"number":151,"title":"the one a person wants first","body":"","labels":[{"name":"ready"},{"name":"priority"}]},
+ {"number":152,"title":"priority, and its last step is yours","body":"","labels":[{"name":"ready"},{"name":"priority"},{"name":"needs-human-step"}]},
+ {"number":153,"title":"priority, and still blocked","body":"","labels":[{"name":"blocked"},{"name":"priority"}]}]
+JSON
+    out="$(in_fleet ready_issues 2>&1)"
+    [ "$(head -1 <<<"$out" | cut -f1)" = 151 ] \
+      || fail "the labelled issue did not go first, so the label buys nothing: $out"
+    echo "ok: a priority issue outranks the issue that frees the most work"
+    grep -q "^7" <<<"$out" \
+      || fail "labelling one issue dropped the rest of the queue: $out"
+    echo "ok: ...and the rest of the queue is still there, behind it"
+    grep -q "^152" <<<"$out" \
+      && fail "priority started an issue whose last step is a person's: $out"
+    echo "ok: priority does not make a needs-human-step issue startable"
+    grep -q "^153" <<<"$out" \
+      && fail "priority started a BLOCKED issue, which is the one thing no label may do: $out"
+    echo "ok: priority does not make a blocked issue startable"
+    ;;
+  priority_renamed)
+    make_fixture ok
+    # The label is a knob (AUTOFLEET_PRIORITY_LABEL), and a host repo that
+    # renames it must not silently get the default back -- which is what a
+    # hardcoded word in the python would do, with nothing on screen to say so.
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":7,"title":"the queue would pick this","body":"","labels":[{"name":"ready"}]},
+ {"number":151,"title":"labelled with the house word","body":"","labels":[{"name":"ready"},{"name":"now"}]},
+ {"number":152,"title":"labelled with the default","body":"","labels":[{"name":"ready"},{"name":"priority"}]}]
+JSON
+    out="$(AUTOFLEET_PRIORITY_LABEL=now in_fleet ready_issues 2>&1)"
+    [ "$(head -1 <<<"$out" | cut -f1)" = 151 ] \
+      || fail "the renamed label was not read, so the knob is decoration: $out"
+    echo "ok: AUTOFLEET_PRIORITY_LABEL renames the label the queue reads"
+    ;;
   list_declines)
     make_fixture ok
     issue_labels "ready,needs-human-step"
@@ -2263,6 +2305,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|priority_first|priority_renamed|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac

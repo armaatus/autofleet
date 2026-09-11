@@ -31,13 +31,22 @@ too.
 
 ### The labels
 
-`unblock.yml` maintains them and `fleet.sh` reads them. Rename them here if your
-repo already uses other words for the same three ideas — but create the labels
-first, because an issue can carry no label that does not exist.
+`unblock.yml` maintains the first three and `fleet.sh` reads them. Rename them
+here if your repo already uses other words for the same ideas — but create the
+labels first, because an issue can carry no label that does not exist.
 
 `AUTOFLEET_READY_LABEL` (`ready`), `AUTOFLEET_BLOCKED_LABEL` (`blocked`),
 `AUTOFLEET_FOUNDATION_LABEL` (`foundation`),
-`AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`).
+`AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`),
+`AUTOFLEET_PRIORITY_LABEL` (`priority`).
+
+`priority` is the one a person applies by hand, and the only ordering the
+tracker cannot derive: an issue carrying it goes to the front of the ready list,
+ahead of whatever frees the most other work. It reorders and nothing more — it
+cannot start a `blocked` issue, cannot start a `needs-human-step` one, and does
+not lift a foundation hold. Label several and the ordinary ordering decides
+between them. `fleet.sh status` marks the rows that carry it, so a queue that
+looks reordered says why.
 
 ### The review
 

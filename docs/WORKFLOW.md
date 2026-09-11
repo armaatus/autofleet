@@ -64,6 +64,13 @@ open issues name it in a `Blocked by #N` line. The work that frees the most othe
 work goes first, which is the fastest way to turn a mostly-blocked backlog into a
 wide one. Milestones do not order it — `ready` already means every blocker is
 closed, and a milestone number is not a claim about what can be built *now*.
+
+Ahead of all of it: anything labelled `priority`. The blocker graph says what
+*can* start, not what *should* go first, and the only way to say "this one next"
+used to be to invent a dependency. A person applies that label; it reorders the
+ready list and changes nothing else, so a `blocked` or `needs-human-step` issue
+is no more startable for carrying it. `fleet.sh status` marks those rows.
+
 `--auto` never pauses; it stops when the queue empties, at `--until`/`--for`, or
 after `--max-prs`, and says which.
 

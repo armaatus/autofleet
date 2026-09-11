@@ -27,13 +27,20 @@
 
 # ---------------------------------------------------------------- the labels
 # The convention `unblock.yml` maintains and `fleet.sh` reads. Rename them here
-# if the repo already uses other words for the same three ideas.
+# if the repo already uses other words for the same ideas.
 : "${AUTOFLEET_READY_LABEL:=ready}"
 : "${AUTOFLEET_BLOCKED_LABEL:=blocked}"
 # An issue that defines an interface later issues include: it lands alone.
 : "${AUTOFLEET_FOUNDATION_LABEL:=foundation}"
 # An issue whose last step is a person's. The fleet opens no worktree for it.
 : "${AUTOFLEET_HUMAN_STEP_LABEL:=needs-human-step}"
+# Work that goes before the queue's own ordering. The only label here a person
+# applies by hand: the other three are derived (`unblock.yml` writes two of them,
+# and a foundation issue is a property of the issue, not of the week). It moves
+# an issue to the FRONT of the ready list and does nothing else -- it cannot
+# start a blocked issue, cannot start a `needs-human-step` one, and cannot run
+# alongside a foundation issue that is holding.
+: "${AUTOFLEET_PRIORITY_LABEL:=priority}"
 
 # ---------------------------------------------------------------- the runner
 # Which driver creates worktrees and terminals. `orca` is the only one that
