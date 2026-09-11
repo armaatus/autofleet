@@ -57,6 +57,28 @@
 #                                 tried again. The asymmetry is the whole fix:
 #                                 backwards, it is the silent block the mode
 #                                 exists to remove.
+#   test_review_mode.sh capped     ...and not forever: AUTOFLEET_REVIEW_MAX_TRIES
+#                                 reviewers on one head that submit nothing, then
+#                                 a hold that says so ONCE and points at the log.
+#                                 Unbounded, this is a full-budget reviewer
+#                                 started every poll against a head that will
+#                                 never get a verdict.
+#   test_review_mode.sh holds      TWO holds in one poll body -- a foundation
+#                                 issue in flight and a PR at the cap. They
+#                                 shared one say-once marker, so each overwrote
+#                                 the other's reason and both re-announced every
+#                                 poll: verbatim the flooding this change
+#                                 removes. `capped` runs with no foundation issue
+#                                 and stayed green against the shared marker.
+#   test_review_mode.sh status_count
+#                                 `fleet.sh status` counts the LOCK and not the
+#                                 three records beside it. Counting them made a
+#                                 reviewed PR read as a slot taken forever, on
+#                                 the first screen anybody looks at -- and it is
+#                                 where the third spelling of the suffix list
+#                                 came to disagree with the other two. Also: a
+#                                 poll leaves an open PR's records alone and
+#                                 sweeps a closed PR's.
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
@@ -530,6 +552,98 @@ import merge_gate; print(merge_gate.review_mode())'); }
     ;;
 
 # --------------------------------------------------------------------- holds
+  status_count)
+  # `fleet.sh status` counts REVIEWERS IN FLIGHT, and the three record files
+  # beside the lock are not reviewers. Counting them made a PR whose head has
+  # been reviewed read as one in flight for as long as that head stands -- which
+  # is the entire point of `<pr>.done` -- and a PR at the cap read as two
+  # (`.tries` plus `.said`). Three reviewed PRs open and `status` says 3: exactly
+  # the number that reads as "every slot is taken", on the screen its own comment
+  # calls the first anybody looks at, permanently rather than transiently.
+  #
+  # Nothing asserted the count, which is how the third spelling of the suffix
+  # list came to disagree with the other two. Found by the independent review,
+  # which found it on both axes independently.
+  make_fixture
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  # One real lock: a reviewer running on PR 42. `$$` is this shell, which IS
+  # alive, so `live_reviewers` cannot reap it mid-phase.
+  printf '%s %s\n' "$$" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  # ...and every record, for three other PRs, so a miscount cannot be read as
+  # the lock being counted twice.
+  printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/43.done"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/44.tries"
+  : >"$AUTOFLEET_DIR/reviewing/45.said"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  line="$(printf '%s\n' "$out" | grep '^review:' || true)"
+  [ -n "$line" ] || fail "status printed no review line at all: $out"
+  grep -q "1 in flight" <<<"$line" \
+    || fail "status counted the record files as reviewers, so a reviewed PR reads as a slot taken forever: $line"
+  ok "status counts the lock and not the three records"
+
+  # ...and the OTHER two consumers, asserted by consequence rather than by
+  # grepping for the predicate's name -- `live_reviewers` is nested inside
+  # `review_open_prs`, so there is no function to inspect, and a text assertion
+  # would pass on a file that merely mentions it.
+  #
+  # `live_reviewers`'s half is not the COUNT -- a record's first field is a head
+  # sha, so `reviewer_alive` answers 1 and the count stays right either way. It
+  # is that a record counted as a dead reviewer gets DELETED, and `<pr>.done` is
+  # the only thing stopping a reviewed head being handed a reviewer every poll.
+  # Deleting it puts the re-spawn loop this PR removes straight back.
+  #
+  # On an OPEN pull request, because the sweep below legitimately removes the
+  # records of closed ones -- which is why the first version of this assertion
+  # failed against its own fix. Two PRs open: 42 needs a review, 43 already has
+  # one on its head.
+  rm -f "$AUTOFLEET_DIR/reviewing/42" "$AUTOFLEET_DIR/reviewing"/4[345].*
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"},{"number":43,"isDraft":false,"headRefOid":"%s"}]\n' \
+    "$PR_HEAD" "$PR_HEAD" >"$GH_PRLIST"
+  printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/43.done"
+  printf '%s 1\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/43.tries"
+  stub_reviewer submits
+  poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
+    || fail "a poll reaped 43.done, so PR 43's reviewed head gets a reviewer again every minute -- the loop this PR exists to remove"
+  [ -e "$AUTOFLEET_DIR/reviewing/43.tries" ] \
+    || fail "a poll reaped 43.tries, so the attempt count restarts every pass and the cap can never be reached"
+  ok "...and a poll leaves an OPEN PR's records alone"
+
+  # ...while the records of a pull request that is no longer open DO go. They
+  # were pruned only by `stop_reviewers`, so on a fleet that stays up a merged
+  # PR's three files sat here for days -- and they were the input to the count
+  # above.
+  #
+  # RECORDS ONLY, and the lock is out of the sweep's scope by construction --
+  # `is_review_record "$rec" || continue`. Not asserted here, and the first
+  # version of this phase tried: a lock naming a pid that is not one of our
+  # reviewers is reaped by `live_reviewers` in the same pass, correctly, which
+  # is the `reaper` phase's whole subject. A phase that planted such a lock and
+  # expected it to survive was asserting the opposite of the fleet's own rule.
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.done"
+  : >"$AUTOFLEET_DIR/reviewing/99.said"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.tries"
+  poll_review_open_prs
+  for f in 99.done 99.said 99.tries; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
+  done
+  ok "...and a closed PR's records are swept"
+
+  # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
+  # them. Treated as locks, their first field is a head sha, `kill` is handed a
+  # non-number and fails, and `rm -f` follows on both paths -- so the two
+  # spellings are indistinguishable from outside. The branch still belongs
+  # there for `reviewer_alive`'s own reason: a numeric-looking first field WOULD
+  # be signalled, and nothing guarantees a future record's first field is not
+  # numeric. Said rather than asserted, because a phase claiming to pin it would
+  # be the inert kind this suite has shipped twice.
+  in_poll stop_reviewers >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
+    && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
+  ok "...and a stop clears the records"
+  ;;
+
   holds)
     # TWO HOLDS AT ONCE, which is the state the shared say-once marker broke.
     # A foundation issue in flight and a PR whose reviewer hit the cap are

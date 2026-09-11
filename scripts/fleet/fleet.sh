@@ -755,9 +755,26 @@ except Exception:
 #
 # In the default `github` mode this returns immediately and costs nothing.
 REVIEWING_DIR="$STATE_DIR/reviewing"
-# Per pull request, beside its lock and its records: `<pr>.said` remembers which
-# hold has already been explained for that PR, so it cannot overwrite -- or be
-# overwritten by -- the foundation hold's marker.
+# WHAT IS IN THIS DIRECTORY, in one place, because a fourth consumer that had to
+# work it out from three use sites is exactly how the third one came to disagree:
+#
+#   <pr>         the LOCK. Holds `pid head`. Its presence means a reviewer is
+#                running; `review.sh` removes it on every exit path.
+#   <pr>.done    a RECORD. Holds a head that has been handled, so a head with a
+#                review does not get a reviewer started every poll.
+#   <pr>.tries   a RECORD. Holds `head n` -- how many reviewers this head has
+#                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
+#   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
+#                it cannot overwrite -- or be overwritten by -- the foundation
+#                hold's marker.
+#
+# Only the first is a lock, and the three records must never be counted as one.
+# `is_review_record` is the predicate; use it rather than respelling the suffix
+# list. `cmd_status` respelled it as a `find ! -name` and counted all three as
+# reviewers in flight, permanently, on the screen its own comment calls the
+# first anybody looks at. Found by the independent review, which noted the
+# comment two lines above already stated the rule this broke.
+is_review_record() { case "$1" in *.done|*.tries|*.said) return 0 ;; esac; return 1; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -814,7 +831,7 @@ stop_reviewers() {
     # The records go too: a dispatcher starting fresh re-derives what has been
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
-    case "$marker" in *.done|*.tries|*.said) rm -f "$marker"; continue ;; esac
+    is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
     if reviewer_alive "$held"; then
@@ -848,6 +865,23 @@ review_open_prs() {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
 
+  # Every number the query returned, DRAFTS INCLUDED, for the record sweep at
+  # the end of this function. Drafts are skipped by the review loop but they are
+  # still open, and sweeping a draft's records out from under it would restart
+  # its attempt count the moment it is marked ready.
+  #
+  # Derived from `$listing` rather than from a second query: the answer is
+  # already in hand, and a review pass that costs two `gh pr list` calls a
+  # minute is how the fleet meets the secondary rate limit.
+  local open_prs
+  open_prs="$(printf '%s' "$listing" | python3 -c '
+import json, sys
+try:
+    print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
+except Exception:
+    pass
+' 2>/dev/null)"
+
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
   # child it has. A marker truncated by a crash between the `>` and the write is
@@ -877,7 +911,7 @@ review_open_prs() {
       [ -e "$m" ] || continue
       # `<pr>.done` is a record, not a lock: it holds a head, not a pid, and
       # reaping it as a dead reviewer would put the re-spawn loop straight back.
-      case "$m" in *.done|*.tries|*.said) continue ;; esac
+      is_review_record "$m" && continue
       p=""
       read -r p _ <"$m" 2>/dev/null || true
       reviewer_alive "$p"; local is=$?
@@ -1005,6 +1039,35 @@ for p in prs:
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"
     say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+  done
+
+  # ...and the records of pull requests that are no longer open. They were
+  # pruned ONLY by `stop_reviewers`, so a merged PR's `.done`, `.tries` and
+  # `.said` sat here until the next dispatcher start -- days, on a fleet that
+  # stays up. Harmless in size, and it was the input to the count `cmd_status`
+  # got wrong, which is reason enough to keep the directory honest. A LOCK is
+  # never pruned here: a reviewer running on a PR that just merged still owns its
+  # pid and its slot, and `live_reviewers` is what reaps it.
+  #
+  # The open list is the one already in hand from the query above, so this costs
+  # no API call. `$open_prs` carries every number the query returned INCLUDING
+  # drafts, which the loop skips -- a draft's records must not be swept out from
+  # under it while it is still open. Found by the independent review.
+  # NOT on an empty answer. `open_prs` is empty both when no PR is open and when
+  # the parse above failed, and those are opposite instructions: the first means
+  # sweep everything, the second means sweep nothing. A repository with no open
+  # PRs has no records worth keeping anyway, so refusing to sweep on empty costs
+  # nothing and cannot delete a live PR's attempt count on a bad parse.
+  [ -n "${open_prs:-}" ] || return 0
+  local rec base num
+  for rec in "$REVIEWING_DIR"/*; do
+    [ -e "$rec" ] || continue
+    is_review_record "$rec" || continue
+    base="$(basename "$rec")"; num="${base%%.*}"
+    case " ${open_prs:-} " in
+      *" $num "*) continue ;;
+    esac
+    rm -f "$rec"
   done
 }
 
@@ -2021,8 +2084,15 @@ cmd_status() {
     # and three reviewed PRs read as every slot taken. Found by the independent
     # review, on both axes independently.
     local n
-    n="$(find "$REVIEWING_DIR" -type f ! -name '*.done' ! -name '*.tries' ! -name '*.said' \
-           2>/dev/null | grep -c . || true)"
+    # Through the predicate, not a fourth spelling of the suffix list: the
+    # `find ! -name` this replaces WAS the drift, and it is the only one of the
+    # three consumers a person reads on every `status`.
+    local n=0 m
+    for m in "$REVIEWING_DIR"/*; do
+      [ -e "$m" ] || continue
+      is_review_record "$m" && continue
+      n=$((n + 1))
+    done
     echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
