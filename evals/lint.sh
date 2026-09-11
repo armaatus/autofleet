@@ -738,6 +738,28 @@ if bad:
 PYEOF
 then
   ok "both pages print the seam check that evals/lint.sh actually runs"
+
+# 4e. ...and CLAUDE.md does not restate it.
+#
+#    4d compares FENCES, and CLAUDE.md states hard rule 4 in prose, so it is
+#    structurally outside 4d -- which is exactly where the rule went stale twice.
+#    Round five put the pattern in that paragraph, round eight proved the pattern
+#    blind, and round nine found CLAUDE.md still publishing it: the file every
+#    agent reads first, handing out a grep that returns nothing on the very leak
+#    this PR removed. An agent checking hard rule 4 with it concludes the seam is
+#    intact.
+#
+#    The rule cannot be asserted in prose, so the fix is to keep the pipeline OUT
+#    of the prose: CLAUDE.md describes the rule and points at docs/RUNNERS.md for
+#    the command. This check fails if a command comes back, which is the only
+#    form of drift that can mislead. Found by the independent review.
+if grep -nE "grep -rn[i]? .orca|ORCA_\\\\\|orca" CLAUDE.md >/dev/null 2>&1; then
+  fail "CLAUDE.md restates the seam pipeline (above). It is prose, so 4d cannot
+    check it, and it has gone stale twice. Describe the rule there and let
+    docs/RUNNERS.md carry the command."
+else
+  ok "CLAUDE.md describes hard rule 4 without restating the command 4d guards"
+fi
 else
   fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
 fi

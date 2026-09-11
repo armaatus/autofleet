@@ -418,14 +418,27 @@ FAKE
     grep -q "rc=1 answer=\[\]" <<<"$out" \
       || fail "fleet_mtime passed on a non-numeric answer instead of refusing it: $out"
 
-    # The ORDERING half, which the validation above does not cover: a GNU stat,
-    # reproduced on a machine that does not have one. `-f` is --file-system
-    # there, takes no format, and reads `%m` as a SECOND FILE -- so it prints a
-    # filesystem block to stdout for the real one AND exits non-zero. BSD-first
-    # would then append the true number to that prose, the capture would fail
-    # validation, and `fleet_mtime` would answer "could not tell" forever: every
-    # foundation hold silently stops re-explaining itself. Both halves are needed
-    # and only both together are green.
+    # A GNU stat, reproduced on a machine that does not have one. `-f` is
+    # --file-system there, takes no format, and reads `%m` as a SECOND FILE --
+    # so it prints a filesystem block to stdout for the real one AND exits
+    # non-zero. This asserts that `fleet_mtime` still comes back with the
+    # mtime on such a host, which is the Linux failure the function was written
+    # for and the one that was silent.
+    #
+    # IT DOES NOT ASSERT THE ORDER, and it said it did until the independent
+    # review checked. The claim was true of the `||`-chain shape this branch
+    # had -- BSD-first would append the real number to the prose, the capture
+    # would fail validation, and `fleet_mtime` would answer "could not tell"
+    # forever -- and it stopped being true at the merge from `main` (2f4e414),
+    # which took `main`'s spelling: each answer is validated SEPARATELY, so a
+    # `-f` that prints prose falls through to `-c` and a `-c` that is an illegal
+    # option falls through to `-f`. Both orders are green on both platforms, and
+    # swapping the two lines in lib.sh leaves this phase passing -- verified.
+    #
+    # So the order is a preference (ask the likely-right one first) and the
+    # VALIDATION is the property. Left saying so rather than deleted: the phase
+    # still pins the GNU-shaped host, and a comment claiming a load-bearing
+    # order would have the next person defend a line that decides nothing.
     gnu="$(mktemp -d)"
     # Answers a FIXED epoch on `-c` rather than shelling out to the platform
     # `stat`: the point of this stub is to behave the way GNU does regardless of
