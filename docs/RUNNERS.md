@@ -174,11 +174,33 @@ runner_worktree_remove <path> [<deadline>]
   cannot address — so a driver must not turn an unparseable answer into rc 0
   with a made-up path, and need not invent a new code for it either.
 - **`runner_worktree_list`** emits `path<TAB>branch<TAB>issue`, `-` where the
-  runner has no answer for a field, excluding the main worktree and archived
-  ones — the fleet counts these to decide whether it may launch, and neither of
-  those is a slot. **Non-zero when the list could not be read**, which is not
-  the same as "nothing is running": reading a failed call as zero live worktrees
-  is how one transient hiccup turns into three duplicate worktrees.
+  runner has no answer for a field, **scoped to THIS repository**, excluding the
+  main worktree and archived ones — the fleet counts these to decide whether it
+  may launch, and neither of those is a slot. Scoping is the DRIVER's job, and
+  it is a property of this contract rather than an optimisation: the fleet
+  resolves every issue number this returns against its own repository, so one
+  worktree belonging
+  to another project takes a slot from `MAX_WORKTREES`, its issue number can
+  answer `in_flight` for one of ours, and — because a foundation issue waits for
+  the count to reach zero, and `foundation_in_flight` cannot read a foreign
+  issue's labels — it stops the dispatcher launching **anything at all**,
+  indefinitely. Nothing this fleet does can close another project's worktree, so
+  that stall is permanent. A driver whose runtime cannot scope the query must
+  filter the answer itself, and must return non-zero rather than hand back an
+  unscoped list: "could not tell" costs one pass, an unscoped list costs the
+  fleet.
+
+  If a runtime takes a `path:`-style selector, note what it names: a repository
+  ROOT, not a worktree. Half of `scripts/fleet/` runs from inside a worktree, so
+  a selector built from the caller's cwd names the wrong thing and the runtime
+  answers "no such repository" — the same permanent stall, through the fix for
+  it. The Orca driver resolves the root with `git rev-parse --git-common-dir`
+  and falls back to the checkout it was given.
+
+  **Non-zero when the list could not be read**, which is not the same as
+  "nothing is running": reading a failed call as zero live worktrees is how one
+  transient hiccup turns into three duplicate worktrees. That clause is the
+  contract's, not Orca's, and applies to every driver.
 - **`runner_worktree_issue`** has THREE answers, and the middle one is why it is
   not a boolean: `0` with the issue on stdout, `2` for "there is no linked
   issue", `1` for "the runtime would not say". A hook that reads 1 as 2
