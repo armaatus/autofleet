@@ -57,12 +57,19 @@ and does not lift a foundation hold. Label several and the ordinary ordering
 decides between them. `fleet.sh status` marks the rows that carry it, so a queue
 that looks reordered says why.
 
-One consequence worth knowing before you use it: a `priority` issue can start
-ahead of a `ready` foundation issue, and while it runs the foundation issue
-waits, because a foundation issue will not join worktrees already in flight.
-Nothing about "a foundation issue lands alone" is weakened — what depends on it
-is `blocked` either way — but the foundation work starts later than it would
-have. If that is not what you meant, the foundation issue is the one to label.
+One consequence worth knowing before you use it, and it is larger than a
+reordering. A `priority` issue can start ahead of a `ready` foundation issue,
+and while it runs the foundation issue waits — a foundation issue will not join
+worktrees already in flight. The part that costs: the scan **stops at the first
+foundation issue** once anything is in flight, so every ready issue behind it is
+skipped for that pass as well, whether or not it has anything to do with it.
+
+The fleet therefore runs at **one** worktree for the priority issue's whole
+time-box, and at one again while the foundation issue lands alone. Nothing about
+"a foundation issue lands alone" is weakened, and what depends on it is `blocked`
+either way — but the dependants are not what stalls, so that is the wrong thing
+to be reassured by. If two time-boxes at one worktree is not what you meant, the
+foundation issue is the one to label.
 
 ### The review
 

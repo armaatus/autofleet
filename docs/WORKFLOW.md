@@ -77,11 +77,22 @@ used to be to invent a dependency. A person applies that label; it reorders the
 ready list and changes nothing else, so a `blocked` or `needs-human-step` issue
 is no more startable for carrying it. `fleet.sh status` marks those rows.
 
-It does not lift a foundation hold, and it can delay one: a `priority` issue that
-starts first holds a worktree, and a foundation issue will not join work already
-in flight — so the foundation issue waits for it. Nothing it depends on can start
-in the meantime (those are `blocked`), but the order is worth meaning rather than
-discovering.
+It does not lift a foundation hold, and delaying one costs more than it looks.
+A `priority` issue that starts first holds a worktree, and a foundation issue
+will not join work already in flight — so the foundation issue waits. But the
+scan **stops at the first foundation issue** once anything is in flight, so
+every ready issue behind it is skipped for that pass too, including ones that
+have nothing to do with it.
+
+Ready list `[#151 priority, #F foundation, #A, #B]`, nothing running: pass one
+launches #151; pass two reaches #F, sees a worktree in flight, and stops — #A
+and #B are never considered. The fleet runs at **one** worktree for #151's whole
+time-box, then at one again while #F lands alone. Unlabelled, the same backlog
+sorts `[#A, #B, #F]` and fills three.
+
+So the question to ask before applying it is not "does this jump the queue" but
+"is this worth two time-boxes at one worktree". If it is not, the foundation
+issue is the one to label.
 
 `--auto` never pauses; it stops when the queue empties, at `--until`/`--for`, or
 after `--max-prs`, and says which.

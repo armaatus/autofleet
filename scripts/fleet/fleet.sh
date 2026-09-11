@@ -32,11 +32,24 @@
 # fake dependencies on issues that did not have them. It reorders the ready list
 # and nothing else: a `blocked` or `needs-human-step` issue is no more startable
 # for carrying it, and a foundation issue that is holding still holds. It can
-# DELAY one, though, and that is the only surprise in it: a priority issue picked
-# first occupies a worktree, and `foundation_in_flight` will not let a foundation
-# issue join work already in flight, so the foundation issue starts later than it
-# would have. Nothing that depends on it could have started either way -- those
-# are `blocked` -- so the rule holds; the wait is real all the same.
+# DELAY one, and the cost is bigger than "the foundation issue starts later".
+# The scan BREAKS on the first foundation issue once anything is in flight, so
+# every ready issue behind it in the list is skipped for that pass too --
+# including issues that have nothing to do with it and are not `blocked`.
+#
+# Worked through, because this is the number a maintainer needs before applying
+# the label. Ready list `[#151 priority, #F foundation, #A, #B]`, nothing in
+# flight: pass 1 launches #151; pass 2 reaches #F, sees `live=1`, breaks, and #A
+# and #B are never considered. The fleet runs at ONE worktree for #151's whole
+# time-box, then at one worktree again while #F lands alone. Without the label
+# the same backlog sorts `[#A, #B, #F]` and fills three.
+#
+# So: one `priority` label in front of a ready foundation issue costs two
+# time-boxes at one worktree, not a reordering. An earlier version of this
+# comment said "nothing that depends on it could have started either way --
+# those are `blocked` -- so the rule holds", which is true and is the wrong
+# reassurance: the dependants are not what stalls. Found by the independent
+# review, which noted this change wrote all three copies of that sentence.
 #
 # ## Stopping
 #

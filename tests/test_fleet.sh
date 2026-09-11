@@ -1975,6 +1975,17 @@ JSON
     [ "$(head -1 <<<"$out" | cut -f1)" = 151 ] \
       || fail "the renamed label was not read, so the knob is decoration: $out"
     echo "ok: AUTOFLEET_PRIORITY_LABEL renames the label the queue reads"
+    # ...AND THE DEFAULT WORD LOST ITS EFFECT, which is the half that catches a
+    # python that reads the knob and keeps `priority` beside it. #152 carries
+    # the default and must now sort like any other ready issue -- so it must not
+    # come ahead of #7, which carries nothing. Without this the phase passes on
+    # an implementation that honours both words at once. Found by the
+    # independent review.
+    rest="$(tail -n +2 <<<"$out" | cut -f1 | tr '\n' ' ')"
+    case "$rest" in
+      "152 "*) fail "the default word still sorted ahead with the knob renamed, so both words are live: $out" ;;
+    esac
+    echo "ok: ...and the default word stops being one"
     ;;
   list_declines)
     make_fixture ok

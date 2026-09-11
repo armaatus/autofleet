@@ -26,8 +26,15 @@
 : "${AUTOFLEET_RM_DEADLINE:=180}"
 
 # ---------------------------------------------------------------- the labels
-# The convention `unblock.yml` maintains and `fleet.sh` reads. Rename them here
-# if the repo already uses other words for the same ideas.
+# The convention `unblock.yml` maintains and `fleet.sh` reads.
+#
+# RENAMING WORKS FOR THREE OF THESE, and the doc says which. `AUTOFLEET_READY_LABEL`
+# is read by nothing -- `ready_issues` asks `gh` for the literal word -- so
+# renaming it hands you an empty queue forever, with nothing on screen saying
+# why. armaatus/autofleet#57. That sentence lives in docs/CONFIGURATION.md, and
+# this is the file somebody actually has open while renaming, so it says it too.
+# Found by the independent review, which pointed out the invitation was here and
+# the warning was one file away.
 : "${AUTOFLEET_READY_LABEL:=ready}"
 : "${AUTOFLEET_BLOCKED_LABEL:=blocked}"
 # An issue that defines an interface later issues include: it lands alone.
