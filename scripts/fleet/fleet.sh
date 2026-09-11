@@ -85,7 +85,33 @@ STARTED_DIR="$STATE_DIR/started"
 # one would then quietly change what they all import.
 ISSUE_REFS="$REPO_ROOT/.github/scripts"
 # One pass's worth of answers, and no longer. Emptied at the top of every poll
-# and once at startup, so a dispatcher never trusts a previous run's.
+# by `cmd_run`, and NOWHERE ELSE -- not at startup, not by any other command.
+#
+# The poll cache belongs to whoever is POLLING, and until #35 every command
+# emptied it at SOURCE TIME. So `status`, `stop`, `retry` and `resume` each
+# deleted it out from under a live dispatcher mid-pass -- and `interrupted-$n`
+# is the only thing stopping `reap_abandoned` re-interrupting an agent that
+# `enforce_timebox` interrupted earlier in that same pass. docs/WORKFLOW.md
+# tells you to run `status` in a loop until it says idle, so the way to hit it
+# was to watch the fleet. It also dropped `issue-$n`, making every watcher
+# re-issue the `gh issue view` that `poll_issue` exists to avoid.
+#
+# THERE IS NO CALL HERE AT ALL, which is #35's Acceptance in one line:
+# "fleet.sh status leaves $STATE_DIR byte-identical". The first fix kept the
+# source-time call and made it conditional on the dispatcher being dead, which
+# (a) still wrote to $STATE_DIR on the ordinary idle path, and (b) had to get
+# `dispatcher_alive`'s THREE answers right -- `||` collapses 2, "alive but ps
+# would not say", into "no dispatcher", so on a host where ps cannot answer
+# every `status` in the watch loop still wiped a live dispatcher's cache. The
+# bug unfixed, in an environment this repo keeps three phases for.
+#
+# Deleting it removes both problems, and costs nothing: `cmd_run` empties the
+# cache at the top of every pass before anything reads it, and NOTHING outSIDE
+# `cmd_run` reads it. `poll_issue` and `foundation_in_flight` are called only
+# from the poll body, from `launch`, and from the watchers the poll body calls.
+# So a cache left behind by a dispatcher that died is never read by anyone --
+# the staleness the conditional was protecting against is unobservable. Found by
+# the independent review, which proposed exactly this.
 POLL_CACHE="$STATE_DIR/poll-cache"
 forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
 LOG="$STATE_DIR/fleet.log"
@@ -2245,6 +2271,19 @@ print(int(spec))
 }
 
 cmd_run() {
+  # THE DRAIN LATCH, once. Three stop conditions were each spelling the same
+  # three lines -- set the flag, set the reason, say "-- launching nothing more,
+  # still reaping what is in flight" -- and a fourth arrived with this change.
+  # Three copies of a sentence are three chances for the stop conditions to stop
+  # saying the same thing, which is the property #36 is about. `reason` is what
+  # `fleet down: $reason` prints; `$2` is what this pass says on the way in.
+  # It closes over cmd_run's locals rather than taking them, because that is the
+  # whole of what it replaces. Found by the independent review.
+  enter_drain() {
+    drain_mode=true
+    reason="$1"
+    say "$2 -- launching nothing more, still reaping what is in flight"
+  }
   local auto=false deadline="" max_prs="" ; local -a wanted=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2361,22 +2400,19 @@ while that one is up."
     # dispatcher is what reaps a worktree once its PR merges, so killing it here
     # would strand every in-flight stack under `restart: unless-stopped`. It
     # keeps reaping and exits when nothing it owns is left.
-    if draining && ! $drain_mode; then
-      drain_mode=true
-      reason="you stopped it"
-      say "draining -- launching nothing more, still reaping what is in flight"
-    fi
+    if draining && ! $drain_mode; then enter_drain "you stopped it" "draining"; fi
     if [ -n "$deadline" ] && [ "$(date +%s)" -ge "$deadline" ] && ! $drain_mode; then
-      drain_mode=true
-      say "deadline passed -- launching nothing more, still reaping what is in flight"
-      reason="the deadline passed"
+      enter_drain "the deadline passed" "deadline passed"
     fi
 
     forget_poll_answers
     # ...here, once per pass, and nowhere else: see the note beside the
-    # definition. The order below is load-bearing in three places. reap_merged first, because a
-    # worktree whose PR merged is its business and reap_abandoned only ever looks
-    # at what is left owned. enforce_timebox before notice_stalled, because the
+    # definition.
+    #
+    # The order below is load-bearing in three places. reap_merged first,
+    # because a worktree whose PR merged is its business and reap_abandoned only
+    # ever looks at what is left owned. enforce_timebox before notice_stalled,
+    # because the
     # first writes `$POLL_CACHE/carded-` and the second reads it to avoid
     # repeating a board comment it has already made. And reap_abandoned LAST of
     # the four: it is the one that removes a worktree, and running it earlier
@@ -2411,7 +2447,7 @@ while that one is up."
       # `restart: unless-stopped` with nothing left to take them down. It stops
       # LAUNCHING here and keeps reaping, which is the same thing the top of the
       # loop does one pass later.
-      if check_drain; then drain_mode=true; reason="you stopped it"; break; fi
+      if check_drain; then enter_drain "you stopped it" "draining"; break; fi
       # A DRAIN, not an exit. `break 2` left the launch loop AND the poll loop,
       # so the dispatcher stopped with its worktrees mid-work: nothing reaped
       # them when their PRs merged, their stacks stayed up under
@@ -2425,9 +2461,7 @@ while that one is up."
       # and the only assignment inside it breaks out at once, so it could never
       # be false here and reading it suggested otherwise.
       if [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ]; then
-        drain_mode=true
-        reason="it opened $opened worktree(s)"
-        say "opened $opened worktree(s) -- launching nothing more, still reaping what is in flight"
+        enter_drain "it opened $opened worktree(s)" "opened $opened worktree(s)"
         break
       fi
 
@@ -2580,6 +2614,17 @@ while that one is up."
     # different directories, and a stale marker with no owned entry would make
     # `owned` under-count and the dispatcher exit with a worktree still in
     # flight -- which is the failure the drain bound exists to prevent, inverted.
+    #
+    # WHY THE SUBTRACTION IS SAFE, since the two directories could in principle
+    # disagree: the `[ -e "$OWNED_DIR/$n" ]` test below is what makes it safe,
+    # and it is not belt-and-braces. `disown_issue` calls `clear_issue_markers`,
+    # so a release takes the marker with it and the pair cannot come apart in
+    # that direction; `reap_merged`'s `[ -d "$path" ] || disown_issue` self-heals
+    # a worktree whose directory is gone. What is left is a marker outliving its
+    # owned entry through some path neither of those covers -- and the test drops
+    # it, so `parked` can only ever count worktrees `owned` also counted. The
+    # review could not construct a case that breaks it either; this is the line
+    # it asked for saying why.
     local held_owned=0 m n
     for m in "$STATE_DIR"/stuck-* "$STATE_DIR"/merge-held-* "$STATE_DIR"/merge-blind-*; do
       [ -e "$m" ] || continue
@@ -2589,10 +2634,31 @@ while that one is up."
     parked="$held_owned"
     [ "${parked:-0}" -gt 0 ] && owned=$(( owned - parked ))
     [ "${owned:-0}" -lt 0 ] && owned=0
+    # THE DRAIN COMES FIRST, and in BOTH modes. Under a drain nothing launches,
+    # so what is still queued cannot keep the dispatcher alive -- only what it
+    # still owns can. The guard used to live on the `$auto` branch alone, and in
+    # LIST mode that was the wedge this PR's own `--max-prs` fix created:
+    #
+    #   `wanted` is pruned only INSIDE the launch loop, and that loop is gated
+    #   on `while ! $drain_mode`. So `run --max-prs 1 148` launches #148,
+    #   `remaining+=("$n")` keeps it in `wanted` because it is in flight rather
+    #   than done, the next iteration hits the cap, latches the drain, and the
+    #   launch loop is never entered again. `queued` is stuck at 1 forever --
+    #   including after #148's PR merges and `reap_merged` disowns it. `owned`
+    #   reaches 0; `queued` never does.
+    #
+    # That is #37's wedge re-created by #36's fix, in the one mode #37's fix does
+    # not cover, and `--auto --max-prs N` was fine (`wanted` is empty there),
+    # which is why the suite stayed green. `--until` and `--for` in list mode had
+    # the same shape already, so this fixes all three rather than `--max-prs`
+    # alone -- which is what makes "equivalent to the other two" true.
+    # Found by the independent review.
     local queued=0
-    if [ "${#wanted[@]}" -gt 0 ]; then
+    if $drain_mode; then
+      queued=0
+    elif [ "${#wanted[@]}" -gt 0 ]; then
       queued="${#wanted[@]}"
-    elif $auto && ! $drain_mode; then
+    elif $auto; then
       # Counted from the lists already in hand rather than by asking `in_flight`
       # per issue: that made two API calls each, and a 200-issue backlog on a
       # 60-second poll is how you meet gh's secondary rate limit.
@@ -2621,7 +2687,16 @@ while that one is up."
         done
       fi
       if $drain_mode; then
-        reason="${reason:-you stopped it}; everything in flight has landed"
+        # NOT "everything in flight has landed" when something has not: the
+        # parked worktrees named just above are exactly the work that did not
+        # land, and signing off with the one thing that did not happen is how a
+        # reader stops reading the lines that say what to do about it. Found by
+        # the independent review.
+        if [ "${parked:-0}" -gt 0 ]; then
+          reason="${reason:-you stopped it}; everything else in flight has landed, and $parked worktree(s) are waiting for you"
+        else
+          reason="${reason:-you stopped it}; everything in flight has landed"
+        fi
       elif $auto && $declined; then
         reason="the backlog has nothing startable left, and what it was given was declined"
       elif $auto; then
@@ -2642,28 +2717,6 @@ while that one is up."
 
 # Sourced by tests/test_orca_fleet.sh, which exercises one function against a
 # stubbed CLI. Executed, it dispatches as usual.
-# The poll cache belongs to whoever is POLLING, and until now every command
-# emptied it at source time. So `status`, `stop`, `retry` and `resume` each
-# deleted it out from under a live dispatcher mid-pass -- and `interrupted-$n`
-# is the only thing stopping `reap_abandoned` re-interrupting an agent that
-# `enforce_timebox` interrupted earlier in that same pass. docs/WORKFLOW.md
-# tells you to run `status` in a loop until it says idle, so the way to hit it
-# was to watch the fleet. It also dropped `issue-$n`, making every watcher
-# re-issue the `gh issue view` that `poll_issue` exists to avoid.
-#
-# Cleared when nobody owns it, which keeps a stale cache from outliving a
-# dispatcher that died -- and left alone when one is live, including the
-# "alive, but ps would not say" answer, because the point is not to touch
-# another process's state. `cmd_run` empties it per pass regardless, which is
-# the only place that actually wants it emptied. armaatus/autofleet#35.
-# `[ "$?" = 1 ]`, NOT `||`. `dispatcher_alive` has THREE answers and `||`
-# collapses 2 -- "alive, but ps would not say" -- into "no dispatcher", so on a
-# host where ps cannot answer every `status` in the watch loop still wiped a live
-# dispatcher's cache. That is this bug unfixed, in an environment this repo
-# already knows it has and keeps three phases for. Every other caller in this
-# file keeps the two apart. The comment above said so and the code did not.
-dispatcher_alive "$(cat "$PIDFILE" 2>/dev/null)"
-[ "$?" = 1 ] && forget_poll_answers
 
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 

@@ -583,6 +583,22 @@ add_origin() {
   git -C "$WORK/wt" push -q -u origin work
 }
 
+# The same thing for a worktree the run itself opened, whose path the phase does
+# not know until the log says so. `add_origin` is hardcoded to $WORK/wt, and
+# `reap_merged` gives up at `rev-parse --abbrev-ref HEAD` on a directory that is
+# not a git repo -- so a launched worktree was unreapable and any phase that
+# waited for one to land waited forever, for a reason that had nothing to do with
+# what it was testing.
+reapable_worktree_at() {
+  local path="$1" bare="$WORK/origin-$(basename "$path").git"
+  git init -q -b work "$path"
+  git -C "$path" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git init -q --bare "$bare"
+  git -C "$path" remote add origin "$bare"
+  git -C "$path" push -q origin work:main
+  git -C "$path" push -q -u origin work
+}
+
 # Nothing this dispatcher may throw away: an untracked file, or a commit that is
 # nowhere but here.
 dirty_worktree()  { echo scratch >"$WORK/wt/notes.txt"; }
@@ -637,7 +653,30 @@ assert_no_box_markers() {
 
 # fleet.sh returns instead of dispatching when it is sourced, so one function can
 # be exercised without starting a dispatcher.
-in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
+#
+# ONE CALL IS ONE PASS, which is why the poll cache is emptied first. `cmd_run`
+# empties it at the top of every pass and nothing else does -- sourcing fleet.sh
+# used to empty it too, and #35 is the bug that was: `status`, `stop`, `retry`
+# and `resume` each wiped a live dispatcher's cache mid-pass. Removing that
+# source-time call left this helper carrying a cache from one `in_fleet` to the
+# next, so a phase that changed an issue's labels between two calls read the
+# first call's answer and seven of them failed for a reason that had nothing to
+# do with what they were testing.
+#
+# `in_poll` below deliberately does NOT do this: its whole point is several
+# watchers inside ONE pass, sharing the per-poll answers the way a real poll
+# does. The two helpers model the two scopes, and that distinction is now what
+# the cache's lifetime means.
+in_fleet() {
+  rm -rf "$AUTOFLEET_DIR/poll-cache"
+  in_fleet_keeping_cache "$@"
+}
+
+# ...and the raw form, for the one phase whose subject IS the cache's survival.
+# `status_keeps_cache` asserts that `cmd_status` leaves the poll cache alone, so
+# running it through a helper that empties the cache first would assert nothing
+# at all.
+in_fleet_keeping_cache() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
 
 # What .claude/hooks/guard.py answers about one command, against THIS phase's
 # fleet dir: 0 allowed, 2 blocked.
@@ -2225,6 +2264,102 @@ JSON
       || fail "it never started: $out"
     echo "ok: a pidfile whose process is gone does not refuse"
     ;;
+  status_keeps_cache)
+    # #35's Acceptance, named in the issue and missing from the first fix: "A
+    # test: arm `interrupted-$n`, run `status`, assert the marker survives", and
+    # "fleet.sh status leaves $STATE_DIR byte-identical".
+    #
+    # Why it matters rather than being tidy: `interrupted-$num` is the ONLY thing
+    # stopping `reap_abandoned` re-interrupting an agent that `enforce_timebox`
+    # interrupted earlier in the same pass, and `carded-$num` is the only thing
+    # stopping a second board comment. docs/WORKFLOW.md tells you to run `status`
+    # in a loop until it says idle, so every watch of a working fleet re-armed
+    # both. Asserted against a fleet with NO dispatcher, which is the ordinary
+    # case and the one the conditional fix still wrote through.
+    make_fixture ok
+    mkdir -p "$AUTOFLEET_DIR/poll-cache"
+    : >"$AUTOFLEET_DIR/poll-cache/interrupted-42"
+    : >"$AUTOFLEET_DIR/poll-cache/carded-42"
+    printf 'OPEN\tready\n' >"$AUTOFLEET_DIR/poll-cache/issue-42"
+    # One status first, then the snapshot, then another: sourcing fleet.sh
+    # `mkdir -p`s its own state directories, which is not what "byte-identical"
+    # is about. What #35 is about is a status in a WATCH LOOP changing state --
+    # so the question is whether the second one differs from the first.
+    # `in_fleet_keeping_cache`, NOT `in_fleet`: this phase's whole subject is
+    # whether `cmd_status` leaves the cache alone, and `in_fleet` empties it
+    # first to model one pass. Through that helper this would assert nothing.
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    before="$(cd "$AUTOFLEET_DIR" && find . | sort | cksum)"
+    out="$(in_fleet_keeping_cache cmd_status 2>&1)"
+    [ -e "$AUTOFLEET_DIR/poll-cache/interrupted-42" ] \
+      || fail "status dropped interrupted-42, so the next pass re-interrupts an agent the time-box already stopped"
+    [ -e "$AUTOFLEET_DIR/poll-cache/carded-42" ] \
+      || fail "status dropped carded-42, so the next pass writes a second board comment under whoever is working in there"
+    [ -e "$AUTOFLEET_DIR/poll-cache/issue-42" ] \
+      || fail "status dropped issue-42, so every watcher re-issues the gh lookup poll_issue exists to avoid"
+    after="$(cd "$AUTOFLEET_DIR" && find . | sort | cksum)"
+    [ "$after" = "$before" ] \
+      || fail "status changed \$STATE_DIR; the acceptance is that it leaves it byte-identical. before=$before after=$after, now holding: $(cd "$AUTOFLEET_DIR" && find . | sort | tr '\n' ' ')"
+    # ...and with a dispatcher that ps cannot see, which is where the conditional
+    # form of this fix was still wrong: `||` reads "alive but ps would not say"
+    # as "no dispatcher" and wipes a LIVE dispatcher's cache.
+    make_repo_git
+    dispatcher_running
+    blind_ps
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/poll-cache/interrupted-42" ] \
+      || fail "status wiped a live dispatcher's cache on a host where ps will not answer -- the three-answer conflation, unfixed"
+    echo "ok: status leaves the poll cache alone, with and without a ps that answers"
+    ;;
+  cap_ends_on_merge)
+    # #36's Acceptance asked for this by name -- "a phase asserting the reap
+    # happens after the cap is reached" -- and its Design notes said why: "the
+    # test is the point: tests/test_fleet.sh uses --max-prs 1 only as a loop
+    # bound, never asserting the drain, which is why this survived". It still
+    # did. `list_declines`, `queue_skips` and `abandon_timebox` all pass
+    # --max-prs 1 as a safety bound on a run that never reaches the cap.
+    #
+    # Reaching it is the whole phase, and without the drain-first `queued` guard
+    # this run NEVER RETURNS: `wanted` is pruned only inside the launch loop,
+    # that loop is gated on `while ! $drain_mode`, and the cap latches the drain.
+    # So #148 stays in `wanted` after its PR merges and `reap_merged` disowns it
+    # -- `owned` reaches 0, `queued` is stuck at 1, and the dispatcher polls
+    # forever with `status` never saying idle and `cmd_run` refusing a second
+    # dispatcher. That is #37's wedge, re-created by #36's fix, in the one mode
+    # #37's fix does not cover. `run_ended` bounds it, so the failure is a
+    # message rather than a hung suite. Found by the independent review.
+    make_fixture ok
+    add_origin
+    issue_state OPEN; issue_labels "ready"
+    # No PR yet: the cap has to be reached by a LAUNCH, so the first pass must
+    # find #148 startable.
+    echo '[]' >"$GH_PRS"
+    : >"$GH_MERGED"
+    ( in_fleet cmd_run --max-prs 1 148 >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    wait_for_log "worktree(s) opened" \
+      || fail "the run never said what its cap was: $(cat "$WORK/run.log")"
+    wait_for_log "opening a worktree for #148" \
+      || fail "the cap was never reached, so this phase asserts nothing: $(cat "$WORK/run.log")"
+    wait_for_log "launching nothing more" \
+      || fail "reaching --max-prs did not latch the drain: $(cat "$WORK/run.log")"
+    # ...and now the work lands, which is the only thing left that can end it.
+    # The launched worktree has to be REAPABLE for that, and the create stub
+    # leaves a bare directory: `reap_merged` gives up at `rev-parse` on it and
+    # the worktree is owned forever, for a reason that is the fixture rather than
+    # the code. Its path is the one the log just named.
+    launched="$(sed -n 's/^.*is running in //p' "$WORK/run.log" | head -1)"
+    [ -n "$launched" ] || fail "could not tell where the run opened its worktree: $(cat "$WORK/run.log")"
+    reapable_worktree_at "$launched"
+    echo '[{"number":9,"body":"Closes #148"}]' >"$GH_PRS"
+    echo 9 >"$GH_MERGED"
+    run_ended "$HELD_PID" \
+      || fail "the run never ended after its one PR merged -- \`wanted\` still holds #148 because the prune lives inside the loop the drain just closed: $(cat "$WORK/run.log")"
+    HELD_PID=""
+    grep -q "everything in flight has landed" "$WORK/run.log" \
+      || fail "it exited for some other reason than the work landing: $(cat "$WORK/run.log")"
+    echo "ok: --max-prs latches the drain and the run still ends when its work lands"
+    ;;
   drain_ends_on_merge)
     make_fixture ok
     make_worktree
@@ -2370,6 +2505,6 @@ JSON
     echo "ok: a dispatcher too old to see the drain is not drained in silence"
     ;;
   *)
-    echo "usage: tests/test_fleet.sh foreign_worktree|reap_blind_upstream|drain_ends_with_parked|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
+    echo "usage: tests/test_fleet.sh foreign_worktree|reap_blind_upstream|drain_ends_with_parked|foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|status_keeps_cache|cap_ends_on_merge|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher" >&2
     exit 2 ;;
 esac
