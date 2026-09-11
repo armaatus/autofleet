@@ -424,6 +424,30 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "${n:-}" = 1 ] \
     || fail "a stopped run did not refund the try the dispatcher spent before the spawn (tries now ${n:-gone})"
   ok "...and refunds the try the dispatcher spent, with the marker set"
+
+  # THE OTHER PRE-HEAD EXIT, and the one that makes the `${head:-}` guard
+  # load-bearing rather than defensive: `fleet_owner_repo` failing calls
+  # `unspent_try`, which matches on a head this run has not read yet. Without the
+  # guard that is an unbound expansion under `set -u`, so the run dies with exit
+  # 1 instead of 2 and refunds nothing.
+  rm -f "$AUTOFLEET_DIR/STOP"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42.tries"
+  cat >"$WORK/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"repo view"*) echo "could not resolve" >&2; exit 1 ;;
+esac
+exit 1
+GHSTUB
+  chmod +x "$WORK/bin/gh"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  make_gh_stub 2>/dev/null || true
+  grep -q "unbound variable" <<<"$out" \
+    && fail "a gh that could not name the repository died on a shell variable: $out"
+  [ "$rc" = 2 ] \
+    || fail "gh failing to name the repository exited $rc rather than 2: $out"
+  ok "...and a gh that cannot name the repository exits 2 without dying on \$head"
   [ "$(n_reviews)" = 0 ] \
     || fail "a stopped fleet submitted a review"
   ok "...and nothing goes out"
