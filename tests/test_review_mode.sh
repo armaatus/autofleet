@@ -438,17 +438,50 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # under two days on the machine this was written on, 65% of them belonging to
   # pull requests that had already merged. The cost is not the bytes -- it is
   # that stale state gets read as current. armaatus/autofleet#70.
-  make_fixture
+  # `stub_reviewer`, NOT make_fixture alone. Without it AUTOFLEET_REVIEW_CMD
+  # stays at its `claude` default, PR 42 is non-draft, the mode is local and the
+  # graphql stub returns no reviews -- so `review_open_prs` launches a REAL agent
+  # with an 1800s timeout, twice, orphaned past the end of the suite. `gh` is
+  # stubbed so they cannot reach GitHub; they spend real budget anyway. Found by
+  # the independent review.
+  make_fixture; stub_reviewer silent
   mkdir -p "$AUTOFLEET_DIR/reviews"
   # Two PRs: 42 is open, 99 is not.
   for h in aaaaaaaa bbbbbbbb cccccccc dddddddd; do
     : >"$AUTOFLEET_DIR/reviews/pr-42-$h.log"; sleep 0.01
   done
   : >"$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log"
-  AUTOFLEET_KEEP_REVIEWS=2 in_poll review_open_prs >/dev/null 2>&1
+  # ONE GRACE PASS FIRST. #70's Acceptance: "nothing is removed on the pass it
+  # becomes eligible". `reap_merged` runs immediately before the sweep, so a PR
+  # that merged this pass has already dropped off the open list -- and losing
+  # every transcript in the same breath as the merge is exactly when somebody
+  # wants them. Found by the independent review.
+  # A TRANSCRIPT IS NOT SWEPT UNDER ITS OWN REVIEWER. `review.sh` holds the file
+  # open for up to AUTOFLEET_REVIEW_TIMEOUT while the grace is one pass, so a PR
+  # that auto-merges two minutes into its own review would have had the output
+  # unlinked under the agent still writing it. Found by `/code-review`.
+  : >"$AUTOFLEET_DIR/reviews/pr-98-99999999.log"
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '%s %s\n' "$$" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/98"
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviews/pr-98-99999999.log" ] \
+    || fail "a transcript was swept while a reviewer for that PR was still writing to it"
+  rm -f "$AUTOFLEET_DIR/reviewing/98"
+  ok "a transcript is not swept under its own running reviewer"
+
+  # ...and now the grace, from a clean slate: the passes above already spent
+  # PR 99's, which is the rule working rather than a fixture problem.
+  rm -f "$AUTOFLEET_DIR/reviews"/.closed-*
+  : >"$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log"
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   [ -e "$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log" ] \
-    && fail "a transcript for a PR that is no longer open survived the sweep"
-  ok "a closed PR's transcripts go"
+    || fail "a closed PR lost its transcripts on the pass it closed, with no grace"
+  ok "a closed PR keeps its transcripts for one pass"
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log" ] \
+    && fail "a transcript for a PR that is no longer open survived the grace pass"
+  ok "...and goes on the next one"
   n="$(ls "$AUTOFLEET_DIR/reviews"/pr-42-*.log 2>/dev/null | grep -c .)"
   [ "$n" = 2 ] \
     || fail "an open PR kept $n transcripts rather than AUTOFLEET_KEEP_REVIEWS=2"
@@ -460,7 +493,8 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # 0 means keep everything, which is what a host project debugging its own
   # reviewer wants. A sweep with no off switch is one somebody works around.
   : >"$AUTOFLEET_DIR/reviews/pr-99-ffffffff.log"
-  AUTOFLEET_KEEP_REVIEWS=0 in_poll review_open_prs >/dev/null 2>&1
+  AUTOFLEET_KEEP_REVIEWS=0 poll_review_open_prs
+  AUTOFLEET_KEEP_REVIEWS=0 poll_review_open_prs
   [ -e "$AUTOFLEET_DIR/reviews/pr-99-ffffffff.log" ] \
     || fail "AUTOFLEET_KEEP_REVIEWS=0 still swept, so there is no way to keep them"
   ok "...and 0 keeps everything"
@@ -469,10 +503,41 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # dispatcher holds it open in append mode, so truncating leaves the offset
   # where it was and the next write pads the gap with NULs.
   head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+
+  # NOT WHILE A REVIEWER IS RUNNING. `review.sh` is spawned with `>>"$LOG"`, and
+  # that redirect holds the inode for up to AUTOFLEET_REVIEW_TIMEOUT -- thirty
+  # minutes and many polls. Rotate under it and its output goes to a file nobody
+  # is reading, and the NEXT rotation unlinks the file it is still writing to.
+  # Found by the independent review, which also caught that the comment named
+  # the dispatcher as the long-lived holder. It is not; `tee -a` is fresh per
+  # call.
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  # A pid `reviewer_alive` accepts as OURS. The first version of this wrote the
+  # harness's own `$$`, which that function correctly reports as not a reviewer
+  # -- so the assertion passed only because the guard was broken in a different
+  # way, and it would have FAILED against the corrected guard. A phase that
+  # passes because of a bug is worse than no phase. Found by `/code-review`.
+  # `reviewer_alive` matches `review.sh` in the ps command line -- that is its
+  # whole point, so a marker left by a `kill -9` cannot name a stranger the OS
+  # has since reused the pid for. The stand-in has to look like one.
+  # NOT `exec sleep`: that replaces the process and ps then reports `sleep`,
+  # which is the thing `reviewer_alive` is looking past.
+  printf '#!/bin/sh\nsleep "$@"\n' >"$WORK/bin/review.sh"
+  chmod +x "$WORK/bin/review.sh"
+  "$WORK/bin/review.sh" 30 &
+  fake_reviewer=$!
+  printf '%s %s\n' "$fake_reviewer" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  AUTOFLEET_LOG_MAX_BYTES=1000 in_poll rotate_fleet_log >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
+    && fail "fleet.log rotated while a reviewer was writing into it; its output goes to a file nobody reads and the next rotation unlinks it"
+  ok "fleet.log does not rotate under a running reviewer"
+
+  kill "$fake_reviewer" 2>/dev/null; wait "$fake_reviewer" 2>/dev/null
+  rm -f "$AUTOFLEET_DIR/reviewing/42"
   AUTOFLEET_LOG_MAX_BYTES=1000 in_poll rotate_fleet_log >/dev/null 2>&1
   [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
     || fail "fleet.log passed the cap and was not rotated"
-  ok "fleet.log rotates at AUTOFLEET_LOG_MAX_BYTES"
+  ok "...and rotates at AUTOFLEET_LOG_MAX_BYTES once none is"
   AUTOFLEET_LOG_MAX_BYTES=0 in_poll rotate_fleet_log >/dev/null 2>&1
   ok "...and 0 keeps it"
   ;;

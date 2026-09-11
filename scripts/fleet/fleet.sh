@@ -848,29 +848,67 @@ stop_reviewers() {
 prune_review_logs() {
   local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
-  [ -n "$open_prs" ] || return 0
+  # An EMPTY list is a real answer -- a drained fleet whose last PR merged, which
+  # is the peak of the pile this sweep exists for. `gh pr list` FAILING is
+  # already handled by the caller, which returns before reaching here, so the
+  # only way to arrive with nothing is a legitimate `[]`. Refusing to sweep then
+  # was refusing exactly when it was most needed. Found by `/code-review`.
   [ -d "$dir" ] || return 0
   local removed=0
   for f in "$dir"/pr-*.log; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
+    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` holds its
+    # transcript open with `>"$log"` for the whole run -- up to
+    # AUTOFLEET_REVIEW_TIMEOUT, thirty minutes -- while the grace is one pass, a
+    # minute. A PR that auto-merges two minutes into its own review would have
+    # had that review's output unlinked under the agent still writing it, and
+    # the sweep would have SAID it swept it. `rotate_fleet_log` was given this
+    # guard for the sibling file; this sweep was not. Found by `/code-review`.
+    [ -e "$REVIEWING_DIR/$num" ] && continue
     case " $open_prs " in
-      *" $num "*) continue ;;                   # still open; the per-PR cap below
+      *" $num "*) rm -f "$dir/.closed-$num"; continue ;;   # still open
     esac
+    # A GRACE PASS, which is #70's own Acceptance: "nothing is removed on the
+    # pass it becomes eligible", and its Design note "a PR that merges at 16:02
+    # still has its logs at 16:03". `reap_merged` runs immediately before this,
+    # so a PR that merged THIS pass has already dropped off `gh pr list --state
+    # open` and would otherwise lose every transcript in the same breath as the
+    # merge -- which is exactly when somebody is most likely to want them. Found
+    # by the independent review; the Plan listed three mitigations and this was
+    # not one of them.
+    if [ ! -e "$dir/.closed-$num" ]; then
+      : >"$dir/.closed-$num"
+      continue
+    fi
     rm -f "$f" && removed=$((removed + 1))
   done
   # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
   # is the order they were written.
   for num in $open_prs; do
     kept=0
-    for f in $(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null); do
+    # `ls -t` through a `while read`, not a `for` over an unquoted substitution:
+    # $FLEET_DIR is a documented knob and a space in it word-split the cap into
+    # `rm -f` on fragments, so it silently stopped enforcing. Hard rule 3.
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
       kept=$((kept + 1))
       [ "$kept" -le "$AUTOFLEET_KEEP_REVIEWS" ] && continue
       rm -f "$f" && removed=$((removed + 1))
-    done
+    done <<EOF
+$(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null)
+EOF
   done
   # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
   # first question about a missing transcript is whether this took it.
+  # ...and the grace markers of PRs whose transcripts are all gone, so the
+  # directory does not trade one kind of growth for another.
+  for f in "$dir"/.closed-*; do
+    [ -e "$f" ] || continue
+    num="$(basename "$f")"; num="${num#.closed-}"
+    ls "$dir"/pr-"$num"-"*.log" >/dev/null 2>&1 || \
+      ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
+  done
   [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
   return 0
 }
@@ -878,17 +916,54 @@ prune_review_logs() {
 # fleet.log, at AUTOFLEET_LOG_MAX_BYTES. ONE generation: the point is a bound,
 # and two files at the cap is twice the cap.
 #
-# Between passes, never mid-pass, and `mv` rather than truncate-in-place: the
-# dispatcher holds this file open in append mode, so truncating it leaves the
-# offset where it was and the next write pads the gap with NULs.
+# NOT WHILE A REVIEWER IS RUNNING, and that is the whole of the care here. The
+# dispatcher's own writes are `tee -a`, fresh per call, so they follow a rename
+# without noticing -- but `review_open_prs` spawns `review.sh ... >>"$LOG"`, and
+# that redirect holds the INODE for up to AUTOFLEET_REVIEW_TIMEOUT, which is
+# thirty minutes by default and many polls. Rotate under it and its output goes
+# to `fleet.log.1`, invisible in the log anybody is reading; the next rotation
+# then `mv -f`s over `fleet.log.1` and unlinks the file it is still writing to.
+# The output is gone and nothing errors. An earlier version of this comment
+# named the dispatcher as the long-lived holder; it is not. Found by the
+# independent review.
+#
+# Waiting costs nothing: the cap is a bound on a log, not a deadline, and the
+# reviewer that blocks the rotation is the thing writing most of what is in it.
 rotate_fleet_log() {
-  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size
+  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size live
   [ "$max" -gt 0 ] 2>/dev/null || return 0
   [ -f "$LOG" ] || return 0
+  # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
+  # silent. It called `is_review_record`, which does not exist on this branch --
+  # it arrives with #42 -- so `command not found` was swallowed by `2>/dev/null`,
+  # the `&& continue` never fired, and EVERY file in the directory blocked
+  # rotation while the dispatcher ran a nonexistent command once per file per
+  # poll. And blocking on any marker rather than a live pid means rotation
+  # starves: `fleet.sh` deliberately keeps a marker whose pid `ps` cannot
+  # identify, and that one survives for the dispatcher's life, after which
+  # AUTOFLEET_LOG_MAX_BYTES is not a bound at all. Found by `/code-review`, which
+  # reproduced the 127.
+  if [ -d "$REVIEWING_DIR" ]; then
+    for live in "$REVIEWING_DIR"/*; do
+      [ -e "$live" ] || continue
+      local held=""
+      read -r held _ <"$live" 2>/dev/null || true
+      # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
+      # 2 alive-but-ps-would-not-say. Rotate only when nothing is holding the
+      # file -- 2 counts as holding it, because the whole point is not to rename
+      # an inode somebody still has open.
+      reviewer_alive "$held"; [ "$?" = 1 ] || return 0
+    done
+  fi
   size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   [ "$size" -gt "$max" ] || return 0
-  mv -f "$LOG" "$LOG.1" 2>/dev/null || return 0
+  mv -f "$LOG" "$LOG.1" 2>/dev/null || {
+    # SAID. A read-only state dir or an undeletable fleet.log.1 made this fail
+    # on every poll forever with nothing logged -- the opposite of the rule
+    # stated forty lines above.
+    say "could not rotate $LOG past $max bytes; it will keep growing"
+    return 0; }
   say "fleet.log passed $max bytes; the previous one is $LOG.1"
   return 0
 }
@@ -898,6 +973,12 @@ rotate_fleet_log() {
 # that was amended or rebased away, and its record can only ever answer for a
 # commit nobody will push again.
 prune_reviewed_markers() {
+  # The same off switch the other two have, because config.sh promises one --
+  # "set either to 0 to keep everything" -- and this sweep was governed by
+  # neither knob. A host project that sets AUTOFLEET_KEEP_REVIEWS=0 to stop the
+  # dispatcher deleting review state still had these deleted every 60 seconds.
+  # Found by `/code-review`.
+  [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
   local dir="$REPO_ROOT/.autofleet/run" f sha removed=0
   [ -d "$dir" ] || return 0
   for f in "$dir"/reviewed-*; do
@@ -906,7 +987,19 @@ prune_reviewed_markers() {
     case "$sha" in *[!0-9a-f]*|"") continue ;; esac
     # `cat-file -e` first: a sha git has never heard of is not ours to judge.
     git -C "$REPO_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null || continue
-    git -C "$REPO_ROOT" branch -a --contains "$sha" 2>/dev/null | grep -q . && continue
+    # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
+    # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
+    # 141 -- so past a few hundred refs this said "on no branch" about a commit
+    # that is on a thousand of them, and deleted the record. Measured: 500 refs
+    # exits 0, 1000 exits 141. guard.py then refuses the push with "record the
+    # local review first" and both passes have to be run again.
+    #
+    # It fails SAFE now, like the `cat-file -e` above it: anything other than a
+    # confidently empty answer keeps the record.
+    local on_branch
+    on_branch="$(git -C "$REPO_ROOT" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
+      || continue
+    [ -n "$on_branch" ] && continue
     rm -f "$f" && removed=$((removed + 1))
   done
   [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
