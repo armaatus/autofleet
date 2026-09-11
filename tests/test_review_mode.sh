@@ -259,6 +259,11 @@ poll_review_open_prs() {
   return 0
 }
 # `review_open_prs` needs fleet.sh's own state, so it is sourced rather than run.
+# One function WITH ITS ARGUMENTS. `in_poll` runs each argument as a function
+# name, which is right for driving several watchers in one pass and silently
+# wrong for anything that takes parameters -- the arguments simply never arrive.
+in_fleet_fn() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1; "$@"); }
+
 in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; for fn in "$@"; do "$fn"; done); }
 
 # Does merge_gate.py count what is on the PR now? Asked of the gate itself, so
@@ -538,8 +543,67 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
     || fail "fleet.log passed the cap and was not rotated"
   ok "...and rotates at AUTOFLEET_LOG_MAX_BYTES once none is"
+  # 0 KEEPS IT, asserted rather than announced. The first version ran the
+  # rotation and printed `ok` unconditionally -- and even with an assertion it
+  # was vacuous, because the `mv` two steps up had left fleet.log holding one
+  # line, under any cap. Refilled past the cap first. 1975460 fixed this exact
+  # shape one PR over ("a lint that asserts nothing"). Found by the independent
+  # review.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  before_1="$(wc -c <"$AUTOFLEET_DIR/fleet.log.1" 2>/dev/null | tr -d ' ')"
   AUTOFLEET_LOG_MAX_BYTES=0 in_poll rotate_fleet_log >/dev/null 2>&1
-  ok "...and 0 keeps it"
+  [ -s "$AUTOFLEET_DIR/fleet.log" ] \
+    || fail "AUTOFLEET_LOG_MAX_BYTES=0 rotated anyway, so there is no way to keep the log"
+  [ "$(wc -c <"$AUTOFLEET_DIR/fleet.log.1" 2>/dev/null | tr -d ' ')" = "$before_1" ] \
+    || fail "AUTOFLEET_LOG_MAX_BYTES=0 overwrote the previous generation"
+  ok "...and 0 keeps it, with the cap exceeded"
+
+  # --- I1: an empty open list that is an ANSWER sweeps; one that is a FAILURE
+  # to answer does not. Three things produce a wrongly-empty list -- the parse
+  # swallowing an error, the page limit, and `--author` -- and each would take
+  # every transcript on the machine, once, permanently.
+  rm -f "$AUTOFLEET_DIR/reviews"/.closed-* "$AUTOFLEET_DIR/reviews"/pr-*.log
+  : >"$AUTOFLEET_DIR/reviews/pr-77-11111111.log"
+  in_fleet_fn prune_review_logs "" no >/dev/null 2>&1
+  in_fleet_fn prune_review_logs "" no >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-77-11111111.log" ] \
+    || fail "a list the caller could not answer for was read as 'every PR is closed', and the store was emptied"
+  ok "a list nobody could answer for sweeps nothing"
+  in_fleet_fn prune_review_logs "" yes >/dev/null 2>&1
+  in_fleet_fn prune_review_logs "" yes >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-77-11111111.log" ] \
+    && fail "a genuinely empty list -- a drained fleet -- swept nothing, which is the peak of the pile"
+  ok "...and a real empty answer does sweep"
+
+  # --- I2: the third sweep had no test at all, and it deletes the state
+  # guard.py reads to permit a push.
+  mkdir -p "$WORK/repo/.autofleet/run"
+  live_sha="$(git -C "$WORK/repo" rev-parse HEAD 2>/dev/null)"
+  : >"$WORK/repo/.autofleet/run/reviewed-$live_sha"
+  AUTOFLEET_KEEP_REVIEWS=3 in_fleet_fn prune_reviewed_markers >/dev/null 2>&1
+  [ -e "$WORK/repo/.autofleet/run/reviewed-$live_sha" ] \
+    || fail "the marker for a commit that IS on a branch was deleted; guard.py then refuses the push and both passes must be re-run"
+  ok "a reviewed- marker for a live commit survives"
+
+  # A REAL commit on NO branch -- made, recorded, then the branch moved back off
+  # it. A made-up sha is kept by the `cat-file -e` guard whatever the knob says,
+  # so asserting with one proves nothing about the off switch.
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "orphaned" 2>/dev/null
+  orphan_sha="$(git -C "$WORK/repo" rev-parse HEAD 2>/dev/null)"
+  git -C "$WORK/repo" reset -q --hard "$live_sha" 2>/dev/null
+  : >"$WORK/repo/.autofleet/run/reviewed-$orphan_sha"
+
+  AUTOFLEET_KEEP_REVIEWS=0 in_fleet_fn prune_reviewed_markers >/dev/null 2>&1
+  [ -e "$WORK/repo/.autofleet/run/reviewed-$orphan_sha" ] \
+    || fail "AUTOFLEET_KEEP_REVIEWS=0 still swept the reviewed- markers, against what config.sh promises"
+  ok "...and 0 keeps every piece of review state"
+
+  AUTOFLEET_KEEP_REVIEWS=3 in_fleet_fn prune_reviewed_markers >/dev/null 2>&1
+  [ -e "$WORK/repo/.autofleet/run/reviewed-$orphan_sha" ] \
+    && fail "a marker for a commit on no branch survived the sweep, so the store still only grows"
+  [ -e "$WORK/repo/.autofleet/run/reviewed-$live_sha" ] \
+    || fail "the same sweep took the live commit's marker with it"
+  ok "...while a commit on no branch does go"
   ;;
 
   queue)

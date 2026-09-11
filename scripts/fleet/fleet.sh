@@ -848,11 +848,24 @@ stop_reviewers() {
 prune_review_logs() {
   local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
-  # An EMPTY list is a real answer -- a drained fleet whose last PR merged, which
-  # is the peak of the pile this sweep exists for. `gh pr list` FAILING is
-  # already handled by the caller, which returns before reaching here, so the
-  # only way to arrive with nothing is a legitimate `[]`. Refusing to sweep then
-  # was refusing exactly when it was most needed. Found by `/code-review`.
+  # `$2` is whether the caller COULD ANSWER, and it is separate from the list
+  # because an empty list has two meanings and they are opposite instructions.
+  #
+  # A drained fleet whose last PR merged is a real empty answer, and the peak of
+  # the pile this sweep exists for. But three things produce a wrongly-empty
+  # list, and each would delete every transcript on the machine: the `python3`
+  # parse between `gh` and here swallows everything (`except: pass`, and a
+  # missing python3 or a `--json` shape change is indistinguishable from `[]`);
+  # `--limit 50` pages, so an open PR past the page reads as closed; and
+  # `--author "@me"` is right for deciding whom to REVIEW and wrong for "is this
+  # PR still open", so a host whose worktrees open PRs under a different account
+  # than the dispatcher's `gh` login loses everything.
+  #
+  # A blip self-heals through the grace pass. A systematic failure empties the
+  # store, once, permanently. Found by the independent review -- and the header
+  # of this function had promised this behaviour while the code did the reverse.
+  local answered="${2:-no}"
+  [ "$answered" = yes ] || return 0
   [ -d "$dir" ] || return 0
   local removed=0
   for f in "$dir"/pr-*.log; do
@@ -1035,15 +1048,25 @@ review_open_prs() {
   #
   # Drafts count as open: sweeping a draft's transcripts out from under it while
   # somebody is still reading them is the failure this sweep must not have.
-  local open_prs
+  # TWO ANSWERS, not one: the numbers, and whether the parse worked at all.
+  # `except: pass` with `2>/dev/null` made a missing python3 and a real `[]`
+  # the same string, and the sweep below treats them oppositely.
+  local open_prs prs_answered=no
   open_prs="$(printf '%s' "$listing" | python3 -c '
 import json, sys
-try:
-    print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
-except Exception:
-    pass
-' 2>/dev/null)"
-  prune_review_logs "$open_prs"
+print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
+' 2>/dev/null)" && prs_answered=yes
+  # ...and a listing that came back truncated is not an answer either: at the
+  # page limit we cannot tell an absent PR from one on the next page.
+  if [ "$(printf '%s' "$listing" | python3 -c '
+import json, sys
+print(len(json.load(sys.stdin)))
+' 2>/dev/null)" = 50 ]; then
+    prs_answered=no
+  fi
+  # `yes` only when the parse produced something we can trust: `gh` succeeding
+  # is not enough, because the parse below it can fail silently.
+  prune_review_logs "$open_prs" "$prs_answered"
 
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
