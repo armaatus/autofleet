@@ -49,7 +49,12 @@ case "${1:-}" in
   *) echo "usage: $0 [--watch]" >&2; exit 2 ;;
 esac
 
+# The driver's deadline, for this process only, ASKED FOR through the contract
+# rather than set by a variable this script happens to know the driver reads. A
+# watcher polls, so it wants a shorter one than the dispatcher's: waiting 30s for
+# one read inside a 3-second poll loop is a watcher that has stopped watching.
 CLI_SECONDS="${AGENT_AUTOSTART_CLI_SECONDS:-20}"
+runner_set_deadline "$CLI_SECONDS"
 POLL_SECONDS="${AGENT_AUTOSTART_POLL_SECONDS:-3}"
 # Long enough for an agent to finish starting on a cold machine. It does not
 # need to be longer: what is being waited for is a paste Orca performs as part
@@ -64,12 +69,10 @@ DEADLINE_SECONDS="${AGENT_AUTOSTART_DEADLINE_SECONDS:-120}"
 GRACE_SECONDS="${AGENT_AUTOSTART_GRACE_SECONDS:-30}"
 PIDFILE="${AGENT_AUTOSTART_PIDFILE:-$REPO_ROOT/.autofleet/run/agent-autostart.pid}"
 
-CLI_OUT="$(mktemp)"
 # TERM and INT as well as EXIT: archive.sh signals this watcher when the worktree
 # is being removed, and bash runs no EXIT trap for an untrapped SIGTERM -- the
 # pidfile would outlive the process and name a pid the system is free to reuse.
 release() {
-  rm -f "$CLI_OUT"
   [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ] && rm -f "$PIDFILE"
   return 0
 }
@@ -80,76 +83,8 @@ if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
   echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
   exit 0
 fi
-orca_cli_resolve || { echo "==> no orca CLI answers here; nothing to start"; exit 0; }
+runner_available || { echo "==> no runner answers here; nothing to start"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "==> no python3; cannot read the agent's draft"; exit 0; }
-
-# This worktree's agent terminal. `orca terminal list` reports every terminal on
-# the machine, so the worktree path is what keeps three parallel worktrees from
-# submitting into each other's agents; `agentIdentity` is what separates the
-# agent from the shell and log tabs beside it.
-AGENT_TERMINAL_PY='
-import json, sys
-root = sys.argv[1]
-try:
-    terminals = json.load(sys.stdin)["result"]["terminals"]
-except Exception:
-    sys.exit(1)
-for t in terminals:
-    if t.get("worktreePath") == root and t.get("agentIdentity") and not t.get("orphaned"):
-        print(t["handle"])
-        sys.exit(0)
-sys.exit(1)
-'
-
-# The composer text the agent has NOT sent, as a single comparable line: its
-# length, a space, then the text with newlines flattened. Prints nothing when
-# there is no draft, which is a normal answer rather than a failure.
-#
-# Whole, not truncated -- the text is read back below to decide whether Orca
-# drafted a real prompt or only the issue URL, and a 60-character prefix cannot
-# tell a bare URL apart from one with instructions after it.
-DRAFT_PY='
-import json, sys
-try:
-    draft = json.load(sys.stdin)["result"]["terminal"].get("draft")
-except Exception:
-    sys.exit(1)
-if draft and str(draft).strip():
-    print(len(str(draft)), str(draft).strip().replace("\n", " "))
-'
-
-# The issue this worktree was created from, if any. Orca records it on the
-# worktree, which is the only durable statement that a draft is expected here.
-LINKED_ISSUE_PY='
-import json, sys
-try:
-    wt = json.load(sys.stdin)["result"]["worktree"]
-except Exception:
-    sys.exit(1)
-for key in ("linkedIssue", "linkedLinearIssue", "linkedWorkItem"):
-    if wt.get(key):
-        print(wt[key] if isinstance(wt[key], (str, int)) else "linked")
-        sys.exit(0)
-sys.exit(1)
-'
-
-linked_issue() {
-  orca_run_with_deadline "$CLI_SECONDS" "$CLI_OUT" "$ORCA_CLI" worktree current --json || return 1
-  python3 -c "$LINKED_ISSUE_PY" <"$CLI_OUT"
-}
-
-agent_terminal() {
-  orca_run_with_deadline "$CLI_SECONDS" "$CLI_OUT" "$ORCA_CLI" terminal list --json || return 1
-  python3 -c "$AGENT_TERMINAL_PY" "$REPO_ROOT" <"$CLI_OUT"
-}
-
-# Non-zero only when the read itself failed. An empty answer means "no draft",
-# which the caller has to be able to tell apart from "could not look".
-draft_of() {
-  orca_run_with_deadline "$CLI_SECONDS" "$CLI_OUT" \
-    "$ORCA_CLI" terminal read --terminal "$1" --screen --limit 1 --json || return 1
-  python3 -c "$DRAFT_PY" <"$CLI_OUT"
-}
 
 # What to add to a draft that is only a link.
 #
@@ -181,9 +116,11 @@ empty_polls=0
 grace_polls=0
 attempt() {
   local handle draft
-  handle="$(agent_terminal)" || return 1
+  handle="$(runner_agent_terminal "$REPO_ROOT")" || return 1
   [ -n "$handle" ] || return 1
-  draft="$(draft_of "$handle")" || return 1
+  # An empty answer means "no draft", which the caller has to be able to tell
+  # apart from "could not look" -- so only the non-zero return is a wait.
+  draft="$(runner_terminal_draft "$handle")" || return 1
 
   if ! $baselined; then
     if [ -z "$draft" ]; then
@@ -210,23 +147,21 @@ attempt() {
     return 1
   fi
 
-  # Everything after the length prefix DRAFT_PY writes.
+  # Everything after the length prefix `runner_terminal_draft` writes.
   local text="${draft#* }" completion
   if completion="$(completion_for "$text")"; then
     echo "==> the drafted prompt is only a link ($text); pointing it at the spec"
-    orca_run_with_deadline "$CLI_SECONDS" "$CLI_OUT" \
-      "$ORCA_CLI" terminal send --terminal "$handle" --text "$completion" --json || {
-        echo "    the orca CLI would not extend it; the agent would start from a bare URL"
-        echo "    press Return in the agent tab yourself, or trust orca.yaml in Orca's"
-        echo "    repository-hooks settings so the issueCommand template is used"
+    runner_terminal_send "$handle" "$completion" || {
+        echo "    the runner would not extend it; the agent would start from a bare URL"
+        echo "    press Return in the agent tab yourself, or configure the runner to"
+        echo "    deliver this repository's issue command as the opening prompt"
         return 0
       }
   fi
 
   echo "==> submitting the agent's drafted prompt (${text:0:60})"
-  orca_run_with_deadline "$CLI_SECONDS" "$CLI_OUT" \
-    "$ORCA_CLI" terminal send --terminal "$handle" --enter --json || {
-      echo "    the orca CLI would not send it; press Return in the agent tab"
+  runner_terminal_enter "$handle" || {
+      echo "    the runner would not send it; press Return in the agent tab"
       return 0
     }
   echo "    sent."
@@ -248,10 +183,21 @@ fi
 
 # A linked issue is the only reason to expect a draft. Without one, whatever is
 # in that composer was typed by a person and must not be submitted for them.
-if ! issue="$(linked_issue)"; then
-  echo "==> this worktree has no linked issue; nothing will be drafted, not watching"
-  exit 0
-fi
+#
+# The two ways to not have one are SAID apart, because for years they were not.
+# A runner that would not answer looked identical to a worktree with no issue,
+# so a broken CLI reported "this worktree has no linked issue" and left a fully
+# provisioned worktree sitting on an unsent prompt -- three of them, on
+# 2026-09-05. Either way nothing is submitted; only one of them is a bug
+# somebody can go and fix.
+issue="$(runner_worktree_issue)"
+case $? in
+  0) ;;
+  2) echo "==> this worktree has no linked issue; nothing will be drafted, not watching"
+     exit 0 ;;
+  *) echo "==> the runner would not say whether this worktree has a linked issue; not watching"
+     exit 0 ;;
+esac
 
 # One watcher per worktree. setup.sh can run more than once over a worktree's
 # life, and a second watcher would race the first into the same composer. A live
@@ -271,7 +217,7 @@ echo $$ >"$PIDFILE"
 grace_polls=$(( (GRACE_SECONDS + POLL_SECONDS - 1) / POLL_SECONDS ))
 [ "$grace_polls" -ge 1 ] || grace_polls=1
 
-echo "==> watching for the prompt Orca drafted from issue $issue"
+echo "==> watching for the prompt the runner drafted from issue $issue"
 waited=0
 while [ "$waited" -lt "$DEADLINE_SECONDS" ]; do
   attempt && exit 0
