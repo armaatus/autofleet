@@ -1454,6 +1454,78 @@ case "${1:-}" in
     echo "ok: ...and says so, rather than keeping it silently"
     ;;
 
+  poll_empties_cache)
+    # #35's third Acceptance bullet: "the poll cache is still emptied once per
+    # pass, so a dispatcher never trusts the previous pass' answers."
+    #
+    # After the source-time call was deleted, `forget_poll_answers` inside
+    # `cmd_run`'s poll is the ONLY emptier left in production -- and every phase
+    # that touches the cache goes around it: the `in_poll` ones call it by hand,
+    # `in_fleet` empties the cache itself so that one call models one pass, and
+    # `status_keeps_cache` asserts the opposite property. The one line whose
+    # survival that bullet is about was the one line nothing was aimed at. Hard
+    # rule 3, in the suite for the issue that created it. Found by the
+    # independent review.
+    make_fixture ok
+    make_repo_git
+    add_origin
+    mkdir -p "$AUTOFLEET_DIR/poll-cache"
+    : >"$AUTOFLEET_DIR/poll-cache/stale-from-the-last-pass"
+    issue_state CLOSED; issue_labels "ready"
+    ( in_fleet_keeping_cache cmd_run --max-prs 1 148 >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    wait_for_log "fleet up" \
+      || fail "the dispatcher never started: $(cat "$WORK/run.log" 2>/dev/null)"
+    run_ended "$HELD_PID" >/dev/null 2>&1
+    HELD_PID=""
+    [ -e "$AUTOFLEET_DIR/poll-cache/stale-from-the-last-pass" ] \
+      && fail "a poll ran and the previous pass' cached answers survived it, so the dispatcher trusts them"
+    echo "ok: a poll empties the cache, which is the only emptier left in production"
+    ;;
+  restart_after_parked_drain)
+    # #37's "A second dispatcher can start afterwards", which is the sentence
+    # that issue opens with -- "the fleet cannot be restarted either" -- and the
+    # bullet with the most behind it: the parked entry stays in $OWNED_DIR,
+    # which is exactly what #36 warns the next dispatcher inherits.
+    #
+    # `drain_ends_with_parked` ends at "the drain ended, it named #42, the
+    # worktree survives" and never asks whether anything can start again. The
+    # behaviour looks right -- `release_dispatcher_files` is on the EXIT trap --
+    # but nothing proved it. Found by the independent review.
+    #
+    # Asserted through what `cmd_run` ACTUALLY CHECKS rather than by starting a
+    # second dispatcher: `run_refuses` is the sibling that drives the refusal,
+    # and a real second run here would poll until its own drain, which is a
+    # minute of suite time to re-test what that phase already covers.
+    make_fixture ok
+    make_repo_git
+    mkdir -p "$AUTOFLEET_DIR/worktrees"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    : >"$AUTOFLEET_DIR/stuck-42"
+    in_fleet cmd_stop >/dev/null 2>&1
+    ( in_fleet cmd_run --auto >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    run_ended "$HELD_PID" \
+      || fail "the drain never ended with a parked worktree owned: $(cat "$WORK/run.log" 2>/dev/null)"
+    HELD_PID=""
+    [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
+      || fail "the drain released a parked worktree to make itself terminate, which is what #37 says must not happen"
+    echo "ok: the drain ends with the parked worktree still owned"
+
+    # THE ASSERTION. `cmd_run` refuses while a dispatcher is alive, and it reads
+    # the pidfile to decide -- so a pidfile left behind is a fleet that cannot be
+    # restarted, with the parked entry still in $OWNED_DIR.
+    held="$(cat "$AUTOFLEET_DIR/fleet.pid" 2>/dev/null || true)"
+    if [ -n "$held" ]; then
+      in_fleet dispatcher_alive "$held" \
+        && fail "the dispatcher exited leaving a pidfile that still reads as alive; a second one cannot start and the parked worktree is stranded"
+    fi
+    in_fleet cmd_resume >/dev/null 2>&1
+    out="$(run_one_pass)"; rc=$?
+    grep -qi "already running" <<<"$out" \
+      && fail "a second dispatcher was refused after a drain that ended with a parked worktree: $out"
+    echo "ok: ...and a second dispatcher is not refused afterwards"
+    ;;
   drain_parked_counted_once)
     # Two markers, ONE worktree. `reap_merged` keeps a merged worktree owned as
     # `merge-blind-42` when its upstream was pruned, and `reap_abandoned` can
@@ -1492,6 +1564,39 @@ case "${1:-}" in
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
       || fail "a held- that came and went across two passes was counted"
     echo "ok: ...and a marker that comes and goes never counts"
+
+    # ...AND THE TWO RE-DERIVED MARKERS NEED THE AGENT TO BE GONE. `held-` and
+    # `git-blind-` are written by `reap_abandoned`, which deliberately leaves the
+    # agent alone -- so the worktree is not waiting for a person, somebody is
+    # still working in it. Counted, the dispatcher exits with an agent mid-write
+    # and the farewell tells a person to discard what is in there. Found by the
+    # independent review.
+    agent_state working
+    : >"$AUTOFLEET_DIR/held-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "held-42 counted as waiting for a person while an agent is still working in that worktree"
+    echo "ok: a worktree with a live agent is not waiting for a person"
+
+    # ...and once the agent is gone it does count, or the drain never ends --
+    # which is the opposite failure, and the reason these two are counted at all.
+    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+      || fail "held-42 with no agent left did not count, so the drain waits on it forever"
+    echo "ok: ...and it does once the agent is gone"
+
+    # "Could not tell" is not "no agent": a listing that would not read leaves
+    # the worktree uncounted, because somebody may still be in there.
+    printf 'not json' >"$ORCA_TERMINALS"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "a terminal listing that could not be read was treated as 'no agent there'"
+    echo "ok: ...and an unreadable listing is not an empty one"
+    # ...and put the listing back, or every assertion after this one is testing
+    # a runner that cannot answer rather than the thing it is about.
+    printf '{"result":{"terminals":[]}}' >"$ORCA_TERMINALS"
+    rm -f "$AUTOFLEET_DIR/held-42"
 
     # ...and the two reap_abandoned keeps, which an earlier comment asserted did
     # not exist. Uncounted, `owned` never reaches 0 and the drain never ends --
@@ -3226,6 +3331,6 @@ GITSTUB
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge" >&2
     exit 2 ;;
 esac

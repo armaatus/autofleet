@@ -423,6 +423,36 @@ count_parked_owned() {
       rm -f "$STATE_DIR/parked-since-$n"
       continue
     fi
+    # THE TWO RE-DERIVED MARKERS NEED THE AGENT TO BE GONE, and surviving a pass
+    # is not enough for them. The other three are written after the agent has
+    # already been stopped or the work has already landed: `stuck-` only after
+    # `reap_abandoned` called `interrupt_agent_in`, and the two `merge-` ones by
+    # `reap_merged`, where the PR is merged. `held-` and `git-blind-` are the
+    # exception -- `reap_abandoned` writes them and DELIBERATELY leaves the agent
+    # alone ("leaving it"), so the worktree is not waiting for a person at all.
+    # Somebody is still working in it.
+    #
+    # Counted, the dispatcher signs off "1 worktree(s) are waiting for you" and
+    # exits with an agent mid-write: no time-box, no reap when its PR merges, its
+    # stack up under `restart: unless-stopped`, and its $OWNED_DIR entry
+    # inherited by the next dispatcher. That is the harm #36 is about, in the PR
+    # that closes #36 -- and the farewell then tells a person to `git status` and
+    # "discard what is there" in a directory being written to.
+    #
+    # The survive-a-pass rule bounds a flicker shorter than one poll; a `blocked`
+    # label that stands for three minutes is not a flicker. Found by the
+    # independent review.
+    #
+    # "Could not tell" does NOT count, which is design note 2: a listing that
+    # would not read is not an empty one, and the safe reading here is that
+    # somebody may still be in there.
+    if [ -e "$STATE_DIR/held-$n" ] || [ -e "$STATE_DIR/git-blind-$n" ]; then
+      local handle
+      if ! handle="$(runner_agent_terminal "$(owned_path "$n")")" || [ -n "$handle" ]; then
+        rm -f "$STATE_DIR/parked-since-$n"
+        continue
+      fi
+    fi
     if [ -e "$STATE_DIR/parked-since-$n" ]; then
       parked=$((parked + 1))
     else
