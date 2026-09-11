@@ -41,8 +41,15 @@
 # the label. Ready list `[#151 priority, #F foundation, #A, #B]`, nothing in
 # flight: pass 1 launches #151; pass 2 reaches #F, sees `live=1`, breaks, and #A
 # and #B are never considered. The fleet runs at ONE worktree for #151's whole
-# time-box, then at one worktree again while #F lands alone. Without the label
-# the same backlog sorts `[#A, #B, #F]` and fills three.
+# time-box, then at one worktree again while #F lands alone.
+#
+# Without the label the same backlog -- all four issues; #151 does not vanish
+# when you take its label off -- sorts `[#A, #B, #151, #F]` and fills THREE,
+# with #F waiting on them. An earlier version of this said `[#A, #B, #F]` fills
+# three, which is wrong twice over: it drops #151, and that list fills two,
+# because the scan breaks at #F with `live=2` for the very reason this passage
+# exists to explain. Found by the independent review, which noted the number is
+# the one the docs tell a maintainer to decide on.
 #
 # So: one `priority` label in front of a ready foundation issue costs two
 # time-boxes at one worktree, not a reordering. An earlier version of this

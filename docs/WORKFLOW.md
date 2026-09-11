@@ -87,8 +87,12 @@ have nothing to do with it.
 Ready list `[#151 priority, #F foundation, #A, #B]`, nothing running: pass one
 launches #151; pass two reaches #F, sees a worktree in flight, and stops — #A
 and #B are never considered. The fleet runs at **one** worktree for #151's whole
-time-box, then at one again while #F lands alone. Unlabelled, the same backlog
-sorts `[#A, #B, #F]` and fills three.
+time-box, then at one again while #F lands alone.
+
+Unlabelled, the same backlog — all four; #151 does not vanish when the label
+comes off — sorts `[#A, #B, #151, #F]` and fills **three**, with #F waiting on
+them. (`[#A, #B, #F]` would fill two, not three: the scan breaks at #F with two
+worktrees live, for the same reason this passage is about.)
 
 So the question to ask before applying it is not "does this jump the queue" but
 "is this worth two time-boxes at one worktree". If it is not, the foundation
