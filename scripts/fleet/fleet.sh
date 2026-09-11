@@ -922,6 +922,19 @@ prune_review_logs() {
       *" $num "*) ;;                # eligible since a previous pass: sweep it
       *) continue ;;                # first pass seeing it closed: keep them all
     esac
+    # CONFIRMED CLOSED, not merely absent from an author-scoped list. The open
+    # list comes from `gh pr list --author "@me"`, which is right for deciding
+    # whom to REVIEW and wrong for "is this PR still open": on a host where the
+    # worktrees open PRs under a different account than the dispatcher's `gh`
+    # login, every one of them reads as closed and loses its transcripts. The
+    # comment above named that hazard among three and the code guarded the other
+    # two. One `gh` call per candidate, and candidates are rare -- a PR reaches
+    # here only after a grace pass. Anything but a confident CLOSED or MERGED
+    # keeps the file. Found by the independent review.
+    case "$(GH_PAGER=cat gh pr view "$num" --json state --jq .state 2>/dev/null)" in
+      CLOSED|MERGED) ;;
+      *) continue ;;
+    esac
     rm -f "$f" && removed=$((removed + 1))
   done
   # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
@@ -1020,14 +1033,31 @@ prune_reviewed_markers() {
   # dispatcher deleting review state still had these deleted every 60 seconds.
   # Found by `/code-review`.
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
-  local dir="$REPO_ROOT/.autofleet/run" f sha removed=0
+  # EVERY CHECKOUT THAT HAS ONE, not just the dispatcher's. `REPO_ROOT` here is
+  # the main worktree, and that is not where the push gate reads: `guard.py`
+  # builds its path from `git rev-parse --show-toplevel`, the WORKTREE root, and
+  # `record-review.sh` sets its own REPO_ROOT from `BASH_SOURCE` and writes
+  # `<worktree>/.autofleet/run/reviewed-<sha>`. So this swept a directory the
+  # gate never reads and never reached the markers that answer it -- while the
+  # comment and #74's Scope both claimed otherwise. The phase could not catch it
+  # either: it built markers under the same path the code used. Found by the
+  # independent review.
+  local roots="$REPO_ROOT" w
+  for w in "$OWNED_DIR"/*; do
+    [ -e "$w" ] || continue
+    w="$(cat "$w" 2>/dev/null)"
+    [ -d "$w/.autofleet/run" ] && roots="$roots $w"
+  done
+  local dir f sha removed=0
+  for dir in $roots; do
+  dir="$dir/.autofleet/run"
   [ -d "$dir" ] || return 0
   for f in "$dir"/reviewed-*; do
     [ -e "$f" ] || continue
     sha="$(basename "$f")"; sha="${sha#reviewed-}"
     case "$sha" in *[!0-9a-f]*|"") continue ;; esac
     # `cat-file -e` first: a sha git has never heard of is not ours to judge.
-    git -C "$REPO_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+    git -C "$dir/../.." cat-file -e "$sha^{commit}" 2>/dev/null || continue
     # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
     # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
     # 141 -- so past a few hundred refs this said "on no branch" about a commit
@@ -1038,10 +1068,11 @@ prune_reviewed_markers() {
     # It fails SAFE now, like the `cat-file -e` above it: anything other than a
     # confidently empty answer keeps the record.
     local on_branch
-    on_branch="$(git -C "$REPO_ROOT" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
+    on_branch="$(git -C "$dir/../.." branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
       || continue
     [ -n "$on_branch" ] && continue
     rm -f "$f" && removed=$((removed + 1))
+  done
   done
   [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
   return 0

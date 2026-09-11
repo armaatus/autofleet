@@ -101,6 +101,13 @@ printf '%s\n' "$*" >>"$GH_CALLS"
 case "$*" in
   *"repo view"*) echo "armaatus/autofleet"; exit 0 ;;
   *"pr list"*)   cat "$GH_PRLIST"; exit 0 ;;
+  # The sweep asks for a PR's STATE before deleting its transcripts -- an
+  # author-scoped open list cannot answer "is this still open", so absence from
+  # it is not enough. Defaults to CLOSED because every PR the sweep asks about
+  # has already fallen off the open list; `$GH_PR_STATE` overrides.
+  *"pr view"*"--json state"*) cat "${GH_PR_STATE:-/dev/null}" 2>/dev/null || true
+                              [ -s "${GH_PR_STATE:-/dev/null}" ] || echo CLOSED
+                              exit 0 ;;
   *"pr view"*)   cat "$GH_HEAD"; exit 0 ;;
   *"api"*"/reviews"*)
     # The count review.sh asks for after the reviewer exits: reviews on the head.
@@ -488,6 +495,21 @@ import merge_gate; print(merge_gate.review_mode())'); }
     && fail "a transcript for a PR that is no longer open survived the grace pass"
   ok "...and goes on the next one"
 
+  # ...AND ONLY WHEN THE PR IS CONFIRMED CLOSED. Absence from the open list is
+  # not enough: that list is `--author "@me"`, so on a host whose worktrees open
+  # PRs under a different account than the dispatcher's `gh` login, every PR
+  # reads as closed and loses its transcripts. Found by the independent review,
+  # which noted the comment named this hazard while the code guarded the other
+  # two. Here the PR answers OPEN, so nothing may go.
+  : >"$AUTOFLEET_DIR/reviews/pr-95-77777777.log"
+  printf 'OPEN\n' >"$WORK/pr-state"
+  GH_PR_STATE="$WORK/pr-state" AUTOFLEET_KEEP_REVIEWS=5 poll_review_open_prs
+  GH_PR_STATE="$WORK/pr-state" AUTOFLEET_KEEP_REVIEWS=5 poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviews/pr-95-77777777.log" ] \
+    || fail "a PR missing from the author-scoped list but still OPEN lost its transcripts"
+  ok "a PR that is still open keeps its transcripts whatever the list says"
+  rm -f "$AUTOFLEET_DIR/reviews/pr-95-77777777.log" "$AUTOFLEET_DIR/reviews"/.closed-95
+
   # THE GRACE IS PER PULL REQUEST, not per transcript. The marker used to be
   # created inside the deleting loop, so a PR's FIRST transcript bought the
   # grace and every other one was deleted on that same pass -- all but one, in
@@ -585,6 +607,36 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "$(wc -c <"$AUTOFLEET_DIR/fleet.log.1" 2>/dev/null | tr -d ' ')" = "$before_1" ] \
     || fail "AUTOFLEET_LOG_MAX_BYTES=0 overwrote the previous generation"
   ok "...and 0 keeps it, with the cap exceeded"
+
+  # ...AND IT SAYS SO WHEN IT CANNOT ROTATE AT ALL. #74's Acceptance ticks that
+  # box and nothing asserted it: every rotation call here discarded output and
+  # no `mv` failure was ever provoked. A rotation that fails silently on every
+  # poll forever is the opposite of the rule stated forty lines above it. Found
+  # by the independent review.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  # The STATE DIR made unwritable, which is what actually stops a rename. Two
+  # earlier attempts did not: `mv -f` replaces an empty directory, and moves the
+  # file INTO a non-empty one. A read-only parent is the condition an operator
+  # really meets -- a state dir on a full or remounted volume.
+  rm -rf "$AUTOFLEET_DIR/fleet.log.1"
+  chmod a-w "$AUTOFLEET_DIR"
+  out="$(AUTOFLEET_LOG_MAX_BYTES=1000 in_poll rotate_fleet_log 2>&1)"
+  chmod u+w "$AUTOFLEET_DIR"
+  grep -q "could not rotate" <<<"$out" \
+    || fail "a rotation that could not happen said nothing, and would fail on every poll forever: $out"
+  ok "...and says so when it cannot rotate at all"
+
+  # THE STORE THIS CHANGE INTRODUCES. `.closed-N` is a new persistent file class
+  # in the reviews directory -- one per closed PR -- in a change about stores
+  # that only grow. Its collector had no assertion: the phase deletes the
+  # markers by hand at three points, so the collector could be a no-op and this
+  # stayed green. Found by the independent review.
+  rm -f "$AUTOFLEET_DIR/reviews"/.closed-* "$AUTOFLEET_DIR/reviews"/pr-*.log
+  : >"$AUTOFLEET_DIR/reviews/.closed-1234"
+  AUTOFLEET_KEEP_REVIEWS=3 poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviews/.closed-1234" ] \
+    && fail ".closed-1234 outlived the transcripts it was tracking, so the sweep trades one growing store for another"
+  ok "a grace marker is collected once its transcripts are gone"
 
   # --- I1: an empty open list that is an ANSWER sweeps; one that is a FAILURE
   # to answer does not. Three things produce a wrongly-empty list -- the parse
