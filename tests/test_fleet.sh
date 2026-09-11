@@ -385,7 +385,35 @@ esac
 # Matched on the pair, because `list` alone is both `worktree list` and
 # `terminal list` and the dispatcher asks for both.
 case "$1 ${2:-}" in
-  "worktree list")   cat "$ORCA_WORKTREES"; exit 0 ;;
+  "worktree list")
+    # `--repo path:<root>` is HONOURED here, not ignored, because the driver
+    # passes it and a stub that ignored it would exercise only the driver's
+    # safety net -- leaving "does the fleet actually ask for a scoped list?"
+    # untested. The real CLI filters; so does this. armaatus/autofleet#31.
+    #
+    # `ORCA_LIST_IGNORES_REPO` is the other half: a runtime too old to know the
+    # flag ACCEPTS it and returns everything, silently, which is precisely the
+    # failure the flag is here to prevent.
+    scope=""
+    prev=""
+    for a in "$@"; do case "$prev" in --repo) scope="${a#path:}" ;; esac; prev="$a"; done
+    if [ -z "$scope" ] || [ -n "${ORCA_LIST_IGNORES_REPO:-}" ]; then
+      cat "$ORCA_WORKTREES"; exit 0
+    fi
+    python3 - "$ORCA_WORKTREES" "$scope" <<'PYLIST'
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+here = os.path.realpath(sys.argv[2])
+worktrees = doc.get("result", {}).get("worktrees", [])
+mine = None
+for w in worktrees:
+    if w.get("isMainWorktree") and os.path.realpath(w.get("path") or "") == here:
+        mine = w.get("repoId")
+        break
+kept = [w for w in worktrees if mine is None or w.get("repoId") == mine]
+print(json.dumps({"result": {"worktrees": kept}}))
+PYLIST
+    exit 0 ;;
   # A create that SUCCEEDS, so the negative case terminates on --max-prs rather
   # than looping on "leaving it in the queue to try again".
   #
@@ -1654,6 +1682,16 @@ print(json.dumps({"result": {"worktrees": [
       || fail "live_count counted a foreign worktree against MAX_WORKTREES"
     echo "ok: ...so the cap counts only our own"
 
+    # ...and the driver ASKED for a scoped list, rather than being saved by its
+    # own filter. Without this the `--repo` flag is inert: drop it and the
+    # answer-check below still filters the foreign entry, so every assertion
+    # above stays green while the fleet pulls every project's worktrees over the
+    # wire every poll and throws most of them away. The flag is the fix;
+    # the filter is the safety net for a runtime that ignores it.
+    grep -q -- "worktree list --repo path:$WORK/repo" "$ORCA_CALLS" \
+      || fail "the driver asked for an unscoped worktree list: $(cat "$ORCA_CALLS")"
+    echo "ok: ...and it asked the runtime to scope the query"
+
     # ...and a list this cannot scope is "could not tell", not "none": the
     # caller's non-zero path already means skip the pass and say so.
     python3 -c '
@@ -1664,6 +1702,25 @@ print(json.dumps({"result": {"worktrees": [
     in_fleet live_worktrees >/dev/null 2>&1 \
       && fail "a list with no entry for this repo read as an empty fleet rather than as unknown"
     echo "ok: a list this cannot scope is could-not-tell, not empty"
+
+    # THE SILENT HALF: a runtime too old to know `--repo` ACCEPTS it and returns
+    # everything. The driver checks the answer rather than trusting the flag,
+    # because that failure looks exactly like success -- and it is the one the
+    # flag exists to prevent. The stub's own filtering is bypassed here, so this
+    # asserts the driver and not the fixture.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+  {"repoId": "ours", "path": sys.argv[1], "isMainWorktree": True, "linkedIssue": None},
+  {"repoId": "ours", "path": sys.argv[1] + "/wt-7", "isMainWorktree": False, "linkedIssue": 7},
+  {"repoId": "theirs", "path": "/elsewhere/other-project/195-x", "isMainWorktree": False, "linkedIssue": 195},
+]}}))' "$WORK/repo" >"$ORCA_WORKTREES"
+    out="$(ORCA_LIST_IGNORES_REPO=1 in_fleet live_worktrees 2>&1)"
+    grep -q "195" <<<"$out" \
+      && fail "a runtime that ignored --repo handed back every project's worktrees and the driver passed them on: $out"
+    grep -q "^7" <<<"$out" \
+      || fail "our own worktree was lost while filtering a runtime that ignores --repo: $out"
+    echo "ok: ...and a runtime that ignores --repo is filtered anyway"
     ;;
 
   foundation_holds)
