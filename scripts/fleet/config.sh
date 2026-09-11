@@ -70,6 +70,27 @@
 # How long one local review may run before it is killed and the PR left for the
 # next poll to pick up. Long enough for a real diff; short enough that a wedged
 # reviewer is not an overnight hold on the worktree waiting for it.
+# ------------------------------------------------------------- what is KEPT ---
+#
+# Every store under $FLEET_DIR only ever grew. On this machine the reviewer
+# transcripts reached 184K across 46 files in under two days, 65% of them
+# belonging to pull requests that had already merged, and `fleet.log` grew
+# without rotation. None of it is read again: a transcript matters while its
+# review is being answered, and a merged PR's never is.
+#
+# A cap stops a thing getting worse; only deletion makes it smaller. These are
+# the two numbers that decide what goes. Set either to 0 to keep everything,
+# which is what a host project debugging its own reviewer wants.
+
+# Reviewer transcripts to keep PER OPEN pull request. Older ones for that PR go,
+# and every transcript for a PR that is no longer open goes regardless.
+: "${AUTOFLEET_KEEP_REVIEWS:=3}"
+
+# Bytes of fleet.log to keep. At the cap the file is rotated to fleet.log.1 --
+# ONE generation, because the point is a bound, and two files at the cap is
+# twice the cap. The dispatcher appends, so this happens between passes.
+: "${AUTOFLEET_LOG_MAX_BYTES:=1048576}"
+
 : "${AUTOFLEET_REVIEW_TIMEOUT:=1800}"
 # The reviewer's turn budget, passed through as `--max-turns`. The wall clock
 # above is the backstop for a wedged process; this is the bound the reviewer can

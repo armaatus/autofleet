@@ -826,6 +826,93 @@ stop_reviewers() {
   return 0
 }
 
+# ----------------------------------------------------------- what is KEPT ---
+#
+# Nothing here deletes anything an agent or a person still needs. It deletes
+# what has stopped being about anything: a transcript of a review that was
+# answered three heads ago, on a pull request that merged yesterday.
+#
+# WHY THIS IS NOT JUST TIDINESS. Every one of these stores only ever grew --
+# reviewer transcripts reached 184K across 46 files in under two days on the
+# machine this was written on, 65% of them belonging to merged PRs -- and the
+# cost is not the bytes. It is that stale state is read as current: a `reviewed-`
+# record for a sha on no branch, or a transcript named for a head nobody is
+# reviewing, answers a question nobody should be asking. See
+# armaatus/autofleet#70.
+
+# Reviewer transcripts. Keeps the newest AUTOFLEET_KEEP_REVIEWS per OPEN pull
+# request and drops the rest, including every transcript of a PR that is no
+# longer open. `$1` is the space-separated list of open PR numbers, which
+# `review_open_prs` already has in hand -- so this costs no API call, and with
+# no list it does nothing rather than guessing everything is closed.
+prune_review_logs() {
+  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
+  [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ -n "$open_prs" ] || return 0
+  [ -d "$dir" ] || return 0
+  local removed=0
+  for f in "$dir"/pr-*.log; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
+    case " $open_prs " in
+      *" $num "*) continue ;;                   # still open; the per-PR cap below
+    esac
+    rm -f "$f" && removed=$((removed + 1))
+  done
+  # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
+  # is the order they were written.
+  for num in $open_prs; do
+    kept=0
+    for f in $(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null); do
+      kept=$((kept + 1))
+      [ "$kept" -le "$AUTOFLEET_KEEP_REVIEWS" ] && continue
+      rm -f "$f" && removed=$((removed + 1))
+    done
+  done
+  # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
+  # first question about a missing transcript is whether this took it.
+  [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
+  return 0
+}
+
+# fleet.log, at AUTOFLEET_LOG_MAX_BYTES. ONE generation: the point is a bound,
+# and two files at the cap is twice the cap.
+#
+# Between passes, never mid-pass, and `mv` rather than truncate-in-place: the
+# dispatcher holds this file open in append mode, so truncating it leaves the
+# offset where it was and the next write pads the gap with NULs.
+rotate_fleet_log() {
+  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size
+  [ "$max" -gt 0 ] 2>/dev/null || return 0
+  [ -f "$LOG" ] || return 0
+  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$max" ] || return 0
+  mv -f "$LOG" "$LOG.1" 2>/dev/null || return 0
+  say "fleet.log passed $max bytes; the previous one is $LOG.1"
+  return 0
+}
+
+# `.autofleet/run/reviewed-<sha>` records, which guard.py reads as "the local
+# review for this commit is recorded". A sha that is on no branch is a commit
+# that was amended or rebased away, and its record can only ever answer for a
+# commit nobody will push again.
+prune_reviewed_markers() {
+  local dir="$REPO_ROOT/.autofleet/run" f sha removed=0
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/reviewed-*; do
+    [ -e "$f" ] || continue
+    sha="$(basename "$f")"; sha="${sha#reviewed-}"
+    case "$sha" in *[!0-9a-f]*|"") continue ;; esac
+    # `cat-file -e` first: a sha git has never heard of is not ours to judge.
+    git -C "$REPO_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+    git -C "$REPO_ROOT" branch -a --contains "$sha" 2>/dev/null | grep -q . && continue
+    rm -f "$f" && removed=$((removed + 1))
+  done
+  [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
+  return 0
+}
+
 review_open_prs() {
   fleet_review_is_local || return 0
   # A stopped fleet writes nothing to a pull request, and `review.sh` knows that
@@ -847,6 +934,23 @@ review_open_prs() {
                --json number,isDraft,headRefOid --limit 50 2>/dev/null)" || {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
+
+  # The open numbers, drafts included, from the listing already in hand -- no
+  # second API call. The transcripts of pull requests that are no longer open go
+  # here, because this is the one place that knows which those are, and because
+  # a review of a closed PR is answering a question nobody is asking.
+  #
+  # Drafts count as open: sweeping a draft's transcripts out from under it while
+  # somebody is still reading them is the failure this sweep must not have.
+  local open_prs
+  open_prs="$(printf '%s' "$listing" | python3 -c '
+import json, sys
+try:
+    print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
+except Exception:
+    pass
+' 2>/dev/null)"
+  prune_review_logs "$open_prs"
 
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
@@ -2315,6 +2419,11 @@ while that one is up."
       say "deadline passed -- launching nothing more, still reaping what is in flight"
       reason="the deadline passed"
     fi
+
+    # Between passes, before anything writes: the log rotation must not land
+    # mid-pass, and the marker sweep reads git, which is cheap and local.
+    rotate_fleet_log
+    prune_reviewed_markers
 
     forget_poll_answers
     # The order is load-bearing in three places. reap_merged first, because a

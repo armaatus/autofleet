@@ -432,6 +432,51 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ;;
 
 # --------------------------------------------------------------------- queue
+  sweeps)
+  # NOTHING EVICTED ANYTHING until this change. Reviewer transcripts, fleet.log
+  # and the `reviewed-<sha>` records only ever grew: 46 transcripts and 184K in
+  # under two days on the machine this was written on, 65% of them belonging to
+  # pull requests that had already merged. The cost is not the bytes -- it is
+  # that stale state gets read as current. armaatus/autofleet#70.
+  make_fixture
+  mkdir -p "$AUTOFLEET_DIR/reviews"
+  # Two PRs: 42 is open, 99 is not.
+  for h in aaaaaaaa bbbbbbbb cccccccc dddddddd; do
+    : >"$AUTOFLEET_DIR/reviews/pr-42-$h.log"; sleep 0.01
+  done
+  : >"$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log"
+  AUTOFLEET_KEEP_REVIEWS=2 in_poll review_open_prs >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-99-eeeeeeee.log" ] \
+    && fail "a transcript for a PR that is no longer open survived the sweep"
+  ok "a closed PR's transcripts go"
+  n="$(ls "$AUTOFLEET_DIR/reviews"/pr-42-*.log 2>/dev/null | grep -c .)"
+  [ "$n" = 2 ] \
+    || fail "an open PR kept $n transcripts rather than AUTOFLEET_KEEP_REVIEWS=2"
+  ok "...and an open PR keeps the newest AUTOFLEET_KEEP_REVIEWS"
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-dddddddd.log" ] \
+    || fail "the sweep kept the OLDEST transcripts rather than the newest"
+  ok "...the newest, not the oldest"
+
+  # 0 means keep everything, which is what a host project debugging its own
+  # reviewer wants. A sweep with no off switch is one somebody works around.
+  : >"$AUTOFLEET_DIR/reviews/pr-99-ffffffff.log"
+  AUTOFLEET_KEEP_REVIEWS=0 in_poll review_open_prs >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-99-ffffffff.log" ] \
+    || fail "AUTOFLEET_KEEP_REVIEWS=0 still swept, so there is no way to keep them"
+  ok "...and 0 keeps everything"
+
+  # fleet.log rotates at a cap, one generation. `mv` rather than truncate: the
+  # dispatcher holds it open in append mode, so truncating leaves the offset
+  # where it was and the next write pads the gap with NULs.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  AUTOFLEET_LOG_MAX_BYTES=1000 in_poll rotate_fleet_log >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
+    || fail "fleet.log passed the cap and was not rotated"
+  ok "fleet.log rotates at AUTOFLEET_LOG_MAX_BYTES"
+  AUTOFLEET_LOG_MAX_BYTES=0 in_poll rotate_fleet_log >/dev/null 2>&1
+  ok "...and 0 keeps it"
+  ;;
+
   queue)
   make_fixture; stub_reviewer marked
 
@@ -613,6 +658,6 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records" >&2
   exit 2 ;;
 esac
