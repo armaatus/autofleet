@@ -36,8 +36,10 @@ A module anywhere else is simply not on disk when the gate runs. `fleet.sh` is
 in a full worktree and can reach here; the gate cannot reach out.
 
 `unblock.yml` is JavaScript inside YAML and cannot import this at all. What
-keeps it in step is that it spells `BLOCKED_BY` identically -- asserted in
-`evals/lint.sh`, which fails if either side is edited alone.
+keeps it in step is that it spells BOTH patterns identically AND scopes them the
+same way. `evals/lint.sh` asserts all three: the two literals match character for
+character, and the workflow's reader is run over this module's own SELFTEST table
+and has to return the same answers. It fails if either side is edited alone.
 
     python3 .github/scripts/issue_refs.py --selftest
 """
@@ -77,11 +79,23 @@ CLOSES = re.compile(r"\b(?:" + _KEYWORDS + r")\s+#(\d+)\b", re.IGNORECASE)
 # `^` with re.MULTILINE, not `\b`: `\b` rules out `unblocked by #12` -- there is
 # no word boundary inside `unblocked` -- but it happily matches the `blocked by
 # #7` inside `no longer blocked by #7`, which is the same sentence with the
-# opposite meaning. A blocker is a LINE, so the line is what is matched. The
-# optional bullet is because these are written as a markdown list as often as
-# not, and a `- ` in front of one must not silently stop blocking anything.
-BLOCKED_BY = re.compile(r"^[ \t]*[-*]?[ \t]*blocked\s+by\s+#(\d+)",
-                        re.IGNORECASE | re.MULTILINE)
+# opposite meaning. A blocker is a LINE, so the line is what is matched.
+#
+# THE PREFIX IS WIDE ON PURPOSE, and every character of it is a spelling an agent
+# actually reaches for: `- `, `* `, `+ `, `> `, `1. `, `1) `, `- [ ] ` and
+# `**Blocked by #7**`. A narrower class does not fail loudly -- it returns NO
+# blockers, which marks the issue `ready` with its foundation open, and that is
+# the collision the label exists to prevent. Found by the independent review,
+# which caught five of these silently blocking nothing.
+#
+# `[0-9]`, NOT `\d`: Python's `\d` matches any Unicode decimal digit and
+# JavaScript's does not, so `Blocked by #\u0667` was a blocker to the fleet and
+# invisible to the workflow -- a disagreement no parity check written in one of
+# the two languages can see.
+BLOCKED_BY = re.compile(
+    r"^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\]|\*{1,2})[ \t]*)*"
+    r"blocked\s+by\s+#([0-9]+)",
+    re.IGNORECASE | re.MULTILINE)
 
 # ...and below this marker, when a body carries one. CLAUDE.md and
 # docs/WORKFLOW.md have both always said the lines live "below a `<!-- blockers
@@ -95,6 +109,24 @@ BLOCKED_BY = re.compile(r"^[ \t]*[-*]?[ \t]*blocked\s+by\s+#(\d+)",
 # the issue as blockers -- which is how #47 came to be labelled `blocked` by
 # seven blockers it does not have.
 BLOCKERS_MARKER = re.compile(r"^[ \t]*<!--\s*blockers\s*-->[ \t]*$", re.MULTILINE)
+
+
+def _normalised(body):
+    """`body` with CRLF folded to LF, because `$` cannot step over a `\r`.
+
+    A body edited through the GitHub WEB UI arrives CRLF. Under both engines `$`
+    matches before the `\n` and not before the `\r`, so the marker line simply
+    stopped existing and the read fell back to the whole body -- the read this
+    module exists to stop, silently, for exactly the issues a human touched.
+
+    Folded here rather than patched into the pattern (`[ \t\r]*$`) because the
+    two readers are compared by lifting the workflow's pattern text into Python,
+    and that comparison cannot see an engine difference in how `$` and `\r`
+    interact. Normalising the INPUT makes the patterns mean the same thing in
+    both languages, which is the only version of parity that check can prove.
+    Found by the independent review.
+    """
+    return (body or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def closes(body):
@@ -129,7 +161,7 @@ def blockers_section(body):
     foundation that has not landed -- the one collision the label exists to
     prevent. Missing the marker costs a false `blocked`, which costs a wait.
     """
-    body = body or ""
+    body = _normalised(body)
     last = None
     for m in BLOCKERS_MARKER.finditer(body):
         last = m
@@ -189,6 +221,30 @@ SELFTEST = [
     # blockers constantly; none of that is the list.
     ("Prose: blocked by #9\n\n<!-- blockers -->\nBlocked by #10\n", [], [10]),
     ("<!-- blockers -->\n", [], []),
+    # CRLF, as the GitHub web UI writes it. The marker has to survive the `\r`
+    # or the whole body is read again and prose blocks work.
+    ("Prose\r\nblocked by #9\r\n\r\n<!-- blockers -->\r\nBlocked by #10\r\n",
+     [], [10]),
+    ("<!-- blockers -->\r\nBlocked by #7\r\n", [], [7]),
+    # Every markdown spelling an agent writes a list in. Five of these returned
+    # NOTHING before the independent review found them -- and returning nothing
+    # marks the issue `ready` with its blocker open, which is the direction that
+    # starts work on a foundation that has not landed.
+    ("+ Blocked by #7", [], [7]),
+    ("1. Blocked by #7", [], [7]),
+    ("2) Blocked by #7", [], [7]),
+    ("- [ ] Blocked by #7", [], [7]),
+    ("- [x] Blocked by #7", [], [7]),
+    ("> Blocked by #7", [], [7]),
+    ("**Blocked by #7**", [], [7]),
+    ("<!-- blockers -->\n- [ ] Blocked by #7\n1. Blocked by #8\n", [], [7, 8]),
+    # ...and the prefix stays a PREFIX. Prose is still prose.
+    ("1. no longer blocked by #7", [], []),
+    ("- unblocked by #12", [], []),
+    # `\d` is Unicode in Python and ASCII in JavaScript, so an Arabic-Indic
+    # numeral was a blocker to the fleet and invisible to the workflow. Neither
+    # reads it now, which is a disagreement fewer.
+    ("Blocked by #\u0667", [], []),
     # The LAST marker on its own line, because #47 quotes the marker mid-sentence
     # in its Scope and carries the real one, empty, at the end. Reading from the
     # quoted one is how it came to carry seven blockers it does not have.

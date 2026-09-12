@@ -325,8 +325,11 @@ this file tells you to edit issue bodies as you work:
 
 - **Your edit relabels the whole backlog**, not just the issue you touched: every
   run recomputes every open issue. That is deliberate and idempotent, and the
-  runs are serialised by a `concurrency` group so two edits cannot interleave and
-  land an issue `ready` with an open blocker.
+  runs are serialised by a `concurrency` group on the job, newest wins. A
+  cancelled run can still stop partway through the backlog — so the stale label
+  is removed *before* the new one is added, which leaves an issue with neither
+  label rather than both. Neither is the fail-open state: `fleet.sh` starts
+  nothing that does not carry `ready`, and the next run finishes the job.
 - **Only a line below the marker counts.** `Blocked by #N` has to begin a line,
   below the last `<!-- blockers -->` marker. Prose in Goal, Scope or Design notes
   does not block anything — including a sentence like *"no longer blocked by

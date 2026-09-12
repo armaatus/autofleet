@@ -1370,9 +1370,16 @@ spec.loader.exec_module(m)
 src = open(".github/workflows/unblock.yml").read()
 
 
+# Over the CODE. `literal()` takes the FIRST assignment it finds, and this file
+# explains itself at length: a commented-out literal above the real one would be
+# the one compared, and the comparison would pass while the workflow ran
+# something else. Its sibling check below strips comments for the same reason.
+code = "\n".join(re.sub(r"//.*", "", line) for line in src.splitlines())
+
+
 def literal(name):
     """The JS regex `name` is assigned, as a Python pattern and flags."""
-    hit = re.search(r"const\s+" + name + r"\s*=\s*/(.*)/([a-z]*);", src)
+    hit = re.search(r"const\s+" + name + r"\s*=\s*/(.*)/([a-z]*);", code)
     if not hit:
         sys.exit(f"unblock.yml no longer assigns a {name} regex literal; this "
                  f"check can no longer see what it matches")
@@ -1391,10 +1398,58 @@ def literal(name):
 
 wf_blocked, wf_marker = literal("BLOCKED_BY"), literal("BLOCKERS_MARKER")
 
+# Character for character first, which is what #47's acceptance asked for: two
+# differently-spelled but equivalent patterns pass the behavioural run below and
+# are still the drift this section exists to catch, because the NEXT edit to
+# either one starts from a different string.
+for name, workflow_side, module_side in (
+    ("BLOCKED_BY", wf_blocked, m.BLOCKED_BY),
+    ("BLOCKERS_MARKER", wf_marker, m.BLOCKERS_MARKER),
+):
+    if workflow_side.pattern != module_side.pattern:
+        sys.exit(f"unblock.yml spells {name} as {workflow_side.pattern!r} and "
+                 f"issue_refs.py spells it {module_side.pattern!r}")
+
+# ...and the workflow has to actually USE the scoping, not merely define it.
+# Nothing asserted the call: deleting `blockersSection(` from the loop and
+# matching over the raw body left every check here green while the workflow read
+# whole bodies again -- hard rule 3, the guard that stops guarding. Found by the
+# independent review.
+if not re.search(r"blockersSection\(\s*issue\.body\s*\)\.matchAll\(\s*BLOCKED_BY\s*\)",
+                 code):
+    sys.exit("unblock.yml no longer matches BLOCKED_BY over blockersSection("
+             "issue.body); the marker scoping is defined and not used, so prose "
+             "anywhere in a body blocks work again (#47)")
+if not re.search(r"matchAll\(\s*BLOCKERS_MARKER\s*\)", code):
+    sys.exit("unblock.yml no longer walks BLOCKERS_MARKER; blockersSection "
+             "cannot be finding the last marker")
+
+# The stale label comes off BEFORE the new one goes on. `cancel-in-progress`
+# makes a run that dies between the two calls reachable, and the other order
+# leaves the issue carrying both `blocked` and `ready` -- and fleet.sh\'s
+# ready_issues() selects on `ready` without ever consulting `blocked`, so that
+# issue is startable. This order leaves neither label, and the fleet starts
+# nothing without `ready`. Found by the independent review.
+if code.index("removeLabel") > code.index("addLabels"):
+    sys.exit("unblock.yml adds the new label before removing the stale one; a "
+             "cancelled run leaves an issue carrying both `blocked` and `ready`, "
+             "and fleet.sh will start it (#47)")
+# CRLF is folded on the way in rather than patched into the pattern, because the
+# comparison above lifts the workflow\'s pattern text into Python and cannot see
+# an engine difference in how `$` and `\r` interact.
+if not re.search(r"replace\(\s*/\\r", code):
+    sys.exit("unblock.yml no longer folds CRLF before reading a body; a body "
+             "edited in the GitHub web UI loses its `<!-- blockers -->` marker "
+             "and the whole body is read as blockers again (#47)")
+
 # The workflow's own scoping, spelled here the way the JS spells it: the LAST
 # marker alone on a line, or the whole body when there is none.
 def wf_blocked_by(body):
-    text = body or ""
+    # The same fold the workflow does on the way in, and asserted to be there
+    # below. Re-typed here rather than lifted, because a JS arrow function is not
+    # something Python can execute -- which is exactly why the assertion that the
+    # workflow still CALLS it matters more than this mirror does.
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     last = None
     for hit in wf_marker.finditer(text):
         last = hit
@@ -1441,18 +1496,29 @@ ok "negated prose does not block anything"
 # to edit issue bodies as they work. Two interleaved runs can land an issue
 # `ready` with an open blocker, which is the foundation collision the label
 # exists to prevent.
+#
+# ON THE JOB, NOT THE WORKFLOW, and that distinction is the assertion: at
+# workflow level EVERY triggering event enters the group, including the
+# `pull_request: closed` of a PR that was never merged, which the job\'s `if:`
+# then skips -- so it cancels a reconcile in flight and does no relabelling of
+# its own. Found by the independent review, on the first version of this change.
 if python3 - <<'PYEOF'; then
 import re, sys
 src = open(".github/workflows/unblock.yml").read()
-# Top level, not inside a job: a group under `jobs:` is indented.
-hit = re.search(r"(?m)^concurrency:\n((?:[ \t]+\S.*\n)+)", src)
+if re.search(r"(?m)^concurrency:", src):
+    sys.exit("unblock.yml declares concurrency at WORKFLOW level; an event the "
+             "job skips still takes the group and cancels a run in flight, so a "
+             "PR closed without merging aborts a relabelling pass and does none")
+hit = re.search(r"(?m)^    concurrency:\n((?:[ \t]{6,}\S.*\n)+)", src)
 if not hit:
-    sys.exit("unblock.yml has no top-level concurrency: group")
+    sys.exit("unblock.yml has no job-level concurrency: group; two runs from two "
+             "issue edits can interleave and land an issue ready with an open "
+             "blocker")
 block = hit.group(1)
 if not re.search(r"(?m)^\s+group:\s*\S", block):
-    sys.exit("unblock.yml's concurrency: has no group:")
+    sys.exit("unblock.yml\'s concurrency: has no group:")
 if not re.search(r"(?m)^\s+cancel-in-progress:\s*true", block):
-    sys.exit("unblock.yml's concurrency: does not cancel in progress; the older "
+    sys.exit("unblock.yml\'s concurrency: does not cancel in progress; the older "
              "run finishes last and writes the STALER labels, which is the "
              "inversion the group is here to stop")
 # `github.ref` in the group would scope it per-branch, and every one of these
