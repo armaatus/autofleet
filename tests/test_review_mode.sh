@@ -684,6 +684,36 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ -e "$WORK/repo/.autofleet/run/reviewed-$live_sha" ] \
     || fail "the same sweep took the live commit's marker with it"
   ok "...while a commit on no branch does go"
+
+  # ...AND A DISPATCHER CHECKOUT WITH NO `.autofleet/run` DOES NOT STOP IT.
+  # `$REPO_ROOT` is prepended to the roots unconditionally while every worktree
+  # root is added only after its directory has been confirmed -- so the only
+  # root that can lack the directory is the first one, and a `return 0` there
+  # exited the whole function. `.autofleet/run/` is gitignored and created on
+  # demand by `record-review.sh` in the checkout that records a review, which is
+  # a WORKTREE: on any host where no review was ever recorded from the main
+  # checkout, the sweep examined nothing at all, every poll. Found by the
+  # independent review.
+  worktree="$WORK/wt-marker"
+  mkdir -p "$worktree/.autofleet/run" "$AUTOFLEET_DIR/worktrees"
+  git -C "$WORK/repo" worktree add -q --detach "$worktree" 2>/dev/null \
+    || git init -q "$worktree"
+  printf '%s\n' "$worktree" >"$AUTOFLEET_DIR/worktrees/77"
+  git -C "$worktree" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base 2>/dev/null
+  wt_base="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)"
+  git -C "$worktree" -c user.email=t@t -c user.name=t commit -q --allow-empty -m orphan 2>/dev/null
+  wt_orphan="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)"
+  # Back to the base BY SHA, not `HEAD~1`: the first version used the relative
+  # form and the branch did not move, so the "orphan" was still contained by
+  # `master` and the assertion was testing nothing.
+  git -C "$worktree" reset -q --hard "$wt_base" 2>/dev/null
+  : >"$worktree/.autofleet/run/reviewed-$wt_orphan"
+  # The dispatcher checkout has none, which is the normal case.
+  rm -rf "$WORK/repo/.autofleet/run"
+  AUTOFLEET_KEEP_REVIEWS=3 in_fleet_fn prune_reviewed_markers >/dev/null 2>&1
+  [ -e "$worktree/.autofleet/run/reviewed-$wt_orphan" ] \
+    && fail "a dispatcher checkout with no .autofleet/run stopped the sweep before it reached any worktree"
+  ok "...and a main checkout without the directory does not stop the sweep"
   ;;
 
   queue)

@@ -1051,7 +1051,15 @@ prune_reviewed_markers() {
   local dir f sha removed=0
   for dir in $roots; do
   dir="$dir/.autofleet/run"
-  [ -d "$dir" ] || return 0
+  # `continue`, NOT `return 0`. This was left over from the single-root version,
+  # where returning was right. Multi-root it exits the whole function on the
+  # FIRST root -- the dispatcher checkout -- and that is the one most likely to
+  # lack the directory: `.autofleet/run/` is gitignored and created on demand by
+  # `record-review.sh` in the checkout that records a review, which is a
+  # WORKTREE. So on any host where no review was ever recorded from the main
+  # checkout, the sweep returned on iteration one every poll and examined
+  # nothing at all. Found by the independent review.
+  [ -d "$dir" ] || continue
   for f in "$dir"/reviewed-*; do
     [ -e "$f" ] || continue
     sha="$(basename "$f")"; sha="${sha#reviewed-}"
