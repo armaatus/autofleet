@@ -773,6 +773,51 @@ import merge_gate; print(merge_gate.review_mode())'); }
     || fail "a rotation that could not happen said nothing, and would fail on every poll forever: $out"
   ok "...and says so when it cannot rotate at all"
 
+  # ...ONCE PER DISPATCHER, and ONE PROCESS is the only place that can be
+  # asserted. A directory `mv` cannot write to is still a file `tee -a` can
+  # append to, so an ungated line here made the ONE state where the cap cannot
+  # hold the one writing into the log it is failing to bound -- ~1440 lines a
+  # day at the 60s default, forever. The assertion above greps the string once
+  # and cannot see the repetition. Found by the independent review.
+  #
+  # The say-once state is a VARIABLE rather than a marker file for the same
+  # reason this asserts inside one shell: the condition is a $STATE_DIR nothing
+  # can write to, so the first fix -- a marker beside `rotate-blind` -- could
+  # not create it in exactly the case it was for, and the line repeated anyway.
+  # This phase caught that.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  rm -rf "$AUTOFLEET_DIR/fleet.log.1"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+          chmod a-w "$AUTOFLEET_DIR"
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          chmod u+w "$AUTOFLEET_DIR" )"
+  chmod u+w "$AUTOFLEET_DIR" 2>/dev/null
+  n="$(grep -c "could not rotate" <<<"$out" || true)"
+  [ "$n" = 1 ] \
+    || fail "three stuck polls said it $n time(s); the one state where the cap cannot hold is the one writing into the file it cannot bound: $out"
+  ok "...and says it once per dispatcher, not once per poll"
+
+  # ...and a rotation that WORKS lets it speak again, because the condition is a
+  # directory permission somebody fixes -- and re-breaks -- while the fleet runs.
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+          chmod a-w "$AUTOFLEET_DIR"
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          chmod u+w "$AUTOFLEET_DIR"
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+          rm -rf "$AUTOFLEET_DIR/fleet.log.1"
+          chmod a-w "$AUTOFLEET_DIR"
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log
+          chmod u+w "$AUTOFLEET_DIR" )"
+  chmod u+w "$AUTOFLEET_DIR" 2>/dev/null
+  n="$(grep -c "could not rotate" <<<"$out" || true)"
+  [ "$n" = 2 ] \
+    || fail "a rotation that worked did not let the next stuck one speak (said it $n time(s), wanted 2): $out"
+  ok "...and a rotation that works lets it speak again"
+  rm -rf "$AUTOFLEET_DIR/fleet.log.1"
+
   # THE STORE THIS CHANGE INTRODUCES. `.closed-N` is a new persistent file class
   # in the reviews directory -- one per closed PR -- in a change about stores
   # that only grow. Its collector had no assertion: the phase deletes the
