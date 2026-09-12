@@ -12,12 +12,22 @@ bodies, and they used to disagree:
                   the dispatcher opened a second worktree for work already in
                   flight, out of only three slots.
 
-  `Blocked by #N` `.github/workflows/unblock.yml` matches
-                  `/blocked\\s+by\\s+#(\\d+)/gi`; `fleet.sh` matched
-                  `Blocked by #` exactly. A body written `blocked by #7` was a
-                  blocker to the workflow and invisible to the fleet, so the
-                  issue that frees the most work scored zero and lost the
-                  ordering the queue exists to produce.
+  `Blocked by #N` `.github/workflows/unblock.yml` matches the pattern below;
+                  `fleet.sh` matched `Blocked by #` exactly. A body written
+                  `blocked by #7` was a blocker to the workflow and invisible to
+                  the fleet, so the issue that frees the most work scored zero
+                  and lost the ordering the queue exists to produce.
+
+                  The line has to BEGIN a line, and -- when the body carries the
+                  `<!-- blockers -->` marker CLAUDE.md and docs/WORKFLOW.md both
+                  describe -- has to sit below it. Neither was true before, and
+                  the unanchored whole-body read let ordinary prose relabel the
+                  backlog: `no longer blocked by #7` in Design notes registered
+                  as a blocker, and CLAUDE.md tells agents to edit issue bodies
+                  as they work, so an agent could write that sentence into its
+                  OWN issue, watch `edited` fire, and be interrupted and reaped
+                  by `fleet.sh` -- which reads `blocked` as "this worktree will
+                  never produce a merged PR" (#47).
 
 WHY IT LIVES IN `.github/scripts/` rather than `scripts/fleet/`, which is where
 its busiest reader is: `.github/workflows/merge-gate.yml` runs `merge_gate.py`
@@ -60,10 +70,31 @@ _KEYWORDS = "|".join(sorted(CLOSING_KEYWORDS, key=len, reverse=True))
 # #N`, and that is the form every reader here agrees on.
 CLOSES = re.compile(r"\b(?:" + _KEYWORDS + r")\s+#(\d+)\b", re.IGNORECASE)
 
-# Character for character what unblock.yml matches, including the absence of a
-# leading `\b`. Parity is the point: an issue this disagrees with the workflow
-# about is one the fleet may start while the labels call it blocked.
-BLOCKED_BY = re.compile(r"blocked\s+by\s+#(\d+)", re.IGNORECASE)
+# Character for character what unblock.yml matches. Parity is the point: an
+# issue this disagrees with the workflow about is one the fleet may start while
+# the labels call it blocked.
+#
+# `^` with re.MULTILINE, not `\b`: `\b` rules out `unblocked by #12` -- there is
+# no word boundary inside `unblocked` -- but it happily matches the `blocked by
+# #7` inside `no longer blocked by #7`, which is the same sentence with the
+# opposite meaning. A blocker is a LINE, so the line is what is matched. The
+# optional bullet is because these are written as a markdown list as often as
+# not, and a `- ` in front of one must not silently stop blocking anything.
+BLOCKED_BY = re.compile(r"^[ \t]*[-*]?[ \t]*blocked\s+by\s+#(\d+)",
+                        re.IGNORECASE | re.MULTILINE)
+
+# ...and below this marker, when a body carries one. CLAUDE.md and
+# docs/WORKFLOW.md have both always said the lines live "below a `<!-- blockers
+# -->` marker"; nothing enforced it, so a mention of a blocker anywhere in Goal,
+# Scope or Design notes counted as one.
+#
+# MATCHED ON ITS OWN LINE, and the LAST such line wins. #47's own body is the
+# case that demands both: it quotes `<!-- blockers -->` mid-sentence in its Scope
+# while discussing this very bug, and carries the real marker, empty, at the end.
+# A `find` for the bare string picks the prose one and reads the entire rest of
+# the issue as blockers -- which is how #47 came to be labelled `blocked` by
+# seven blockers it does not have.
+BLOCKERS_MARKER = re.compile(r"^[ \t]*<!--\s*blockers\s*-->[ \t]*$", re.MULTILINE)
 
 
 def closes(body):
@@ -87,9 +118,27 @@ def closes_issue(body, number):
     return number in closes(body)
 
 
+def blockers_section(body):
+    """The part of `body` the blocker lines may live in.
+
+    Everything below the last `<!-- blockers -->` line, or the whole body when
+    there is no marker at all. The fallback is deliberate and is the fail-CLOSED
+    direction: 14 of this repo's own open issues predate the marker, and a host
+    project vendoring this may never adopt it. Reading those as "no blockers"
+    would mark a dependent issue `ready` and let the fleet start it on top of a
+    foundation that has not landed -- the one collision the label exists to
+    prevent. Missing the marker costs a false `blocked`, which costs a wait.
+    """
+    body = body or ""
+    last = None
+    for m in BLOCKERS_MARKER.finditer(body):
+        last = m
+    return body[last.end():] if last else body
+
+
 def blocked_by(body):
     """Every issue number `body` names as a blocker, in order, as ints."""
-    return [int(m.group(1)) for m in BLOCKED_BY.finditer(body or "")]
+    return [int(m.group(1)) for m in BLOCKED_BY.finditer(blockers_section(body))]
 
 
 SELFTEST = [
@@ -123,6 +172,34 @@ SELFTEST = [
     ("Blocked by\n#7", [], [7]),
     ("<!-- blockers -->\nBlocked by #7\nBlocked by #8\n", [], [7, 8]),
     ("nothing blocks this", [], []),
+    # A blocker is a LINE. Prose that says the opposite of what it contains was
+    # a blocker to both readers until #47, and CLAUDE.md tells agents to write
+    # exactly this kind of sentence into issue bodies as they work.
+    ("no longer blocked by #7", [], []),
+    ("unblocked by #12", [], []),
+    ("#40 was unblocked by #12 when that merged", [], []),
+    ("it is blocked by #7 today", [], []),
+    # ...but the spellings a blocker line is actually written in all hold,
+    # including the markdown list an agent reaches for first.
+    ("- Blocked by #7", [], [7]),
+    ("* blocked by #7", [], [7]),
+    ("  Blocked by #7", [], [7]),
+    ("Closes #1\n- Blocked by #7\n", [1], [7]),
+    # Below the marker only, when there is one. Scope and Design notes discuss
+    # blockers constantly; none of that is the list.
+    ("Prose: blocked by #9\n\n<!-- blockers -->\nBlocked by #10\n", [], [10]),
+    ("<!-- blockers -->\n", [], []),
+    # The LAST marker on its own line, because #47 quotes the marker mid-sentence
+    # in its Scope and carries the real one, empty, at the end. Reading from the
+    # quoted one is how it came to carry seven blockers it does not have.
+    ("the `<!-- blockers -->` marker\nblocked by #12\n\n<!-- blockers -->\n", [], []),
+    ("<!-- blockers -->\nBlocked by #3\n\n<!-- blockers -->\nBlocked by #4\n",
+     [], [4]),
+    # No marker at all: the whole body, still anchored. 14 of this repo's open
+    # issues have no marker, and a host project may never adopt one -- reading
+    # those as unblocked is the direction that starts work on a foundation that
+    # has not landed.
+    ("Blocked by #7\nBlocked by #8\n", [], [7, 8]),
     # A real body, carrying both.
     ("## Plan\nCloses #115\n\n<!-- blockers -->\nBlocked by #40\n", [115], [40]),
     # Neither reader may fall over on an absent body: `gh` returns null for one.
