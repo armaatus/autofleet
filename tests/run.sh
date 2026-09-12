@@ -31,7 +31,7 @@ SUITES=(
 "lint:"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes skips guards interrupt orphans"
+"runner_bound:bounds passes skips hostlint guards interrupt orphans"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "review_mode:sweeps mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite"

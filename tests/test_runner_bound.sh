@@ -202,6 +202,19 @@ sleep $BLOCK_NAP &
 wait
 EOF
         ;;
+      skipperbad*)
+        # Allow-listed by the prefix rule above, and exits 1. The one mutation
+        # the phase could not see: relax the `rc = 77` test in the runner to
+        # `rc != 0` and every other row here stays green, because no fixture was
+        # ever both listed AND failing for an ordinary reason. A skip code that
+        # swallows real failures is the thing this change exists to prevent.
+        # Found by the independent review.
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "this is an ordinary failure from a phase that is allowed to skip"
+exit 1
+EOF
+        ;;
       skipper*)
         # Declines to judge, the way test_teardown.sh does when docker is down or
         # when the machine already carries an orphan stack. 77 is the autotools
@@ -486,6 +499,21 @@ case "${1:-}" in
     || fail "the suite/phase label was not reported as a skip: $(cat "$WORK/out")"
   ok "...and a suite/phase label is matched the same way a bare suite name is"
 
+  # Listed, and failing for an ordinary reason. SKIPPABLE says this phase may
+  # DECLINE; it does not say its failures stop counting. Without this row the
+  # runner could treat every non-zero from a listed phase as a skip and nothing
+  # here would notice. Found by the independent review.
+  make_runner skipperbad
+  run_copy
+  rc=$?
+  [ "$rc" = 1 ] \
+    || fail "a listed phase exiting 1 did not fail the run (rc=$rc): $(cat "$WORK/out")"
+  grep -q "skip skipperbad" "$WORK/out" \
+    && fail "a listed phase exiting 1 was reported as a skip: $(cat "$WORK/out")"
+  grep -q "FAIL skipperbad" "$WORK/out" \
+    || fail "a listed phase exiting 1 was not reported FAIL: $(cat "$WORK/out")"
+  ok "being on the list buys a phase 77 and nothing else"
+
   # The two refusals stay apart. A phase that BROKE into exiting 77 needs to hear
   # about SKIPPABLE even in a run where nothing may skip -- under a shared status
   # it heard about the variable instead, in CI, which is the hardest place to
@@ -495,6 +523,64 @@ case "${1:-}" in
   grep -q "is not in SKIPPABLE" "$WORK/out" \
     || fail "an unlisted phase under NO_SKIP was told the wrong thing: $(cat "$WORK/out")"
   ok "...and an unlisted phase is told so even where nothing may skip"
+  ;;
+
+# ----------------------------------------------------------------- hostlint
+  hostlint)
+  # evals/lint.sh is VENDORED and tests/ is not, so its phase-registry check has
+  # to decide which repository it is running in. That decision has now been wrong
+  # in two consecutive commits -- first keyed on the `tests/` directory, which
+  # every pytest project has; then fixed only on the branch where the file is
+  # missing, leaving a host project with its own tests/run.sh to fail on a SUITES
+  # block it has never heard of. Both were verified by hand, and hand-verifying
+  # is what missed the second. So it gets a row. Found by the independent review.
+  #
+  # The check is driven out of the SHIPPED file rather than restated: the python
+  # block is extracted from evals/lint.sh and run in a throwaway tree, the same
+  # way make_runner drives a copy of the real runner.
+  WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
+  python3 - "$REPO_ROOT/evals/lint.sh" "$WORK/check.py" <<'PY2'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+marker = "if python3 - <<'PHASES'\n"
+if marker not in s:
+    sys.exit("evals/lint.sh no longer runs the phase check as an inline python block")
+block = s.split(marker, 1)[1].split("\nPHASES", 1)[0]
+if "SKIPPABLE" not in block:
+    sys.exit("the extracted block is not the phase-registry check")
+open(dst, "w").write(block)
+PY2
+  [ -s "$WORK/check.py" ] || fail "the phase-registry check could not be extracted"
+
+  # A host installation: no autofleet suite, and a tests/run.sh of its own --
+  # which is a common shell-project convention, and the case the second wrong
+  # discriminator failed on.
+  mkdir -p "$WORK/host/tests"
+  printf '#!/usr/bin/env bash\necho some other project\n' >"$WORK/host/tests/run.sh"
+  : >"$WORK/host/tests/test_something.py"
+  out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 77 ] \
+    || fail "a host repo with its own tests/run.sh was not skipped (rc=$rc): $out"
+  grep -q "no phase registry" <<<"$out" \
+    || fail "the host repo was skipped without saying why: $out"
+  ok "a host installation is told the check does not apply, not that it failed"
+
+  # ...and the caller turns that into silence rather than a green line.
+  grep -q 'elif \[ "\$?" = 77 \]' "$REPO_ROOT/evals/lint.sh" \
+    || fail "evals/lint.sh no longer gives the skip its own branch; a host repo now gets ok or FAIL"
+  ok "...and the lint gives that its own branch rather than an ok"
+
+  # HERE, with the registry gone: the check silently stopping, which is the one
+  # case that must still be loud.
+  mkdir -p "$WORK/mine/tests"
+  : >"$WORK/mine/tests/test_runner_bound.sh"
+  out="$(cd "$WORK/mine" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && fail "autofleet without tests/run.sh was waved through: $out"
+  [ "$rc" = 77 ] && fail "autofleet without tests/run.sh was read as a host repo: $out"
+  grep -q "asserts nothing" <<<"$out" \
+    || fail "the missing registry was not reported as the check stopping: $out"
+  ok "...while the registry going missing HERE is still the check stopping"
   ;;
 
 # ----------------------------------------------------------------- guards
@@ -643,6 +729,6 @@ case "${1:-}" in
   ;;
 
   *)
-  echo "usage: $0 bounds|passes|skips|guards|interrupt|orphans" >&2
+  echo "usage: $0 bounds|passes|skips|hostlint|guards|interrupt|orphans" >&2
   exit 2 ;;
 esac
