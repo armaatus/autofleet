@@ -486,6 +486,20 @@ has_label() { printf '%s' "$1" | tr ',' '\n' | grep -qxF -- "$2"; }
 is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 
 FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
+# The rotation's say-once marker, named here rather than spelled out at each
+# use: it was written as a bare path at three sites, and a list of literals is
+# the drift `clear_issue_markers` already has a comment about. In $STATE_DIR so
+# it outlives a poll, cleared when a dispatcher STARTS -- the same rule, for the
+# same reason, as the one above. Found by the independent review.
+ROTATE_BLIND_SAID="$STATE_DIR/rotate-blind"
+# Its sibling for "the rotation could not happen at all" is a VARIABLE, not a
+# file, and that is the whole point: the condition it reports is a $STATE_DIR
+# nothing can write to, so a marker in $STATE_DIR cannot be created in exactly
+# the case it exists for and the line repeats anyway. A variable is once per
+# dispatcher, which is what the marker was reaching for -- a new process starts
+# with it empty, so "cleared at dispatcher start" comes for free. Found by the
+# independent review, and by the first fix for it, which used a file.
+ROTATE_STUCK_SAID=""
 
 # Hold, remember the reason, and say it if it is news. The three branches below
 # were three copies of `printf hold` / `foundation_hold_say` / `return 0`, which
@@ -893,6 +907,376 @@ stop_reviewers() {
   return 0
 }
 
+# ----------------------------------------------------------- what is KEPT ---
+#
+# Nothing here deletes anything an agent or a person still needs. It deletes
+# what has stopped being about anything: a transcript of a review that was
+# answered three heads ago, on a pull request that merged yesterday.
+#
+# WHY THIS IS NOT JUST TIDINESS. Every one of these stores only ever grew --
+# reviewer transcripts reached 184K across 46 files in under two days on the
+# machine this was written on, 65% of them belonging to merged PRs -- and the
+# cost is not the bytes. It is that stale state is read as current: a `reviewed-`
+# record for a sha on no branch, or a transcript named for a head nobody is
+# reviewing, answers a question nobody should be asking. See
+# armaatus/autofleet#70.
+
+# Reviewer transcripts. Keeps the newest AUTOFLEET_KEEP_REVIEWS per OPEN pull
+# request and drops the rest, including every transcript of a PR that is no
+# longer open. `$1` is the space-separated list of open PR numbers, which
+# `review_open_prs` already has in hand, so deciding WHICH PRs to look at costs
+# nothing. One `gh pr view <n> --json state` is then spent per candidate pull
+# request per pass, and only after a grace pass -- see the comment at that call
+# for why absence from `$1` is not an answer on its own.
+#
+# `$2` is whether that list is an ANSWER, and an empty list with `$2` = yes
+# sweeps everything: that is a drained fleet, which is the peak of the pile this
+# exists for. An empty list that is a FAILURE is `$2` = no and does nothing.
+#
+# This header used to say "costs no API call" and "with no list it does nothing",
+# and both stopped being true when the confirmation call and the two-valued `$2`
+# arrived. Found by the independent review -- the same class of stale claim this
+# branch had already fixed once.
+prune_review_logs() {
+  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
+  [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
+  # `$2` is whether the caller COULD ANSWER, and it is separate from the list
+  # because an empty list has two meanings and they are opposite instructions.
+  #
+  # A drained fleet whose last PR merged is a real empty answer, and the peak of
+  # the pile this sweep exists for. But three things produce a wrongly-empty
+  # list, and each would delete every transcript on the machine: the `python3`
+  # parse between `gh` and here swallows everything (`except: pass`, and a
+  # missing python3 or a `--json` shape change is indistinguishable from `[]`);
+  # `--limit 50` pages, so an open PR past the page reads as closed; and
+  # `--author "@me"` is right for deciding whom to REVIEW and wrong for "is this
+  # PR still open", so a host whose worktrees open PRs under a different account
+  # than the dispatcher's `gh` login loses everything.
+  #
+  # A blip self-heals through the grace pass. A systematic failure empties the
+  # store, once, permanently. Found by the independent review -- and the header
+  # of this function had promised this behaviour while the code did the reverse.
+  local answered="${2:-no}"
+  [ "$answered" = yes ] || return 0
+  [ -d "$dir" ] || return 0
+  # WHICH PRs ARE ELIGIBLE, decided per PULL REQUEST and in two steps, because
+  # one step has the bug twice over: collect the closed numbers FIRST, then ask
+  # about each one's marker. Done in a single pass, the first transcript of a PR
+  # creates `.closed-N` and the second finds it already there -- so the PR is
+  # "graced" on the same pass it was recorded, and every transcript but the
+  # first goes in the same breath as the merge. That is the failure the grace
+  # exists to prevent, and it survived one attempt at fixing it. Found by the
+  # independent review.
+  local removed=0 graced="" closed="" num_seen
+  for f in "$dir"/pr-*.log; do
+    [ -e "$f" ] || continue
+    num_seen="$(basename "$f")"; num_seen="${num_seen#pr-}"; num_seen="${num_seen%%-*}"
+    case " $open_prs " in *" $num_seen "*) continue ;; esac
+    # A PR with a reviewer still writing is not eligible for anything: the
+    # deleting loop skips it, and granting grace here would mean the pass after
+    # the reviewer finishes deletes with no grace at all.
+    if [ -e "$REVIEWING_DIR/$num_seen" ]; then
+      local held_seen=""
+      read -r held_seen _ <"$REVIEWING_DIR/$num_seen" 2>/dev/null || true
+      reviewer_alive "$held_seen" && continue
+    fi
+    case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
+  done
+  for num_seen in $closed; do
+    if [ ! -e "$dir/.closed-$num_seen" ]; then
+      : >"$dir/.closed-$num_seen"       # first pass seeing it closed: grace it
+      continue
+    fi
+    # CONFIRMED CLOSED, not merely absent from an author-scoped list -- and
+    # asked ONCE PER PULL REQUEST, here, rather than once per transcript in the
+    # loop below. The open list comes from `gh pr list --author "@me"`, which is
+    # right for deciding whom to REVIEW and wrong for "is this PR still open":
+    # on a host where the worktrees open PRs under a different account than the
+    # dispatcher's `gh` login, every one of them reads as closed and loses its
+    # transcripts. The comment above named that hazard among three and the code
+    # guarded the other two.
+    #
+    # The call used to sit in the deleting loop, so the PR with thirteen
+    # transcripts #70 measured cost thirteen identical calls -- every poll,
+    # forever, because a PR that answers OPEN is never deleted and so never
+    # stops being a candidate. At the default 60s poll that is ~18,700 calls a
+    # day against the same budget `next_issue` and `review_open_prs` spend, and
+    # gh's secondary rate limit is how this dispatcher breaks. Found by the
+    # independent review.
+    #
+    # An OPEN answer puts the PR BACK ON THE OPEN LIST for the rest of this
+    # sweep, which is what it is. Leaving it a permanent candidate meant its
+    # transcripts were never swept AND never trimmed either -- the newest-N cap
+    # below iterates `$open_prs`, which by construction did not contain it -- so
+    # the one case this call exists to protect was the one case that grew
+    # without bound. Anything but a confident answer keeps the files and keeps
+    # the grace, so a `gh` blip costs a pass rather than a store.
+    #
+    # THE QUESTION RECURS, and that is chosen rather than overlooked. Dropping
+    # the marker on OPEN means the next pass is a grace pass that asks nothing,
+    # so such a PR costs one call every SECOND poll for as long as it stays open
+    # and absent from the author-scoped list. Keeping the marker instead would
+    # ask on every poll; caching the answer for good would mean never noticing
+    # it had closed, and its transcripts would outlive it. Halved and alternating
+    # is the bound, not "asked once" -- the cap reaches it on the passes it
+    # answers, which is enough to bound the store. Found by the independent
+    # review, which read the paragraph above as claiming more than the code does.
+    case "$(GH_PAGER=cat gh pr view "$num_seen" --json state --jq .state 2>/dev/null)" in
+      CLOSED|MERGED) graced="$graced$num_seen " ;;
+      OPEN) open_prs="$open_prs $num_seen"; rm -f "$dir/.closed-$num_seen" ;;
+      *) ;;
+    esac
+  done
+
+  for f in "$dir"/pr-*.log; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
+    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` holds its
+    # transcript open with `>"$log"` for the whole run -- up to
+    # AUTOFLEET_REVIEW_TIMEOUT, thirty minutes -- while the grace is one pass, a
+    # minute. A PR that auto-merges two minutes into its own review would have
+    # had that review's output unlinked under the agent still writing it, and
+    # the sweep would have SAID it swept it. `rotate_fleet_log` was given this
+    # guard for the sibling file; this sweep was not. Found by `/code-review`.
+    # A LIVE reviewer, asked the same way the rotation asks -- the comment
+    # claimed parity and the code tested mere existence, so a marker left by a
+    # SIGKILL blocked this PR's transcripts from ever being swept. Only a
+    # definite 0 blocks, for the same reason as there: a 2-marker is never
+    # cleared, so blocking on it is permanent. Found by the independent review.
+    if [ -e "$REVIEWING_DIR/$num" ]; then
+      local held_by=""
+      read -r held_by _ <"$REVIEWING_DIR/$num" 2>/dev/null || true
+      reviewer_alive "$held_by" && continue
+    fi
+    case " $open_prs " in
+      *" $num "*) rm -f "$dir/.closed-$num"; continue ;;   # still open
+    esac
+    # PER PR, DECIDED BEFORE THIS LOOP. The marker used to be created inside it:
+    # iteration one for a PR made `.closed-N` and continued, and iteration two
+    # onward found it already there and deleted immediately -- so on the very
+    # pass a PR dropped off the open list, ALL BUT ONE of its transcripts went,
+    # and the survivor was whichever head-sha sorted first. #70 measured
+    # thirteen transcripts on one PR; twelve would have gone in the same breath
+    # as the merge, which is exactly what the grace exists to prevent and what
+    # its own comment claimed it did. The `sweeps` phase could not catch it
+    # because no PR there ever had two transcripts alive at once. Found by the
+    # independent review.
+    # `$graced` is "past its grace pass AND confirmed closed by gh", both
+    # decided per pull request above. Everything else keeps its transcripts.
+    case " $graced " in
+      *" $num "*) ;;                # eligible since a previous pass: sweep it
+      *) continue ;;                # first pass seeing it closed: keep them all
+    esac
+    rm -f "$f" && removed=$((removed + 1))
+  done
+  # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
+  # is the order they were written.
+  for num in $open_prs; do
+    kept=0
+    # `ls -t` through a `while read`, not a `for` over an unquoted substitution:
+    # $FLEET_DIR is a documented knob and a space in it word-split the cap into
+    # `rm -f` on fragments, so it silently stopped enforcing. Hard rule 3.
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      kept=$((kept + 1))
+      [ "$kept" -le "$AUTOFLEET_KEEP_REVIEWS" ] && continue
+      rm -f "$f" && removed=$((removed + 1))
+    done <<EOF
+$(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null)
+EOF
+  done
+  # ...and the grace markers of PRs whose transcripts are all gone, so the
+  # directory does not trade one kind of growth for another.
+  for f in "$dir"/.closed-*; do
+    [ -e "$f" ] || continue
+    num="$(basename "$f")"; num="${num#.closed-}"
+    ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
+  done
+  # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
+  # first question about a missing transcript is whether this took it. The
+  # comment sat two blocks above the line it describes, which is the same drift
+  # as a stale one. Found by the independent review.
+  [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
+  return 0
+}
+
+# fleet.log, at AUTOFLEET_LOG_MAX_BYTES. ONE generation: the point is a bound,
+# and two files at the cap is twice the cap.
+#
+# NOT WHILE A REVIEWER IS RUNNING, and that is the whole of the care here. The
+# dispatcher's own writes are `tee -a`, fresh per call, so they follow a rename
+# without noticing -- but `review_open_prs` spawns `review.sh ... >>"$LOG"`, and
+# that redirect holds the INODE for up to AUTOFLEET_REVIEW_TIMEOUT, which is
+# thirty minutes by default and many polls. Rotate under it and its output goes
+# to `fleet.log.1`, invisible in the log anybody is reading; the next rotation
+# then `mv -f`s over `fleet.log.1` and unlinks the file it is still writing to.
+# The output is gone and nothing errors. An earlier version of this comment
+# named the dispatcher as the long-lived holder; it is not. Found by the
+# independent review.
+#
+# Waiting costs nothing: the cap is a bound on a log, not a deadline, and the
+# reviewer that blocks the rotation is the thing writing most of what is in it.
+rotate_fleet_log() {
+  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size live blind=""
+  [ "$max" -gt 0 ] 2>/dev/null || return 0
+  [ -f "$LOG" ] || return 0
+  # UNDER THE CAP IS THE ANSWER FOR ALMOST EVERY POLL, so it is decided FIRST.
+  # The size check used to run after the loop below, which meant a poll that was
+  # never going to rotate anything still burned the say-once marker: an rc-2
+  # holder plus a log at half the cap wrote `rotate-blind`, said the warning, and
+  # then returned without renaming a thing. The real blind rotation, whenever it
+  # came, was then silent -- the marker having been spent on a rotation that did
+  # not happen. Found by the independent review.
+  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$max" ] || return 0
+  # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
+  # silent. It called `is_review_record`, which does not exist on this branch --
+  # it arrives with #42 -- so `command not found` was swallowed by `2>/dev/null`,
+  # the `&& continue` never fired, and EVERY file in the directory blocked
+  # rotation while the dispatcher ran a nonexistent command once per file per
+  # poll. And blocking on any marker rather than a live pid means rotation
+  # starves: `fleet.sh` deliberately keeps a marker whose pid `ps` cannot
+  # identify, and that one survives for the dispatcher's life, after which
+  # AUTOFLEET_LOG_MAX_BYTES is not a bound at all. Found by `/code-review`, which
+  # reproduced the 127.
+  if [ -d "$REVIEWING_DIR" ]; then
+    for live in "$REVIEWING_DIR"/*; do
+      [ -e "$live" ] || continue
+      local held=""
+      read -r held _ <"$live" 2>/dev/null || true
+      # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
+      # 2 alive-but-ps-would-not-say. ONLY 0 BLOCKS.
+      #
+      # An earlier version blocked on 2 as well -- "the whole point is not to
+      # rename an inode somebody still has open" -- and that reinstated exactly
+      # the starvation the comment above names. A 2-marker is never cleared:
+      # `live_reviewers` keeps it deliberately ("only a definite 1 clears it")
+      # and `stop_reviewers` runs at dispatcher start, so one SIGKILLed reviewer
+      # whose pid the OS reuses for something `ps` will not name blocks every
+      # rotation for the life of the dispatcher, silently -- the `say` below is
+      # never reached, because the function returned before the `mv`. The cap
+      # stops being a bound at all.
+      #
+      # Weighing the two: blocking on 2 risks an unbounded log, forever, with no
+      # message. Not blocking risks ONE rename under a writer nobody can
+      # identify -- one generation, the file still on disk as fleet.log.1, and
+      # the writer's fd still valid. The second is recoverable and the first is
+      # not. It is said once, because rotating out from under something is worth
+      # knowing about even when it is the better answer. Found by the
+      # independent review, which noted the two comments contradicted and the
+      # code implemented the losing one.
+      reviewer_alive "$held"; local is=$?
+      [ "$is" = 0 ] && return 0
+      [ "$is" = 2 ] && blind="$held"
+    done
+  fi
+  mv -f "$LOG" "$LOG.1" 2>/dev/null || {
+    # SAID, AND SAID ONCE. A read-only state dir or an undeletable fleet.log.1
+    # made this fail on every poll forever with nothing logged -- the opposite
+    # of the rule stated forty lines above. Ungated, it then did the opposite of
+    # the rule this whole function is: a directory `mv` cannot write to is still
+    # a file `tee -a` can append to, so the one state where the cap CANNOT hold
+    # was the one writing ~1440 lines a day into the log it is failing to bound.
+    # Same shape and same marker rule as the warning below. Found by the
+    # independent review.
+    if [ -z "$ROTATE_STUCK_SAID" ]; then
+      ROTATE_STUCK_SAID=1
+      say "could not rotate $LOG past $max bytes; it will keep growing"
+    fi
+    return 0; }
+  # ...and cleared by a rotation that works, so the next time it sticks it says
+  # so. The condition is a directory permission somebody fixes while the fleet
+  # runs, so "once per dispatcher" would otherwise be once per dispatcher even
+  # after the operator had fixed and re-broken it.
+  ROTATE_STUCK_SAID=""
+  # SAID AFTER THE RENAME, into the file people read. `say` is `tee -a "$LOG"`,
+  # so a warning printed before the `mv` was appended to the inode that became
+  # `fleet.log.1` -- the one this very line says nobody reads. Found by the
+  # independent review.
+  if [ -n "$blind" ] && [ ! -e "$ROTATE_BLIND_SAID" ]; then
+    : >"$ROTATE_BLIND_SAID"
+    say "  rotated fleet.log with pid $blind holding it and ps unable to name it;"
+    say "  its output may land in fleet.log.1 -- the alternative is never rotating"
+  fi
+  say "fleet.log passed $max bytes; the previous one is $LOG.1"
+  return 0
+}
+
+# `.autofleet/run/reviewed-<sha>` records, which guard.py reads as "the local
+# review for this commit is recorded". A sha that is on no branch is a commit
+# that was amended or rebased away, and its record can only ever answer for a
+# commit nobody will push again.
+prune_reviewed_markers() {
+  # The same off switch the other two have, because config.sh promises one --
+  # "set either to 0 to keep everything" -- and this sweep was governed by
+  # neither knob. A host project that sets AUTOFLEET_KEEP_REVIEWS=0 to stop the
+  # dispatcher deleting review state still had these deleted every 60 seconds.
+  # Found by `/code-review`.
+  [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
+  # EVERY CHECKOUT THAT HAS ONE, not just the dispatcher's. `REPO_ROOT` here is
+  # the main worktree, and that is not where the push gate reads: `guard.py`
+  # builds its path from `git rev-parse --show-toplevel`, the WORKTREE root, and
+  # `record-review.sh` sets its own REPO_ROOT from `BASH_SOURCE` and writes
+  # `<worktree>/.autofleet/run/reviewed-<sha>`. So this swept a directory the
+  # gate never reads and never reached the markers that answer it -- while the
+  # comment and #74's Scope both claimed otherwise. The phase could not catch it
+  # either: it built markers under the same path the code used. Found by the
+  # independent review.
+  # NEWLINE-DELIMITED, and read as lines. A space-joined list word-splits, and
+  # `$FLEET_DIR` and the worktree paths are both things a host sets -- so a
+  # worktree under `/Users/me/my projects/...` was silently skipped, which is the
+  # same shape as the `$STATE_DIR`-with-a-space glob this file already guards.
+  # Found by the independent review.
+  local roots w
+  roots="$REPO_ROOT"
+  for w in "$OWNED_DIR"/*; do
+    [ -e "$w" ] || continue
+    w="$(cat "$w" 2>/dev/null)"
+    [ -d "$w/.autofleet/run" ] && roots="$roots
+$w"
+  done
+  local dir f sha removed=0 root
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    dir="$root/.autofleet/run"
+    # `continue`, NOT `return 0`. This was left over from the single-root version,
+    # where returning was right. Multi-root it exits the whole function on the
+    # FIRST root -- the dispatcher checkout -- and that is the one most likely to
+    # lack the directory: `.autofleet/run/` is gitignored and created on demand by
+    # `record-review.sh` in the checkout that records a review, which is a
+    # WORKTREE. So on any host where no review was ever recorded from the main
+    # checkout, the sweep returned on iteration one every poll and examined
+    # nothing at all. Found by the independent review.
+    [ -d "$dir" ] || continue
+    for f in "$dir"/reviewed-*; do
+      [ -e "$f" ] || continue
+      sha="$(basename "$f")"; sha="${sha#reviewed-}"
+      case "$sha" in *[!0-9a-f]*|"") continue ;; esac
+      # `cat-file -e` first: a sha git has never heard of is not ours to judge.
+      git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+      # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
+      # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
+      # 141 -- so past a few hundred refs this said "on no branch" about a commit
+      # that is on a thousand of them, and deleted the record. Measured: 500 refs
+      # exits 0, 1000 exits 141. guard.py then refuses the push with "record the
+      # local review first" and both passes have to be run again.
+      #
+      # It fails SAFE now, like the `cat-file -e` above it: anything other than a
+      # confidently empty answer keeps the record.
+      local on_branch
+      on_branch="$(git -C "$root" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
+        || continue
+      [ -n "$on_branch" ] && continue
+      rm -f "$f" && removed=$((removed + 1))
+    done
+  done <<EOF
+$roots
+EOF
+  [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
+  return 0
+}
+
 review_open_prs() {
   fleet_review_is_local || return 0
   # A stopped fleet writes nothing to a pull request, and `review.sh` knows that
@@ -909,11 +1293,44 @@ review_open_prs() {
   # is a thing to opt into deliberately, not a side effect of turning on local
   # review. `@me` is the account gh is logged in as, which in the fleet's case
   # is also the account every worktree opens PRs with.
-  local listing
+  # ONE NUMBER, because the guard below only guards while it equals the limit.
+  # Both were literal `50`, and a page size changed in one place would have left
+  # the guard passing a truncated listing through as an answer -- which empties
+  # the transcript store once, permanently, and that is the single failure the
+  # `prs_answered` split exists to prevent. Hard rule 3. Found by the
+  # independent review.
+  local listing pr_page=50
   listing="$(GH_PAGER=cat gh pr list --state open --author "@me" \
-               --json number,isDraft,headRefOid --limit 50 2>/dev/null)" || {
+               --json number,isDraft,headRefOid --limit "$pr_page" 2>/dev/null)" || {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
+
+  # The open numbers, drafts included, from the listing already in hand -- no
+  # second API call. The transcripts of pull requests that are no longer open go
+  # here, because this is the one place that knows which those are, and because
+  # a review of a closed PR is answering a question nobody is asking.
+  #
+  # Drafts count as open: sweeping a draft's transcripts out from under it while
+  # somebody is still reading them is the failure this sweep must not have.
+  # TWO ANSWERS, not one: the numbers, and whether the parse worked at all.
+  # `except: pass` with `2>/dev/null` made a missing python3 and a real `[]`
+  # the same string, and the sweep below treats them oppositely.
+  local open_prs prs_answered=no
+  open_prs="$(printf '%s' "$listing" | python3 -c '
+import json, sys
+print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
+' 2>/dev/null)" && prs_answered=yes
+  # ...and a listing that came back truncated is not an answer either: at the
+  # page limit we cannot tell an absent PR from one on the next page.
+  if [ "$(printf '%s' "$listing" | python3 -c '
+import json, sys
+print(len(json.load(sys.stdin)))
+' 2>/dev/null)" = "$pr_page" ]; then
+    prs_answered=no
+  fi
+  # `yes` only when the parse produced something we can trust: `gh` succeeding
+  # is not enough, because the parse below it can fail silently.
+  prune_review_logs "$open_prs" "$prs_answered"
 
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
@@ -2357,9 +2774,13 @@ while that one is up."
   # are cleared before this dispatcher counts anything, rather than reaped
   # one-by-one against a `kill -0` that cannot tell the difference.
   stop_reviewers >/dev/null
-  # ...and the "already said it" marker, so this dispatcher explains its own
-  # holds rather than inheriting a previous run's silence.
-  rm -f "$FOUNDATION_HOLD_SAID"
+  # ...and the "already said it" markers, so this dispatcher explains its own
+  # holds rather than inheriting a previous run's silence. `rotate-blind` is the
+  # same shape and was cleared by nothing at all, so "rotating with a pid ps
+  # cannot name" was said once per MACHINE -- an operator debugging truncated
+  # reviewer output next month got no line at all. Found by the independent
+  # review.
+  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID"
 
   record_dispatcher
   echo $$ >"$PIDFILE"
@@ -2398,6 +2819,11 @@ while that one is up."
       say "deadline passed -- launching nothing more, still reaping what is in flight"
       reason="the deadline passed"
     fi
+
+    # Between passes, before anything writes: the log rotation must not land
+    # mid-pass, and the marker sweep reads git, which is cheap and local.
+    rotate_fleet_log
+    prune_reviewed_markers
 
     forget_poll_answers
     # The order is load-bearing in three places. reap_merged first, because a
