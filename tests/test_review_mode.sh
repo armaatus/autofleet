@@ -98,7 +98,8 @@
 #                                 nothing to read (CI run 34658821929, exit 143
 #                                 at nine minutes). tests/run.sh bounds each
 #                                 phase now, so a wedge is a FAIL that names
-#                                 itself; this asserts the cause.
+#                                 itself; this catches the two shapes named in
+#                                 the arm, not every write-time expansion.
 #
 # `gh` and the reviewer command are both stubbed on PATH and the fleet state dir
 # is a temp dir, so nothing here touches a pull request or the machine's fleet.
@@ -263,8 +264,13 @@ PY
   # substitutions on it. Unescaped, \`stub_reviewer submits\` above called this
   # very function, which rewrote the stub, which called it again -- the suite
   # hung from \`refuses\` onwards with no failure and no output, and CI killed it
-  # at nine minutes (run 34658821929). tests/run.sh bounds each phase now, so
-  # the next one of these is a FAIL that names itself rather than a wedge.
+  # at nine minutes (run 34658821929).
+  #
+  # tests/run.sh bounds each phase now, but do not read that as cover for this:
+  # the bound names a phase that BLOCKS, and this one forks. Its own note says
+  # so. A repeat of this exact bug still outruns the watchdog, because killing
+  # the top of a recursion that is busy making more of itself is not a fix.
+  # Escaping the backtick is.
 esac
 exit 0
 STUB
@@ -1001,9 +1007,17 @@ GHSTUB
   # This is the phase that would have hung. Every phase but `mode` calls
   # `stub_reviewer`, so the suite stopped dead immediately after it with no
   # failure, no output and no name to read -- nine minutes of silence and exit
-  # 143 in CI run 34658821929. It is asserted against the FILE rather than
-  # against the one backtick that caused it, so the next write-time expansion
-  # that is not a backtick fails here too.
+  # 143 in CI run 34658821929.
+  #
+  # WHAT IT DOES NOT CATCH, said plainly because this file has twice been bitten
+  # by a phase that claimed more than it asserted: a write-time expansion that
+  # succeeds SILENTLY and eats text this does not name -- `\`date\``, `$HOME` --
+  # passes all four rows. Only two shapes are caught: one that writes to stderr,
+  # and the loss of the one line named below. The general case wants the written
+  # file compared against the heredoc body, which is worth doing and is not this
+  # change; it is noted on armaatus/autofleet#71 with the other guards aimed
+  # slightly off. Both review passes raised this, and narrowing the claim is the
+  # answer rather than leaving the comment to be believed.
   make_fixture
   err="$WORK/stub-err"
   stub_reviewer marked 2>"$err"
@@ -1019,18 +1033,18 @@ GHSTUB
   # The prose reached the file instead of being executed out of it. Both halves
   # matter: present means the substitution did not eat it, and a stub that still
   # says this is a stub that still carries its own warning.
-  grep -q 'stub_reviewer submits' "$WORK/bin/fake-reviewer" \
+  grep -qF 'stub_reviewer submits' "$WORK/bin/fake-reviewer" \
     || fail "the stub's NOTE was consumed as a command substitution, not written"
   ok "backticked prose reaches the stub as text"
 
   # The parts the heredoc is unquoted FOR still expand, so the fix did not buy
   # the bound by making the stub inert.
-  grep -q "$GH_REVIEWS" "$WORK/bin/fake-reviewer" \
+  grep -qF "$GH_REVIEWS" "$WORK/bin/fake-reviewer" \
     || fail "the stub no longer has the review path baked in; the heredoc stopped expanding"
   ok "...while the paths the heredoc is unquoted for still expand"
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records|holds|once|retries|capped|stubwrite" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records|status_count|holds|once|retries|capped|stubwrite" >&2
   exit 2 ;;
 esac
