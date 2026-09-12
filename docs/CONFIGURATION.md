@@ -68,8 +68,15 @@ The fleet therefore runs at **one** worktree for the priority issue's whole
 time-box, and at one again while the foundation issue lands alone. Nothing about
 "a foundation issue lands alone" is weakened, and what depends on it is `blocked`
 either way — but the dependants are not what stalls, so that is the wrong thing
-to be reassured by. If two time-boxes at one worktree is not what you meant, the
-foundation issue is the one to label.
+to be reassured by.
+
+Measure that against the right baseline. Those dependants are also what make the
+foundation issue sort to the *front* of an unlabelled queue — the second sort key
+is how many issues it frees — so it would have taken a solo time-box first
+anyway. The label therefore adds one solo time-box rather than costing the
+difference between a full fleet and one worktree; `docs/WORKFLOW.md` works the
+arithmetic through. If another time-box at one worktree is not what you meant,
+the foundation issue is the one to label.
 
 ### The review
 

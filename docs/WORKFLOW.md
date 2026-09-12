@@ -94,8 +94,16 @@ comes off — sorts `[#A, #B, #151, #F]` and fills **three**, with #F waiting on
 them. (`[#A, #B, #F]` would fill two, not three: the scan breaks at #F with two
 worktrees live, for the same reason this passage is about.)
 
+That order stipulates a foundation issue that frees nothing, which is the worst
+case rather than the usual one. The second sort key is how many issues an issue
+frees, so an `#F` that even one open `Blocked by #N` line names sorts **first**
+unlabelled — `[#F, #A, #B, #151]` — and the fleet is already down to one worktree
+while it lands alone, filling three only afterwards. Against that `#F`, which is
+the kind the "lands alone" rule exists for, the label buys one *extra* solo
+time-box, not the whole gap.
+
 So the question to ask before applying it is not "does this jump the queue" but
-"is this worth two time-boxes at one worktree". If it is not, the foundation
+"is this worth another time-box at one worktree". If it is not, the foundation
 issue is the one to label.
 
 `--auto` never pauses; it stops when the queue empties, at `--until`/`--for`, or

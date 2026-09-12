@@ -51,12 +51,27 @@
 # exists to explain. Found by the independent review, which noted the number is
 # the one the docs tell a maintainer to decide on.
 #
-# So: one `priority` label in front of a ready foundation issue costs two
-# time-boxes at one worktree, not a reordering. An earlier version of this
-# comment said "nothing that depends on it could have started either way --
-# those are `blocked` -- so the rule holds", which is true and is the wrong
-# reassurance: the dependants are not what stalls. Found by the independent
-# review, which noted this change wrote all three copies of that sentence.
+# THAT ORDER STIPULATES A FOUNDATION ISSUE THAT FREES NOTHING, and that is the
+# atypical one -- so read the comparison as a bound, not as the usual case. The
+# second key is `-blocks`, so a `#F` named in even one open `Blocked by #N` line
+# outranks three issues that free nothing and sorts FIRST, unlabelled. Run that
+# through the same code: `[#F, #A, #B, #151]` launches #F on pass 1 and breaks on
+# `is_foundation`, so the fleet is at ONE worktree while #F lands alone and fills
+# three only afterwards. Labelled, the same backlog is one worktree for #151,
+# then one for #F, then two.
+#
+# So: against a foundation issue that anything is waiting on -- the kind the
+# "lands alone" rule exists for -- the label costs ONE EXTRA SOLO TIME-BOX, and
+# the three-versus-one gap is the worst case, reached only when #F frees nothing.
+# Either way it is time-boxes at one worktree and not a reordering, which is the
+# thing to decide about. Found by the independent review, which noted the
+# stipulation was doing the work the arithmetic was getting credit for.
+#
+# An earlier version of this comment said "nothing that depends on it could have
+# started either way -- those are `blocked` -- so the rule holds", which is true
+# and is the wrong reassurance: the dependants are not what stalls. Found by the
+# independent review, which noted this change wrote all three copies of that
+# sentence.
 #
 # ## Stopping
 #
@@ -379,7 +394,9 @@ waiting_worktrees() {
 
 # --------------------------------------------------------------- the queue ---
 # Every open issue, with how many other open issues are blocked BY it. That
-# number is the ordering: the work that frees the most other work goes first.
+# number is the SECOND key, not the ordering: `priority` sorts ahead of it (see
+# "What it picks" above), and within one priority class the work that frees the
+# most other work goes first.
 # It reads the same `Blocked by #N` lines unblock.yml parses, so nothing new has
 # to be maintained.
 ready_issues() {
