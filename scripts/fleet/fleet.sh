@@ -26,6 +26,53 @@
 # one. Milestones do not order it: `ready` already means every blocker is closed,
 # and a milestone number is not a claim about what can be built now.
 #
+# Ahead of all of that: anything labelled `priority`. That is the one ordering a
+# person states rather than derives, and it exists because the blocker graph
+# cannot express "this one first" -- the only way to say it before was to file
+# fake dependencies on issues that did not have them. It reorders the ready list
+# and nothing else: a `blocked` or `needs-human-step` issue is no more startable
+# for carrying it, and a foundation issue that is holding still holds. It can
+# DELAY one, and the cost is bigger than "the foundation issue starts later".
+# The scan BREAKS on the first foundation issue once anything is in flight, so
+# every ready issue behind it in the list is skipped for that pass too --
+# including issues that have nothing to do with it and are not `blocked`.
+#
+# Worked through, because this is the number a maintainer needs before applying
+# the label. Ready list `[#151 priority, #F foundation, #A, #B]`, nothing in
+# flight: pass 1 launches #151; pass 2 reaches #F, sees `live=1`, breaks, and #A
+# and #B are never considered. The fleet runs at ONE worktree for #151's whole
+# time-box, then at one worktree again while #F lands alone.
+#
+# Without the label the same backlog -- all four issues; #151 does not vanish
+# when you take its label off -- sorts `[#A, #B, #151, #F]` and fills THREE,
+# with #F waiting on them. An earlier version of this said `[#A, #B, #F]` fills
+# three, which is wrong twice over: it drops #151, and that list fills two,
+# because the scan breaks at #F with `live=2` for the very reason this passage
+# exists to explain. Found by the independent review, which noted the number is
+# the one the docs tell a maintainer to decide on.
+#
+# THAT ORDER STIPULATES A FOUNDATION ISSUE THAT FREES NOTHING, and that is the
+# atypical one -- so read the comparison as a bound, not as the usual case. The
+# second key is `-blocks`, so a `#F` named in even one open `Blocked by #N` line
+# outranks three issues that free nothing and sorts FIRST, unlabelled. Run that
+# through the same code: `[#F, #A, #B, #151]` launches #F on pass 1 and breaks on
+# `is_foundation`, so the fleet is at ONE worktree while #F lands alone and fills
+# three only afterwards. Labelled, the same backlog is one worktree for #151,
+# then one for #F, then two.
+#
+# So: against a foundation issue that anything is waiting on -- the kind the
+# "lands alone" rule exists for -- the label costs ONE EXTRA SOLO TIME-BOX, and
+# the three-versus-one gap is the worst case, reached only when #F frees nothing.
+# Either way it is time-boxes at one worktree and not a reordering, which is the
+# thing to decide about. Found by the independent review, which noted the
+# stipulation was doing the work the arithmetic was getting credit for.
+#
+# An earlier version of this comment said "nothing that depends on it could have
+# started either way -- those are `blocked` -- so the rule holds", which is true
+# and is the wrong reassurance: the dependants are not what stalls. Found by the
+# independent review, which noted this change wrote all three copies of that
+# sentence.
+#
 # ## Stopping
 #
 # The stop is a FILE, not a signal, and it lives outside every worktree
@@ -100,6 +147,12 @@ POLL_SECONDS="${AUTOFLEET_POLL:-60}"
 # task that was never going to work.
 TIMEBOX_SECONDS="${AUTOFLEET_TIMEBOX:-10800}"
 FOUNDATION_LABEL="${AUTOFLEET_FOUNDATION_LABEL:-foundation}"
+# The human's thumb on the queue -- see "What it picks" above. Read in exactly one
+# place that can change what STARTS (`ready_issues`, where it only sorts), plus
+# `cmd_status`, which reports. That split is the point: an override that also
+# decided what may start would be a second way past `blocked`, and this fleet has
+# one set of rules about what is startable.
+PRIORITY_LABEL="${AUTOFLEET_PRIORITY_LABEL:-priority}"
 # An issue whose LAST step is outward, irreversible and the maintainer's --
 # tagging a release, touching real hardware, signing something. The fleet may not
 # finish one, so it does not start one, does not read an agent waiting on one as
@@ -341,7 +394,9 @@ waiting_worktrees() {
 
 # --------------------------------------------------------------- the queue ---
 # Every open issue, with how many other open issues are blocked BY it. That
-# number is the ordering: the work that frees the most other work goes first.
+# number is the SECOND key, not the ordering: `priority` sorts ahead of it (see
+# "What it picks" above), and within one priority class the work that frees the
+# most other work goes first.
 # It reads the same `Blocked by #N` lines unblock.yml parses, so nothing new has
 # to be maintained.
 ready_issues() {
@@ -350,8 +405,13 @@ ready_issues() {
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
 import json, sys
 from issue_refs import blocked_by
-human_step = sys.argv[1]
+human_step, priority = sys.argv[1], sys.argv[2]
 issues = json.load(sys.stdin)
+
+
+def has(issue, label):
+    return any(l["name"] == label for l in issue.get("labels", []))
+
 blocks = {}
 for i in issues:
     for n in blocked_by(i.get("body")):
@@ -361,14 +421,21 @@ for i in issues:
 # that prepares it, and stays `ready` with it. #148 was picked up again 18
 # seconds after its own preparatory PR merged, and would have been picked up
 # once per cycle forever, each attempt further from the point.
-ready = [i for i in issues
-         if any(l["name"] == "ready" for l in i.get("labels", []))
-         and not any(l["name"] == human_step for l in i.get("labels", []))]
-# Most-unblocking first, then oldest issue number: predictable inside a tie.
-for i in sorted(ready, key=lambda i: (-blocks.get(i["number"], 0), i["number"])):
+ready = [i for i in issues if has(i, "ready") and not has(i, human_step)]
+# Priority first, then most-unblocking, then oldest issue number: predictable
+# inside a tie. The priority flag is a BOOLEAN in the key and not a weight -- a
+# labelled issue outranks every unlabelled one whatever either unblocks, which is
+# the whole of what a person applying the label is asking for. Within the
+# labelled set the ordinary ordering still decides, so labelling five issues does
+# not throw away what the queue itself says about which of the five goes first.
+# NOTE: no apostrophes anywhere in this block -- it lives inside a single-quoted
+# `python3 -c` string, and one closes it.
+for i in sorted(ready, key=lambda i: (not has(i, priority),
+                                      -blocks.get(i["number"], 0),
+                                      i["number"])):
     labels = ",".join(l["name"] for l in i.get("labels", []))
     print(i["number"], blocks.get(i["number"], 0), labels, i["title"], sep="\t")
-' "$HUMAN_STEP_LABEL"
+' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL"
 }
 
 # `ready` overstates availability: the label stays until the PR merges, so an
@@ -1997,12 +2064,28 @@ cmd_status() {
   done
   echo
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
-  echo "         'unblocks' is how many issues it frees):"
-  printf '  %-6s %-9s %s\n' "issue" "unblocks" "title"
+  echo "         'unblocks' is how many issues it frees, and a row marked"
+  echo "         $PRIORITY_LABEL goes ahead of that ordering):"
+  # The column is HEADED with the label word and FILLED with the label word, and
+  # sized to it. Heading it `ahead` and filling it with `priority` named two
+  # different things in one column; and a fixed `%-9s` fits the default with one
+  # character to spare, so a host renaming the label to anything longer pushed
+  # that row's title past the header and only that row's -- which reads as the
+  # rendering bug this marker exists to prevent. Both found by the independent
+  # review. `unblocks` is 8, so 8 is the floor that keeps the columns apart.
+  local col="${#PRIORITY_LABEL}"
+  [ "$col" -ge 8 ] || col=8
+  printf "  %-6s %-9s %-${col}s %s\n" "issue" "unblocks" "$PRIORITY_LABEL" "title"
+  # The label column ready_issues already prints is what says which rows are
+  # ahead of the queue: a `next up` list reordered with nothing on screen saying
+  # why reads as a bug in the ordering, which is the report this marker exists
+  # to prevent.
   ready_issues | while IFS="$(printf '\t')" read -r num unblocks labels title; do
     in_flight "$num" && continue
     gave_up_on "$num" && continue
-    printf '  #%-5s %-9s %s\n' "$num" "$unblocks" "$title"
+    local mark=""
+    has_label "$labels" "$PRIORITY_LABEL" && mark="$PRIORITY_LABEL"
+    printf "  #%-5s %-9s %-${col}s %s\n" "$num" "$unblocks" "$mark" "$title"
   done | head -12
 
   # ...and where the ones missing from that list went, since a `ready` issue the
