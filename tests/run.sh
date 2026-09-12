@@ -24,7 +24,7 @@ SUITES=(
 "teardown:derives reap watcher profiles mtime"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
-"review_mode:mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped"
+"review_mode:mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite"
 "fleet:foundation_holds foundation_break_is_local foundation_resays foundation_waiting_once foundation_closed_frees foundation_cold_start foundation_restart_speaks foundation_launch_held foundation_said_once foundation_one_lookup foundation_frees foundation_none foundation_blind foundation_cli_blind create_says create_warns card_says card_quiet remove_forces remove_advice remove_keeps_stack remove_sweeps_stack merged_keeps_dirty merged_keeps_owned merged_unknown_git merged_cli_silent remove_scoped_sweep stall_expected stall_reports timebox_waits timebox_stops queue_skips list_declines timebox_rearms labels_unknown outage_once one_lookup timebox_clears stop_clears own_clears one_card abandon_blocked abandon_closed abandon_human_step abandon_keeps_dirty abandon_keeps_commits abandon_unknown_git abandon_leaves_working abandon_timebox gaveup_not_restarted gaveup_retry abandon_warns_first abandon_warned_saved abandon_two_keeps gaveup_pruned list_says_declined abandon_reason_flickers abandon_lookup_blind status_stale status_current status_unrecorded status_from_worktree status_draining status_stopped status_drained status_behind status_behind_revert status_unreadable status_names_root run_refuses run_stale_recycled run_stale_gone status_recycled stop_spares_stranger stop_stops_dispatcher run_blind_ps status_blind_ps stop_blind_ps drain_ends_on_merge drain_after_stop stop_writes_drain stop_now_writes_both drain_lets_agents_finish stop_freezes_agents drain_launches_nothing resume_clears_both stop_drain_blind_dispatcher runner_stub runner_unresolved selector_git_unusable create_scoped live_scoped foundation_foreign status_worktree_scope"
 )
 
@@ -41,17 +41,66 @@ want_suite="${1:-}"
 want_phase="${2:-}"
 pass=0; fail=0; failed=""
 
+# Every phase runs under a bound, because the failure this runner is worst at
+# reporting is the one that produces nothing. CI run 34658821929 printed
+# `ok review_mode/mode`, then nine minutes of silence, then exit 143 when the
+# runner killed the job: no suite named, no phase named, and nothing in the log
+# to read. A phase blocks on what a laptop has and a runner does not -- a tty, a
+# login, an `orca` binary, a `read` with no input, a poll with no deadline -- or,
+# as it turned out that time, on itself. Bounded, that is a FAIL that says which
+# phase and how long it sat there.
+#
+# `timeout(1)` is coreutils and is not on macOS, and this suite has to run in
+# both places, so the bound is built here out of a background job and a watcher.
+# Generous on purpose: the phases wait on real background processes and their own
+# `await` helpers already allow up to 120s, so this is the runner giving up, not
+# a deadline anything is expected to meet. AUTOFLEET_TEST_TIMEOUT overrides it.
+#
+# What this does NOT rescue is a phase that forks rather than blocks: the one
+# that caused run 34658821929 recursed through a command substitution, and by the
+# time it mattered the machine had no process left to fork the watcher with. The
+# bound catches a phase WAITING on something CI does not have; it is not a
+# sandbox. Keep the phases from forking unboundedly on their own account.
+PHASE_TIMEOUT="${AUTOFLEET_TEST_TIMEOUT:-300}"
+
 run_one() {
   local label="$1"; shift
-  if "$@" >/tmp/autofleet-suite.$$ 2>&1; then
+  local out="/tmp/autofleet-suite.$$" flag="/tmp/autofleet-suite.$$.blocked"
+  local rc=0 pid watcher
+  rm -f "$flag"
+
+  # The phase's output goes to a FILE, not a pipe. A pipe would keep this runner
+  # waiting on any grandchild that inherited the write end -- the reviewer stubs
+  # spawn `sleep`s on purpose -- so killing the phase would not end the wait.
+  "$@" >"$out" 2>&1 &
+  pid=$!
+  # The watcher holds neither the output file nor stdin, for the same reason.
+  ( sleep "$PHASE_TIMEOUT"; kill -9 "$pid" 2>/dev/null && : >"$flag" ) \
+    >/dev/null 2>&1 </dev/null &
+  watcher=$!
+  # stderr silenced only around the reap: killing the job makes the shell
+  # announce it ("line NN: 1234 Killed: 9 ..."), which is noise pointing at this
+  # runner rather than at the phase that blocked. The phase's own output went to
+  # "$out" and is printed below.
+  wait "$pid" 2>/dev/null; rc=$?
+  kill -9 "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null
+
+  if [ -e "$flag" ]; then
+    fail=$((fail + 1)); failed="$failed $label"
+    printf '  FAIL %s\n' "$label"
+    printf '       BLOCKED: produced no result in %ss and was killed.\n' "$PHASE_TIMEOUT"
+    printf '       Output up to that point:\n'
+    sed 's/^/       /' "$out"
+  elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
   else
     fail=$((fail + 1)); failed="$failed $label"
     printf '  FAIL %s\n' "$label"
-    sed 's/^/       /' /tmp/autofleet-suite.$$
+    sed 's/^/       /' "$out"
   fi
-  rm -f /tmp/autofleet-suite.$$
+  rm -f "$out" "$flag"
 }
 
 for entry in "${SUITES[@]}"; do
