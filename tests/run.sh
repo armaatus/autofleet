@@ -75,15 +75,26 @@ skipped=0; skips=""
 # and again when the machine already carries an orphan stack a real sweep would
 # destroy.
 SKIPPABLE="teardown/reap"
+# 0 = allowed. 1 = this phase is not on the list. 2 = skips are refused here,
+# whatever the list says.
+#
+# A REASON, not a bare status, because the two refusals need different words and
+# the caller cannot tell them apart from a shared 1: under AUTOFLEET_TEST_NO_SKIP
+# a phase that genuinely BROKE into exiting 77 would be told "this run does not
+# accept a phase that judged nothing" and never that it is missing from
+# SKIPPABLE -- erasing the distinction in CI, which is the one place the variable
+# is for and the hardest place to diagnose from. It also stops a third refusal
+# reason inheriting whichever message was written last. Found by the independent
+# review.
 may_skip() {
-  # ...and nowhere at all when the caller says skips are not acceptable here.
-  # "Machine state, not diff state" is true of a laptop and false of CI: a
-  # missing docker on a runner is an infrastructure regression, and a green run
-  # with a count in it is how that goes unnoticed for a month. The allowlist
-  # bounds WHICH phase may decline; this bounds WHERE. Found by the independent
-  # review. Off by default, because the local ergonomics are what #78 was about.
-  [ -z "${AUTOFLEET_TEST_NO_SKIP:-}" ] || return 1
-  printf '%s\n' $SKIPPABLE | grep -qxF -- "$1"
+  printf '%s\n' $SKIPPABLE | grep -qxF -- "$1" || return 1
+  # Listed, and still refused HERE. "Machine state, not diff state" is true of a
+  # laptop and false of a runner, where a missing docker is an infrastructure
+  # regression and a green run with a count in it is how that goes unnoticed for
+  # a month. The allowlist bounds WHICH phase may decline; this bounds WHERE. Off
+  # by default: the local ergonomics are what #78 was about.
+  [ -z "${AUTOFLEET_TEST_NO_SKIP:-}" ] || return 2
+  return 0
 }
 
 # Every phase runs under a bound, because the failure this runner is worst at
@@ -262,7 +273,7 @@ report_fail() {
 run_one() {
   local label="$1"; shift
   local out="/tmp/autofleet-suite.$$" marker="/tmp/autofleet-suite.$$.blocked"
-  local rc=0 pid watcher
+  local rc=0 pid watcher skip_why=0
   rm -f "$marker"
 
   # The phase's output goes to a FILE, not a pipe. A pipe would keep this runner
@@ -314,7 +325,7 @@ run_one() {
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
-  elif [ "$rc" = "$SKIP_RC" ] && may_skip "$label"; then
+  elif [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_why=$?; [ "$skip_why" = 0 ]; }; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
     # ever running again.
@@ -322,21 +333,22 @@ run_one() {
     printf '  skip %s\n' "$label"
     sed 's/^/       /' "$out"
   elif [ "$rc" = "$SKIP_RC" ]; then
-    # 77 from a phase nobody agreed may skip. Reported as the failure it is, and
-    # named as the specific one, because "add it to SKIPPABLE" and "this phase
-    # has a bug" are different answers and the reader has to pick.
+    # 77 from a phase that was not allowed to say it. Which refusal it was decides
+    # the words: "add it to SKIPPABLE" and "nothing may skip here" send the reader
+    # to different places, and a phase that BROKE into exiting 77 needs the first
+    # one even under the second.
     report_fail "$label"
-    if [ -n "${AUTOFLEET_TEST_NO_SKIP:-}" ]; then
+    if [ "$skip_why" = 1 ]; then
+      printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
+        "$SKIP_RC" "$label"
+      printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
+      printf '       in that list where a reviewer can see it.\n'
+    else
       # Nothing to add to a list here: the run was told that skipping is not an
       # acceptable answer in this place, and a message about SKIPPABLE would send
       # the reader to edit a list that is not what refused them.
       printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
       printf '       does not accept a phase that judged nothing.\n'
-    else
-      printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
-        "$SKIP_RC" "$label"
-      printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
-      printf '       in that list where a reviewer can see it.\n'
     fi
     sed 's/^/       /' "$out"
   else

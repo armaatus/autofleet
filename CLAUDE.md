@@ -43,7 +43,8 @@ This file is the short form.
 ./tests/run.sh                      # the whole suite
 ./tests/run.sh fleet                # one suite
 ./tests/run.sh fleet card_says      # one phase of one suite
-AUTOFLEET_TEST_NO_SKIP=1 ./tests/run.sh   # ...and a phase that declines is a failure
+AUTOFLEET_TEST_NO_SKIP=1 ./tests/run.sh   # everything, and a phase that
+                                    # declines to judge is a failure
 ./evals/lint.sh                     # is the agent config still well-formed
 python3 .claude/hooks/guard.py --selftest
 python3 .github/scripts/merge_gate.py --selftest

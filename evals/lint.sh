@@ -1005,9 +1005,23 @@ echo "== every test phase actually runs"
 # Every suite in the registry, not one named here: the check that covered a
 # single script by name missed the file that then grew ten phases in one change.
 if python3 - <<'PHASES'
-import re, sys
+import os, re, sys
 
-runner = open("tests/run.sh").read()
+# `tests/` is NOT vendored (CLAUDE.md Layout), so in a host installation this
+# file is absent and everything below has nothing to judge. Said and skipped,
+# rather than raising: a traceback out of the vendored lint reads as "the agent
+# configuration is broken" in a repository where nothing is wrong. In THIS
+# repository the file is the payload of the check, so its absence is the check
+# silently stopping -- which is why the two cases are told apart rather than both
+# being waved through. Pre-existing; named here because this check now reads two
+# registries out of that one file. Found by the independent review.
+try:
+    runner = open("tests/run.sh").read()
+except OSError:
+    if os.path.isdir("tests"):
+        sys.exit("tests/ exists but tests/run.sh does not; this check now asserts nothing")
+    print("  (no tests/run.sh -- not vendored, so there is no phase registry here)")
+    sys.exit(0)
 block = re.search(r"SUITES=\((.*?)\n\)", runner, re.S)
 if not block:
     sys.exit("tests/run.sh has no SUITES registry; this check now asserts nothing")
@@ -1080,7 +1094,7 @@ PHASES
 then
   ok "every phase-dispatching suite agrees with tests/run.sh"
 else
-  fail "tests/run.sh and a phase test script disagree about which phases exist; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing"
+  fail "the phase registries in tests/run.sh do not match the scripts; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing. The line above says which"
 fi
 
 echo "== the workflows parse as GitHub reads them"

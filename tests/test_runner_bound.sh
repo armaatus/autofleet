@@ -134,7 +134,16 @@ make_runner() {
 import re, sys
 src, dst, names = sys.argv[1], sys.argv[2], sys.argv[3:]
 s = open(src).read()
-block = "SUITES=(\n" + "\n".join('"%s:"' % n for n in names) + "\n)"
+# A name carrying a dot registers as a suite WITH a phase -- `skipperd.one`
+# becomes the entry `"skipperd:one"` and the label `skipperd/one`. That shape is
+# the one that actually ships (SKIPPABLE holds `teardown/reap`), and with only
+# bare suite names here `may_skip` was never asked about a `suite/phase` label at
+# all. Found by the independent review.
+def split(n):
+    suite, _, phase = n.partition(".")
+    return suite, phase
+
+block = "SUITES=(\n" + "\n".join('"%s:%s"' % split(n) for n in names) + "\n)"
 s, n = re.subn(r"SUITES=\(.*?\n\)", lambda m: block, s, count=1, flags=re.S)
 if n != 1:
     sys.exit("could not find the SUITES registry in %s" % src)
@@ -143,7 +152,8 @@ if n != 1:
 # and `marker*` fixtures are listed, `rogue*` fixtures deliberately are NOT --
 # that pair is what the `skips` phase uses to tell an agreed skip from an
 # unlisted one.
-allowed = " ".join(n for n in names if n.startswith(("skipper", "marker")))
+allowed = " ".join("/".join(p for p in split(n) if p)
+                   for n in names if n.startswith(("skipper", "marker")))
 s, n = re.subn(r'SKIPPABLE="[^"]*"', 'SKIPPABLE="%s"' % allowed, s, count=1)
 if n != 1:
     sys.exit("could not find the SKIPPABLE registry in %s" % src)
@@ -152,8 +162,10 @@ PY2
   [ -s "$WORK/tests/run.sh" ] || fail "the runner copy was not written"
   chmod +x "$WORK/tests/run.sh"
 
-  local name
+  local name suite phase
   for name in "$@"; do
+    suite="${name%%.*}"; phase="${name#*.}"
+    [ "$phase" = "$name" ] && phase=""
     case "$name" in
       blocker*)
         # Blocks forever, after saying something first: the partial output is
@@ -221,7 +233,11 @@ exit 0
 EOF
         ;;
     esac
-    chmod +x "$WORK/tests/test_$name.sh"
+    # A dotted name is one suite with one phase, so the SCRIPT is named after the
+    # suite half -- the runner invokes `test_<suite>.sh <phase>`, and the fixture
+    # ignores the argument it is handed.
+    [ -n "$phase" ] && mv "$WORK/tests/test_$name.sh" "$WORK/tests/test_$suite.sh"
+    chmod +x "$WORK/tests/test_$suite.sh"
   done
 }
 
@@ -291,7 +307,7 @@ case "${1:-}" in
   skips)
   make_runner skipper quick
 
-  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
 
   # The whole of it: a phase that could not judge anything must not turn the run
@@ -321,7 +337,7 @@ case "${1:-}" in
   # A run that is ALL skips ran nothing, but it is not the mistyped suite name
   # that exit 2 is for: the phase was found, it declined.
   make_runner skipper
-  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
   [ "$rc" = 2 ] \
     && fail "an all-skips run was reported as a mistyped suite name: $(cat "$WORK/out")"
@@ -333,7 +349,7 @@ case "${1:-}" in
   # failure. A skip code that swallowed failures would be the guard that stops
   # guarding.
   make_runner skipper failer
-  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
   [ "$rc" = 1 ] || fail "a failing phase beside a skip did not fail the run (rc=$rc): $(cat "$WORK/out")"
   grep -q "FAIL failer" "$WORK/out" \
@@ -359,7 +375,7 @@ case "${1:-}" in
   # fixture writes the marker itself rather than racing for it, so this is a
   # state assertion and not a flake. Found by the independent review.
   make_runner marker
-  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
   grep -q "BLOCKED" "$WORK/out" \
     && fail "a phase that exited 77 with the marker present was reported BLOCKED: $(cat "$WORK/out")"
@@ -385,6 +401,23 @@ case "${1:-}" in
     && fail "the refusal sent the reader to edit a list that did not refuse them: $(cat "$WORK/out")"
   ok "AUTOFLEET_TEST_NO_SKIP makes an allowed skip a failure, and says so"
 
+  # The outer environment does not reach the copy. AUTOFLEET_TEST_NO_SKIP is read
+  # from the environment, so `AUTOFLEET_TEST_NO_SKIP=1 ./tests/run.sh` -- the
+  # strict form this change documents in CLAUDE.md -- is inherited all the way
+  # down into the runner copies these fixtures drive, and turns every skip row
+  # here red on a harness artefact rather than on a defect. That is the failure
+  # class #78 exists to remove, reintroduced by the fix for it. Every invocation
+  # in this phase clears it; this row is what notices if one stops.
+  # Found by the independent review.
+  ( export AUTOFLEET_TEST_NO_SKIP=1
+    AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1 )
+  rc=$?
+  [ "$rc" = 0 ] \
+    || fail "an outer AUTOFLEET_TEST_NO_SKIP reached the runner copy anyway (rc=$rc): $(cat "$WORK/out")"
+  grep -q "skip skipper" "$WORK/out" \
+    || fail "the cleared value did not restore the skip: $(cat "$WORK/out")"
+  ok "...and clearing it on the invocation beats an outer environment that set it"
+
   # ...and an empty value is not "set". The obvious way to write the guard reads
   # a cleared variable as a request for strictness, which is the opposite of the
   # normal shell reading of one.
@@ -398,7 +431,7 @@ case "${1:-}" in
   # phase that exits it without being in SKIPPABLE is the phase that BROKE into
   # skipping, and an allowlist nothing asserts is hard rule 3 all over again.
   make_runner rogue
-  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
   [ "$rc" = 1 ] \
     || fail "an unlisted phase exiting 77 did not fail the run (rc=$rc): $(cat "$WORK/out")"
@@ -423,6 +456,27 @@ case "${1:-}" in
   grep -qE '^SKIPPABLE="([^"]* )?teardown/reap( [^"]*)?"' "$REPO_ROOT/tests/run.sh" \
     || fail "the shipped SKIPPABLE no longer lists teardown/reap"
   ok "...and the shipped list still names the phase that needs it"
+
+  # The label shape that actually ships. Everything above is a bare suite name;
+  # SKIPPABLE holds `teardown/reap`, so without this row `may_skip` is never
+  # asked about a `suite/phase` label at all. Found by the independent review.
+  make_runner skipperd.one
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 0 ] || fail "a suite/phase label could not skip (rc=$rc): $(cat "$WORK/out")"
+  grep -q "skip skipperd/one" "$WORK/out" \
+    || fail "the suite/phase label was not reported as a skip: $(cat "$WORK/out")"
+  ok "...and a suite/phase label is matched the same way a bare suite name is"
+
+  # The two refusals stay apart. A phase that BROKE into exiting 77 needs to hear
+  # about SKIPPABLE even in a run where nothing may skip -- under a shared status
+  # it heard about the variable instead, in CI, which is the hardest place to
+  # diagnose from. Found by the independent review.
+  make_runner rogue
+  AUTOFLEET_TEST_NO_SKIP=1 AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  grep -q "is not in SKIPPABLE" "$WORK/out" \
+    || fail "an unlisted phase under NO_SKIP was told the wrong thing: $(cat "$WORK/out")"
+  ok "...and an unlisted phase is told so even where nothing may skip"
   ;;
 
 # ----------------------------------------------------------------- guards
