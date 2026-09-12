@@ -843,8 +843,19 @@ stop_reviewers() {
 # Reviewer transcripts. Keeps the newest AUTOFLEET_KEEP_REVIEWS per OPEN pull
 # request and drops the rest, including every transcript of a PR that is no
 # longer open. `$1` is the space-separated list of open PR numbers, which
-# `review_open_prs` already has in hand -- so this costs no API call, and with
-# no list it does nothing rather than guessing everything is closed.
+# `review_open_prs` already has in hand, so deciding WHICH PRs to look at costs
+# nothing. One `gh pr view <n> --json state` is then spent per candidate pull
+# request per pass, and only after a grace pass -- see the comment at that call
+# for why absence from `$1` is not an answer on its own.
+#
+# `$2` is whether that list is an ANSWER, and an empty list with `$2` = yes
+# sweeps everything: that is a drained fleet, which is the peak of the pile this
+# exists for. An empty list that is a FAILURE is `$2` = no and does nothing.
+#
+# This header used to say "costs no API call" and "with no list it does nothing",
+# and both stopped being true when the confirmation call and the two-valued `$2`
+# arrived. Found by the independent review -- the same class of stale claim this
+# branch had already fixed once.
 prune_review_logs() {
   local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -983,8 +994,6 @@ prune_review_logs() {
 $(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null)
 EOF
   done
-  # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
-  # first question about a missing transcript is whether this took it.
   # ...and the grace markers of PRs whose transcripts are all gone, so the
   # directory does not trade one kind of growth for another.
   for f in "$dir"/.closed-*; do
@@ -992,6 +1001,10 @@ EOF
     num="$(basename "$f")"; num="${num#.closed-}"
     ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
   done
+  # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
+  # first question about a missing transcript is whether this took it. The
+  # comment sat two blocks above the line it describes, which is the same drift
+  # as a stale one. Found by the independent review.
   [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
   return 0
 }
@@ -1013,9 +1026,19 @@ EOF
 # Waiting costs nothing: the cap is a bound on a log, not a deadline, and the
 # reviewer that blocks the rotation is the thing writing most of what is in it.
 rotate_fleet_log() {
-  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size live
+  local max="${AUTOFLEET_LOG_MAX_BYTES:-0}" size live blind=""
   [ "$max" -gt 0 ] 2>/dev/null || return 0
   [ -f "$LOG" ] || return 0
+  # UNDER THE CAP IS THE ANSWER FOR ALMOST EVERY POLL, so it is decided FIRST.
+  # The size check used to run after the loop below, which meant a poll that was
+  # never going to rotate anything still burned the say-once marker: an rc-2
+  # holder plus a log at half the cap wrote `rotate-blind`, said the warning, and
+  # then returned without renaming a thing. The real blind rotation, whenever it
+  # came, was then silent -- the marker having been spent on a rotation that did
+  # not happen. Found by the independent review.
+  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$size" -gt "$max" ] || return 0
   # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
   # silent. It called `is_review_record`, which does not exist on this branch --
   # it arrives with #42 -- so `command not found` was swallowed by `2>/dev/null`,
@@ -1054,22 +1077,24 @@ rotate_fleet_log() {
       # code implemented the losing one.
       reviewer_alive "$held"; local is=$?
       [ "$is" = 0 ] && return 0
-      if [ "$is" = 2 ] && [ ! -e "$STATE_DIR/rotate-blind" ]; then
-        : >"$STATE_DIR/rotate-blind"
-        say "  rotating fleet.log with pid $held holding it and ps unable to name it;"
-        say "  its output may land in fleet.log.1 -- the alternative is never rotating"
-      fi
+      [ "$is" = 2 ] && blind="$held"
     done
   fi
-  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
-  case "$size" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$size" -gt "$max" ] || return 0
   mv -f "$LOG" "$LOG.1" 2>/dev/null || {
     # SAID. A read-only state dir or an undeletable fleet.log.1 made this fail
     # on every poll forever with nothing logged -- the opposite of the rule
     # stated forty lines above.
     say "could not rotate $LOG past $max bytes; it will keep growing"
     return 0; }
+  # SAID AFTER THE RENAME, into the file people read. `say` is `tee -a "$LOG"`,
+  # so a warning printed before the `mv` was appended to the inode that became
+  # `fleet.log.1` -- the one this very line says nobody reads. Found by the
+  # independent review.
+  if [ -n "$blind" ] && [ ! -e "$STATE_DIR/rotate-blind" ]; then
+    : >"$STATE_DIR/rotate-blind"
+    say "  rotated fleet.log with pid $blind holding it and ps unable to name it;"
+    say "  its output may land in fleet.log.1 -- the alternative is never rotating"
+  fi
   say "fleet.log passed $max bytes; the previous one is $LOG.1"
   return 0
 }
