@@ -590,11 +590,20 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "$n" = 3 ] \
     || fail "the grace pass kept $n of 3 transcripts for a PR that just closed; it protects the pull request, not one file"
   ok "a closed PR keeps ALL its transcripts for the grace pass"
+  : >"$AUTOFLEET_DIR/fleet.log"
   AUTOFLEET_KEEP_REVIEWS=5 poll_review_open_prs
   n="$(ls "$AUTOFLEET_DIR/reviews"/pr-96-*.log 2>/dev/null | grep -c .)"
   [ "$n" = 0 ] \
     || fail "$n transcripts survived the pass after the grace, so the sweep does not finish what it starts"
   ok "...and all of them go on the next pass"
+  # ...AND SAYS SO. "A sweep nobody can see is one nobody can debug" is the
+  # function's own comment and nothing asserted it, so the count could have
+  # drifted or the line disappeared with the phase still green. Asserted
+  # against fleet.log because `say` is `tee -a "$LOG"` and this pass's stdout
+  # is swallowed by the poll wrapper. Found by the independent review.
+  grep -q "swept 3 reviewer transcript(s)" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null \
+    || fail "the sweep took three transcripts and did not say so: $(cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+  ok "...and says how many it took"
   # ...and hand the next assertion back the fixture it needs: this block cleared
   # the directory to get a clean per-PR grace, including PR 42's transcripts.
   for h in aaaaaaaa bbbbbbbb cccccccc dddddddd; do
@@ -705,6 +714,32 @@ import merge_gate; print(merge_gate.review_mode())'); }
   grep -q "ps unable to name it" <<<"$out" \
     || fail "it rotated out from under an unnameable holder and said nothing: $out"
   ok "...and says so when it does"
+
+  # ...INTO THE FILE PEOPLE READ. `say` is `tee -a "$LOG"`, so a warning printed
+  # before the `mv` was appended to the inode that became fleet.log.1 -- the
+  # generation the warning itself says nobody reads. Asserted against the file
+  # rather than the captured stdout, because stdout cannot tell the two apart.
+  # Found by the independent review.
+  grep -q "ps unable to name it" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null \
+    || fail "the warning about rotating blind went into the generation it warns nobody reads: $out"
+  ok "...into the log that survives the rotation, not the one it warns about"
+
+  # ...AND THE MARKER IS NOT SPENT BY A POLL THAT ROTATES NOTHING. The size
+  # check ran AFTER the loop above, so an rc-2 holder and a log at a tenth of
+  # the cap wrote `rotate-blind`, said the warning, and returned without
+  # renaming anything -- and the real blind rotation, whenever it came, was
+  # silent, the marker having been spent on one that never happened. Found by
+  # the independent review.
+  rm -f "$AUTOFLEET_DIR/fleet.log.1" "$AUTOFLEET_DIR/rotate-blind"
+  head -c 100 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  printf '%s %s\n' 424242 "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+    reviewer_alive() { return 2; }
+    AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log ) >/dev/null 2>&1
+  rm -f "$AUTOFLEET_DIR/reviewing/42"
+  [ -e "$AUTOFLEET_DIR/rotate-blind" ] \
+    && fail "a poll that was never going to rotate spent the say-once marker, so the rotation that does happen explains itself in silence"
+  ok "...and a poll under the cap does not spend it"
   # 0 KEEPS IT, asserted rather than announced. The first version ran the
   # rotation and printed `ok` unconditionally -- and even with an assertion it
   # was vacuous, because the `mv` two steps up had left fleet.log holding one
