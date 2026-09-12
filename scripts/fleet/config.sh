@@ -26,14 +26,29 @@
 : "${AUTOFLEET_RM_DEADLINE:=180}"
 
 # ---------------------------------------------------------------- the labels
-# The convention `unblock.yml` maintains and `fleet.sh` reads. Rename them here
-# if the repo already uses other words for the same three ideas.
+# The convention `unblock.yml` maintains and `fleet.sh` reads.
+#
+# RENAMING WORKS FOR THREE OF THESE, and the doc says which. `AUTOFLEET_READY_LABEL`
+# is read by nothing -- `ready_issues` fetches every open issue and then filters
+# on the LITERAL word in its Python block, never passing `gh` a `--label` -- so
+# renaming it hands you an empty queue forever, with nothing on screen saying
+# why. armaatus/autofleet#57. That sentence lives in docs/CONFIGURATION.md, and
+# this is the file somebody actually has open while renaming, so it says it too.
+# Found by the independent review, which pointed out the invitation was here and
+# the warning was one file away.
 : "${AUTOFLEET_READY_LABEL:=ready}"
 : "${AUTOFLEET_BLOCKED_LABEL:=blocked}"
 # An issue that defines an interface later issues include: it lands alone.
 : "${AUTOFLEET_FOUNDATION_LABEL:=foundation}"
 # An issue whose last step is a person's. The fleet opens no worktree for it.
 : "${AUTOFLEET_HUMAN_STEP_LABEL:=needs-human-step}"
+# Work that goes before the queue's own ordering. The only one of these labels
+# that says WHEN rather than WHAT: the other four are properties of the issue
+# (two of them derived by `unblock.yml`, two applied by a person), and this one
+# is a property of the week. It moves an issue to the FRONT of the ready list and
+# does nothing else -- it cannot start a blocked issue, cannot start a
+# `needs-human-step` one, and does not lift a foundation hold.
+: "${AUTOFLEET_PRIORITY_LABEL:=priority}"
 
 # ---------------------------------------------------------------- the runner
 # Which driver creates worktrees and terminals. `orca` is the only one that
