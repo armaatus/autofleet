@@ -419,6 +419,20 @@ has_label() { printf '%s' "$1" | tr ',' '\n' | grep -qxF -- "$2"; }
 is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 
 FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
+# The rotation's say-once marker, named here rather than spelled out at each
+# use: it was written as a bare path at three sites, and a list of literals is
+# the drift `clear_issue_markers` already has a comment about. In $STATE_DIR so
+# it outlives a poll, cleared when a dispatcher STARTS -- the same rule, for the
+# same reason, as the one above. Found by the independent review.
+ROTATE_BLIND_SAID="$STATE_DIR/rotate-blind"
+# Its sibling for "the rotation could not happen at all" is a VARIABLE, not a
+# file, and that is the whole point: the condition it reports is a $STATE_DIR
+# nothing can write to, so a marker in $STATE_DIR cannot be created in exactly
+# the case it exists for and the line repeats anyway. A variable is once per
+# dispatcher, which is what the marker was reaching for -- a new process starts
+# with it empty, so "cleared at dispatcher start" comes for free. Found by the
+# independent review, and by the first fix for it, which used a file.
+ROTATE_STUCK_SAID=""
 
 # Hold, remember the reason, and say it if it is news. The three branches below
 # were three copies of `printf hold` / `foundation_hold_say` / `return 0`, which
@@ -930,6 +944,16 @@ prune_review_logs() {
     # the one case this call exists to protect was the one case that grew
     # without bound. Anything but a confident answer keeps the files and keeps
     # the grace, so a `gh` blip costs a pass rather than a store.
+    #
+    # THE QUESTION RECURS, and that is chosen rather than overlooked. Dropping
+    # the marker on OPEN means the next pass is a grace pass that asks nothing,
+    # so such a PR costs one call every SECOND poll for as long as it stays open
+    # and absent from the author-scoped list. Keeping the marker instead would
+    # ask on every poll; caching the answer for good would mean never noticing
+    # it had closed, and its transcripts would outlive it. Halved and alternating
+    # is the bound, not "asked once" -- the cap reaches it on the passes it
+    # answers, which is enough to bound the store. Found by the independent
+    # review, which read the paragraph above as claiming more than the code does.
     case "$(GH_PAGER=cat gh pr view "$num_seen" --json state --jq .state 2>/dev/null)" in
       CLOSED|MERGED) graced="$graced$num_seen " ;;
       OPEN) open_prs="$open_prs $num_seen"; rm -f "$dir/.closed-$num_seen" ;;
@@ -1081,17 +1105,30 @@ rotate_fleet_log() {
     done
   fi
   mv -f "$LOG" "$LOG.1" 2>/dev/null || {
-    # SAID. A read-only state dir or an undeletable fleet.log.1 made this fail
-    # on every poll forever with nothing logged -- the opposite of the rule
-    # stated forty lines above.
-    say "could not rotate $LOG past $max bytes; it will keep growing"
+    # SAID, AND SAID ONCE. A read-only state dir or an undeletable fleet.log.1
+    # made this fail on every poll forever with nothing logged -- the opposite
+    # of the rule stated forty lines above. Ungated, it then did the opposite of
+    # the rule this whole function is: a directory `mv` cannot write to is still
+    # a file `tee -a` can append to, so the one state where the cap CANNOT hold
+    # was the one writing ~1440 lines a day into the log it is failing to bound.
+    # Same shape and same marker rule as the warning below. Found by the
+    # independent review.
+    if [ -z "$ROTATE_STUCK_SAID" ]; then
+      ROTATE_STUCK_SAID=1
+      say "could not rotate $LOG past $max bytes; it will keep growing"
+    fi
     return 0; }
+  # ...and cleared by a rotation that works, so the next time it sticks it says
+  # so. The condition is a directory permission somebody fixes while the fleet
+  # runs, so "once per dispatcher" would otherwise be once per dispatcher even
+  # after the operator had fixed and re-broken it.
+  ROTATE_STUCK_SAID=""
   # SAID AFTER THE RENAME, into the file people read. `say` is `tee -a "$LOG"`,
   # so a warning printed before the `mv` was appended to the inode that became
   # `fleet.log.1` -- the one this very line says nobody reads. Found by the
   # independent review.
-  if [ -n "$blind" ] && [ ! -e "$STATE_DIR/rotate-blind" ]; then
-    : >"$STATE_DIR/rotate-blind"
+  if [ -n "$blind" ] && [ ! -e "$ROTATE_BLIND_SAID" ]; then
+    : >"$ROTATE_BLIND_SAID"
     say "  rotated fleet.log with pid $blind holding it and ps unable to name it;"
     say "  its output may land in fleet.log.1 -- the alternative is never rotating"
   fi
@@ -1134,38 +1171,38 @@ $w"
   done
   local dir f sha removed=0 root
   while IFS= read -r root; do
-  [ -n "$root" ] || continue
-  dir="$root/.autofleet/run"
-  # `continue`, NOT `return 0`. This was left over from the single-root version,
-  # where returning was right. Multi-root it exits the whole function on the
-  # FIRST root -- the dispatcher checkout -- and that is the one most likely to
-  # lack the directory: `.autofleet/run/` is gitignored and created on demand by
-  # `record-review.sh` in the checkout that records a review, which is a
-  # WORKTREE. So on any host where no review was ever recorded from the main
-  # checkout, the sweep returned on iteration one every poll and examined
-  # nothing at all. Found by the independent review.
-  [ -d "$dir" ] || continue
-  for f in "$dir"/reviewed-*; do
-    [ -e "$f" ] || continue
-    sha="$(basename "$f")"; sha="${sha#reviewed-}"
-    case "$sha" in *[!0-9a-f]*|"") continue ;; esac
-    # `cat-file -e` first: a sha git has never heard of is not ours to judge.
-    git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || continue
-    # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
-    # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
-    # 141 -- so past a few hundred refs this said "on no branch" about a commit
-    # that is on a thousand of them, and deleted the record. Measured: 500 refs
-    # exits 0, 1000 exits 141. guard.py then refuses the push with "record the
-    # local review first" and both passes have to be run again.
-    #
-    # It fails SAFE now, like the `cat-file -e` above it: anything other than a
-    # confidently empty answer keeps the record.
-    local on_branch
-    on_branch="$(git -C "$root" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
-      || continue
-    [ -n "$on_branch" ] && continue
-    rm -f "$f" && removed=$((removed + 1))
-  done
+    [ -n "$root" ] || continue
+    dir="$root/.autofleet/run"
+    # `continue`, NOT `return 0`. This was left over from the single-root version,
+    # where returning was right. Multi-root it exits the whole function on the
+    # FIRST root -- the dispatcher checkout -- and that is the one most likely to
+    # lack the directory: `.autofleet/run/` is gitignored and created on demand by
+    # `record-review.sh` in the checkout that records a review, which is a
+    # WORKTREE. So on any host where no review was ever recorded from the main
+    # checkout, the sweep returned on iteration one every poll and examined
+    # nothing at all. Found by the independent review.
+    [ -d "$dir" ] || continue
+    for f in "$dir"/reviewed-*; do
+      [ -e "$f" ] || continue
+      sha="$(basename "$f")"; sha="${sha#reviewed-}"
+      case "$sha" in *[!0-9a-f]*|"") continue ;; esac
+      # `cat-file -e` first: a sha git has never heard of is not ours to judge.
+      git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+      # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
+      # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
+      # 141 -- so past a few hundred refs this said "on no branch" about a commit
+      # that is on a thousand of them, and deleted the record. Measured: 500 refs
+      # exits 0, 1000 exits 141. guard.py then refuses the push with "record the
+      # local review first" and both passes have to be run again.
+      #
+      # It fails SAFE now, like the `cat-file -e` above it: anything other than a
+      # confidently empty answer keeps the record.
+      local on_branch
+      on_branch="$(git -C "$root" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
+        || continue
+      [ -n "$on_branch" ] && continue
+      rm -f "$f" && removed=$((removed + 1))
+    done
   done <<EOF
 $roots
 EOF
@@ -2660,7 +2697,7 @@ while that one is up."
   # cannot name" was said once per MACHINE -- an operator debugging truncated
   # reviewer output next month got no line at all. Found by the independent
   # review.
-  rm -f "$FOUNDATION_HOLD_SAID" "$STATE_DIR/rotate-blind"
+  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID"
 
   record_dispatcher
   echo $$ >"$PIDFILE"
