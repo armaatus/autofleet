@@ -1422,7 +1422,37 @@ if not re.search(r"blockersSection\(\s*issue\.body\s*\)\.matchAll\(\s*BLOCKED_BY
              "anywhere in a body blocks work again (#47)")
 if not re.search(r"matchAll\(\s*BLOCKERS_MARKER\s*\)", code):
     sys.exit("unblock.yml no longer walks BLOCKERS_MARKER; blockersSection "
-             "cannot be finding the last marker")
+             "cannot be finding the marker at all")
+
+# THE SHAPE OF THE WALK AND THE SLICE, not just the call.
+#
+# Everything above compares the workflow's two regex LITERALS, lifted into
+# Python. The scoping around them is a JavaScript arrow function, and the mirror
+# used to check it (`wf_blocked_by`) is re-typed here rather than executed -- so
+# these three one-line mutations of unblock.yml left this whole file green while
+# the workflow did something else, which the independent review demonstrated:
+#
+#   `{ first = m; break; }` -> `last = m`       : last marker wins again
+#   `: text`                -> `: ''`           : the 14 marker-less issues read
+#                                                 as UNBLOCKED -- fail-open, and
+#                                                 the collision the label exists
+#                                                 to prevent
+#   `slice(first.index + ...)` -> `slice(0, ...)`: reads only ABOVE the marker
+#
+# Pinned by shape, the way the call site already is. Executing the JS under node
+# would close it properly, but node is not a dependency this repo has (CLAUDE.md:
+# bash and python3, nothing to install) and a check that silently skips where node
+# is absent is hard rule 3 arriving through the door marked "not a failure".
+if not re.search(r"for\s*\(const\s+m\s+of\s+text\.matchAll\(\s*BLOCKERS_MARKER\s*\)\s*\)"
+                 r"\s*\{\s*first\s*=\s*m;\s*break;\s*\}", code):
+    sys.exit("unblock.yml no longer stops at the FIRST blockers marker; a body "
+             "carrying the template marker twice loses the section above the "
+             "last one, and goes ready with an open blocker (#47)")
+if not re.search(r"return\s+first\s*\?\s*text\.slice\(\s*first\.index\s*\+\s*"
+                 r"first\[0\]\.length\s*\)\s*:\s*text\s*;", code):
+    sys.exit("unblock.yml no longer returns everything BELOW the marker, with the "
+             "whole body as the fallback; slicing the other way, or returning '' "
+             "when there is no marker, reads issues as unblocked that are not")
 
 # The stale label comes off BEFORE the new one goes on. `cancel-in-progress`
 # makes a run that dies between the two calls reachable, and the other order
@@ -1434,6 +1464,17 @@ if code.index("removeLabel") > code.index("addLabels"):
     sys.exit("unblock.yml adds the new label before removing the stale one; a "
              "cancelled run leaves an issue carrying both `blocked` and `ready`, "
              "and fleet.sh will start it (#47)")
+# ...and the removal is not allowed to fail quietly. Ordering the two calls fixes
+# a run that DIES between them and does nothing for one that FAILS the first and
+# carries on: a swallowed 403 on removeLabel plus a successful addLabels is the
+# both-labels state again, behind a green check. Found by the independent review.
+if re.search(r"removeLabel\((?:[^;]|\n)*?\.catch\(\s*\(\s*\)\s*=>", code):
+    sys.exit("unblock.yml discards every error from removeLabel again; a rate "
+             "limit on the removal leaves the issue carrying both `blocked` and "
+             "`ready`, and ready_issues() starts it (#47)")
+if not re.search(r"err\.status\s*!==\s*404\s*\)\s*throw\s+err", code):
+    sys.exit("unblock.yml no longer rethrows a non-404 from removeLabel; only "
+             "the label already being gone is a safe failure to ignore")
 # CRLF is folded on the way in rather than patched into the pattern, because the
 # comparison above lifts the workflow\'s pattern text into Python and cannot see
 # an engine difference in how `$` and `\r` interact.
@@ -1450,11 +1491,12 @@ def wf_blocked_by(body):
     # something Python can execute -- which is exactly why the assertion that the
     # workflow still CALLS it matters more than this mirror does.
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
-    last = None
+    first = None
     for hit in wf_marker.finditer(text):
-        last = hit
-    if last:
-        text = text[last.end():]
+        first = hit
+        break
+    if first:
+        text = text[first.end():]
     return [int(hit.group(1)) for hit in wf_blocked.finditer(text)]
 
 

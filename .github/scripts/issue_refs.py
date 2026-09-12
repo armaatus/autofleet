@@ -102,12 +102,28 @@ BLOCKED_BY = re.compile(
 # -->` marker"; nothing enforced it, so a mention of a blocker anywhere in Goal,
 # Scope or Design notes counted as one.
 #
-# MATCHED ON ITS OWN LINE, and the LAST such line wins. #47's own body is the
-# case that demands both: it quotes `<!-- blockers -->` mid-sentence in its Scope
-# while discussing this very bug, and carries the real marker, empty, at the end.
-# A `find` for the bare string picks the prose one and reads the entire rest of
-# the issue as blockers -- which is how #47 came to be labelled `blocked` by
-# seven blockers it does not have.
+# MATCHED ON ITS OWN LINE, and the FIRST such line wins -- everything below it.
+#
+# The own-line anchor is what handles #47's own body: it quotes `<!-- blockers
+# -->` mid-sentence in its Scope while discussing this very bug, and carries the
+# real marker, empty, at the end. A `find` for the bare string picks the prose one
+# and reads the rest of the issue as blockers, which is how #47 came to be
+# labelled `blocked` by seven it does not have. Anchoring to a whole line excludes
+# the quote on its own.
+#
+# This first read LAST-wins, on the theory that it was the quote that needed
+# excluding. The anchor already did that, so last-wins bought nothing and cost
+# this, which the independent review found:
+#
+#     <!-- blockers -->
+#     Blocked by #51
+#
+#     <!-- blockers -->
+#
+# -- an agent appending a section and re-pasting the template marker -- read as NO
+# blockers, and #51 is open. FIRST-wins takes the union of everything below the
+# earliest marker, so a duplicated marker over-collects rather than under-collects.
+# Every other ambiguity here resolves fail-closed; this one now does too.
 BLOCKERS_MARKER = re.compile(r"^[ \t]*<!--\s*blockers\s*-->[ \t]*$", re.MULTILINE)
 
 
@@ -153,7 +169,7 @@ def closes_issue(body, number):
 def blockers_section(body):
     """The part of `body` the blocker lines may live in.
 
-    Everything below the last `<!-- blockers -->` line, or the whole body when
+    Everything below the first `<!-- blockers -->` line, or the whole body when
     there is no marker at all. The fallback is deliberate and is the fail-CLOSED
     direction: 14 of this repo's own open issues predate the marker, and a host
     project vendoring this may never adopt it. Reading those as "no blockers"
@@ -162,10 +178,11 @@ def blockers_section(body):
     prevent. Missing the marker costs a false `blocked`, which costs a wait.
     """
     body = _normalised(body)
-    last = None
+    first = None
     for m in BLOCKERS_MARKER.finditer(body):
-        last = m
-    return body[last.end():] if last else body
+        first = m
+        break
+    return body[first.end():] if first else body
 
 
 def blocked_by(body):
@@ -245,12 +262,24 @@ SELFTEST = [
     # numeral was a blocker to the fleet and invisible to the workflow. Neither
     # reads it now, which is a disagreement fewer.
     ("Blocked by #\u0667", [], []),
-    # The LAST marker on its own line, because #47 quotes the marker mid-sentence
-    # in its Scope and carries the real one, empty, at the end. Reading from the
+    # The marker has to be alone on a line: #47 quotes it mid-sentence in its
+    # Scope and carries the real one, empty, at the end, and reading from the
     # quoted one is how it came to carry seven blockers it does not have.
     ("the `<!-- blockers -->` marker\nblocked by #12\n\n<!-- blockers -->\n", [], []),
+    # ...and the FIRST such line wins, so a duplicated marker over-collects
+    # rather than silently dropping the section above it. Found by the
+    # independent review, which pointed out that last-wins read this as NO
+    # blockers while #51 was open.
     ("<!-- blockers -->\nBlocked by #3\n\n<!-- blockers -->\nBlocked by #4\n",
-     [], [4]),
+     [], [3, 4]),
+    ("<!-- blockers -->\nBlocked by #51\n\n<!-- blockers -->\n", [], [51]),
+    # A KNOWN LIMIT, recorded rather than fixed, so the table does not read as
+    # broader than it is. `^` sees the start of a line and nothing before it, so
+    # a negation that wrapped onto the previous line still yields a blocker --
+    # and this repo hard-wraps prose at 80 columns. The fix is the marker: below
+    # one, prose does not reach the parser at all. Every spelling that fits on a
+    # line IS caught, above. Raised by the independent review.
+    ("#40 is no longer\nblocked by #7", [], [7]),
     # No marker at all: the whole body, still anchored. 14 of this repo's open
     # issues have no marker, and a host project may never adopt one -- reading
     # those as unblocked is the direction that starts work on a foundation that
