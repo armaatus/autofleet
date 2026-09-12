@@ -475,8 +475,21 @@ how_to_release() {
 # opposite direction. One predicate now. Found by the independent review.
 #
 # Prints the reason, or nothing. Non-zero when it is not waiting for a person.
+# The second argument is the VOICE, and it is the difference between a poll and
+# a look. `say` is `tee -a "$STATE_DIR/fleet.log"` and the `ps-blind-` latch is
+# per-issue dispatcher state, so a caller that does either is WRITING to
+# $STATE_DIR. #35's Acceptance -- the issue this PR closes -- is "fleet.sh
+# status leaves $STATE_DIR byte-identical", and `cmd_status` reached this
+# function for every live worktree. WORKFLOW.md tells an operator to run
+# `status` in a loop until it says idle, so the first look created the latch and
+# the dispatcher's own terminal then never printed the sentence explaining why
+# the drain had become unbounded -- it survived in fleet.log alone. A read-only
+# command consuming a live dispatcher's said-once marker because somebody
+# looked: the same shape as the bug #35 is about, through the door #37 opened.
+# Only `count_parked_owned`, which runs in the poll body, passes `say`. Found by
+# the independent review.
 parked_for_person() {
-  local n="$1" reason listing state
+  local n="$1" voice="${2:-quiet}" reason listing state
   reason="$(why_parked "$n")" || return 1
   # EVERY reason that means "there is something in there" is gated, not just the
   # two `reap_abandoned` writes. The gate used to be reached only when a `held-`
@@ -505,7 +518,7 @@ parked_for_person() {
         # review.
         # The `*-blind-` family idiom: one marker per issue, said once, and
         # swept with the rest when the issue is released.
-        if [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
+        if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
           : >"$STATE_DIR/ps-blind-$n"
           say "  could not read the agent states, so whether #$n is still being"
           say "  worked in cannot be answered -- it is NOT counted as waiting for"
@@ -513,7 +526,10 @@ parked_for_person() {
         fi
         return 1
       fi
-      rm -f "$STATE_DIR/ps-blind-$n"
+      # Releasing the latch is the milder half of the same write -- it makes the
+      # dispatcher re-say a line it already said -- but it is still a write, so
+      # it is the poll's to make too.
+      if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
       state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
       case "$state" in working) return 1 ;; esac ;;
   esac
@@ -546,7 +562,7 @@ count_parked_owned() {
     fi
     # ...and the agent gate, through the shared predicate so `status` cannot
     # disagree with this count about the same worktree.
-    if ! parked_for_person "$n" >/dev/null; then
+    if ! parked_for_person "$n" say >/dev/null; then
       rm -f "$STATE_DIR/parked-since-$n"
       continue
     fi
@@ -2307,7 +2323,11 @@ cmd_status() {
     # `parked_for_person`, not `why_parked`: a worktree whose agent is still
     # working is not waiting for anybody, and printing the recovery line for it
     # tells a person to discard what is being written.
-    why="$(parked_for_person "$num")" && why="waiting for you -- $why" || why=""
+    #
+    # In the QUIET voice -- the default, spelled out here because this is the
+    # caller that makes it matter. `status` answers from $STATE_DIR and writes
+    # nothing back to it; see the note on `parked_for_person`. #35.
+    why="$(parked_for_person "$num" quiet)" && why="waiting for you -- $why" || why=""
     if [ -n "$why" ]; then
       printf '  #%-5s %s\n' "$num" "$path"
       printf '         %s\n' "$why"
