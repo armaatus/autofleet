@@ -12,6 +12,15 @@
 # lets evals/lint.sh assert that every phase a script defines is actually run.
 # A phase defined in the script and missing from this list never executes, in
 # this runner or in CI, and is indistinguishable from a phase that passes.
+#
+# A phase exits 0 for pass and any non-zero for fail, with ONE exception: exit 77
+# means "this phase could not judge anything" and is reported as a skip. It is
+# the autotools convention. A phase may only use it if it is named in SKIPPABLE
+# below -- see the comment there for why a skip is a registry entry and not a
+# decision the phase gets to make alone. AUTOFLEET_TEST_NO_SKIP=1 refuses even
+# those, for a place where judging nothing is not an acceptable answer -- which
+# is what a CI runner is, though nothing sets it there yet (#80), so do not read
+# a green CI run as having been strict.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +31,7 @@ SUITES=(
 "lint:"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes guards interrupt orphans"
+"runner_bound:bounds passes skips hostlint guards interrupt orphans"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "review_mode:sweeps mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite"
@@ -41,6 +50,54 @@ suite_command() {
 want_suite="${1:-}"
 want_phase="${2:-}"
 pass=0; fail=0; failed=""
+# A phase that could not judge anything is not a phase that judged and found
+# nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
+# once when docker is not running, and once when the machine already carries an
+# orphan stack, where sweeping for real would delete somebody else's work rather
+# than the fixture. Both exit 77 -- the autotools convention, and the number
+# test_teardown.sh has always used -- and this runner counted both as FAIL,
+# because it read every non-zero the same way. That is the reading that teaches
+# an agent its suite is red for a reason it cannot fix, on a machine detail that
+# has nothing to do with its diff. Skips are reported, counted and printed with
+# the phase's own reason, and they do not fail the run.
+SKIP_RC=77
+skipped=0; skips=""
+# WHICH phases may say it. A skip code with no allowlist is hard rule 3 arriving
+# through the door marked "not a failure": any phase that broke into exiting 77
+# -- a bad `docker info` probe, a fixture guard inverted, an `exit $SKIP` written
+# where `exit 1` was meant -- would be green in CI forever, visible only as a
+# count in a line nobody greps. So the runner, not the phase, decides that a skip
+# is legitimate here: an unlisted phase exiting 77 is a FAIL that says so.
+#
+# A registry rather than a label on the phase, for the same reason SUITES is a
+# registry: a list something else can read is what lets a reviewer see, in one
+# place, every phase that is allowed to judge nothing. ONE entry today, with two
+# reasons behind it: test_teardown.sh reap declines when docker is not running,
+# and again when the machine already carries an orphan stack a real sweep would
+# destroy.
+SKIPPABLE="teardown/reap"
+# 0 = allowed. 1 = this phase is not on the list. 2 = skips are refused here,
+# whatever the list says.
+#
+# A REASON, not a bare status, because the two refusals need different words and
+# the caller cannot tell them apart from a shared 1: under AUTOFLEET_TEST_NO_SKIP
+# a phase that genuinely BROKE into exiting 77 would be told "this run does not
+# accept a phase that judged nothing" and never that it is missing from
+# SKIPPABLE -- erasing the distinction in CI, which is the one place the variable
+# is for and the hardest place to diagnose from. It also stops a third refusal
+# reason inheriting whichever message was written last. Found by the independent
+# review.
+may_skip() {
+  # shellcheck disable=SC2086 -- SKIPPABLE is a deliberate word list, like SUITES
+  printf '%s\n' $SKIPPABLE | grep -qxF -- "$1" || return 1
+  # Listed, and still refused HERE. "Machine state, not diff state" is true of a
+  # laptop and false of a runner, where a missing docker is an infrastructure
+  # regression and a green run with a count in it is how that goes unnoticed for
+  # a month. The allowlist bounds WHICH phase may decline; this bounds WHERE. Off
+  # by default: the local ergonomics are what #78 was about.
+  [ -z "${AUTOFLEET_TEST_NO_SKIP:-}" ] || return 2
+  return 0
+}
 
 # Every phase runs under a bound, because the failure this runner is worst at
 # reporting is the one that produces nothing. CI run 34658821929 printed
@@ -208,6 +265,11 @@ reap_tree() {
   return 0
 }
 
+# What the phase printed, indented under the row that reports it. Four copies of
+# one `sed` in run_one, which is three chances for the next one to indent by a
+# different amount.
+show_output() { sed 's/^/       /' "$1"; }
+
 # One spelling of a failing phase. There are two ways to reach it and they were
 # two copies of the same three lines.
 report_fail() {
@@ -218,7 +280,7 @@ report_fail() {
 run_one() {
   local label="$1"; shift
   local out="/tmp/autofleet-suite.$$" marker="/tmp/autofleet-suite.$$.blocked"
-  local rc=0 pid watcher
+  local rc=0 pid watcher skip_refusal=0
   rm -f "$marker"
 
   # The phase's output goes to a FILE, not a pipe. A pipe would keep this runner
@@ -255,18 +317,70 @@ run_one() {
   # kill, so a phase that finished on its own in that window leaves one behind
   # having passed. A phase that exited 0 was not blocked, whatever the marker
   # says, and a false BLOCKED is the kind of flake that teaches people to re-run.
-  if [ -e "$marker" ] && [ "$rc" != 0 ]; then
+  # ...and not 77 either, for the same reason as `rc = 0`: a phase that exited
+  # 77 EXITED, and a killed one comes back 137. Without this a wedged docker
+  # daemon letting `docker info` return in the window where the marker is written
+  # reports `teardown/reap` as BLOCKED, and counts it toward MAX_BLOCKED, for a
+  # phase that was never killed. The comment above exempted the pass and stopped
+  # there. Found by /code-review.
+  # Asked ONCE, above the cascade. Assigning it inside one arm's condition and
+  # reading it from another couples the two: insert an arm between them, or
+  # reorder, and the reader is told AUTOFLEET_TEST_NO_SKIP refused a phase whose
+  # real problem was a missing SKIPPABLE entry -- the exact confusion the reason
+  # codes were added to remove. Latent, not live; found by the independent
+  # review.
+  [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_refusal=$?; }
+
+  if [ -e "$marker" ] && [ "$rc" != 0 ] && [ "$rc" != "$SKIP_RC" ]; then
     blocked=$((blocked + 1))
     report_fail "$label"
     printf '       BLOCKED: produced no result in %ss and was killed.\n' "$PHASE_TIMEOUT"
     printf '       Output up to that point:\n'
-    sed 's/^/       /' "$out"
+    show_output "$out"
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
+  elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
+    # The phase's own output carries WHY, and it is the half that matters: a
+    # silent `skip` line is indistinguishable from a phase quietly opting out of
+    # ever running again.
+    skipped=$((skipped + 1)); skips="$skips $label"
+    printf '  skip %s\n' "$label"
+    show_output "$out"
+  elif [ "$rc" = "$SKIP_RC" ]; then
+    # 77 from a phase that was not allowed to say it. Which refusal it was decides
+    # the words: "add it to SKIPPABLE" and "nothing may skip here" send the reader
+    # to different places, and a phase that BROKE into exiting 77 needs the first
+    # one even under the second.
+    report_fail "$label"
+    # A `case`, not an `if/else`: the reason codes exist so a third refusal
+    # cannot inherit whichever message was written last, and a bare `else` is
+    # exactly that inheritance. The fallthrough says it has no words for this
+    # one rather than borrowing the neighbour's. Found by the independent review.
+    case "$skip_refusal" in
+      1)
+        printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
+          "$SKIP_RC" "$label"
+        printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
+        printf '       in that list where a reviewer can see it.\n'
+        ;;
+      2)
+        # Nothing to add to a list here: the run was told that skipping is not an
+        # acceptable answer in this place, and a message about SKIPPABLE would
+        # send the reader to edit a list that is not what refused them.
+        printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
+        printf '       does not accept a phase that judged nothing.\n'
+        ;;
+      *)
+        printf '       exited %s (skip) and may_skip refused it with reason %s, which\n' \
+          "$SKIP_RC" "$skip_refusal"
+        printf '       this runner has no message for. That is a bug in tests/run.sh.\n'
+        ;;
+    esac
+    show_output "$out"
   else
     report_fail "$label"
-    sed 's/^/       /' "$out"
+    show_output "$out"
   fi
   rm -f "$out" "$marker"
 }
@@ -306,9 +420,21 @@ for entry in "${SUITES[@]}"; do
 done
 
 echo
+# Named in both summaries. A count of skips in the green line is what makes a
+# phase that stopped running visible without reading the whole log for it.
+# Each list behind the name of what it lists. Two lists behind two bare colons
+# read as one run of names and the reader cannot tell which is which -- found by
+# the standards review, which reproduced `1 failed, 0 passed, 1 skipped: skipper:
+# failer` and could not say which name had failed.
+skip_note=""
+[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped (${skips# })"
 if [ "$fail" -gt 0 ]; then
-  echo "$fail failed, $pass passed:$failed" >&2
+  echo "$fail failed, $pass passed$skip_note. failed:$failed" >&2
   exit 1
 fi
-[ "$pass" -gt 0 ] || { echo "nothing ran; check the suite or phase name" >&2; exit 2; }
-echo "$pass passed."
+# A run that is ALL skips still ran nothing worth trusting, but it is not the
+# "check the suite or phase name" typo this is here to catch -- the phases were
+# found, they declined. Both are reported; only the typo is exit 2.
+[ "$pass" -gt 0 ] || [ "$skipped" -gt 0 ] \
+  || { echo "nothing ran; check the suite or phase name" >&2; exit 2; }
+echo "$pass passed$skip_note."

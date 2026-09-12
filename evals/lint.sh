@@ -1005,9 +1005,39 @@ echo "== every test phase actually runs"
 # Every suite in the registry, not one named here: the check that covered a
 # single script by name missed the file that then grew ten phases in one change.
 if python3 - <<'PHASES'
-import re, sys
+import os, re, sys
 
-runner = open("tests/run.sh").read()
+# WHICH repository is this -- asked ONCE, before anything is opened, so no path
+# below can answer it differently.
+#
+# `evals/lint.sh` is vendored and `tests/` is not (CLAUDE.md Layout), so in a
+# host installation there is no phase registry and nothing here to judge. The
+# discriminator cannot be a generic name: `tests/` is the commonest test
+# directory there is, and `tests/run.sh` is a common shell-project convention --
+# this repository is the proof that it is the natural name to reach for. A host
+# project with either gets told its agent configuration is broken, in a
+# repository where nothing is wrong, on a check `agent-config.yml` runs on every
+# PR. That is hard rule 1 with the damage landing on the payload.
+#
+# So the question is answered by autofleet OWN suite: one of the scripts
+# tests/run.sh dispatches is present exactly when the registry it reads should
+# be. Two earlier attempts at this got it wrong in the two available ways -- the
+# directory, then only the missing-file branch, leaving a host repo with its own
+# tests/run.sh to fail on a SUITES block it has never heard of. Both found by the
+# independent review.
+IN_AUTOFLEET = os.path.exists("tests/test_runner_bound.sh")
+if not IN_AUTOFLEET:
+    # NOT `ok`: the caller cannot print a green line for an assertion that did
+    # not run. 77 is the runner convention this change adds, borrowed here so the
+    # caller can tell "nothing to check" from "checked and agreed".
+    print("  (autofleet suite is not here -- not vendored, so there is no phase registry)")
+    sys.exit(77)
+try:
+    runner = open("tests/run.sh").read()
+except OSError:
+    # Absent in autofleet itself is this check silently stopping, which is the
+    # thing hard rule 3 is about.
+    sys.exit("autofleet suite is here but tests/run.sh is not; this check now asserts nothing")
 block = re.search(r"SUITES=\((.*?)\n\)", runner, re.S)
 if not block:
     sys.exit("tests/run.sh has no SUITES registry; this check now asserts nothing")
@@ -1032,9 +1062,16 @@ def phases_in(path):
     return set(re.findall(r"^  ([a-z0-9_]+)\)$", body, re.M))
 
 bad = covered = 0
+# The label each phase is REPORTED under, collected on the way past: `suite/phase`
+# for a suite with phases, bare `suite` for one that runs whole. Built here rather
+# than walked again below, so a change to the registry syntax needs one edit and
+# not two. Found by the independent review.
+labels = set()
 for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
     if not listed.strip():
+        labels.add(suite)
         continue
+    labels.update(f"{suite}/{name}" for name in listed.split())
     script = f"tests/test_{suite}.sh"
     try:
         defined = phases_in(script)
@@ -1053,12 +1090,35 @@ for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
 if covered == 0:
     print("no suite in tests/run.sh was paired with a script; this check now asserts nothing")
     bad = 1
+
+# The OTHER registry of phase labels. SKIPPABLE names the phases allowed to exit
+# 77 rather than pass or fail, and it is the same two-files-must-agree problem:
+# rename or split a phase and the stale entry goes on looking correct, until the
+# first machine where that phase actually declines gets a hard FAIL naming a
+# label the maintainer believes is listed. A registry nothing cross-checks is
+# what hard rule 3 is about. Found by /code-review.
+skippable = re.search(r'^SKIPPABLE="([^"]*)"', runner, re.M)
+if not skippable:
+    print("tests/run.sh has no SKIPPABLE registry; the skip allowlist now asserts nothing")
+    bad = 1
+else:
+    for name in sorted(set(skippable.group(1).split()) - labels):
+        print(f"{name}: allowed to skip in tests/run.sh, but no such phase is registered")
+        bad = 1
 sys.exit(bad)
 PHASES
 then
-  ok "every phase-dispatching suite agrees with tests/run.sh"
+  ok "every phase-dispatching suite agrees with tests/run.sh, and SKIPPABLE names phases that exist"
+elif [ "$?" = 77 ]; then  # NOTHING may go between the `if` list and here: $? is
+                          # still the python block's status only while nothing
+                          # else has run. shellcheck would flag the shape
+                          # (SC2181) and nothing lints this file.
+  # A host installation, where `tests/` was never vendored. Said, and not counted
+  # as agreement: a green line for an assertion that did not run is the same
+  # false comfort as a phase that stopped executing.
+  :
 else
-  fail "a phase test script and tests/run.sh disagree about which phases exist; the ones above never run"
+  fail "the phase registries in tests/run.sh do not match the scripts; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing. The line above says which"
 fi
 
 echo "== the workflows parse as GitHub reads them"
