@@ -22,6 +22,16 @@
 #                                 leaves one behind having passed: the row that
 #                                 goes red if the `rc` half of the test is
 #                                 dropped and BLOCKED becomes a coin flip.
+#   test_runner_bound.sh skips    a phase that exits 77 is a SKIP: reported, counted
+#                                 and printed with its own reason, and it does
+#                                 not fail the run. test_teardown.sh has exited
+#                                 77 since it was written -- when docker is down,
+#                                 and when the machine carries an orphan stack a
+#                                 real sweep would destroy -- and this runner
+#                                 read it as FAIL, so the suite went red on a
+#                                 machine detail no diff could fix. The other
+#                                 half is asserted with it: 77 is the ONLY
+#                                 non-zero that means skip.
 #   test_runner_bound.sh guards   the two guards ON the bound: a nonsense
 #                                 AUTOFLEET_TEST_TIMEOUT is refused at startup
 #                                 rather than reporting every phase BLOCKED with
@@ -150,6 +160,23 @@ sleep $BLOCK_NAP &
 wait
 EOF
         ;;
+      skipper*)
+        # Declines to judge, the way test_teardown.sh does when docker is down or
+        # when the machine already carries an orphan stack. 77 is the autotools
+        # convention and the number that file has always exited with.
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIP: nothing here to judge"
+exit 77
+EOF
+        ;;
+      failer*)
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "this is a real failure"
+exit 1
+EOF
+        ;;
       *)
         cat >"$WORK/tests/test_$name.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -222,6 +249,62 @@ case "${1:-}" in
   grep -q "BLOCKED" "$WORK/out" \
     && fail "a phase that passed was reported BLOCKED: $(cat "$WORK/out")"
   ok "...and never reported BLOCKED, whatever the marker raced to"
+  ;;
+
+# ----------------------------------------------------------------- skips
+  skips)
+  make_runner skipper quick
+
+  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+
+  # The whole of it: a phase that could not judge anything must not turn the run
+  # red. It did, and on a machine detail no diff can fix -- docker not running,
+  # or an orphan stack from somebody else's crashed run. An agent reading that
+  # red row either chases a defect that is not there or learns to ignore the
+  # suite, and the second one is how a real failure ships.
+  [ "$rc" = 0 ] || fail "a skipped phase failed the run (rc=$rc): $(cat "$WORK/out")"
+  ok "a phase that exits 77 does not fail the run"
+
+  grep -q "FAIL skipper" "$WORK/out" \
+    && fail "the skipped phase was reported FAIL: $(cat "$WORK/out")"
+  grep -q "skip skipper" "$WORK/out" \
+    || fail "the skipped phase was not reported as a skip: $(cat "$WORK/out")"
+  ok "...and is reported as a skip"
+
+  # Silent is no better than red: a phase that stopped running has to say why, or
+  # it is indistinguishable from one that quietly opted out months ago.
+  grep -q "SKIP: nothing here to judge" "$WORK/out" \
+    || fail "the skip was reported without the phase's reason: $(cat "$WORK/out")"
+  ok "...with the reason the phase gave"
+
+  grep -q "1 skipped" "$WORK/out" \
+    || fail "the summary did not count the skip: $(cat "$WORK/out")"
+  ok "...and counted in the summary line"
+
+  # A run that is ALL skips ran nothing, but it is not the mistyped suite name
+  # that exit 2 is for: the phase was found, it declined.
+  make_runner skipper
+  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 2 ] \
+    && fail "an all-skips run was reported as a mistyped suite name: $(cat "$WORK/out")"
+  [ "$rc" = 0 ] \
+    || fail "an all-skips run exited $rc: $(cat "$WORK/out")"
+  ok "...and a run that is nothing but skips is not 'nothing ran'"
+
+  # The half that matters more: 77 is a skip and every OTHER non-zero is still a
+  # failure. A skip code that swallowed failures would be the guard that stops
+  # guarding.
+  make_runner skipper failer
+  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 1 ] || fail "a failing phase beside a skip did not fail the run (rc=$rc): $(cat "$WORK/out")"
+  grep -q "FAIL failer" "$WORK/out" \
+    || fail "the failing phase was not named: $(cat "$WORK/out")"
+  grep -q "1 failed" "$WORK/out" \
+    || fail "the summary did not count the failure: $(cat "$WORK/out")"
+  ok "...while any other non-zero is still a failure"
   ;;
 
 # ----------------------------------------------------------------- guards
@@ -370,6 +453,6 @@ case "${1:-}" in
   ;;
 
   *)
-  echo "usage: $0 bounds|passes|guards|interrupt|orphans" >&2
+  echo "usage: $0 bounds|passes|skips|guards|interrupt|orphans" >&2
   exit 2 ;;
 esac
