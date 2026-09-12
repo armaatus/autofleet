@@ -66,6 +66,81 @@ LOG_DIR="$FLEET_DIR/reviews"
 # three two-second exits could hold every slot forever and a fourth pull request
 # was never reviewed at all. Found by the independent review.
 #
+# ...and the record of a head this run is DONE with, which is a different thing
+# from the lock above and must not be released the same way.
+#
+# The marker is a LOCK: "a reviewer is running", released on every exit. The
+# dispatcher decides whether to start a reviewer from its presence -- so an exit
+# meaning "there is nothing to do here" released the lock, and the next poll,
+# finding none, started another. Once a head had its review that repeated once
+# per poll until the agent pushed again: fourteen spawns in thirteen minutes on
+# PR #32's first head, each exiting 8 two API calls later. Cheap individually,
+# and it buried the dispatcher log.
+#
+# So: a second file, a RECORD -- "this head has been handled". Written only on
+# the exits where that is true, 0 and 8, and never on 5 or 7, where nothing was
+# submitted or the reviewer was killed and trying again is correct. Getting that
+# asymmetry backwards turns this fix into the silent block the whole mode exists
+# to remove. armaatus/autofleet#33.
+# Both siblings derived in one place, with the same empty-guard: reaching for
+# one of them inline is how the pair drifts apart.
+DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
+TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
+
+# The dispatcher counts a try BEFORE the spawn, because it has to decide from
+# something. That makes the count a count of SPAWNS -- and a spawn that never
+# reached a reviewer is not an attempt at a verdict. Exits 2 (could not read the
+# PR), 3 (the fleet is stopped) and 6 (no reviewer command on PATH) are all of
+# that kind, and three `gh` blips a minute apart would otherwise retire a head
+# for good. Issue 33's Acceptance asks for the opposite, and both the knob's
+# comment and its row in docs/CONFIGURATION.md describe attempts that "submit
+# nothing". Found by the independent review.
+#
+# What DOES burn a try: 5, a reviewer that ran and submitted nothing, and 7, one
+# killed at the deadline having submitted nothing. Those are the ones the cap is
+# for.
+unspent_try() {
+  [ -n "$TRIES_MARKER" ] || return 0
+  # `${head:-}`, because this is called from paths that run BEFORE `head` is
+  # assigned -- the stop check is the one this function exists for. The file is
+  # `set -u`, so a bare `$head` there terminates the script: the stopped path
+  # exited 1 with `head: unbound variable` rather than the documented 3, and the
+  # try it was called to refund was not refunded. The two guards above do not
+  # save it when the DISPATCHER is the caller, because it sets
+  # AUTOFLEET_REVIEW_MARKER and writes `.tries` before the spawn. With no head
+  # yet there is nothing to match, and nothing to refund. Found by the
+  # independent review.
+  [ -n "${head:-}" ] || return 0
+  local h n
+  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  [ "${h:-}" = "$head" ] || return 0
+  n=$(( ${n:-1} - 1 ))
+  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
+  else printf '%s %s\n' "$head" "$n" >"$TRIES_MARKER" 2>/dev/null || true
+  fi
+}
+# The same refund with no head to match on, for the exits that fail before the
+# head is known. It decrements whatever head the marker names, which is right
+# because the dispatcher spent that try for THIS run and this run reached no
+# reviewer.
+unspent_try_any() {
+  [ -n "$TRIES_MARKER" ] || return 0
+  local h n
+  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  [ -n "${h:-}" ] || return 0
+  n=$(( ${n:-1} - 1 ))
+  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
+  else printf '%s %s\n' "$h" "$n" >"$TRIES_MARKER" 2>/dev/null || true
+  fi
+}
+
+record_done() {
+  [ -n "$DONE_MARKER" ] || return 0
+  printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
+  # The attempt count belongs to heads that got NO verdict. This head got one.
+  rm -f "$TRIES_MARKER" 2>/dev/null || true
+}
+
 # Empty when a person ran this by hand, and then dropping it does nothing.
 #
 # There is exactly ONE EXIT trap in this file, installed here and extended once
@@ -87,18 +162,32 @@ fi
 # The stop is a stop. This submits a review to a pull request, which is exactly
 # what nothing may do while that file exists -- and the reviewer it spawns would
 # be blocked by guard.py anyway, one API call later and with a worse message.
-fleet_stopped && { echo "STOPPED: $FLEET_STOP exists."; exit 3; }
+fleet_stopped && { echo "STOPPED: $FLEET_STOP exists."; unspent_try_any; exit 3; }
 
-[ -r "$BRIEF" ] || { echo "no reviewer brief at $BRIEF" >&2; exit 2; }
+[ -r "$BRIEF" ] || { echo "no reviewer brief at $BRIEF" >&2; unspent_try_any; exit 2; }
 
 pr="${1:-}"
 if [ -z "$pr" ]; then
   pr="$(fleet_pr_for_branch)" || {
-    echo "no open PR for branch $(git rev-parse --abbrev-ref HEAD)" >&2; exit 2; }
+    # `unspent_try_any` like every other pre-head exit. A no-op in practice --
+    # the dispatcher always passes the number, and with no marker set there is
+    # nothing to refund -- but review.sh states the rule as "exits 2, 3 and 6 do
+    # not burn a try" and this was the one exit left off it, for the third round
+    # running. A rule with an exception nobody wrote down is how the two refund
+    # helpers got swapped three times. Found by the independent review.
+    echo "no open PR for branch $(git rev-parse --abbrev-ref HEAD)" >&2
+    unspent_try_any; exit 2; }
 fi
 
 fleet_owner_repo || {
   echo "could not read this repository's name from gh; nothing here can ask about the PR" >&2
+  # `unspent_try_any`, NOT `unspent_try`: `head` is not assigned for another
+  # twelve lines, so the head-matching form returns at its own `[ -n "${head:-}" ]`
+  # guard and refunds nothing. This was the one pre-head exit still using it --
+  # the exact bug the commit before this was written to fix, left standing on
+  # one path, and the comment at the unreadable-head exit already states the rule
+  # it broke. Found by the independent review.
+  unspent_try_any
   exit 2; }
 
 # The head GitHub holds, not the local one. The marker binds the review to a
@@ -108,7 +197,21 @@ fleet_owner_repo || {
 # already says so on the other side.
 head="$(GH_PAGER=cat gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)"
 case "$head" in
-  ""|null) echo "could not read PR #$pr's head from gh" >&2; exit 2 ;;
+  # REFUNDED BLIND. `unspent_try` needs a head to match and there is none, so it
+  # returns without doing anything -- which means this exit cannot refund the
+  # try the dispatcher already spent. The comment that used to sit here claimed
+  # the dispatcher discards it anyway "because its count is keyed on the head
+  # too". That is not true: the dispatcher keys on the sha from its OWN
+  # `gh pr list`, so if the PR head has not moved the count stands, and the
+  # record is discarded only when the head changes -- exactly the case where
+  # nothing needed discarding. Found by the independent review, which noted this
+  # claim is what made the missing refunds look safe.
+  #
+  # So the refund is done by NUMBER instead: decrement whatever head the marker
+  # names, since this run never reached a reviewer under any head.
+  ""|null) echo "could not read PR #$pr's head from gh" >&2
+     unspent_try_any
+     exit 2 ;;
 esac
 
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
@@ -162,14 +265,19 @@ PY
 
 counting_review
 case $? in
-  0) echo "PR #$pr already has a counting review on ${head:0:8}; nothing to do."; exit 8 ;;
-  2) echo "Fix merge_gate.py, then run this again." >&2; exit 2 ;;
+  0) echo "PR #$pr already has a counting review on ${head:0:8}; nothing to do."
+     record_done; exit 8 ;;
+  # Refunded: no reviewer ran. `merge_gate.py` is a file agents in this
+  # repository edit, so a broken import is not exotic -- and without this the
+  # hold reports "N reviewers submitted nothing", which is untrue, and points at
+  # a transcript that is only created further down.
+  2) echo "Fix merge_gate.py, then run this again." >&2; unspent_try; exit 2 ;;
 esac
 
 command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {
   echo "AUTOFLEET_REVIEW_CMD is '$AUTOFLEET_REVIEW_CMD', which is not on PATH." >&2
   echo "Set it in .autofleet/config, or install the reviewer." >&2
-  exit 6; }
+  unspent_try; exit 6; }
 
 mkdir -p "$LOG_DIR"
 log="$LOG_DIR/pr-$pr-${head:0:8}.log"
@@ -301,7 +409,16 @@ on_exit() {
   signal_reviewer TERM
   rm -f "${AUTOFLEET_REVIEW_MARKER:-}"
 }
-trap 'kill_reviewer; exit 143' TERM INT
+# Refunded, like the stop path below and for the same reason: a reviewer killed
+# is not a reviewer that submitted nothing, and #33's Acceptance groups the two
+# retryable cases together. `stop_reviewers` heals the dispatcher's own kills by
+# deleting the records; a person pressing Ctrl-C at the terminal has nothing
+# doing that for them, so this was the one kill path that charged the cap for a
+# run the reviewer never got to finish. `unspent_try` rather than
+# `unspent_try_any`: this trap is installed after `head` is resolved, which is
+# the distinction three rounds got wrong on one path or another.
+# Found by the independent review.
+trap 'kill_reviewer; unspent_try; exit 143' TERM INT
 
 waited=0
 while kill -0 "$reviewer" 2>/dev/null; do
@@ -319,6 +436,11 @@ while kill -0 "$reviewer" 2>/dev/null; do
   if fleet_stopped; then
     kill_reviewer
     echo "STOPPED mid-review: $FLEET_STOP appeared; the reviewer was killed." >&2
+    # Refunded: killed by a stop is not a reviewer that submitted nothing. A
+    # dispatcher-driven `stop --now` heals itself because `stop_reviewers`
+    # deletes the records, but a hand-started run killed at the terminal does
+    # not. Found by the independent review.
+    unspent_try
     exit 3
   fi
   sleep 5
@@ -337,6 +459,7 @@ wait "$reviewer"; rc=$?
 # The SAME question as before the run, deliberately -- see counting_review().
 if counting_review; then
   echo "==> a counting review is on ${head:0:8}"
+  record_done
   exit 0
 fi
 

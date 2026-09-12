@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # The knobs a host project sets, and their defaults. Sourced by lib.sh, never
-# executed.
+# executed -- but not therefore harmless: the validation at the foot of this file
+# `exit`s on a knob it cannot accept, and in a sourced file that ends the
+# SOURCING shell. A bad value in `.autofleet/config` is fatal to every fleet
+# command, `stop.sh` included. Deliberate, and argued where the check is.
 #
 # autofleet ships no knowledge of any one project. Everything it needs to know
 # about the repo it is driving -- what a worktree has to provision, which labels
@@ -92,7 +95,35 @@
 # .claude/agents/reviewer.md a budget rather than a hope. 80 is what
 # claude-review.yml grants.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
-
+# How many attempts one head may get that produce NO VERDICT.
+#
+# A reviewer that runs and submits nothing is retried, because that is usually
+# transient -- and unbounded, it is a full-budget reviewer started every poll
+# against a head that will never get a verdict, until the agent pushes or its
+# three-hour time-box expires. `claude-review.yml` bounds the same case at ONE
+# more attempt per head and then leaves a comment saying a person decides. This
+# is that bound.
+: "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
+# Validated, because of how a bad value fails. The only consumer is
+# `[ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]` in fleet.sh: with a
+# non-number, `[` prints "integer expression expected" and returns 2, so the
+# test is FALSE, the cap never fires, and the unbounded full-budget-reviewer-
+# every-poll behaviour this knob exists to bound is back -- silently, apart from
+# one stderr line per poll. `fleet.sh` runs without `-e`, so nothing stops.
+#
+# 0 is rejected separately: it reads as "never review", and the gave-up line
+# would announce "0 reviewers on <sha> submitted nothing, which is the cap",
+# which is not true of any run. A knob whose bad value turns a guard OFF has to
+# refuse the value; this is the same reasoning tests/run.sh applies to
+# AUTOFLEET_TEST_TIMEOUT, which had the check this one only had the argument
+# for. Found by the independent review.
+#
+# The check itself is at the BOTTOM of this file, after `.autofleet/config` is
+# sourced. Here it could only ever see the environment route: the host config is
+# read last so it can override these defaults, so a project writing
+# `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
+# the cap unchecked and the guard was decorative for the one route that matters.
+# Found by the independent review of the change that added it.
 # ------------------------------------------------------------- what is KEPT ---
 #
 # Every store under $FLEET_DIR only ever grew. On this machine the reviewer
@@ -166,3 +197,37 @@
 if [ -f "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}" ]; then
   . "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}"
 fi
+
+# ----------------------------------------------------- knobs that must be sane
+#
+# AFTER the host config, because that is the route that matters: a value only
+# checked before it is checked on the one path nobody uses. See the note by
+# AUTOFLEET_REVIEW_MAX_TRIES above for why this knob in particular cannot be
+# allowed through wrong -- a non-number makes `[ N -ge X ]` return 2, the cap
+# test false, and the cap itself absent.
+#
+# FATAL, and fatal to every fleet command, not just the dispatcher: this file is
+# sourced by lib.sh, so `exit` here takes the sourcing shell with it -- including
+# `stop.sh`, which is the one you reach for when something is wrong. That is the
+# intended trade and it is named here rather than discovered: the message says
+# exactly which knob and what it got, and the fix is a one-line edit to the file
+# the message is about. A cap that is silently absent is the failure this exists
+# to prevent, and it cannot be prevented by a warning nobody reads in a
+# dispatcher log.
+# Digits first, then a NUMERIC test for positive. `''|*[!0-9]*|0` rejected the
+# literal `0` and let `00` straight through -- all digits, not that literal --
+# and `[ 0 -ge 00 ]` is true, so the cap is zero attempts: no PR is ever
+# reviewed, every PR blocks on a review that cannot arrive, and the hold
+# announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
+# the exact untrue line the 0 rejection exists to prevent. One spare zero and the
+# guard was the failure. Found by the independent review.
+case "$AUTOFLEET_REVIEW_MAX_TRIES" in
+  ''|*[!0-9]*)
+    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
+         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+    exit 2 ;;
+esac
+[ "$AUTOFLEET_REVIEW_MAX_TRIES" -gt 0 ] || {
+  echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
+       "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+  exit 2; }

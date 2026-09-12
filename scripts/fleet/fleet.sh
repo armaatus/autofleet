@@ -757,12 +757,19 @@ foundation_hold() {
 # independent review.
 : "${AUTOFLEET_HOLD_RESAY:=3600}"
 
-foundation_hold_say() {
-  # $1 is what to say the hold is for, used as the marker's content so a hold
-  # that MOVES to a different issue is announced again.
-  local what="$1"; shift
+# Say something once per reason, remembering the reason in $1.
+#
+# ONE MARKER PER THING BEING HELD. This took a single shared file, so two
+# different holds -- a foundation issue in flight and a PR whose reviewer hit
+# the cap -- overwrote each other's reason every poll and BOTH re-announced,
+# once a minute, forever. That is the flooding this whole change exists to
+# remove, reintroduced by the fix for it. The two holds are also evaluated in
+# the same poll body, which is what made it certain rather than unlucky. Found
+# by the independent review.
+hold_say_into() {
+  local where="$1" what="$2"; shift 2
   local said_at now stale=false
-  said_at="$(fleet_mtime "$FOUNDATION_HOLD_SAID")" || said_at=""
+  said_at="$(fleet_mtime "$where")" || said_at=""
   now="$(date +%s)"
   # Guarded, because an mtime this could not read must degrade to "say it" and
   # never to an arithmetic error inside the dispatcher's poll.
@@ -770,12 +777,14 @@ foundation_hold_say() {
     ''|*[!0-9]*) stale=true ;;
     *) [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true ;;
   esac
-  if $stale || [ "$(cat "$FOUNDATION_HOLD_SAID" 2>/dev/null)" != "$what" ]; then
-    printf '%s' "$what" >"$FOUNDATION_HOLD_SAID" 2>/dev/null || true
+  if $stale || [ "$(cat "$where" 2>/dev/null)" != "$what" ]; then
+    printf '%s' "$what" >"$where" 2>/dev/null || true
     local line
     for line in "$@"; do say "$line"; done
   fi
 }
+
+foundation_hold_say() { hold_say_into "$FOUNDATION_HOLD_SAID" "$@"; }
 
 # Is one of the worktrees in flight working on a FOUNDATION issue?
 #
@@ -1074,6 +1083,26 @@ launch() {
 #
 # In the default `github` mode this returns immediately and costs nothing.
 REVIEWING_DIR="$STATE_DIR/reviewing"
+# WHAT IS IN THIS DIRECTORY, in one place, because a fourth consumer that had to
+# work it out from three use sites is exactly how the third one came to disagree:
+#
+#   <pr>         the LOCK. Holds `pid head`. Its presence means a reviewer is
+#                running; `review.sh` removes it on every exit path.
+#   <pr>.done    a RECORD. Holds a head that has been handled, so a head with a
+#                review does not get a reviewer started every poll.
+#   <pr>.tries   a RECORD. Holds `head n` -- how many reviewers this head has
+#                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
+#   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
+#                it cannot overwrite -- or be overwritten by -- the foundation
+#                hold's marker.
+#
+# Only the first is a lock, and the three records must never be counted as one.
+# `is_review_record` is the predicate; use it rather than respelling the suffix
+# list. `cmd_status` respelled it as a `find ! -name` and counted all three as
+# reviewers in flight, permanently, on the screen its own comment calls the
+# first anybody looks at. Found by the independent review, which noted the
+# comment two lines above already stated the rule this broke.
+is_review_record() { case "$1" in *.done|*.tries|*.said) return 0 ;; esac; return 1; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1127,6 +1156,10 @@ stop_reviewers() {
   [ -d "$REVIEWING_DIR" ] || return 0
   for marker in "$REVIEWING_DIR"/*; do
     [ -e "$marker" ] || continue
+    # The records go too: a dispatcher starting fresh re-derives what has been
+    # reviewed from the pull request itself, which is the only source that
+    # cannot be stale.
+    is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
     if reviewer_alive "$held"; then
@@ -1362,18 +1395,31 @@ rotate_fleet_log() {
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   [ "$size" -gt "$max" ] || return 0
   # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
-  # silent. It called `is_review_record`, which does not exist on this branch --
-  # it arrives with #42 -- so `command not found` was swallowed by `2>/dev/null`,
-  # the `&& continue` never fired, and EVERY file in the directory blocked
-  # rotation while the dispatcher ran a nonexistent command once per file per
-  # poll. And blocking on any marker rather than a live pid means rotation
-  # starves: `fleet.sh` deliberately keeps a marker whose pid `ps` cannot
-  # identify, and that one survives for the dispatcher's life, after which
+  # silent. It called `is_review_record` when that predicate did not yet exist on
+  # this branch, so `command not found` was swallowed by `2>/dev/null`, the
+  # `&& continue` never fired, and EVERY file in the directory blocked rotation
+  # while the dispatcher ran a nonexistent command once per file per poll. And
+  # blocking on any marker rather than a live pid means rotation starves:
+  # `fleet.sh` deliberately keeps a marker whose pid `ps` cannot identify, and
+  # that one survives for the dispatcher's life, after which
   # AUTOFLEET_LOG_MAX_BYTES is not a bound at all. Found by `/code-review`, which
   # reproduced the 127.
+  #
+  # The predicate DOES exist now -- THIS PR adds it, a few hundred lines up; main
+  # still carries only the comment saying it arrives with #42, which is what the
+  # note above used to be. Said precisely because it is provenance for whoever
+  # reverts this: reverting #42 takes the predicate with it and this loop must go
+  # back with it. So this loop uses it rather than leaning on a record's first
+  # field being a sha that
+  # `reviewer_alive` happens to reject. That is the rule stated where
+  # `is_review_record` is defined: use the predicate, do not respell the suffix
+  # list or rely on what the contents happen to look like. This was the one loop
+  # over the directory still doing neither, and the comment above it still said
+  # the predicate was unavailable. Found by the independent review.
   if [ -d "$REVIEWING_DIR" ]; then
     for live in "$REVIEWING_DIR"/*; do
       [ -e "$live" ] || continue
+      is_review_record "$live" && continue
       local held=""
       read -r held _ <"$live" 2>/dev/null || true
       # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
@@ -1590,6 +1636,9 @@ print(len(json.load(sys.stdin)))
     local m p n=0
     for m in "$REVIEWING_DIR"/*; do
       [ -e "$m" ] || continue
+      # `<pr>.done` is a record, not a lock: it holds a head, not a pid, and
+      # reaping it as a dead reviewer would put the re-spawn loop straight back.
+      is_review_record "$m" && continue
       p=""
       read -r p _ <"$m" 2>/dev/null || true
       reviewer_alive "$p"; local is=$?
@@ -1618,6 +1667,25 @@ for p in prs:
 ' | while IFS="$(printf '\t')" read -r pr head; do
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
+    # ...and the record of a head already handled, which is not the same
+    # question as "is a reviewer running". Without it, a head that HAS its
+    # review had a reviewer started for it every poll -- each exiting 8 two API
+    # calls later, once a minute, until the agent pushed. Per head, so a push
+    # invalidates it. armaatus/autofleet#33.
+    if [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ]; then
+      continue
+    fi
+    rm -f "$marker.done"
+
+    # ...and a head that has had its attempts. A reviewer that submits nothing
+    # is retried -- that is usually transient -- but not forever: unbounded, it
+    # is a full-budget reviewer started every poll against a head that will
+    # never get a verdict. claude-review.yml bounds the same case at one more
+    # attempt and then says a person decides; this says the same thing.
+    local tries_head tries_n
+    tries_head=""; tries_n=0
+    read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
+    [ "${tries_head:-}" = "$head" ] || tries_n=0
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""
@@ -1648,6 +1716,25 @@ for p in prs:
       # killed and none replaced, costing a whole poll interval out of the
       # time-box of the very agents that are waiting on them.
       [ "${running:-0}" -gt 0 ] && running=$((running - 1))
+    fi
+    # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding. Checked
+    # before it, the branch was taken while the LAST reviewer was still running:
+    # the count is incremented before the spawn, so with a cap of 3 the third
+    # spawn leaves `.tries` at 3 and every poll for the rest of that reviewer's
+    # timeout announced "3 reviewers submitted nothing, which is the cap". Only
+    # two had. The third might still submit -- and a person acting on the line
+    # starts a second full-budget reviewer on a head that already has one, while
+    # `.said` keeps the claim unrepeated and uncorrected even after the running
+    # one succeeds. Below the lock check the message is true whenever it prints.
+    # Found by the independent review.
+    if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
+      # Its OWN marker, per pull request: sharing the foundation one made the
+      # two holds overwrite each other every poll.
+      hold_say_into "$REVIEWING_DIR/$pr.said" "gaveup-$head" \
+        "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
+        "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
+        "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."
+      continue
     fi
     # Bounded by the same number as the worktrees. NOT the same pool, and the
     # difference is worth knowing before you raise either: at the cap this is
@@ -1684,10 +1771,48 @@ for p in prs:
     # next candidate in this loop, so the slot is held for one iteration rather
     # than leaked. An earlier version of this comment claimed the marker was
     # written first; found by the independent review.
+    printf '%s %s\n' "$head" "$(( ${tries_n:-0} + 1 ))" >"$marker.tries"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     printf '%s %s\n' "$!" "$head" >"$marker"
     say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+  done
+
+  # ...and the records of pull requests that are no longer open. They were
+  # pruned ONLY by `stop_reviewers`, so a merged PR's `.done`, `.tries` and
+  # `.said` sat here until the next dispatcher start -- days, on a fleet that
+  # stays up. Harmless in size, and it was the input to the count `cmd_status`
+  # got wrong, which is reason enough to keep the directory honest. A LOCK is
+  # never pruned here: a reviewer running on a PR that just merged still owns its
+  # pid and its slot, and `live_reviewers` is what reaps it.
+  #
+  # The open list is the one already in hand from the query above, so this costs
+  # no API call. `$open_prs` carries every number the query returned INCLUDING
+  # drafts, which the loop skips -- a draft's records must not be swept out from
+  # under it while it is still open. Found by the independent review.
+  # NOT on an empty answer. `open_prs` is empty both when no PR is open and when
+  # the parse above failed, and those are opposite instructions: the first means
+  # sweep everything, the second means sweep nothing. A repository with no open
+  # PRs has no records worth keeping anyway, so refusing to sweep on empty costs
+  # nothing and cannot delete a live PR's attempt count on a bad parse.
+  [ -n "${open_prs:-}" ] || return 0
+  # ...and NOT on a truncated one either. #72 added `prs_answered` because a
+  # listing at the page limit cannot tell an absent PR from one on the next page,
+  # and there `open_prs` is non-empty and still not an answer -- the emptiness
+  # guard above does not see it. The records this sweeps are a live PR's attempt
+  # count and its say-once marker, so the same listing that is too weak to prune
+  # a transcript is too weak to prune these. Both readers of `open_prs` honour
+  # the one signal, which is the point of #72 having made it a signal.
+  [ "${prs_answered:-no}" = yes ] || return 0
+  local rec base num
+  for rec in "$REVIEWING_DIR"/*; do
+    [ -e "$rec" ] || continue
+    is_review_record "$rec" || continue
+    base="$(basename "$rec")"; num="${base%%.*}"
+    case " ${open_prs:-} " in
+      *" $num "*) continue ;;
+    esac
+    rm -f "$rec"
   done
 }
 
@@ -2688,8 +2813,23 @@ cmd_status() {
   # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
   # says which of the two reviewers this repository actually has.
   if fleet_review_is_local; then
-    local n; n="$(find "$REVIEWING_DIR" -type f 2>/dev/null | grep -c . || true)"
-    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
+    # LOCKS only. `stop_reviewers` and `live_reviewers` both learned to skip
+    # the record files; this third reader of the directory did not -- and it is
+    # the one its own comment calls the first screen anybody looks at. A `.done`
+    # stands for as long as its head does, which is the point of the file, so
+    # status reported a reviewer in flight permanently rather than transiently,
+    # and three reviewed PRs read as every slot taken. Found by the independent
+    # review, on both axes independently.
+    # Through the predicate, not a fourth spelling of the suffix list: the
+    # `find ! -name` this replaces WAS the drift, and it is the only one of the
+    # three consumers a person reads on every `status`.
+    local n=0 m
+    for m in "$REVIEWING_DIR"/*; do
+      [ -e "$m" ] || continue
+      is_review_record "$m" && continue
+      n=$((n + 1))
+    done
+    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"

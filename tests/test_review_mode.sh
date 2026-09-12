@@ -48,6 +48,37 @@
 #                                 of ours is never signalled, and a marker naming
 #                                 a dead pid is cleared. This is the second place
 #                                 the fleet signals a pid it read out of a file.
+#   test_review_mode.sh once       a head that already has a counting review is
+#                                 not handed to a second reviewer, on this poll
+#                                 or any later one -- and a push invalidates
+#                                 that. Fourteen spawns in thirteen minutes on
+#                                 PR #32's first head is what this stops.
+#   test_review_mode.sh retries    ...while a reviewer that submitted NOTHING is
+#                                 tried again. The asymmetry is the whole fix:
+#                                 backwards, it is the silent block the mode
+#                                 exists to remove.
+#   test_review_mode.sh capped     ...and not forever: AUTOFLEET_REVIEW_MAX_TRIES
+#                                 reviewers on one head that submit nothing, then
+#                                 a hold that says so ONCE and points at the log.
+#                                 Unbounded, this is a full-budget reviewer
+#                                 started every poll against a head that will
+#                                 never get a verdict.
+#   test_review_mode.sh holds      TWO holds in one poll body -- a foundation
+#                                 issue in flight and a PR at the cap. They
+#                                 shared one say-once marker, so each overwrote
+#                                 the other's reason and both re-announced every
+#                                 poll: verbatim the flooding this change
+#                                 removes. `capped` runs with no foundation issue
+#                                 and stayed green against the shared marker.
+#   test_review_mode.sh status_count
+#                                 `fleet.sh status` counts the LOCK and not the
+#                                 three records beside it. Counting them made a
+#                                 reviewed PR read as a slot taken forever, on
+#                                 the first screen anybody looks at -- and it is
+#                                 where the third spelling of the suffix list
+#                                 came to disagree with the other two. Also: a
+#                                 poll leaves an open PR's records alone and
+#                                 sweeps a closed PR's.
 #   test_review_mode.sh records   record-review.sh writes the marker guard.py's
 #                                 push gate reads, on a worktree with no
 #                                 `.autofleet/run` yet -- and it is asked of the
@@ -59,6 +90,16 @@
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
+#   test_review_mode.sh stubwrite the reviewer stub's heredoc is unquoted, so its
+#                                 body is expanded on the way to the file and a
+#                                 backtick in prose is a command. One named
+#                                 `stub_reviewer` itself: every phase but `mode`
+#                                 then recursed forever, and the suite hung with
+#                                 nothing to read (CI run 34658821929, exit 143
+#                                 at nine minutes). tests/run.sh bounds each
+#                                 phase now, so a wedge is a FAIL that names
+#                                 itself; this catches the two shapes named in
+#                                 the arm, not every write-time expansion.
 #
 # `gh` and the reviewer command are both stubbed on PATH and the fleet state dir
 # is a temp dir, so nothing here touches a pull request or the machine's fleet.
@@ -216,6 +257,27 @@ PY
   # it running. The sleep is given a distinctive duration so a test can tell the
   # wrapper's death from the work's.
   hang)   sleep 3607 ;;
+  # NOTE: no default arm, deliberately-for-now. An unknown mode falls through and
+  # behaves like \`silent\`, which is how \`stub_reviewer submits\` -- a mode that
+  # was never defined -- read as the opposite of what it did. Adding
+  # \`*) exit 64\` is the obvious fix and it wedges the suite: several phases pass
+  # modes this case does not name and rely on the fall-through. Recorded rather
+  # than half-done; the callsite that was wrong is fixed, and the sharp edge is
+  # in armaatus/autofleet#71 with the other guards aimed slightly off.
+  #
+  # THE BACKTICKS ABOVE ARE ESCAPED, and every backtick added below this line
+  # must be too. This is an UNQUOTED heredoc, so it has no comment lines: a \`#\`
+  # is text being written to a file, and the shell still runs command
+  # substitutions on it. Unescaped, \`stub_reviewer submits\` above called this
+  # very function, which rewrote the stub, which called it again -- the suite
+  # hung from \`refuses\` onwards with no failure and no output, and CI killed it
+  # at nine minutes (run 34658821929).
+  #
+  # tests/run.sh bounds each phase now, but do not read that as cover for this:
+  # the bound names a phase that BLOCKS, and this one forks. Its own note says
+  # so. A repeat of this exact bug still outruns the watchdog, because killing
+  # the top of a recursion that is busy making more of itself is not a fix.
+  # Escaping the backtick is.
 esac
 exit 0
 STUB
@@ -230,6 +292,31 @@ n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))
 # -- a reviewer can run and submit nothing -- and "was one started at all" is the
 # question the queue phase is really asking.
 n_started() { grep -c . "$REVIEWER_CALLS" 2>/dev/null || echo 0; }
+# How many times the DISPATCHER started review.sh -- which is what the re-spawn
+# bug is about, and is not the same as how many times a reviewer ran.
+#
+# `n_started` counts the stub, and the exit-8 path returns before the stub is
+# ever invoked. So on the base code the extra spawns happened, produced no stub
+# call, and a phase asserting `n_started` was satisfied: it passed before the fix
+# as well as after, measuring model calls where the issue is about spawns. The
+# dispatcher says "reviewing PR #N at <head> (pid ...)" once per spawn, and that
+# is the line to count. Found by the independent review -- the sixth phase on
+# this project to pass for a reason other than the one it claimed, in the change
+# whose own body reports the fifth.
+# The DISPATCHER's line, which carries a pid -- not `review.sh`'s own
+# `==> reviewing PR #42 at <head> with <cmd>`, which lands in the same file
+# because the dispatcher redirects the child's output into it. Counting both
+# doubled every spawn.
+#
+# `|| true` inside the substitution, not `|| echo 0`: `grep -c` PRINTS 0 and
+# exits 1 when it finds nothing, so `|| echo 0` appends a second line and the
+# caller compares "0\n0" against a number. That has now cost time twice in this
+# file.
+n_spawned() { local n; n="$(grep -c "reviewing PR #42 at .* (pid" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s\n' "${n:-0}"; }
+# Whether a reviewer still holds PR 42's lock. A poll taken while one is running
+# is CORRECTLY skipped, so a phase that polls again immediately is testing the
+# dedup rather than the thing it means to.
+lock_held() { [ -e "$AUTOFLEET_DIR/reviewing/42" ] && echo yes || echo no; }
 
 # Wait until `$1` prints `$2`, or give up after `$3` seconds and say what it was.
 #
@@ -359,6 +446,67 @@ import merge_gate; print(merge_gate.review_mode())'); }
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 3 ] || fail "a stopped fleet did not exit 3 (got $rc)"
   ok "a stopped fleet exits 3"
+
+  # ...AS THE DISPATCHER CALLS IT, which is the only way the refund path is
+  # reached at all. `run_it` sets no AUTOFLEET_REVIEW_MARKER, so `TRIES_MARKER`
+  # is empty and `unspent_try` returns at its first line -- which is why the bug
+  # this asserts survived the suite: with the marker set, the same path read
+  # `$head` before it was assigned, and `set -u` terminated the script with
+  # `head: unbound variable` and exit 1 instead of the documented 3. The try the
+  # dispatcher had already spent was then never refunded, which is the opposite
+  # of what the call is there for. Found by the independent review.
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42.tries"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$rc" = 3 ] \
+    || fail "called the way the dispatcher calls it, a stopped fleet exited $rc rather than 3: $out"
+  grep -q "unbound variable" <<<"$out" \
+    && fail "the stopped path died on a shell variable instead of exiting 3: $out"
+  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  [ "${n:-}" = 1 ] \
+    || fail "a stopped run did not refund the try the dispatcher spent before the spawn (tries now ${n:-gone})"
+  ok "...and refunds the try the dispatcher spent, with the marker set"
+
+  # THE OTHER PRE-HEAD EXIT, and the one that makes the `${head:-}` guard
+  # load-bearing rather than defensive: `fleet_owner_repo` failing calls
+  # `unspent_try`, which matches on a head this run has not read yet. Without the
+  # guard that is an unbound expansion under `set -u`, so the run dies with exit
+  # 1 instead of 2 and refunds nothing.
+  rm -f "$AUTOFLEET_DIR/STOP"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42.tries"
+  # SAVED, because the restore below has to put back the real thing. The first
+  # version called `make_gh_stub`, which does not exist anywhere in this
+  # repository -- and `2>/dev/null || true` swallowed the 127, so the line read
+  # as "put the working stub back" and put nothing back. Every assertion after
+  # it would have run against a `gh` that answers nothing while claiming to test
+  # something else. Found by the independent review.
+  cp "$WORK/bin/gh" "$WORK/bin/gh.working"
+  cat >"$WORK/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"repo view"*) echo "could not resolve" >&2; exit 1 ;;
+esac
+exit 1
+GHSTUB
+  chmod +x "$WORK/bin/gh"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  mv -f "$WORK/bin/gh.working" "$WORK/bin/gh"
+  grep -q "unbound variable" <<<"$out" \
+    && fail "a gh that could not name the repository died on a shell variable: $out"
+  [ "$rc" = 2 ] \
+    || fail "gh failing to name the repository exited $rc rather than 2: $out"
+  # ...AND IT REFUNDED. Asserting only the exit code let the wrong refund
+  # function stand: `unspent_try` matches on a head this path has not read yet,
+  # so it returned without doing anything and three gh outages a poll apart
+  # still retired the head -- which is the failure this whole knob exists to
+  # avoid, and which docs/CONFIGURATION.md and config.sh both promise against.
+  # Found by the independent review.
+  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  [ "${n:-}" = 1 ] \
+    || fail "a gh that cannot name the repository spent a try; three outages a poll apart retire the head (tries now ${n:-gone})"
+  ok "...and a gh that cannot name the repository exits 2 and refunds"
   [ "$(n_reviews)" = 0 ] \
     || fail "a stopped fleet submitted a review"
   ok "...and nothing goes out"
@@ -442,6 +590,368 @@ import merge_gate; print(merge_gate.review_mode())'); }
     && fail "the wedged reviewer's own child outlived the kill"
   ok "...and so is what it had started"
   ;;
+
+# ---------------------------------------------------------------------- once
+  once)
+    make_fixture; stub_reviewer marked
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_spawned 1 || fail "the first pass started no reviewer"
+    await n_reviews 1 || fail "the first reviewer submitted nothing"
+    await lock_held no || fail "the first reviewer never released its lock"
+    # ...and now every later poll must start nothing, because the head is done.
+    for _ in 1 2 3; do poll_review_open_prs; done
+    # On SPAWNS. Asserting on stub calls passed against the base code too,
+    # because the spawns it should have counted all exited before reaching the
+    # stub. `await`, not a fixed sleep, so a loaded machine does not decide it.
+    await n_spawned 2 10 >/dev/null 2>&1 || true
+    [ "$(n_spawned)" = 1 ] \
+      || fail "three further polls started $(n_spawned) reviewers on a head that already has one"
+    ok "a head with a counting review is not handed to another reviewer"
+
+    # A push invalidates it: new head, new review.
+    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m push)
+    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_spawned 2 || fail "a new head did not get a reviewer"
+    ok "...and a push starts one again"
+    ;;
+
+# ------------------------------------------------------------------- retries
+  retries)
+    # The asymmetry. A reviewer that submitted NOTHING must be tried again --
+    # exit 5 is a transient failure, and recording it as handled would turn this
+    # fix into a PR nobody ever reviews, which is the failure local mode exists
+    # to remove.
+    make_fixture; stub_reviewer silent
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_started 1 || fail "the first pass started no reviewer"
+    # ...and let it finish. Polling while it runs is correctly skipped, which is
+    # a different property and one the `once` phase already covers.
+    await lock_held no || fail "the first reviewer never released its lock"
+    # It submitted nothing. The next pass must try again.
+    poll_review_open_prs
+    await n_started 2 \
+      || fail "a reviewer that submitted nothing was recorded as done; that PR is never reviewed"
+    ok "a reviewer that submitted nothing is tried again"
+    [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
+      && fail "exit 5 wrote the done record, which is the silent-block direction"
+    ok "...and no done record was written for it"
+
+    # EXIT 7 TOO, which is the other half of #33's Acceptance -- "a reviewer that
+    # submitted nothing (exit 5) OR WAS KILLED (exit 7) is retried" -- and the
+    # half nothing pinned. The pre-existing `timeout` phase is the only exit-7
+    # coverage and it calls `run_it`, which sets no AUTOFLEET_REVIEW_MARKER: with
+    # DONE_MARKER empty `record_done` returns at its first line, so that phase
+    # cannot observe the record either way. Add `record_done` to the exit-7
+    # branch and the whole suite stays green -- which is the silent-block
+    # direction #33 calls "the whole of this issue". Found by the independent
+    # review.
+    rm -f "$AUTOFLEET_DIR/reviewing/42.done" "$AUTOFLEET_DIR/reviewing/42.tries"
+    stub_reviewer hang
+    out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+              AUTOFLEET_REVIEW_TIMEOUT=1 ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+    [ "$rc" = 7 ] \
+      || fail "a reviewer past its deadline exited $rc rather than 7: $out"
+    [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
+      && fail "a reviewer KILLED at the deadline wrote the done record, so that head is never reviewed again -- the silent block #33 exists to remove"
+    ok "...and a reviewer killed at the deadline is not recorded as done"
+    ;;
+
+# --------------------------------------------------------------------- capped
+  capped)
+    # ...and the retry is bounded. Unbounded, a head that never gets a verdict
+    # gets a full-budget reviewer every poll until the agent's three-hour
+    # time-box expires. claude-review.yml bounds the same case at one more
+    # attempt and then says a person decides.
+    make_fixture; stub_reviewer silent
+    export AUTOFLEET_REVIEW_MAX_TRIES=2
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    n=0
+    while [ "$n" -lt 5 ]; do
+      poll_review_open_prs
+      await lock_held no >/dev/null 2>&1 || true
+      n=$((n + 1))
+    done
+    [ "$(n_started)" = 2 ] \
+      || fail "five polls started $(n_started) reviewers against a cap of 2"
+    ok "a head that never gets a verdict stops being retried at the cap"
+
+    # ...and the cap refuses a value that would turn it off. `[ x -ge abc ]`
+    # prints "integer expression expected" and returns 2, so the cap test is
+    # FALSE and the unbounded behaviour this knob exists to bound is back --
+    # silently, since fleet.sh runs without `-e`. 0 is refused separately: it
+    # reads as "never review", and the gave-up line would announce "0 reviewers
+    # submitted nothing, which is the cap", which is true of no run. The knob had
+    # this reasoning written down one file over and no check of its own. Found by
+    # the independent review.
+    for bad in abc 0 2x -1; do
+      cfg_out="$( (cd "$WORK/repo" \
+        && AUTOFLEET_REVIEW_MAX_TRIES="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "AUTOFLEET_REVIEW_MAX_TRIES='$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a positive whole number" <<<"$cfg_out" \
+        || fail "AUTOFLEET_REVIEW_MAX_TRIES='$bad' failed without saying why: $cfg_out"
+    done
+    ok "...and a cap that is not a positive number is refused, not ignored"
+
+    # THROUGH THE CONFIG FILE, which is the route that matters and the one the
+    # check could not see: `.autofleet/config` is sourced LAST so it can override
+    # the defaults, and the check sat with the defaults. A host project writing
+    # `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file docs/CONFIGURATION.md
+    # documents this knob in reached the cap unchecked, so the guard was
+    # decorative for every real user of it and green here. The row above passes
+    # either way; this one is the one that failed. Found by the independent
+    # review of the change that added the check.
+    hostcfg="$WORK/hostcfg"
+    for bad in three 0 ""; do
+      printf 'AUTOFLEET_REVIEW_MAX_TRIES=%s\n' "$bad" >"$hostcfg"
+      cfg_out="$( (cd "$WORK/repo" \
+        && env -u AUTOFLEET_REVIEW_MAX_TRIES AUTOFLEET_CONFIG="$hostcfg" \
+             bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "a config file setting the cap to '$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a positive whole number" <<<"$cfg_out" \
+        || fail "a config file setting the cap to '$bad' failed without saying why: $cfg_out"
+    done
+    ok "...including when it arrives through .autofleet/config, which is read last"
+
+    printf 'AUTOFLEET_REVIEW_MAX_TRIES=5\n' >"$hostcfg"
+    ( cd "$WORK/repo" && env -u AUTOFLEET_REVIEW_MAX_TRIES AUTOFLEET_CONFIG="$hostcfg" \
+        bash -c '. ./scripts/fleet/config.sh' ) >/dev/null 2>&1 \
+      || fail "a valid cap in .autofleet/config was refused"
+    ok "...while a whole number there is accepted"
+
+    ( cd "$WORK/repo" && AUTOFLEET_REVIEW_MAX_TRIES=4 bash -c '. ./scripts/fleet/config.sh' ) \
+      >/dev/null 2>&1 || fail "a valid cap was refused"
+    ok "...while a whole number is accepted"
+    out="$(poll_review_open_prs 2>&1; cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+    grep -q "submitted nothing, which is the cap" <<<"$out" \
+      || fail "it stopped retrying without saying so: $out"
+    ok "...and says so, rather than going quiet"
+    ;;
+
+# --------------------------------------------------------------------- holds
+  status_count)
+  # `fleet.sh status` counts REVIEWERS IN FLIGHT, and the three record files
+  # beside the lock are not reviewers. Counting them made a PR whose head has
+  # been reviewed read as one in flight for as long as that head stands -- which
+  # is the entire point of `<pr>.done` -- and a PR at the cap read as two
+  # (`.tries` plus `.said`). Three reviewed PRs open and `status` says 3: exactly
+  # the number that reads as "every slot is taken", on the screen its own comment
+  # calls the first anybody looks at, permanently rather than transiently.
+  #
+  # Nothing asserted the count, which is how the third spelling of the suffix
+  # list came to disagree with the other two. Found by the independent review,
+  # which found it on both axes independently.
+  make_fixture
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  # One real lock: a reviewer running on PR 42. `$$` is this shell, which IS
+  # alive, so `live_reviewers` cannot reap it mid-phase.
+  printf '%s %s\n' "$$" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  # ...and every record, for three other PRs, so a miscount cannot be read as
+  # the lock being counted twice.
+  printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/43.done"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/44.tries"
+  : >"$AUTOFLEET_DIR/reviewing/45.said"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  line="$(printf '%s\n' "$out" | grep '^review:' || true)"
+  [ -n "$line" ] || fail "status printed no review line at all: $out"
+  grep -q "1 in flight" <<<"$line" \
+    || fail "status counted the record files as reviewers, so a reviewed PR reads as a slot taken forever: $line"
+  ok "status counts the lock and not the three records"
+
+  # ...and the OTHER two consumers, asserted by consequence rather than by
+  # grepping for the predicate's name -- `live_reviewers` is nested inside
+  # `review_open_prs`, so there is no function to inspect, and a text assertion
+  # would pass on a file that merely mentions it.
+  #
+  # `live_reviewers`'s half is not the COUNT -- a record's first field is a head
+  # sha, so `reviewer_alive` answers 1 and the count stays right either way. It
+  # is that a record counted as a dead reviewer gets DELETED, and `<pr>.done` is
+  # the only thing stopping a reviewed head being handed a reviewer every poll.
+  # Deleting it puts the re-spawn loop this PR removes straight back.
+  #
+  # On an OPEN pull request, because the sweep below legitimately removes the
+  # records of closed ones -- which is why the first version of this assertion
+  # failed against its own fix. Two PRs open: 42 needs a review, 43 already has
+  # one on its head.
+  rm -f "$AUTOFLEET_DIR/reviewing/42" "$AUTOFLEET_DIR/reviewing"/4[345].*
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"},{"number":43,"isDraft":false,"headRefOid":"%s"}]\n' \
+    "$PR_HEAD" "$PR_HEAD" >"$GH_PRLIST"
+  printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/43.done"
+  printf '%s 1\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/43.tries"
+  stub_reviewer marked
+  poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
+    || fail "a poll reaped 43.done, so PR 43's reviewed head gets a reviewer again every minute -- the loop this PR exists to remove"
+  [ -e "$AUTOFLEET_DIR/reviewing/43.tries" ] \
+    || fail "a poll reaped 43.tries, so the attempt count restarts every pass and the cap can never be reached"
+  ok "...and a poll leaves an OPEN PR's records alone"
+
+  # ...while the records of a pull request that is no longer open DO go. They
+  # were pruned only by `stop_reviewers`, so on a fleet that stays up a merged
+  # PR's three files sat here for days -- and they were the input to the count
+  # above.
+  #
+  # RECORDS ONLY, and the lock is out of the sweep's scope by construction --
+  # `is_review_record "$rec" || continue`. Not asserted here, and the first
+  # version of this phase tried: a lock naming a pid that is not one of our
+  # reviewers is reaped by `live_reviewers` in the same pass, correctly, which
+  # is the `reaper` phase's whole subject. A phase that planted such a lock and
+  # expected it to survive was asserting the opposite of the fleet's own rule.
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.done"
+  : >"$AUTOFLEET_DIR/reviewing/99.said"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.tries"
+  poll_review_open_prs
+  for f in 99.done 99.said 99.tries; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
+  done
+  ok "...and a closed PR's records are swept"
+
+  # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
+  # them. Treated as locks, their first field is a head sha, `kill` is handed a
+  # non-number and fails, and `rm -f` follows on both paths -- so the two
+  # spellings are indistinguishable from outside. The branch still belongs
+  # there for `reviewer_alive`'s own reason: a numeric-looking first field WOULD
+  # be signalled, and nothing guarantees a future record's first field is not
+  # numeric. Said rather than asserted, because a phase claiming to pin it would
+  # be the inert kind this suite has shipped twice.
+  in_poll stop_reviewers >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
+    && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
+  ok "...and a stop clears the records"
+
+  # --------------------------------------------- when the sweep must NOT run
+  #
+  # The sweep decides what is gone by ABSENCE from a listing, so it is only ever
+  # as good as the listing. Both refusals below are argued at length where they
+  # are written and neither was pinned: deleting either `return 0` left the whole
+  # suite green, which is the shape this PR calls out twice and the standard
+  # CLAUDE.md hard rule 3 sets. Found by the independent review.
+  #
+  # The records are a live PR's `.done` -- the one thing stopping a reviewed head
+  # being handed a reviewer every poll -- and its attempt count. Sweeping them
+  # for want of a readable listing puts back the loop this PR removes.
+  plant_records() {
+    mkdir -p "$AUTOFLEET_DIR/reviewing"
+    printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/$1.done"
+    printf '%s 1\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/$1.tries"
+  }
+  survived() { [ -e "$AUTOFLEET_DIR/reviewing/$1.done" ] && [ -e "$AUTOFLEET_DIR/reviewing/$1.tries" ]; }
+
+  # 1. A listing that does not parse. `open_prs` comes back EMPTY, which is
+  #    indistinguishable from "no PR is open" -- and those are opposite
+  #    instructions. Empty means sweep nothing, not sweep everything.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  printf 'not json at all\n' >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 77 \
+    || fail "an unparseable PR listing swept a live PR's records, so its reviewed head gets a reviewer again every poll"
+  ok "a listing that does not parse sweeps nothing"
+
+  # 1b. ...and an EMPTY BUT VALID listing, which is the only case the emptiness
+  #     guard still catches on its own. `[]` parses, so `prs_answered` is `yes`
+  #     and the refusal above does not fire; `open_prs` is empty and means "no PR
+  #     is open" rather than "could not tell", and the two reach the sweep as the
+  #     same string. Written as its own row because the obvious one -- the
+  #     unparseable listing above -- is pinned by `prs_answered` and leaves the
+  #     emptiness guard free to be deleted with the suite still green. That is
+  #     the "passes for a reason other than the one it claims" this file keeps a
+  #     tally of; this is the row that actually holds it.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  printf '[]\n' >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 77 \
+    || fail "an empty PR listing swept the records, so a transient 'no PRs' answer loses a live PR's attempt count"
+  ok "...and neither does an empty but valid one"
+
+  # 2. A listing at the PAGE LIMIT. `open_prs` is NON-EMPTY here and still not an
+  #    answer: an absent PR and one on the next page cannot be told apart, so the
+  #    emptiness guard above does not see this case at all. #72 added
+  #    `prs_answered` for its own sweep; this one reads the same signal.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  python3 - "$GH_PRLIST" "$PR_HEAD" <<'PY2'
+import json, sys
+# Exactly `pr_page` entries, none of them 77 -- so on a listing this size the
+# sweep must refuse rather than conclude 77 is gone.
+json.dump([{"number": 100 + i, "isDraft": False, "headRefOid": sys.argv[2]}
+           for i in range(50)], open(sys.argv[1], "w"))
+PY2
+  poll_review_open_prs
+  survived 77 \
+    || fail "a listing at the page limit swept the records of a PR that may simply be on the next page"
+  ok "...and neither does one truncated at the page limit"
+
+  # 3. A DRAFT is open. The review loop skips drafts, and the sweep must not read
+  #    that as gone: sweeping a draft's records restarts its attempt count the
+  #    moment it is marked ready. The one draft fixture in this file plants no
+  #    records, so the guarantee `review_open_prs` states was unasserted.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 78
+  printf '[{"number":78,"isDraft":true,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 78 \
+    || fail "a poll swept an open DRAFT's records, so its attempt count restarts when it is marked ready"
+  ok "...and a draft counts as open, so its records are left alone"
+  ;;
+
+  holds)
+    # TWO HOLDS AT ONCE, which is the state the shared say-once marker broke.
+    # A foundation issue in flight and a PR whose reviewer hit the cap are
+    # evaluated in the same poll body; sharing one file meant each overwrote the
+    # other's reason and BOTH re-announced every poll -- the flooding this whole
+    # change removes. `capped` runs with no foundation issue, so it stayed green
+    # against the shared marker. Found by the independent review.
+    make_fixture; stub_reviewer silent
+    export AUTOFLEET_REVIEW_MAX_TRIES=1
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    # Spend the one try, so the next pass holds on the cap.
+    poll_review_open_prs
+    await lock_held no || fail "the first reviewer never released its lock"
+
+    # ...and a foundation hold standing at the same time.
+    mkdir -p "$AUTOFLEET_DIR"
+    (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+     foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+      >/dev/null 2>&1
+
+    n_cap()   { local n; n="$(grep -c "which is the cap" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
+    n_found() { local n; n="$(grep -c "lands alone" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s' "${n:-0}"; }
+    # Let each hold speak ONCE first. The baseline is "both have been
+    # announced"; what this phase is about is whether they then stay quiet with
+    # the other one standing. Taken before the first announcement, the cap's own
+    # correct first line read as a repeat.
+    poll_review_open_prs
+    (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+     foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+      >/dev/null 2>&1
+    before_cap="$(n_cap)"
+    before_found="$(n_found)"
+    [ "$before_cap" -ge 1 ] || fail "the cap hold never announced at all, so this asserts nothing"
+    [ "$before_found" -ge 1 ] || fail "the foundation hold never announced at all"
+    for _ in 1 2 3; do
+      poll_review_open_prs
+      (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+       foundation_hold_say "1" "#1 is a foundation issue and is still in flight; it lands alone, so") \
+        >/dev/null 2>&1
+    done
+    after_cap="$(n_cap)"
+    after_found="$(n_found)"
+    [ "$before_cap" = "$after_cap" ] \
+      || fail "the cap hold re-announced while a foundation hold stood ($before_cap then $after_cap)"
+    [ "$before_found" = "$after_found" ] \
+      || fail "the foundation hold re-announced while a cap hold stood ($before_found then $after_found)"
+    ok "two holds at once each stay quiet; neither overwrites the other's reason"
+    ;;
 
 # --------------------------------------------------------------------- queue
   sweeps)
@@ -1088,7 +1598,56 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and it is the marker the push gate actually reads"
   ;;
 
+# ---------------------------------------------------------------- stubwrite
+  stubwrite)
+  # The reviewer stub is written through an UNQUOTED heredoc, so its body is not
+  # inert text on the way to the file: the shell expands parameters and RUNS
+  # command substitutions in it, and a heredoc has no comment lines -- a `#` is
+  # just more text being written. A backtick pair inside what reads like a
+  # comment is therefore a command, and one of them named the function doing the
+  # writing. `stub_reviewer` called `stub_reviewer`, forever.
+  #
+  # This is the phase that would have hung. Every phase but `mode` calls
+  # `stub_reviewer`, so the suite stopped dead immediately after it with no
+  # failure, no output and no name to read -- nine minutes of silence and exit
+  # 143 in CI run 34658821929.
+  #
+  # WHAT IT DOES NOT CATCH, said plainly because this file has twice been bitten
+  # by a phase that claimed more than it asserted: a write-time expansion that
+  # succeeds SILENTLY and eats text this does not name -- `\`date\``, `$HOME` --
+  # passes all four rows. Only two shapes are caught: one that writes to stderr,
+  # and the loss of the one line named below. The general case wants the written
+  # file compared against the heredoc body, which is worth doing and is not this
+  # change; it is noted on armaatus/autofleet#71 with the other guards aimed
+  # slightly off. Both review passes raised this, and narrowing the claim is the
+  # answer rather than leaving the comment to be believed.
+  make_fixture
+  err="$WORK/stub-err"
+  stub_reviewer marked 2>"$err"
+
+  [ -s "$err" ] \
+    && fail "writing the reviewer stub ran something: $(cat "$err")"
+  ok "writing the reviewer stub executes nothing"
+
+  bash -n "$WORK/bin/fake-reviewer" \
+    || fail "the written reviewer stub does not parse"
+  ok "the written reviewer stub parses"
+
+  # The prose reached the file instead of being executed out of it. Both halves
+  # matter: present means the substitution did not eat it, and a stub that still
+  # says this is a stub that still carries its own warning.
+  grep -qF 'stub_reviewer submits' "$WORK/bin/fake-reviewer" \
+    || fail "the stub's NOTE was consumed as a command substitution, not written"
+  ok "backticked prose reaches the stub as text"
+
+  # The parts the heredoc is unquoted FOR still expand, so the fix did not buy
+  # the bound by making the stub inert.
+  grep -qF "$GH_REVIEWS" "$WORK/bin/fake-reviewer" \
+    || fail "the stub no longer has the review path baked in; the heredoc stopped expanding"
+  ok "...while the paths the heredoc is unquoted for still expand"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite" >&2
   exit 2 ;;
 esac
