@@ -20,8 +20,9 @@ model runs in the dispatcher, and no agent merges its own work.
 
 1. **Picks.** Anything labelled `ready` and not already in flight, ordered by how
    many open issues name it in a `Blocked by #N` line — the work that frees the
-   most other work goes first. `blocked`, `needs-human-step` and foundation
-   issues are handled by rules, not by judgement.
+   most other work goes first, and anything labelled `priority` ahead of that.
+   `blocked`, `needs-human-step` and foundation issues are handled by rules, not
+   by judgement.
 2. **Opens a worktree** with its own isolated identity: a derived project name, a
    derived block of ports, its own `.env`. Your project's setup hook provisions
    whatever else it needs, and the agent's tab is held until that finishes.

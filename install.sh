@@ -340,6 +340,7 @@ Next, in the repo you just installed into:
        gh label create blocked --color b60205 --description "Waiting on an open blocker; do not start"
        gh label create foundation       --color 5319e7 --description "Defines an interface later issues include; lands alone"
        gh label create needs-human-step --color b60205 --description "Last step is the maintainer's; the fleet opens no worktree"
+       gh label create priority         --color d4c5f9 --description "A person put this at the front of the dispatcher's queue"
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.

@@ -1246,6 +1246,39 @@ if [ -f .github/workflows/ci.yml ]; then
   ok "main's builds are never cancelled by the next merge"
 fi
 
+echo "== the labels a host has to create"
+# config.sh names every label the dispatcher reads; install.sh's next-steps are
+# the only place a host is TOLD to create them, and a label that does not exist
+# is a label no issue can carry. A default added to one file and not the other
+# is not a crash -- it is a queue that silently never orders anything the way the
+# docs say it does, on somebody else's repo, where nobody here will see it.
+#
+# Only the install half is asserted. AUTOFLEET_READY_LABEL is read by nothing
+# today -- `ready` is a literal in ready_issues, while its three neighbours are
+# threaded through properly and AUTOFLEET_BLOCKED_LABEL is read at the
+# "its issue went blocked" path -- and that one is #57. Asserting the read half
+# here would go red on a defect this file cannot fix.
+#
+# COUNTED, not just looped over. The rows come out of a `sed` that knows the
+# `: "${X:=y}"` shape config.sh writes defaults in; reflow those lines, or write
+# the next one as a plain assignment, and this loop runs zero times and prints
+# `ok` while asserting nothing. That is the failure this whole file exists to
+# refuse -- the SUITES check two sections UP says so in the same words.
+labels_ok=1
+labels_seen=0
+while read -r var default; do
+  [ -n "$var" ] || continue
+  labels_seen=$((labels_seen + 1))
+  grep -q "gh label create $default " install.sh \
+    || { fail "$var defaults to \`$default\`, and install.sh never tells a host to create that label"
+         labels_ok=0; }
+done < <(sed -n 's/^: "${\(AUTOFLEET_[A-Z_]*_LABEL\):=\([^}]*\)}"/\1 \2/p' scripts/fleet/config.sh)
+if [ "$labels_seen" = 0 ]; then
+  fail "no AUTOFLEET_*_LABEL default was found in scripts/fleet/config.sh; this check now asserts nothing"
+elif [ "$labels_ok" = 1 ]; then
+  ok "all $labels_seen label defaults in config.sh are ones install.sh tells a host to create"
+fi
+
 echo "== the cross-reference conventions"
 # `Closes #N` and `Blocked by #N` are read by three parsers -- GitHub itself,
 # unblock.yml, and fleet.sh via merge_gate.py's neighbour -- and every way they
