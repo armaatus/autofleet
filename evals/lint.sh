@@ -1263,7 +1263,7 @@ echo "== the labels a host has to create"
 # `: "${X:=y}"` shape config.sh writes defaults in; reflow those lines, or write
 # the next one as a plain assignment, and this loop runs zero times and prints
 # `ok` while asserting nothing. That is the failure this whole file exists to
-# refuse -- the SUITES check two sections down says so in the same words.
+# refuse -- the SUITES check two sections UP says so in the same words.
 labels_ok=1
 labels_seen=0
 while read -r var default; do

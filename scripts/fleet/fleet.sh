@@ -2066,7 +2066,16 @@ cmd_status() {
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
   echo "         'unblocks' is how many issues it frees, and a row marked"
   echo "         $PRIORITY_LABEL goes ahead of that ordering):"
-  printf '  %-6s %-9s %-9s %s\n' "issue" "unblocks" "ahead" "title"
+  # The column is HEADED with the label word and FILLED with the label word, and
+  # sized to it. Heading it `ahead` and filling it with `priority` named two
+  # different things in one column; and a fixed `%-9s` fits the default with one
+  # character to spare, so a host renaming the label to anything longer pushed
+  # that row's title past the header and only that row's -- which reads as the
+  # rendering bug this marker exists to prevent. Both found by the independent
+  # review. `unblocks` is 8, so 8 is the floor that keeps the columns apart.
+  local col="${#PRIORITY_LABEL}"
+  [ "$col" -ge 8 ] || col=8
+  printf "  %-6s %-9s %-${col}s %s\n" "issue" "unblocks" "$PRIORITY_LABEL" "title"
   # The label column ready_issues already prints is what says which rows are
   # ahead of the queue: a `next up` list reordered with nothing on screen saying
   # why reads as a bug in the ordering, which is the report this marker exists
@@ -2076,7 +2085,7 @@ cmd_status() {
     gave_up_on "$num" && continue
     local mark=""
     has_label "$labels" "$PRIORITY_LABEL" && mark="$PRIORITY_LABEL"
-    printf '  #%-5s %-9s %-9s %s\n' "$num" "$unblocks" "$mark" "$title"
+    printf "  #%-5s %-9s %-${col}s %s\n" "$num" "$unblocks" "$mark" "$title"
   done | head -12
 
   # ...and where the ones missing from that list went, since a `ready` issue the

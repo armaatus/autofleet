@@ -29,7 +29,8 @@
 # The convention `unblock.yml` maintains and `fleet.sh` reads.
 #
 # RENAMING WORKS FOR THREE OF THESE, and the doc says which. `AUTOFLEET_READY_LABEL`
-# is read by nothing -- `ready_issues` asks `gh` for the literal word -- so
+# is read by nothing -- `ready_issues` fetches every open issue and then filters
+# on the LITERAL word in its Python block, never passing `gh` a `--label` -- so
 # renaming it hands you an empty queue forever, with nothing on screen saying
 # why. armaatus/autofleet#57. That sentence lives in docs/CONFIGURATION.md, and
 # this is the file somebody actually has open while renaming, so it says it too.
