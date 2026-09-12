@@ -90,6 +90,15 @@
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
+#   test_review_mode.sh stubwrite the reviewer stub's heredoc is unquoted, so its
+#                                 body is expanded on the way to the file and a
+#                                 backtick in prose is a command. One named
+#                                 `stub_reviewer` itself: every phase but `mode`
+#                                 then recursed forever, and the suite hung with
+#                                 nothing to read (CI run 34658821929, exit 143
+#                                 at nine minutes). tests/run.sh bounds each
+#                                 phase now, so a wedge is a FAIL that names
+#                                 itself; this asserts the cause.
 #
 # `gh` and the reviewer command are both stubbed on PATH and the fleet state dir
 # is a temp dir, so nothing here touches a pull request or the machine's fleet.
@@ -241,12 +250,21 @@ PY
   # wrapper's death from the work's.
   hang)   sleep 3607 ;;
   # NOTE: no default arm, deliberately-for-now. An unknown mode falls through and
-  # behaves like `silent`, which is how `stub_reviewer submits` -- a mode that
+  # behaves like \`silent\`, which is how \`stub_reviewer submits\` -- a mode that
   # was never defined -- read as the opposite of what it did. Adding
-  # `*) exit 64` is the obvious fix and it wedges the suite: several phases pass
+  # \`*) exit 64\` is the obvious fix and it wedges the suite: several phases pass
   # modes this case does not name and rely on the fall-through. Recorded rather
   # than half-done; the callsite that was wrong is fixed, and the sharp edge is
   # in armaatus/autofleet#71 with the other guards aimed slightly off.
+  #
+  # THE BACKTICKS ABOVE ARE ESCAPED, and every backtick added below this line
+  # must be too. This is an UNQUOTED heredoc, so it has no comment lines: a \`#\`
+  # is text being written to a file, and the shell still runs command
+  # substitutions on it. Unescaped, \`stub_reviewer submits\` above called this
+  # very function, which rewrote the stub, which called it again -- the suite
+  # hung from \`refuses\` onwards with no failure and no output, and CI killed it
+  # at nine minutes (run 34658821929). tests/run.sh bounds each phase now, so
+  # the next one of these is a FAIL that names itself rather than a wedge.
 esac
 exit 0
 STUB
@@ -971,7 +989,48 @@ GHSTUB
   ok "...and it is the marker the push gate actually reads"
   ;;
 
+# ---------------------------------------------------------------- stubwrite
+  stubwrite)
+  # The reviewer stub is written through an UNQUOTED heredoc, so its body is not
+  # inert text on the way to the file: the shell expands parameters and RUNS
+  # command substitutions in it, and a heredoc has no comment lines -- a `#` is
+  # just more text being written. A backtick pair inside what reads like a
+  # comment is therefore a command, and one of them named the function doing the
+  # writing. `stub_reviewer` called `stub_reviewer`, forever.
+  #
+  # This is the phase that would have hung. Every phase but `mode` calls
+  # `stub_reviewer`, so the suite stopped dead immediately after it with no
+  # failure, no output and no name to read -- nine minutes of silence and exit
+  # 143 in CI run 34658821929. It is asserted against the FILE rather than
+  # against the one backtick that caused it, so the next write-time expansion
+  # that is not a backtick fails here too.
+  make_fixture
+  err="$WORK/stub-err"
+  stub_reviewer marked 2>"$err"
+
+  [ -s "$err" ] \
+    && fail "writing the reviewer stub ran something: $(cat "$err")"
+  ok "writing the reviewer stub executes nothing"
+
+  bash -n "$WORK/bin/fake-reviewer" \
+    || fail "the written reviewer stub does not parse"
+  ok "the written reviewer stub parses"
+
+  # The prose reached the file instead of being executed out of it. Both halves
+  # matter: present means the substitution did not eat it, and a stub that still
+  # says this is a stub that still carries its own warning.
+  grep -q 'stub_reviewer submits' "$WORK/bin/fake-reviewer" \
+    || fail "the stub's NOTE was consumed as a command substitution, not written"
+  ok "backticked prose reaches the stub as text"
+
+  # The parts the heredoc is unquoted FOR still expand, so the fix did not buy
+  # the bound by making the stub inert.
+  grep -q "$GH_REVIEWS" "$WORK/bin/fake-reviewer" \
+    || fail "the stub no longer has the review path baked in; the heredoc stopped expanding"
+  ok "...while the paths the heredoc is unquoted for still expand"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records|holds|once|retries|capped" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|queue|records|holds|once|retries|capped|stubwrite" >&2
   exit 2 ;;
 esac
