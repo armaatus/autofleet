@@ -542,6 +542,38 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "a PR that is still open keeps its transcripts whatever the list says"
   rm -f "$AUTOFLEET_DIR/reviews/pr-95-77777777.log" "$AUTOFLEET_DIR/reviews"/.closed-95
 
+  # ...ASKED ONCE PER PULL REQUEST, not once per transcript. The call sat in the
+  # deleting loop, so the PR #70 measured with thirteen transcripts cost
+  # thirteen identical calls -- every poll, forever, because a PR that answers
+  # OPEN is never deleted and so never stops being a candidate. At the default
+  # 60s poll that is ~18,700 calls a day against the same gh budget
+  # `next_issue` and the review pass spend, and gh's secondary rate limit is how
+  # this dispatcher breaks. The assertion is the CALL COUNT, because the
+  # keep-it behaviour above passed either way. Found by the independent review.
+  rm -f "$AUTOFLEET_DIR/reviews"/.closed-* "$AUTOFLEET_DIR/reviews"/pr-95-*.log
+  for h in 11111111 22222222 33333333; do
+    : >"$AUTOFLEET_DIR/reviews/pr-95-$h.log"; sleep 0.01
+  done
+  printf 'OPEN\n' >"$WORK/pr-state"
+  GH_PR_STATE="$WORK/pr-state" AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  : >"$GH_CALLS"
+  GH_PR_STATE="$WORK/pr-state" AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  n="$(grep -c 'pr view 95 --json state' "$GH_CALLS" 2>/dev/null || true)"
+  [ "$n" = 1 ] \
+    || fail "the sweep asked GitHub about PR 95 $n time(s) in one pass; it is one question per pull request, not one per transcript"
+  ok "a candidate PR's state is asked once per pass, whatever its transcript count"
+
+  # ...and an OPEN answer puts it BACK ON THE OPEN LIST, so the newest-N cap
+  # applies to it. Left a permanent candidate, its transcripts were never swept
+  # AND never trimmed -- the cap iterates the open list, which by construction
+  # did not contain it -- so the one case that call exists to protect was the
+  # one case that grew without bound.
+  n="$(ls "$AUTOFLEET_DIR/reviews"/pr-95-*.log 2>/dev/null | grep -c . || true)"
+  [ "$n" = 2 ] \
+    || fail "$n transcripts survived AUTOFLEET_KEEP_REVIEWS=2 for a PR confirmed OPEN; the cap does not reach it and the store grows without bound"
+  ok "...and is capped like any other open PR"
+  rm -f "$AUTOFLEET_DIR/reviews"/pr-95-*.log "$AUTOFLEET_DIR/reviews"/.closed-95
+
   # THE GRACE IS PER PULL REQUEST, not per transcript. The marker used to be
   # created inside the deleting loop, so a PR's FIRST transcript bought the
   # grace and every other one was deleted on that same pass -- all but one, in
