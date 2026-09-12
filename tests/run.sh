@@ -41,6 +41,18 @@ suite_command() {
 want_suite="${1:-}"
 want_phase="${2:-}"
 pass=0; fail=0; failed=""
+# A phase that could not judge anything is not a phase that judged and found
+# nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
+# once when docker is not running, and once when the machine already carries an
+# orphan stack, where sweeping for real would delete somebody else's work rather
+# than the fixture. Both exit 77 -- the autotools convention, and the number
+# test_teardown.sh has always used -- and this runner counted both as FAIL,
+# because it read every non-zero the same way. That is the reading that teaches
+# an agent its suite is red for a reason it cannot fix, on a machine detail that
+# has nothing to do with its diff. Skips are reported, counted and printed with
+# the phase's own reason, and they do not fail the run.
+SKIP_RC=77
+skipped=0; skips=""
 
 # Every phase runs under a bound, because the failure this runner is worst at
 # reporting is the one that produces nothing. CI run 34658821929 printed
@@ -264,6 +276,13 @@ run_one() {
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
+  elif [ "$rc" = "$SKIP_RC" ]; then
+    # The phase's own output carries WHY, and it is the half that matters: a
+    # silent `skip` line is indistinguishable from a phase quietly opting out of
+    # ever running again.
+    skipped=$((skipped + 1)); skips="$skips $label"
+    printf '  skip %s\n' "$label"
+    sed 's/^/       /' "$out"
   else
     report_fail "$label"
     sed 's/^/       /' "$out"
@@ -306,9 +325,17 @@ for entry in "${SUITES[@]}"; do
 done
 
 echo
+# Named in both summaries. A count of skips in the green line is what makes a
+# phase that stopped running visible without reading the whole log for it.
+skip_note=""
+[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped:$skips"
 if [ "$fail" -gt 0 ]; then
-  echo "$fail failed, $pass passed:$failed" >&2
+  echo "$fail failed, $pass passed$skip_note:$failed" >&2
   exit 1
 fi
-[ "$pass" -gt 0 ] || { echo "nothing ran; check the suite or phase name" >&2; exit 2; }
-echo "$pass passed."
+# A run that is ALL skips still ran nothing worth trusting, but it is not the
+# "check the suite or phase name" typo this is here to catch -- the phases were
+# found, they declined. Both are reported; only the typo is exit 2.
+[ "$pass" -gt 0 ] || [ "$skipped" -gt 0 ] \
+  || { echo "nothing ran; check the suite or phase name" >&2; exit 2; }
+echo "$pass passed$skip_note."
