@@ -31,13 +31,52 @@ too.
 
 ### The labels
 
-`unblock.yml` maintains them and `fleet.sh` reads them. Rename them here if your
-repo already uses other words for the same three ideas — but create the labels
-first, because an issue can carry no label that does not exist.
+`unblock.yml` maintains the first two and `fleet.sh` reads them; the other three
+a person applies. `install.sh` prints the `gh label create` line for all five —
+create them before anything can carry one.
+
+**Renaming works for three of the five today.** `AUTOFLEET_FOUNDATION_LABEL`,
+`AUTOFLEET_HUMAN_STEP_LABEL` and `AUTOFLEET_PRIORITY_LABEL` are read through the
+variable. `AUTOFLEET_READY_LABEL` is not — `ready` is a literal in the
+dispatcher's queue filter, and `unblock.yml` writes both `ready` and `blocked` by
+name in JavaScript — so renaming that one gives you a dispatcher looking for a
+label nothing writes: an empty queue, forever, with nothing on screen saying why.
+That is [#57](https://github.com/armaatus/autofleet/issues/57). Until it lands,
+keep `ready` and `blocked`.
 
 `AUTOFLEET_READY_LABEL` (`ready`), `AUTOFLEET_BLOCKED_LABEL` (`blocked`),
 `AUTOFLEET_FOUNDATION_LABEL` (`foundation`),
-`AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`).
+`AUTOFLEET_HUMAN_STEP_LABEL` (`needs-human-step`),
+`AUTOFLEET_PRIORITY_LABEL` (`priority`).
+
+`priority` is the only one that says *when* rather than *what*, and the only
+ordering the tracker cannot derive: an issue carrying it goes to the front of the
+ready list, ahead of whatever frees the most other work. It reorders and nothing
+more — it cannot start a `blocked` issue, cannot start a `needs-human-step` one,
+and does not lift a foundation hold. Label several and the ordinary ordering
+decides between them. `fleet.sh status` marks the rows that carry it, so a queue
+that looks reordered says why.
+
+One consequence worth knowing before you use it, and it is larger than a
+reordering. A `priority` issue can start ahead of a `ready` foundation issue,
+and while it runs the foundation issue waits — a foundation issue will not join
+worktrees already in flight. The part that costs: the scan **stops at the first
+foundation issue** once anything is in flight, so every ready issue behind it is
+skipped for that pass as well, whether or not it has anything to do with it.
+
+The fleet therefore runs at **one** worktree for the priority issue's whole
+time-box, and at one again while the foundation issue lands alone. Nothing about
+"a foundation issue lands alone" is weakened, and what depends on it is `blocked`
+either way — but the dependants are not what stalls, so that is the wrong thing
+to be reassured by.
+
+Measure that against the right baseline. Those dependants are also what make the
+foundation issue sort to the *front* of an unlabelled queue — the second sort key
+is how many issues it frees — so it would have taken a solo time-box first
+anyway. The label therefore adds one solo time-box rather than costing the
+difference between a full fleet and one worktree; `docs/WORKFLOW.md` works the
+arithmetic through. If another time-box at one worktree is not what you meant,
+the foundation issue is the one to label.
 
 ### The review
 

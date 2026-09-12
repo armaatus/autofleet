@@ -70,6 +70,42 @@ open issues name it in a `Blocked by #N` line. The work that frees the most othe
 work goes first, which is the fastest way to turn a mostly-blocked backlog into a
 wide one. Milestones do not order it — `ready` already means every blocker is
 closed, and a milestone number is not a claim about what can be built *now*.
+
+Ahead of all of it: anything labelled `priority`. The blocker graph says what
+*can* start, not what *should* go first, and the only way to say "this one next"
+used to be to invent a dependency. A person applies that label; it reorders the
+ready list and changes nothing else, so a `blocked` or `needs-human-step` issue
+is no more startable for carrying it. `fleet.sh status` marks those rows.
+
+It does not lift a foundation hold, and delaying one costs more than it looks.
+A `priority` issue that starts first holds a worktree, and a foundation issue
+will not join work already in flight — so the foundation issue waits. But the
+scan **stops at the first foundation issue** once anything is in flight, so
+every ready issue behind it is skipped for that pass too, including ones that
+have nothing to do with it.
+
+Ready list `[#151 priority, #F foundation, #A, #B]`, nothing running: pass one
+launches #151; pass two reaches #F, sees a worktree in flight, and stops — #A
+and #B are never considered. The fleet runs at **one** worktree for #151's whole
+time-box, then at one again while #F lands alone.
+
+Unlabelled, the same backlog — all four; #151 does not vanish when the label
+comes off — sorts `[#A, #B, #151, #F]` and fills **three**, with #F waiting on
+them. (`[#A, #B, #F]` would fill two, not three: the scan breaks at #F with two
+worktrees live, for the same reason this passage is about.)
+
+That order stipulates a foundation issue that frees nothing, which is the worst
+case rather than the usual one. The second sort key is how many issues an issue
+frees, so an `#F` that even one open `Blocked by #N` line names sorts **first**
+unlabelled — `[#F, #A, #B, #151]` — and the fleet is already down to one worktree
+while it lands alone, filling three only afterwards. Against that `#F`, which is
+the kind the "lands alone" rule exists for, the label buys one *extra* solo
+time-box, not the whole gap.
+
+So the question to ask before applying it is not "does this jump the queue" but
+"is this worth another time-box at one worktree". If it is not, the foundation
+issue is the one to label.
+
 `--auto` never pauses; it stops when the queue empties, at `--until`/`--for`, or
 after `--max-prs`, and says which.
 
