@@ -1108,7 +1108,7 @@ else:
 sys.exit(bad)
 PHASES
 then
-  ok "every phase-dispatching suite agrees with tests/run.sh"
+  ok "every phase-dispatching suite agrees with tests/run.sh, and SKIPPABLE names phases that exist"
 elif [ "$?" = 77 ]; then
   # A host installation, where `tests/` was never vendored. Said, and not counted
   # as agreement: a green line for an assertion that did not run is the same

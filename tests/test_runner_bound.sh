@@ -35,6 +35,24 @@
 #                                 named in SKIPPABLE -- an unlisted phase exiting
 #                                 77 is the phase that BROKE into skipping, and
 #                                 goes red saying which list it is missing from.
+#   test_runner_bound.sh hostlint evals/lint.sh's phase-registry check decides
+#                                 which repository it is running in, because it
+#                                 reads tests/run.sh and tests/ is NOT vendored.
+#                                 That decision was wrong twice in a row -- keyed
+#                                 on the `tests/` directory, which every pytest
+#                                 project has; then fixed only where the file is
+#                                 missing, so a host project with its own
+#                                 tests/run.sh failed on a SUITES block it had
+#                                 never heard of. Both were checked by hand, and
+#                                 by hand is what missed the second. The phase
+#                                 drives the SHIPPED check in throwaway trees.
+#
+#                                 NOTE: that check keys on THIS FILE's name --
+#                                 rename it and evals/lint.sh quietly decides it
+#                                 is in a host repo and asserts nothing. The
+#                                 phase reads the sentinel out of the lint and
+#                                 checks the tree really has it, so the rename
+#                                 goes red here instead of going silent there.
 #   test_runner_bound.sh guards   the two guards ON the bound: a nonsense
 #                                 AUTOFLEET_TEST_TIMEOUT is refused at startup
 #                                 rather than reporting every phase BLOCKED with
@@ -95,7 +113,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # form nobody runs locally. A helper makes forgetting impossible rather than
 # noticed. Found by the independent review.
 run_copy() {
-  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 \
+  AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_TIMEOUT=10 \
     "$WORK/tests/run.sh" "$@" >"$WORK/out" 2>&1
 }
 ok()   { echo "  ok: $*"; }
@@ -361,8 +379,8 @@ case "${1:-}" in
     || fail "the skip was reported without the phase's reason: $(cat "$WORK/out")"
   ok "...with the reason the phase gave"
 
-  grep -q "1 skipped" "$WORK/out" \
-    || fail "the summary did not count the skip: $(cat "$WORK/out")"
+  grep -q "1 passed, 1 skipped (skipper)." "$WORK/out" \
+    || fail "the green summary did not count the skip by name: $(cat "$WORK/out")"
   ok "...and counted in the summary line"
 
   # A run that is ALL skips ran nothing, but it is not the mistyped suite name
@@ -420,7 +438,7 @@ case "${1:-}" in
   # not a local detail, and a green run with a count in it is how that goes
   # unnoticed. Found by the independent review.
   make_runner skipper
-  AUTOFLEET_TEST_NO_SKIP=1 AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  COPY_NO_SKIP=1 run_copy
   rc=$?
   [ "$rc" = 1 ] \
     || fail "AUTOFLEET_TEST_NO_SKIP let a skip pass (rc=$rc): $(cat "$WORK/out")"
@@ -452,7 +470,7 @@ case "${1:-}" in
   # ...and an empty value is not "set". The obvious way to write the guard reads
   # a cleared variable as a request for strictness, which is the opposite of the
   # normal shell reading of one.
-  AUTOFLEET_TEST_NO_SKIP="" AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  COPY_NO_SKIP="" run_copy
   rc=$?
   [ "$rc" = 0 ] \
     || fail "an empty AUTOFLEET_TEST_NO_SKIP was read as strict (rc=$rc): $(cat "$WORK/out")"
@@ -519,7 +537,10 @@ case "${1:-}" in
   # it heard about the variable instead, in CI, which is the hardest place to
   # diagnose from. Found by the independent review.
   make_runner rogue
-  AUTOFLEET_TEST_NO_SKIP=1 AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  COPY_NO_SKIP=1 run_copy
+  rc=$?
+  [ "$rc" = 1 ] \
+    || fail "an unlisted phase under NO_SKIP did not fail the run (rc=$rc): $(cat "$WORK/out")"
   grep -q "is not in SKIPPABLE" "$WORK/out" \
     || fail "an unlisted phase under NO_SKIP was told the wrong thing: $(cat "$WORK/out")"
   ok "...and an unlisted phase is told so even where nothing may skip"
@@ -567,9 +588,70 @@ PY2
   ok "a host installation is told the check does not apply, not that it failed"
 
   # ...and the caller turns that into silence rather than a green line.
-  grep -q 'elif \[ "\$?" = 77 \]' "$REPO_ROOT/evals/lint.sh" \
-    || fail "evals/lint.sh no longer gives the skip its own branch; a host repo now gets ok or FAIL"
-  ok "...and the lint gives that its own branch rather than an ok"
+  # By behaviour, not by spelling: grepping for the `elif` line reds this row for
+  # a reformat that changes nothing. The shell fragment around the check is
+  # extracted and driven with a stub that exits 77 in its place.
+  cat >"$WORK/caller.sh" <<EOF
+ok()   { echo "OK: \$*"; }
+fail() { echo "FAIL: \$*"; exit 1; }
+if python3 -c 'import sys; sys.exit(77)'; then
+$(sed -n '/^then$/,/^fi$/p' "$REPO_ROOT/evals/lint.sh" \
+   | sed -n '/^  ok "every phase-dispatching suite agrees/,/^fi$/p')
+EOF
+  out="$(bash "$WORK/caller.sh" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] || fail "the lint's 77 branch is not a clean exit: $out"
+  grep -q "OK:" <<<"$out" \
+    && fail "the lint prints a green line for a check that did not run: $out"
+  grep -q "FAIL:" <<<"$out" \
+    && fail "the lint fails a host installation: $out"
+  ok "...and the lint neither passes nor fails a check it did not run"
+
+  # The sentinel, read out of the shipped lint rather than restated, and asserted
+  # against the REAL tree. Rename this file and update SUITES in the same change
+  # -- the ordinary way a suite gets renamed, and the suite stays green through
+  # it -- and inside autofleet the check would decide it was a host installation,
+  # exit 77 and assert nothing, on a lint that runs for every PR. The rows below
+  # cannot see that: they fabricate the filename inside their own trees.
+  # Found by the independent review.
+  sentinel="$(sed -n 's/^HERE = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh")"
+  [ -n "$sentinel" ] \
+    || fail "evals/lint.sh no longer decides which repository it is in with one os.path.exists"
+  [ -e "$REPO_ROOT/$sentinel" ] \
+    || fail "evals/lint.sh keys on $sentinel, which is not in this tree: the phase check now asserts nothing here"
+  ok "the file evals/lint.sh keys on is the one this repository actually has"
+
+  # A tree that reaches the cross-check itself. Neither tree above does: one
+  # exits at the discriminator, the other at the missing registry, so the loop
+  # that compares SKIPPABLE against the registered labels was driven red by hand
+  # once and by nothing since -- the same gap as the branch this phase exists
+  # for, one function lower. Found by the independent review.
+  mkdir -p "$WORK/stale/tests"
+  : >"$WORK/stale/tests/test_runner_bound.sh"
+  cat >"$WORK/stale/tests/run.sh" <<'EOF'
+SUITES=(
+"runner_bound:bounds"
+)
+SKIPPABLE="runner_bound/nosuch"
+EOF
+  printf '#!/usr/bin/env bash
+case "${1:-}" in
+  bounds)
+  ;;
+esac
+'     >"$WORK/stale/tests/test_runner_bound.sh"
+  out="$(cd "$WORK/stale" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && fail "a SKIPPABLE entry naming no registered phase was accepted: $out"
+  grep -q "runner_bound/nosuch: allowed to skip" <<<"$out" \
+    || fail "the stale SKIPPABLE entry was not named: $out"
+  ok "...and a SKIPPABLE entry naming no registered phase is caught"
+
+  # ...while the entry that DOES name one is left alone, so the row above is not
+  # passing because the check rejects everything.
+  sed -i.bak 's|SKIPPABLE="runner_bound/nosuch"|SKIPPABLE="runner_bound/bounds"|' \
+    "$WORK/stale/tests/run.sh"
+  out="$(cd "$WORK/stale" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] || fail "a SKIPPABLE entry naming a registered phase was rejected: $out"
+  ok "...and one that names a registered phase is not"
 
   # HERE, with the registry gone: the check silently stopping, which is the one
   # case that must still be loud.
