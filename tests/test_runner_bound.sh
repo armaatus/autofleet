@@ -31,7 +31,10 @@
 #                                 read it as FAIL, so the suite went red on a
 #                                 machine detail no diff could fix. The other
 #                                 half is asserted with it: 77 is the ONLY
-#                                 non-zero that means skip.
+#                                 non-zero that means skip, and only from a phase
+#                                 named in SKIPPABLE -- an unlisted phase exiting
+#                                 77 is the phase that BROKE into skipping, and
+#                                 goes red saying which list it is missing from.
 #   test_runner_bound.sh guards   the two guards ON the bound: a nonsense
 #                                 AUTOFLEET_TEST_TIMEOUT is refused at startup
 #                                 rather than reporting every phase BLOCKED with
@@ -135,6 +138,14 @@ block = "SUITES=(\n" + "\n".join('"%s:"' % n for n in names) + "\n)"
 s, n = re.subn(r"SUITES=\(.*?\n\)", lambda m: block, s, count=1, flags=re.S)
 if n != 1:
     sys.exit("could not find the SUITES registry in %s" % src)
+# The copy gets its own allowlist for the same reason it gets its own suites:
+# the fixtures are throwaway names the real one has never heard of. `skipper*`
+# fixtures are listed, `rogue*` fixtures deliberately are NOT -- that pair is
+# what the `skips` phase uses to tell an agreed skip from an unlisted one.
+allowed = " ".join(n for n in names if n.startswith("skipper"))
+s, n = re.subn(r'SKIPPABLE="[^"]*"', 'SKIPPABLE="%s"' % allowed, s, count=1)
+if n != 1:
+    sys.exit("could not find the SKIPPABLE registry in %s" % src)
 open(dst, "w").write(s)
 PY2
   [ -s "$WORK/tests/run.sh" ] || fail "the runner copy was not written"
@@ -167,6 +178,15 @@ EOF
         cat >"$WORK/tests/test_$name.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "SKIP: nothing here to judge"
+exit 77
+EOF
+        ;;
+      rogue*)
+        # Exits 77 without being in SKIPPABLE: the phase that broke into
+        # skipping, which is the whole reason the allowlist exists.
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIP: nobody agreed to this"
 exit 77
 EOF
         ;;
@@ -305,6 +325,36 @@ case "${1:-}" in
   grep -q "1 failed" "$WORK/out" \
     || fail "the summary did not count the failure: $(cat "$WORK/out")"
   ok "...while any other non-zero is still a failure"
+
+  # ...and the half that keeps 77 from becoming a way to go green quietly. A
+  # phase that exits it without being in SKIPPABLE is the phase that BROKE into
+  # skipping, and an allowlist nothing asserts is hard rule 3 all over again.
+  make_runner rogue
+  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 1 ] \
+    || fail "an unlisted phase exiting 77 did not fail the run (rc=$rc): $(cat "$WORK/out")"
+  grep -q "skip rogue" "$WORK/out" \
+    && fail "an unlisted phase was allowed to skip: $(cat "$WORK/out")"
+  grep -q "FAIL rogue" "$WORK/out" \
+    || fail "the unlisted skip was not reported FAIL: $(cat "$WORK/out")"
+  ok "an unlisted phase exiting 77 is a failure, not a skip"
+
+  # Named, and told which of the two answers it is: add it to the list, or fix
+  # the phase. A bare FAIL sends the reader to the wrong one.
+  grep -q "SKIPPABLE" "$WORK/out" \
+    || fail "the unlisted skip did not say what to do about it: $(cat "$WORK/out")"
+  ok "...and says which list it is missing from"
+
+  # The real runner ships with the one phase that is meant to use it. Asserted
+  # here so an allowlist emptied by a bad edit is caught by this file rather than
+  # by a red teardown/reap on somebody with no docker.
+  # CONTAINS, not equals. Pinning the whole string turns a legitimate second
+  # skippable phase into a red row saying teardown/reap was dropped, which is
+  # false and sends the reader to the wrong fix. Found by /code-review.
+  grep -qE '^SKIPPABLE="([^"]* )?teardown/reap( [^"]*)?"' "$REPO_ROOT/tests/run.sh" \
+    || fail "the shipped SKIPPABLE no longer lists teardown/reap"
+  ok "...and the shipped list still names the phase that needs it"
   ;;
 
 # ----------------------------------------------------------------- guards

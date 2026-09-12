@@ -124,7 +124,10 @@ than the permission does.
 
 1. `./tests/run.sh` is green, and your change has a test that would have failed
    before it — run it and read the output. For a bug fix, commit the failing test
-   before the fix.
+   before the fix. A phase reported `skip` judged nothing and is not a pass: the
+   runner allows it only for the phases named in `SKIPPABLE` in `tests/run.sh`,
+   and on a machine where one of those skips, read the reason before believing
+   the green.
 2. **Run `/code-review` AND `/mattpocock-skills:code-review` on your own branch**
    and put both sets of findings in the PR body. Required, not optional —
    `merge_gate.py` refuses a body that does not name both, and

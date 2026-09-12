@@ -12,6 +12,12 @@
 # lets evals/lint.sh assert that every phase a script defines is actually run.
 # A phase defined in the script and missing from this list never executes, in
 # this runner or in CI, and is indistinguishable from a phase that passes.
+#
+# A phase exits 0 for pass and any non-zero for fail, with ONE exception: exit 77
+# means "this phase could not judge anything" and is reported as a skip. It is
+# the autotools convention. A phase may only use it if it is named in SKIPPABLE
+# below -- see the comment there for why a skip is a registry entry and not a
+# decision the phase gets to make alone.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -53,6 +59,20 @@ pass=0; fail=0; failed=""
 # the phase's own reason, and they do not fail the run.
 SKIP_RC=77
 skipped=0; skips=""
+# WHICH phases may say it. A skip code with no allowlist is hard rule 3 arriving
+# through the door marked "not a failure": any phase that broke into exiting 77
+# -- a bad `docker info` probe, a fixture guard inverted, an `exit $SKIP` written
+# where `exit 1` was meant -- would be green in CI forever, visible only as a
+# count in a line nobody greps. So the runner, not the phase, decides that a skip
+# is legitimate here: an unlisted phase exiting 77 is a FAIL that says so.
+#
+# A registry rather than a label on the phase, for the same reason SUITES is a
+# registry: a list something else can read is what lets a reviewer see, in one
+# place, every phase that is allowed to judge nothing. Both entries below are
+# test_teardown.sh reap, which declines when docker is not running and when the
+# machine already carries an orphan stack a real sweep would destroy.
+SKIPPABLE="teardown/reap"
+may_skip() { printf '%s\n' $SKIPPABLE | grep -qxF -- "$1"; }
 
 # Every phase runs under a bound, because the failure this runner is worst at
 # reporting is the one that produces nothing. CI run 34658821929 printed
@@ -267,7 +287,13 @@ run_one() {
   # kill, so a phase that finished on its own in that window leaves one behind
   # having passed. A phase that exited 0 was not blocked, whatever the marker
   # says, and a false BLOCKED is the kind of flake that teaches people to re-run.
-  if [ -e "$marker" ] && [ "$rc" != 0 ]; then
+  # ...and not 77 either, for the same reason as `rc = 0`: a phase that exited
+  # 77 EXITED, and a killed one comes back 137. Without this a wedged docker
+  # daemon letting `docker info` return in the window where the marker is written
+  # reports `teardown/reap` as BLOCKED, and counts it toward MAX_BLOCKED, for a
+  # phase that was never killed. The comment above exempted the pass and stopped
+  # there. Found by /code-review.
+  if [ -e "$marker" ] && [ "$rc" != 0 ] && [ "$rc" != "$SKIP_RC" ]; then
     blocked=$((blocked + 1))
     report_fail "$label"
     printf '       BLOCKED: produced no result in %ss and was killed.\n' "$PHASE_TIMEOUT"
@@ -276,12 +302,22 @@ run_one() {
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
-  elif [ "$rc" = "$SKIP_RC" ]; then
+  elif [ "$rc" = "$SKIP_RC" ] && may_skip "$label"; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
     # ever running again.
     skipped=$((skipped + 1)); skips="$skips $label"
     printf '  skip %s\n' "$label"
+    sed 's/^/       /' "$out"
+  elif [ "$rc" = "$SKIP_RC" ]; then
+    # 77 from a phase nobody agreed may skip. Reported as the failure it is, and
+    # named as the specific one, because "add it to SKIPPABLE" and "this phase
+    # has a bug" are different answers and the reader has to pick.
+    report_fail "$label"
+    printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
+      "$SKIP_RC" "$label"
+    printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
+    printf '       in that list where a reviewer can see it.\n'
     sed 's/^/       /' "$out"
   else
     report_fail "$label"
@@ -327,10 +363,14 @@ done
 echo
 # Named in both summaries. A count of skips in the green line is what makes a
 # phase that stopped running visible without reading the whole log for it.
+# Each list behind the name of what it lists. Two lists behind two bare colons
+# read as one run of names and the reader cannot tell which is which -- found by
+# the standards review, which reproduced `1 failed, 0 passed, 1 skipped: skipper:
+# failer` and could not say which name had failed.
 skip_note=""
-[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped:$skips"
+[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped ($(echo $skips))"
 if [ "$fail" -gt 0 ]; then
-  echo "$fail failed, $pass passed$skip_note:$failed" >&2
+  echo "$fail failed, $pass passed$skip_note. failed:$failed" >&2
   exit 1
 fi
 # A run that is ALL skips still ran nothing worth trusting, but it is not the

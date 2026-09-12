@@ -1053,12 +1053,36 @@ for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
 if covered == 0:
     print("no suite in tests/run.sh was paired with a script; this check now asserts nothing")
     bad = 1
+
+# The OTHER registry of phase labels. SKIPPABLE names the phases allowed to exit
+# 77 rather than pass or fail, and it is the same two-files-must-agree problem:
+# rename or split a phase and the stale entry goes on looking correct, until the
+# first machine where that phase actually declines gets a hard FAIL naming a
+# label the maintainer believes is listed. A registry nothing cross-checks is
+# what hard rule 3 is about. Found by /code-review.
+skippable = re.search(r'^SKIPPABLE="([^"]*)"', runner, re.M)
+if not skippable:
+    print("tests/run.sh has no SKIPPABLE registry; the skip allowlist now asserts nothing")
+    bad = 1
+else:
+    # The label a phase is REPORTED under, which is what SKIPPABLE is matched
+    # against: `suite/phase` for a suite with phases, bare `suite` for one that
+    # runs whole.
+    labels = set()
+    for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
+        if listed.strip():
+            labels.update(f"{suite}/{name}" for name in listed.split())
+        else:
+            labels.add(suite)
+    for name in sorted(set(skippable.group(1).split()) - labels):
+        print(f"{name}: allowed to skip in tests/run.sh, but no such phase is registered")
+        bad = 1
 sys.exit(bad)
 PHASES
 then
   ok "every phase-dispatching suite agrees with tests/run.sh"
 else
-  fail "a phase test script and tests/run.sh disagree about which phases exist; the ones above never run"
+  fail "tests/run.sh and a phase test script disagree about which phases exist; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing"
 fi
 
 echo "== the workflows parse as GitHub reads them"
