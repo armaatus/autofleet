@@ -3172,8 +3172,25 @@ JSON
     # `in_fleet_keeping_cache`, NOT `in_fleet`: this phase's whole subject is
     # whether `cmd_status` leaves the cache alone, and `in_fleet` empties it
     # first to model one pass. Through that helper this would assert nothing.
+    # THE SNAPSHOT HASHES CONTENTS, not the list of names. `find . | sort |
+    # cksum` hashes PATHS: an append to an already-existing fleet.log, or a
+    # marker rewritten in place, passes it unchanged -- and `say` is
+    # `tee -a "$STATE_DIR/fleet.log"`, so the one write `cmd_status` was most
+    # likely to make was precisely the one a name-hash cannot see. The phase
+    # quoted "byte-identical" twice and asserted something strictly weaker.
+    # Found by the independent review.
+    #
+    # `cksum <"$f"`, not `cksum "$f"`: the second prints the filename too, and
+    # the names are already covered by the `find` half above it.
+    state_bytes() {
+      (cd "$AUTOFLEET_DIR" \
+        && find . | sort \
+        && find . -type f | sort | while IFS= read -r f; do
+             printf '%s ' "$f"; cksum <"$f"
+           done) | cksum
+    }
     in_fleet_keeping_cache cmd_status >/dev/null 2>&1
-    before="$(cd "$AUTOFLEET_DIR" && find . | sort | cksum)"
+    before="$(state_bytes)"
     out="$(in_fleet_keeping_cache cmd_status 2>&1)"
     [ -e "$AUTOFLEET_DIR/poll-cache/interrupted-42" ] \
       || fail "status dropped interrupted-42, so the next pass re-interrupts an agent the time-box already stopped"
@@ -3181,7 +3198,7 @@ JSON
       || fail "status dropped carded-42, so the next pass writes a second board comment under whoever is working in there"
     [ -e "$AUTOFLEET_DIR/poll-cache/issue-42" ] \
       || fail "status dropped issue-42, so every watcher re-issues the gh lookup poll_issue exists to avoid"
-    after="$(cd "$AUTOFLEET_DIR" && find . | sort | cksum)"
+    after="$(state_bytes)"
     [ "$after" = "$before" ] \
       || fail "status changed \$STATE_DIR; the acceptance is that it leaves it byte-identical. before=$before after=$after, now holding: $(cd "$AUTOFLEET_DIR" && find . | sort | tr '\n' ' ')"
     # ...and with a dispatcher that ps cannot see, which is where the conditional
@@ -3194,6 +3211,48 @@ JSON
     [ -e "$AUTOFLEET_DIR/poll-cache/interrupted-42" ] \
       || fail "status wiped a live dispatcher's cache on a host where ps will not answer -- the three-answer conflation, unfixed"
     echo "ok: status leaves the poll cache alone, with and without a ps that answers"
+
+    # ...AND THROUGH THE PARKED PATH, which is the one this PR added and the one
+    # nothing here reached: with no owned worktree carrying a park reason,
+    # `cmd_status` never called `parked_for_person` at all, so the `ps-blind-`
+    # write inside it could be deleted and this phase stayed green. An assertion
+    # that exists but not for the property the issue names is hard rule 3's
+    # subject. Found by the independent review.
+    #
+    # The state it needs is the one this repo keeps three phases for: the
+    # worktree listing ANSWERS (so `live_worktrees` reports #42) while the agent
+    # states do NOT (so `parked_for_person` takes its blind arm). They are two
+    # different runner calls and they fail independently.
+    mkdir -p "$AUTOFLEET_DIR/worktrees"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    : >"$AUTOFLEET_DIR/held-42"
+    worktree_on_issue 42
+    printf 'not json' >"$ORCA_PS"
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    before="$(state_bytes)"
+    out="$(in_fleet_keeping_cache cmd_status 2>&1)"
+    [ -e "$AUTOFLEET_DIR/ps-blind-42" ] \
+      && fail "status created the ps-blind- latch; it is the dispatcher's said-once marker, and a watch loop consuming it means the dispatcher's own terminal never prints why the drain is unbounded: $out"
+    after="$(state_bytes)"
+    [ "$after" = "$before" ] \
+      || fail "status changed \$STATE_DIR through the parked path. before=$before after=$after"
+    echo "ok: ...and through the parked path, where the latch belongs to the poll"
+
+    # ...and the same look with the states READABLE does not release the latch
+    # either. That direction is the milder half -- the dispatcher re-says a line
+    # it already said -- but it is still a write, and still `status`'s to leave
+    # alone.
+    agent_state idle
+    : >"$AUTOFLEET_DIR/ps-blind-42"
+    before="$(state_bytes)"
+    out="$(in_fleet_keeping_cache cmd_status 2>&1)"
+    [ -e "$AUTOFLEET_DIR/ps-blind-42" ] \
+      || fail "status cleared the dispatcher's ps-blind- latch, so the next pass re-says a line the operator has already been told: $out"
+    after="$(state_bytes)"
+    [ "$after" = "$before" ] \
+      || fail "status changed \$STATE_DIR clearing the latch. before=$before after=$after"
+    echo "ok: ...and does not release it either"
     ;;
   cap_ends_on_merge)
     # #36's Acceptance asked for this by name -- "a phase asserting the reap
