@@ -2107,9 +2107,19 @@ JSON
     printf '1' >"$AUTOFLEET_DIR/holding-for-foundation"
     [ -s "$AUTOFLEET_DIR/holding-for-foundation" ] \
       || fail "could not seed the marker, so what follows would assert nothing"
+    # ...AND EVERY OTHER SAY-ONCE MARKER, because they are the same shape and
+    # the same rule. `rotate-blind` was cleared by nothing at all, so "rotating
+    # with a pid ps cannot name" was said once per MACHINE -- an operator
+    # debugging truncated reviewer output next month got no line at all, which
+    # is the same silence this phase exists to end. Found by the independent
+    # review.
+    : >"$AUTOFLEET_DIR/rotate-blind"
     start_dispatcher --auto
     wait_for_log "lands alone"
     echo "ok: a restarted dispatcher explains its own hold rather than inheriting silence"
+    [ -e "$AUTOFLEET_DIR/rotate-blind" ] \
+      && fail "the rotation's say-once marker survived a dispatcher start, so it speaks once per machine rather than once per run"
+    echo "ok: ...and the rotation's say-once marker goes with it"
     grep -q "^worktree create" "$ORCA_CALLS" \
       && fail "it also launched something while holding: $(cat "$WORK/run.log")"
     echo "ok: ...and still opens nothing"
