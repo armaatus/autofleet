@@ -666,6 +666,29 @@ GHSTUB
     [ "$(n_started)" = 2 ] \
       || fail "five polls started $(n_started) reviewers against a cap of 2"
     ok "a head that never gets a verdict stops being retried at the cap"
+
+    # ...and the cap refuses a value that would turn it off. `[ x -ge abc ]`
+    # prints "integer expression expected" and returns 2, so the cap test is
+    # FALSE and the unbounded behaviour this knob exists to bound is back --
+    # silently, since fleet.sh runs without `-e`. 0 is refused separately: it
+    # reads as "never review", and the gave-up line would announce "0 reviewers
+    # submitted nothing, which is the cap", which is true of no run. The knob had
+    # this reasoning written down one file over and no check of its own. Found by
+    # the independent review.
+    for bad in abc 0 2x -1; do
+      cfg_out="$( (cd "$WORK/repo" \
+        && AUTOFLEET_REVIEW_MAX_TRIES="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "AUTOFLEET_REVIEW_MAX_TRIES='$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a positive whole number" <<<"$cfg_out" \
+        || fail "AUTOFLEET_REVIEW_MAX_TRIES='$bad' failed without saying why: $cfg_out"
+    done
+    ok "...and a cap that is not a positive number is refused, not ignored"
+
+    ( cd "$WORK/repo" && AUTOFLEET_REVIEW_MAX_TRIES=4 bash -c '. ./scripts/fleet/config.sh' ) \
+      >/dev/null 2>&1 || fail "a valid cap was refused"
+    ok "...while a whole number is accepted"
     out="$(poll_review_open_prs 2>&1; cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
     grep -q "submitted nothing, which is the cap" <<<"$out" \
       || fail "it stopped retrying without saying so: $out"

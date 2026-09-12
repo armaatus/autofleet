@@ -86,6 +86,25 @@
 # more attempt per head and then leaves a comment saying a person decides. This
 # is that bound.
 : "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
+# Validated, because of how a bad value fails. The only consumer is
+# `[ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]` in fleet.sh: with a
+# non-number, `[` prints "integer expression expected" and returns 2, so the
+# test is FALSE, the cap never fires, and the unbounded full-budget-reviewer-
+# every-poll behaviour this knob exists to bound is back -- silently, apart from
+# one stderr line per poll. `fleet.sh` runs without `-e`, so nothing stops.
+#
+# 0 is rejected separately: it reads as "never review", and the gave-up line
+# would announce "0 reviewers on <sha> submitted nothing, which is the cap",
+# which is not true of any run. A knob whose bad value turns a guard OFF has to
+# refuse the value; this is the same reasoning tests/run.sh applies to
+# AUTOFLEET_TEST_TIMEOUT, which had the check this one only had the argument
+# for. Found by the independent review.
+case "$AUTOFLEET_REVIEW_MAX_TRIES" in
+  ''|*[!0-9]*|0)
+    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
+         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+    exit 2 ;;
+esac
 
 # ------------------------------------------------------------- per-worktree
 # The prefix every derived compose project name carries, and the thing reap.sh

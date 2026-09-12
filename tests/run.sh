@@ -22,7 +22,7 @@ SUITES=(
 "lint:"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes orphans"
+"runner_bound:bounds passes guards orphans"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "review_mode:mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite"
@@ -225,6 +225,18 @@ run_one() {
   rm -f "$out" "$marker"
 }
 
+# Asked after EVERY run_one, in both branches. Checking it only inside the phase
+# loop left a whole-suite entry (`lint:`) able to block, increment the counter
+# and never trigger the give-up -- so the note above overstated what it covered.
+# Harmless at one whole-suite entry against a cap of 3, and still wrong. Found by
+# the independent review.
+give_up_if_blocked() {
+  [ "$blocked" -ge "$MAX_BLOCKED" ] || return 1
+  echo "  (giving up: $blocked phases blocked at ${PHASE_TIMEOUT}s each."
+  echo "   The rest of the run is not reported. See the BLOCKED lines above.)"
+  return 0
+}
+
 # Said once, where the run stops, rather than per phase.
 gave_up=0
 for entry in "${SUITES[@]}"; do
@@ -237,16 +249,12 @@ for entry in "${SUITES[@]}"; do
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }
     run_one "$suite" $(suite_command "$suite")
+    give_up_if_blocked && gave_up=1
   else
     for phase in $phases; do
       [ -z "$want_phase" ] || [ "$want_phase" = "$phase" ] || continue
       run_one "$suite/$phase" $(suite_command "$suite") "$phase"
-      if [ "$blocked" -ge "$MAX_BLOCKED" ]; then
-        echo "  (giving up: $blocked phases blocked at ${PHASE_TIMEOUT}s each."
-        echo "   The rest of the run is not reported. See the BLOCKED lines above.)"
-        gave_up=1
-        break
-      fi
+      give_up_if_blocked && { gave_up=1; break; }
     done
   fi
 done

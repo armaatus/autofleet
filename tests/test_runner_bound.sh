@@ -22,6 +22,18 @@
 #                                 leaves one behind having passed: the row that
 #                                 goes red if the `rc` half of the test is
 #                                 dropped and BLOCKED becomes a coin flip.
+#   test_runner_bound.sh guards   the two guards ON the bound: a nonsense
+#                                 AUTOFLEET_TEST_TIMEOUT is refused at startup
+#                                 rather than reporting every phase BLOCKED with
+#                                 a duration of "abc" -- `sleep abc` returns AT
+#                                 ONCE, so a bad value inverts the guard instead
+#                                 of stopping it -- and a run where MAX_BLOCKED
+#                                 phases have blocked gives up and says so, since
+#                                 no bound rescues a run whose every phase blocks
+#                                 from the job's own cap. Both shipped with the
+#                                 reasoning and no assertion; CLAUDE.md hard rule
+#                                 3 is about that. Found by the independent
+#                                 review.
 #   test_runner_bound.sh orphans  ...and the watchdog takes its `sleep` with it.
 #                                 `kill` on the subshell alone reaps the subshell
 #                                 and orphans the sleep, one per phase -- 58
@@ -48,7 +60,17 @@ cleanup() {
   # assertion, or died before reaching it, must not leave the stray behind: this
   # file would then be causing the machine-wide contamination it is here to
   # catch, and the next phase to ask `pgrep` a question would pay for it.
-  [ -n "$WORK" ] && { pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null; rm -rf "$WORK"; }
+  # BOTH naps. $WATCH_NAP is 82 minutes and is the subject of `orphans`: when the
+  # regression that phase guards against is present, the phase fails AND leaves
+  # the stray -- after which every later `orphans` on this machine hard-fails at
+  # its own `before` guard, so the guard is off for exactly as long as it matters
+  # most. Reaping only $BLOCK_NAP left the one sleep this file is about. Found by
+  # the independent review.
+  [ -n "$WORK" ] && {
+    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null
+    pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    rm -rf "$WORK"
+  }
   return 0
 }
 trap cleanup EXIT
@@ -61,43 +83,70 @@ trap cleanup EXIT
 BLOCK_NAP=5507   # what the blocking fixture waits on
 WATCH_NAP=4931   # what the watchdog waits on, i.e. the bound itself
 
-# A copy of the real runner, with two throwaway suites spliced into its registry.
+# A copy of the real runner, registering ONLY the throwaway suites named in "$@".
+#
+# The registry is REPLACED rather than added to. Splicing fixtures in front of
+# the real SUITES left the copy still registering every real suite, so an inner
+# run with no argument ran the whole repo's suite from a temp directory holding
+# none of its scripts -- 145 phases failing for want of a file, and a give-up
+# assertion that only passed because the fixtures happened to sort first.
+#
+# Each name gets tests/test_<name>.sh next to the copy: anything starting
+# `blocker` blocks forever, `quick` returns at once. run.sh derives its own
+# REPO_ROOT from its path, so the copy looks there and finds only these.
 make_runner() {
   WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
   mkdir -p "$WORK/tests"
-  # REPO_ROOT inside run.sh derives from its own path, so the copy looks for
-  # tests/test_<suite>.sh next to itself and finds only the fixtures below.
-  awk '{ print }
-       /^SUITES=\(/ { print "\"blocker:\""; print "\"quick:\"" }' \
-    "$REPO_ROOT/tests/run.sh" >"$WORK/tests/run.sh"
+  python3 - "$REPO_ROOT/tests/run.sh" "$WORK/tests/run.sh" "$@" <<'PY2'
+import re, sys
+src, dst, names = sys.argv[1], sys.argv[2], sys.argv[3:]
+s = open(src).read()
+block = "SUITES=(\n" + "\n".join('"%s:"' % n for n in names) + "\n)"
+s, n = re.subn(r"SUITES=\(.*?\n\)", lambda m: block, s, count=1, flags=re.S)
+if n != 1:
+    sys.exit("could not find the SUITES registry in %s" % src)
+open(dst, "w").write(s)
+PY2
+  [ -s "$WORK/tests/run.sh" ] || fail "the runner copy was not written"
   chmod +x "$WORK/tests/run.sh"
 
-  # Blocks forever, after saying something first: the partial output is half of
-  # what a BLOCKED report is for.
-  # `set -m` puts the sleep in its OWN process group, which is what `review.sh`
-  # does with the reviewer so it can signal it. That is the hard case: a group
-  # kill aimed at the phase does not reach it, and only walking the descendant
-  # tree does. Measured -- a group kill alone left one stray here.
-  cat >"$WORK/tests/test_blocker.sh" <<EOF
+  local name
+  for name in "$@"; do
+    case "$name" in
+      blocker*)
+        # Blocks forever, after saying something first: the partial output is
+        # half of what a BLOCKED report is for.
+        #
+        # `set -m` puts the sleep in its OWN process group, which is what
+        # `review.sh` does with the reviewer so it can signal it. That is the
+        # hard case: a group kill aimed at the phase does not reach it, and only
+        # walking the descendant tree does. Measured -- a group kill alone left
+        # one stray here.
+        cat >"$WORK/tests/test_$name.sh" <<EOF
 #!/usr/bin/env bash
 echo "got this far before wedging"
 set -m
 sleep $BLOCK_NAP &
 wait
 EOF
-  cat >"$WORK/tests/test_quick.sh" <<'EOF'
+        ;;
+      *)
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "finished on time"
 exit 0
 EOF
-  chmod +x "$WORK/tests/test_blocker.sh" "$WORK/tests/test_quick.sh"
+        ;;
+    esac
+    chmod +x "$WORK/tests/test_$name.sh"
+  done
 }
 
 case "${1:-}" in
 
 # ----------------------------------------------------------------- bounds
   bounds)
-  make_runner
+  make_runner blocker
   started="$(date +%s)"
   AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" blocker >"$WORK/out" 2>&1
   rc=$?
@@ -139,7 +188,7 @@ case "${1:-}" in
 
 # ----------------------------------------------------------------- passes
   passes)
-  make_runner
+  make_runner quick
   AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" quick >"$WORK/out" 2>&1
   rc=$?
 
@@ -155,9 +204,67 @@ case "${1:-}" in
   ok "...and never reported BLOCKED, whatever the marker raced to"
   ;;
 
+# ----------------------------------------------------------------- guards
+  guards)
+  make_runner quick
+
+  # A bad bound is refused, rather than reporting every phase blocked. This is
+  # the inverted-guard case: `sleep abc` fails instantly, so without the check
+  # the watchdog falls straight through to the kill.
+  for bad in abc 0 12x -5 " "; do
+    out="$(AUTOFLEET_TEST_TIMEOUT="$bad" "$WORK/tests/run.sh" quick 2>&1)"
+    rc=$?
+    [ "$rc" = 2 ] \
+      || fail "AUTOFLEET_TEST_TIMEOUT='$bad' was accepted (rc=$rc): $out"
+    grep -q "must be a positive whole number" <<<"$out" \
+      || fail "AUTOFLEET_TEST_TIMEOUT='$bad' failed without saying why: $out"
+    grep -q "BLOCKED" <<<"$out" \
+      && fail "AUTOFLEET_TEST_TIMEOUT='$bad' reported a phase BLOCKED: $out"
+  done
+  ok "a nonsense bound is refused at startup, not turned into BLOCKED reports"
+
+  # ...and a good one is not.
+  AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" quick >"$WORK/out" 2>&1 \
+    || fail "a valid bound was refused: $(cat "$WORK/out")"
+  ok "...while a whole number is accepted"
+
+  # An EMPTY value is not a bad one: `${AUTOFLEET_TEST_TIMEOUT:-180}` reads it as
+  # unset and takes the default, which is the normal shell reading of an env var
+  # someone cleared. Asserted rather than assumed, because the obvious way to
+  # write the row above is to put "" in the bad list and watch it pass for the
+  # wrong reason -- which is what it did on the first run of this phase.
+  AUTOFLEET_TEST_TIMEOUT="" "$WORK/tests/run.sh" quick >"$WORK/out" 2>&1 \
+    || fail "an empty bound was refused instead of falling back: $(cat "$WORK/out")"
+  ok "...and an empty one means unset, so the default applies"
+
+  # The give-up. MAX_BLOCKED blocking phases and the run stops, saying so --
+  # otherwise ~130 of them at the bound outlast the 20-minute cap on the job
+  # that runs this, and the log ends in exit 143 with most of it unreported,
+  # which is where this started.
+  # Four blocking suites and nothing else registered, so a cap of 3 has a fourth
+  # left to skip and the run has no real phase to wander into.
+  make_runner blocker blocker2 blocker3 blocker4
+
+  AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  [ "$?" = 0 ] && fail "a run with four blocked phases passed: $(cat "$WORK/out")"
+
+  grep -q "giving up: 3 phases blocked" "$WORK/out" \
+    || fail "the run did not give up at the cap: $(cat "$WORK/out")"
+  ok "a run gives up once MAX_BLOCKED phases have blocked, and says so"
+
+  blocked_lines="$(grep -c "BLOCKED: produced no result" "$WORK/out" || true)"
+  [ "${blocked_lines:-0}" = 3 ] \
+    || fail "expected 3 BLOCKED reports before giving up, got ${blocked_lines}"
+  ok "...after reporting each of them, so the log names what blocked"
+
+  grep -q "blocker4" "$WORK/out" \
+    && fail "the run continued past the cap into a fourth blocked suite"
+  ok "...and does not go on to sit out the bound for every phase left"
+  ;;
+
 # ---------------------------------------------------------------- orphans
   orphans)
-  make_runner
+  make_runner quick
   before="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
   [ "${before:-0}" = 0 ] \
     || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
@@ -177,6 +284,6 @@ case "${1:-}" in
   ;;
 
   *)
-  echo "usage: $0 bounds|passes|orphans" >&2
+  echo "usage: $0 bounds|passes|guards|orphans" >&2
   exit 2 ;;
 esac

@@ -2078,7 +2078,6 @@ cmd_status() {
     # status reported a reviewer in flight permanently rather than transiently,
     # and three reviewed PRs read as every slot taken. Found by the independent
     # review, on both axes independently.
-    local n
     # Through the predicate, not a fourth spelling of the suffix list: the
     # `find ! -name` this replaces WAS the drift, and it is the only one of the
     # three consumers a person reads on every `status`.
@@ -2088,7 +2087,7 @@ cmd_status() {
       is_review_record "$m" && continue
       n=$((n + 1))
     done
-    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), ${n:-0} in flight"
+    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
