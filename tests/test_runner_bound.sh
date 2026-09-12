@@ -470,7 +470,14 @@ case "${1:-}" in
   # ...and an empty value is not "set". The obvious way to write the guard reads
   # a cleared variable as a request for strictness, which is the opposite of the
   # normal shell reading of one.
-  COPY_NO_SKIP="" run_copy
+  # UNSET, not "the helper's default with an empty value" -- run_copy assigns the
+  # variable either way, so `COPY_NO_SKIP="" run_copy` is byte-identical to the
+  # plain call above and reds only under mutations that red five earlier rows.
+  # The distinction being asserted is a shell one: `${X:-}` reads a cleared
+  # variable as unset, which is the normal reading of one somebody emptied.
+  # Found by the independent review.
+  env -u AUTOFLEET_TEST_NO_SKIP AUTOFLEET_TEST_TIMEOUT=10 \
+    "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   rc=$?
   [ "$rc" = 0 ] \
     || fail "an empty AUTOFLEET_TEST_NO_SKIP was read as strict (rc=$rc): $(cat "$WORK/out")"
@@ -587,6 +594,18 @@ PY2
     || fail "the host repo was skipped without saying why: $out"
   ok "a host installation is told the check does not apply, not that it failed"
 
+  # ...and the PLAIN host shape, with no tests/run.sh at all. Both shapes share
+  # one path today, since the discriminator answers before anything is opened --
+  # but that is an argument from the current implementation, and round 5 is what
+  # arguing from the implementation cost: the discriminator then guarded one of
+  # its two branches. Found by the independent review.
+  mkdir -p "$WORK/bare/tests"
+  : >"$WORK/bare/tests/test_something.py"
+  out="$(cd "$WORK/bare" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 77 ] \
+    || fail "a host repo with no tests/run.sh at all was not skipped (rc=$rc): $out"
+  ok "...whether or not it has a tests/run.sh of its own"
+
   # ...and the caller turns that into silence rather than a green line.
   # By behaviour, not by assertion-on-spelling: grepping for the `elif` line reds
   # this row for a reformat that changes nothing. The shell fragment around the
@@ -613,6 +632,18 @@ EOF
     && fail "the lint fails a host installation: $out"
   ok "...and the lint neither passes nor fails a check it did not run"
 
+  # ...and the same caller with a REAL failure. Without this row, relaxing the
+  # caller's `= 77` to `!= 0` -- the same one-character-class mutation round 6
+  # found in the runner -- leaves every genuine registry mismatch green, on a
+  # check that runs for every PR. The row above cannot see it: it only ever
+  # drives the caller with a skip. Found by the independent review.
+  sed 's|sys.exit(77)|sys.exit(1)|' "$WORK/caller.sh" >"$WORK/caller-fail.sh"
+  out="$(bash "$WORK/caller-fail.sh" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && fail "the lint passed a genuine registry mismatch: $out"
+  grep -q "FAIL:" <<<"$out" \
+    || fail "a genuine registry mismatch did not reach the lint's fail branch: $out"
+  ok "...while a real mismatch still reaches fail"
+
   # The sentinel, read out of the shipped lint rather than restated, and asserted
   # against the REAL tree. Rename this file and update SUITES in the same change
   # -- the ordinary way a suite gets renamed, and the suite stays green through
@@ -620,7 +651,7 @@ EOF
   # exit 77 and assert nothing, on a lint that runs for every PR. The rows below
   # cannot see that: they fabricate the filename inside their own trees.
   # Found by the independent review.
-  sentinel="$(sed -n 's/^HERE = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh")"
+  sentinel="$(sed -n 's/^[A-Z_]* = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh")"
   [ -n "$sentinel" ] \
     || fail "evals/lint.sh no longer decides which repository it is in with one os.path.exists"
   [ -e "$REPO_ROOT/$sentinel" ] \

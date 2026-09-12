@@ -1007,8 +1007,8 @@ echo "== every test phase actually runs"
 if python3 - <<'PHASES'
 import os, re, sys
 
-# WHICH repository is this -- asked ONCE, before anything is opened, and used by
-# every path below.
+# WHICH repository is this -- asked ONCE, before anything is opened, so no path
+# below can answer it differently.
 #
 # `evals/lint.sh` is vendored and `tests/` is not (CLAUDE.md Layout), so in a
 # host installation there is no phase registry and nothing here to judge. The
@@ -1025,8 +1025,8 @@ import os, re, sys
 # directory, then only the missing-file branch, leaving a host repo with its own
 # tests/run.sh to fail on a SUITES block it has never heard of. Both found by the
 # independent review.
-HERE = os.path.exists("tests/test_runner_bound.sh")
-if not HERE:
+IN_AUTOFLEET = os.path.exists("tests/test_runner_bound.sh")
+if not IN_AUTOFLEET:
     # NOT `ok`: the caller cannot print a green line for an assertion that did
     # not run. 77 is the runner convention this change adds, borrowed here so the
     # caller can tell "nothing to check" from "checked and agreed".
@@ -1035,8 +1035,8 @@ if not HERE:
 try:
     runner = open("tests/run.sh").read()
 except OSError:
-    # Absent HERE is this check silently stopping, which is the thing hard rule 3
-    # is about.
+    # Absent in autofleet itself is this check silently stopping, which is the
+    # thing hard rule 3 is about.
     sys.exit("autofleet suite is here but tests/run.sh is not; this check now asserts nothing")
 block = re.search(r"SUITES=\((.*?)\n\)", runner, re.S)
 if not block:
@@ -1109,7 +1109,10 @@ sys.exit(bad)
 PHASES
 then
   ok "every phase-dispatching suite agrees with tests/run.sh, and SKIPPABLE names phases that exist"
-elif [ "$?" = 77 ]; then
+elif [ "$?" = 77 ]; then  # NOTHING may go between the `if` list and here: $? is
+                          # still the python block's status only while nothing
+                          # else has run. shellcheck would flag the shape
+                          # (SC2181) and nothing lints this file.
   # A host installation, where `tests/` was never vendored. Said, and not counted
   # as agreement: a green line for an assertion that did not run is the same
   # false comfort as a phase that stopped executing.

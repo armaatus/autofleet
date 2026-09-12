@@ -353,18 +353,30 @@ run_one() {
     # to different places, and a phase that BROKE into exiting 77 needs the first
     # one even under the second.
     report_fail "$label"
-    if [ "$skip_refusal" = 1 ]; then
-      printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
-        "$SKIP_RC" "$label"
-      printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
-      printf '       in that list where a reviewer can see it.\n'
-    else
-      # Nothing to add to a list here: the run was told that skipping is not an
-      # acceptable answer in this place, and a message about SKIPPABLE would send
-      # the reader to edit a list that is not what refused them.
-      printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
-      printf '       does not accept a phase that judged nothing.\n'
-    fi
+    # A `case`, not an `if/else`: the reason codes exist so a third refusal
+    # cannot inherit whichever message was written last, and a bare `else` is
+    # exactly that inheritance. The fallthrough says it has no words for this
+    # one rather than borrowing the neighbour's. Found by the independent review.
+    case "$skip_refusal" in
+      1)
+        printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
+          "$SKIP_RC" "$label"
+        printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
+        printf '       in that list where a reviewer can see it.\n'
+        ;;
+      2)
+        # Nothing to add to a list here: the run was told that skipping is not an
+        # acceptable answer in this place, and a message about SKIPPABLE would
+        # send the reader to edit a list that is not what refused them.
+        printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
+        printf '       does not accept a phase that judged nothing.\n'
+        ;;
+      *)
+        printf '       exited %s (skip) and may_skip refused it with reason %s, which\n' \
+          "$SKIP_RC" "$skip_refusal"
+        printf '       this runner has no message for. That is a bug in tests/run.sh.\n'
+        ;;
+    esac
     show_output "$out"
   else
     report_fail "$label"
