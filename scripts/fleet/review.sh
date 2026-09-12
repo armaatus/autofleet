@@ -169,7 +169,14 @@ fleet_stopped && { echo "STOPPED: $FLEET_STOP exists."; unspent_try_any; exit 3;
 pr="${1:-}"
 if [ -z "$pr" ]; then
   pr="$(fleet_pr_for_branch)" || {
-    echo "no open PR for branch $(git rev-parse --abbrev-ref HEAD)" >&2; exit 2; }
+    # `unspent_try_any` like every other pre-head exit. A no-op in practice --
+    # the dispatcher always passes the number, and with no marker set there is
+    # nothing to refund -- but review.sh states the rule as "exits 2, 3 and 6 do
+    # not burn a try" and this was the one exit left off it, for the third round
+    # running. A rule with an exception nobody wrote down is how the two refund
+    # helpers got swapped three times. Found by the independent review.
+    echo "no open PR for branch $(git rev-parse --abbrev-ref HEAD)" >&2
+    unspent_try_any; exit 2; }
 fi
 
 fleet_owner_repo || {

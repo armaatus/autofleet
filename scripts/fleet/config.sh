@@ -214,9 +214,20 @@ fi
 # the message is about. A cap that is silently absent is the failure this exists
 # to prevent, and it cannot be prevented by a warning nobody reads in a
 # dispatcher log.
+# Digits first, then a NUMERIC test for positive. `''|*[!0-9]*|0` rejected the
+# literal `0` and let `00` straight through -- all digits, not that literal --
+# and `[ 0 -ge 00 ]` is true, so the cap is zero attempts: no PR is ever
+# reviewed, every PR blocks on a review that cannot arrive, and the hold
+# announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
+# the exact untrue line the 0 rejection exists to prevent. One spare zero and the
+# guard was the failure. Found by the independent review.
 case "$AUTOFLEET_REVIEW_MAX_TRIES" in
-  ''|*[!0-9]*|0)
+  ''|*[!0-9]*)
     echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
          "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
     exit 2 ;;
 esac
+[ "$AUTOFLEET_REVIEW_MAX_TRIES" -gt 0 ] || {
+  echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
+       "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+  exit 2; }

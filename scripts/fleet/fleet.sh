@@ -1405,8 +1405,12 @@ rotate_fleet_log() {
   # AUTOFLEET_LOG_MAX_BYTES is not a bound at all. Found by `/code-review`, which
   # reproduced the 127.
   #
-  # The predicate DOES exist now -- merging main brought it -- so this loop uses
-  # it rather than leaning on a record's first field being a sha that
+  # The predicate DOES exist now -- THIS PR adds it, a few hundred lines up; main
+  # still carries only the comment saying it arrives with #42, which is what the
+  # note above used to be. Said precisely because it is provenance for whoever
+  # reverts this: reverting #42 takes the predicate with it and this loop must go
+  # back with it. So this loop uses it rather than leaning on a record's first
+  # field being a sha that
   # `reviewer_alive` happens to reject. That is the rule stated where
   # `is_review_record` is defined: use the predicate, do not respell the suffix
   # list or rely on what the contents happen to look like. This was the one loop

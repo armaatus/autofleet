@@ -34,6 +34,22 @@
 #                                 reasoning and no assertion; CLAUDE.md hard rule
 #                                 3 is about that. Found by the independent
 #                                 review.
+#   test_runner_bound.sh interrupt a SIGINT ENDS the run rather than skipping one
+#                                 phase, and leaves nothing behind.
+#                                 `trap ... EXIT INT TERM` on a handler that only
+#                                 returns reaped the phase and carried on: bash
+#                                 resumes after a trap that returns, so Ctrl-C
+#                                 stopped a PHASE and not the RUN, and finishing
+#                                 needed one per phase left -- about 150.
+#                                 Measured at five more phases completed after
+#                                 the signal. Found by the independent review.
+#
+#                                 The no-stray rows are real but do NOT pin the
+#                                 watchdog's INT trap: a group interrupt reaches
+#                                 its sleep directly, and a runner-only one never
+#                                 reaches the watchdog at all. Said here rather
+#                                 than left to be assumed, because this file's
+#                                 whole subject is rows that hold what they claim.
 #   test_runner_bound.sh orphans  ...and the watchdog takes its `sleep` with it.
 #                                 `kill` on the subshell alone reaps the subshell
 #                                 and orphans the sleep, one per phase -- 58
@@ -215,7 +231,7 @@ case "${1:-}" in
   # A bad bound is refused, rather than reporting every phase blocked. This is
   # the inverted-guard case: `sleep abc` fails instantly, so without the check
   # the watchdog falls straight through to the kill.
-  for bad in abc 0 12x -5 " "; do
+  for bad in abc 0 00 12x -5 " "; do
     out="$(AUTOFLEET_TEST_TIMEOUT="$bad" "$WORK/tests/run.sh" quick 2>&1)"
     rc=$?
     [ "$rc" = 2 ] \
@@ -266,6 +282,72 @@ case "${1:-}" in
   ok "...and does not go on to sit out the bound for every phase left"
   ;;
 
+# -------------------------------------------------------------- interrupt
+  interrupt)
+  make_runner blocker blocker2 blocker3
+
+  # A long bound, so nothing here finishes on its own: what ends the run must be
+  # the signal. $WATCH_NAP doubles as the watchdog's sleep, which is what the
+  # leak half of this phase counts.
+  [ "$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)" = 0 ] \
+    || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
+
+  # `set -m` around the launch, and it is not incidental. A command started with
+  # `&` from a NON-INTERACTIVE shell has SIGINT set to ignored on entry, and a
+  # signal ignored on entry cannot be trapped afterwards -- so the runner would
+  # survive the INT below no matter what its trap said, and this phase would
+  # "fail" against correct code and "pass" against nothing. Job control gives the
+  # runner its own process group with default dispositions, which is what a
+  # terminal Ctrl-C actually delivers to.
+  set -m
+  AUTOFLEET_TEST_TIMEOUT="$WATCH_NAP" "$WORK/tests/run.sh" >"$WORK/out" 2>&1 &
+  runner=$!
+  set +m
+  # Long enough for the first phase and its watchdog to be up, short enough that
+  # nothing has finished.
+  sleep 4
+  # The process GROUP, which is what a terminal Ctrl-C delivers to -- not the
+  # runner alone. The difference is the whole second half of this phase: the
+  # watchdog is forked after `set +m`, so it is IN that group and takes the INT
+  # directly. Signalling only the runner, its watchdog is reached a moment later
+  # by the cleanup's own TERM, and a watchdog trapping TERM alone looks fine.
+  # Measured: this phase passed against the TERM-only watchdog until it signalled
+  # the group. `set -m` above makes the runner its own group leader, so the
+  # negative pid is its pgid.
+  kill -INT -"$runner" 2>/dev/null
+
+  # It must END. Ten seconds is far longer than the handler needs and far shorter
+  # than $WATCH_NAP, so surviving this means it carried on rather than ran slow.
+  waited=0
+  while kill -0 "$runner" 2>/dev/null && [ "$waited" -lt 10 ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  if kill -0 "$runner" 2>/dev/null; then
+    kill -9 "$runner" 2>/dev/null
+    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null; pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    fail "the runner survived SIGINT, so Ctrl-C stops a phase and not the run"
+  fi
+  ok "a SIGINT ends the run rather than skipping one phase"
+
+  wait "$runner" 2>/dev/null; rc=$?
+  [ "$rc" = 0 ] \
+    && fail "an interrupted run exited 0, so a cancelled job reads as a pass"
+  ok "...and does not exit 0"
+
+  # Nothing left behind. The watchdog's sleep is the one the round-one leak was
+  # about, and the INT path is where it came back.
+  sleep 2
+  strays="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  [ "${strays:-0}" = 0 ] \
+    || fail "SIGINT orphaned ${strays} watchdog sleep(s); the trap does not cover INT"
+  ok "...and the watchdog takes its sleep with it on INT, not only on TERM"
+
+  phase_strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
+  [ "${phase_strays:-0}" = 0 ] \
+    || fail "SIGINT left ${phase_strays} descendant(s) of the running phase behind"
+  ok "...and the running phase is reaped with its descendants"
+  ;;
+
 # ---------------------------------------------------------------- orphans
   orphans)
   make_runner quick
@@ -288,6 +370,6 @@ case "${1:-}" in
   ;;
 
   *)
-  echo "usage: $0 bounds|passes|guards|orphans" >&2
+  echo "usage: $0 bounds|passes|guards|interrupt|orphans" >&2
   exit 2 ;;
 esac

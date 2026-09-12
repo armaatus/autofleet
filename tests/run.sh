@@ -22,7 +22,7 @@ SUITES=(
 "lint:"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes guards orphans"
+"runner_bound:bounds passes guards interrupt orphans"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "review_mode:sweeps mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite"
@@ -69,12 +69,21 @@ PHASE_TIMEOUT="${AUTOFLEET_TEST_TIMEOUT:-180}"
 # straight through to the kill and every phase in the run is reported BLOCKED
 # with a duration of "abc". A mistyped env var would turn the whole suite red
 # for a reason that points at nothing. Rejected at startup instead.
+# Digits first, then a NUMERIC test for positive. `''|*[!0-9]*|0` rejected the
+# literal `0` and let `00` through, which is all digits and is not that literal
+# -- and `sleep 00` returns at once, so the bound went straight to the kill and
+# reported every phase BLOCKED. One spare zero reopened the inverted guard this
+# check exists to close. Found by the independent review.
 case "$PHASE_TIMEOUT" in
-  ''|*[!0-9]*|0)
+  ''|*[!0-9]*)
     echo "AUTOFLEET_TEST_TIMEOUT must be a positive whole number of seconds;" \
          "got '$PHASE_TIMEOUT'" >&2
     exit 2 ;;
 esac
+[ "$PHASE_TIMEOUT" -gt 0 ] || {
+  echo "AUTOFLEET_TEST_TIMEOUT must be a positive whole number of seconds;" \
+       "got '$PHASE_TIMEOUT'" >&2
+  exit 2; }
 
 # A run where phase after phase blocks cannot be rescued by any bound: at 180s
 # each, thirty of them exceed the 20-minute cap on the job that runs this
@@ -97,7 +106,27 @@ runner_cleanup() {
   [ -n "$RUNNING_PID" ] && reap_tree "$RUNNING_PID"
   return 0
 }
-trap 'runner_cleanup' EXIT INT TERM
+# EXIT gets the cleanup. INT and TERM get a handler that cleans up AND EXITS,
+# which is the whole difference: bash resumes after a trap that merely returns,
+# so one `trap 'runner_cleanup' EXIT INT TERM` reaped the running phase and then
+# carried straight on into the next one. Ctrl-C stopped a phase and not the run,
+# and finishing needed one per phase left -- about 150. Measured: the runner
+# survived a SIGINT and completed five more phases.
+#
+# It is not a pre-existing wart either, it arrived with this change. Before it
+# there was no trap and no `set -m`, so the phase shared the runner's process
+# group and a single Ctrl-C at the terminal ended everything at once. Putting the
+# phase in its own group is what took that away, and this is the half that has to
+# give it back. A cancelled CI job is the same shape through TERM. Found by the
+# independent review.
+runner_interrupted() {
+  runner_cleanup
+  echo "  (interrupted; the rest of the run is not reported)"
+  exit "$1"
+}
+trap 'runner_cleanup' EXIT
+trap 'runner_interrupted 130' INT
+trap 'runner_interrupted 143' TERM
 
 # The watchdog behind PHASE_TIMEOUT, as a function so the `sleep` it waits on has
 # a name. Killing the subshell alone reaps the subshell and ORPHANS that sleep:
@@ -120,7 +149,19 @@ phase_watchdog() {
   # whole reason for the extra process. Interrupted during `wait`, the trap runs
   # now and takes the sleep with it. `$napper` is empty until then and the kill
   # simply fails, which is the correct thing to do with a sleep never started.
-  trap 'kill -9 "$napper" 2>/dev/null; exit 0' TERM
+  # INT as well as TERM, DEFENSIVELY -- and said plainly, because no case was
+  # found where leaving it off actually leaks. The review reasoned that this
+  # watchdog is forked after `set +m`, so it sits in the runner's process group
+  # and a terminal Ctrl-C reaches it with the default disposition, orphaning its
+  # sleep. The first half is true; the leak is not, and both ways of delivering
+  # the signal say so. A GROUP interrupt reaches the sleep too -- it is a child
+  # of this subshell and in the same group -- so it dies of the signal whether
+  # this trap exists or not. An interrupt aimed at the runner alone never reaches
+  # this process, and the runner's own cleanup TERMs it a moment later, which the
+  # TERM half already handles. `interrupt` asserts no strays survive either way
+  # and passes with INT removed here; it is not pinned, and it is kept because it
+  # costs nothing and closes the case neither delivery covers.
+  trap 'kill -9 "$napper" 2>/dev/null; exit 0' TERM INT
   sleep "$PHASE_TIMEOUT" & napper=$!
   wait "$napper" 2>/dev/null
 
@@ -190,11 +231,16 @@ run_one() {
   set -m
   "$@" >"$out" 2>&1 &
   pid=$!
+  RUNNING_PID="$pid"
   set +m
   # The watchdog holds neither the output file nor stdin, for the same reason.
   phase_watchdog "$pid" "$marker" >/dev/null 2>&1 </dev/null &
   watcher=$!
-  RUNNING_PID="$pid"; RUNNING_WATCHER="$watcher"
+  # Each recorded AS it is forked, not both once the pair is up: an interrupt
+  # landing in that two-line window left the phase unreaped, in a process group
+  # the terminal cannot reach. The same "reopened in the seam between two lines"
+  # as the watchdog's own trap. Found by the independent review.
+  RUNNING_WATCHER="$watcher"
   # stderr silenced only around the reap: killing the job makes the shell
   # announce it ("line NN: 1234 Killed: 9 ..."), which is noise pointing at this
   # runner rather than at the phase that blocked. The phase's own output went to
