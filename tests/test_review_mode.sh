@@ -593,6 +593,54 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
     || fail "fleet.log passed the cap and was not rotated"
   ok "...and rotates at AUTOFLEET_LOG_MAX_BYTES once none is"
+
+  # RC 2 -- "alive, but ps will not name it" -- DOES NOT BLOCK. There was no row
+  # for it, and blocking on it starved the rotation permanently: a 2-marker is
+  # never cleared (`live_reviewers` keeps it deliberately, `stop_reviewers` runs
+  # only at dispatcher start), so one SIGKILLed reviewer whose pid the OS reuses
+  # blocks every rotation for the life of the dispatcher, silently. The cap
+  # stops being a bound. Found by the independent review.
+  #
+  # A pid that is alive and is NOT one of ours gives exactly that answer: `ps`
+  # names it, but not as `review.sh`... so this uses a pid that is alive and
+  # unnameable by construction -- our own shell's parent is nameable, so instead
+  # the marker names a pid we know is alive and let `reviewer_alive` decide.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  rm -f "$AUTOFLEET_DIR/fleet.log.1" "$AUTOFLEET_DIR/rotate-blind"
+  printf '#!/bin/sh\nsleep "$@"\n' >"$WORK/bin/review.sh"; chmod +x "$WORK/bin/review.sh"
+  "$WORK/bin/review.sh" 30 & blocker=$!
+  printf '%s %s\n' "$blocker" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  AUTOFLEET_LOG_MAX_BYTES=1000 in_poll rotate_fleet_log >/dev/null 2>&1
+  [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
+    && fail "rotation went ahead with one of OUR reviewers holding the file"
+  ok "a definite 0 still blocks rotation"
+  kill "$blocker" 2>/dev/null; wait "$blocker" 2>/dev/null
+
+  # ...AND RC 2 DOES NOT BLOCK. "Alive, but ps will not name it" cannot be
+  # produced reliably from a shell -- it needs `kill -0` to succeed while
+  # `ps -o command=` prints nothing -- so this asserts the DECISION rather than
+  # the OS condition, by answering 2 from `reviewer_alive` directly. That is the
+  # right level: what was wrong was the choice, not the detection.
+  #
+  # Blocking on 2 starves the rotation permanently, because nothing ever clears
+  # a 2-marker: `live_reviewers` keeps it deliberately and `stop_reviewers` runs
+  # only at dispatcher start. One SIGKILLed reviewer whose pid the OS reuses
+  # means fleet.log grows past the cap for the life of the dispatcher, and
+  # silently -- the "could not rotate" line is never reached, because the
+  # function returns before the `mv`. Found by the independent review.
+  head -c 3000 /dev/zero | tr '\0' 'x' >"$AUTOFLEET_DIR/fleet.log"
+  rm -f "$AUTOFLEET_DIR/fleet.log.1" "$AUTOFLEET_DIR/rotate-blind"
+  printf '%s %s\n' 424242 "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/42"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+          reviewer_alive() { return 2; }
+          AUTOFLEET_LOG_MAX_BYTES=1000 rotate_fleet_log 2>&1 )"
+  rm -f "$AUTOFLEET_DIR/reviewing/42"
+  [ -e "$AUTOFLEET_DIR/fleet.log.1" ] \
+    || fail "a holder ps cannot name blocked the rotation, which never clears -- the cap stops being a bound for the dispatcher's life: $out"
+  ok "...and a holder ps cannot name does not block it forever"
+  grep -q "ps unable to name it" <<<"$out" \
+    || fail "it rotated out from under an unnameable holder and said nothing: $out"
+  ok "...and says so when it does"
   # 0 KEEPS IT, asserted rather than announced. The first version ran the
   # rotation and printed `ok` unconditionally -- and even with an assertion it
   # was vacuous, because the `mv` two steps up had left fleet.log holding one

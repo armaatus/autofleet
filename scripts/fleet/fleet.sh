@@ -1003,10 +1003,33 @@ rotate_fleet_log() {
       local held=""
       read -r held _ <"$live" 2>/dev/null || true
       # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
-      # 2 alive-but-ps-would-not-say. Rotate only when nothing is holding the
-      # file -- 2 counts as holding it, because the whole point is not to rename
-      # an inode somebody still has open.
-      reviewer_alive "$held"; [ "$?" = 1 ] || return 0
+      # 2 alive-but-ps-would-not-say. ONLY 0 BLOCKS.
+      #
+      # An earlier version blocked on 2 as well -- "the whole point is not to
+      # rename an inode somebody still has open" -- and that reinstated exactly
+      # the starvation the comment above names. A 2-marker is never cleared:
+      # `live_reviewers` keeps it deliberately ("only a definite 1 clears it")
+      # and `stop_reviewers` runs at dispatcher start, so one SIGKILLed reviewer
+      # whose pid the OS reuses for something `ps` will not name blocks every
+      # rotation for the life of the dispatcher, silently -- the `say` below is
+      # never reached, because the function returned before the `mv`. The cap
+      # stops being a bound at all.
+      #
+      # Weighing the two: blocking on 2 risks an unbounded log, forever, with no
+      # message. Not blocking risks ONE rename under a writer nobody can
+      # identify -- one generation, the file still on disk as fleet.log.1, and
+      # the writer's fd still valid. The second is recoverable and the first is
+      # not. It is said once, because rotating out from under something is worth
+      # knowing about even when it is the better answer. Found by the
+      # independent review, which noted the two comments contradicted and the
+      # code implemented the losing one.
+      reviewer_alive "$held"; local is=$?
+      [ "$is" = 0 ] && return 0
+      if [ "$is" = 2 ] && [ ! -e "$STATE_DIR/rotate-blind" ]; then
+        : >"$STATE_DIR/rotate-blind"
+        say "  rotating fleet.log with pid $held holding it and ps unable to name it;"
+        say "  its output may land in fleet.log.1 -- the alternative is never rotating"
+      fi
     done
   fi
   size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
