@@ -18,8 +18,9 @@
 # the autotools convention. A phase may only use it if it is named in SKIPPABLE
 # below -- see the comment there for why a skip is a registry entry and not a
 # decision the phase gets to make alone. AUTOFLEET_TEST_NO_SKIP=1 refuses even
-# those: a place where judging nothing is not an acceptable answer, which is what
-# a CI runner is.
+# those, for a place where judging nothing is not an acceptable answer -- which
+# is what a CI runner is, though nothing sets it there yet (#80), so do not read
+# a green CI run as having been strict.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -263,6 +264,11 @@ reap_tree() {
   return 0
 }
 
+# What the phase printed, indented under the row that reports it. Four copies of
+# one `sed` in run_one, which is three chances for the next one to indent by a
+# different amount.
+show_output() { sed 's/^/       /' "$1"; }
+
 # One spelling of a failing phase. There are two ways to reach it and they were
 # two copies of the same three lines.
 report_fail() {
@@ -321,7 +327,7 @@ run_one() {
     report_fail "$label"
     printf '       BLOCKED: produced no result in %ss and was killed.\n' "$PHASE_TIMEOUT"
     printf '       Output up to that point:\n'
-    sed 's/^/       /' "$out"
+    show_output "$out"
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
@@ -331,7 +337,7 @@ run_one() {
     # ever running again.
     skipped=$((skipped + 1)); skips="$skips $label"
     printf '  skip %s\n' "$label"
-    sed 's/^/       /' "$out"
+    show_output "$out"
   elif [ "$rc" = "$SKIP_RC" ]; then
     # 77 from a phase that was not allowed to say it. Which refusal it was decides
     # the words: "add it to SKIPPABLE" and "nothing may skip here" send the reader
@@ -350,10 +356,10 @@ run_one() {
       printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
       printf '       does not accept a phase that judged nothing.\n'
     fi
-    sed 's/^/       /' "$out"
+    show_output "$out"
   else
     report_fail "$label"
-    sed 's/^/       /' "$out"
+    show_output "$out"
   fi
   rm -f "$out" "$marker"
 }

@@ -1007,28 +1007,37 @@ echo "== every test phase actually runs"
 if python3 - <<'PHASES'
 import os, re, sys
 
-# `tests/` is NOT vendored (CLAUDE.md Layout), so in a host installation this
-# file is absent and everything below has nothing to judge. Said and skipped,
-# rather than raising: a traceback out of the vendored lint reads as "the agent
-# configuration is broken" in a repository where nothing is wrong. In THIS
-# repository the file is the payload of the check, so its absence is the check
-# silently stopping -- which is why the two cases are told apart rather than both
-# being waved through. Pre-existing; named here because this check now reads two
-# registries out of that one file. Found by the independent review.
+# WHICH repository is this -- asked ONCE, before anything is opened, and used by
+# every path below.
+#
+# `evals/lint.sh` is vendored and `tests/` is not (CLAUDE.md Layout), so in a
+# host installation there is no phase registry and nothing here to judge. The
+# discriminator cannot be a generic name: `tests/` is the commonest test
+# directory there is, and `tests/run.sh` is a common shell-project convention --
+# this repository is the proof that it is the natural name to reach for. A host
+# project with either gets told its agent configuration is broken, in a
+# repository where nothing is wrong, on a check `agent-config.yml` runs on every
+# PR. That is hard rule 1 with the damage landing on the payload.
+#
+# So the question is answered by autofleet OWN suite: one of the scripts
+# tests/run.sh dispatches is present exactly when the registry it reads should
+# be. Two earlier attempts at this got it wrong in the two available ways -- the
+# directory, then only the missing-file branch, leaving a host repo with its own
+# tests/run.sh to fail on a SUITES block it has never heard of. Both found by the
+# independent review.
+HERE = os.path.exists("tests/test_runner_bound.sh")
+if not HERE:
+    # NOT `ok`: the caller cannot print a green line for an assertion that did
+    # not run. 77 is the runner convention this change adds, borrowed here so the
+    # caller can tell "nothing to check" from "checked and agreed".
+    print("  (autofleet suite is not here -- not vendored, so there is no phase registry)")
+    sys.exit(77)
 try:
     runner = open("tests/run.sh").read()
 except OSError:
-    # WHICH repository is this. Not `tests/` existing -- that is the commonest
-    # test-directory name there is, and a host project with pytest or jest under
-    # it would be told its agent configuration is broken. The discriminator has
-    # to name autofleet SUITE, not a generic directory: one of the scripts
-    # tests/run.sh dispatches is here exactly when the registry it reads should
-    # be here too. Found by the independent review, on the previous attempt at
-    # this branch, which used the directory.
-    if os.path.exists("tests/test_runner_bound.sh"):
-        sys.exit("autofleet's suite is here but tests/run.sh is not; this check now asserts nothing")
-    print("  (no tests/run.sh -- not vendored, so there is no phase registry here)")
-    sys.exit(0)
+    # Absent HERE is this check silently stopping, which is the thing hard rule 3
+    # is about.
+    sys.exit("autofleet suite is here but tests/run.sh is not; this check now asserts nothing")
 block = re.search(r"SUITES=\((.*?)\n\)", runner, re.S)
 if not block:
     sys.exit("tests/run.sh has no SUITES registry; this check now asserts nothing")
@@ -1100,6 +1109,11 @@ sys.exit(bad)
 PHASES
 then
   ok "every phase-dispatching suite agrees with tests/run.sh"
+elif [ "$?" = 77 ]; then
+  # A host installation, where `tests/` was never vendored. Said, and not counted
+  # as agreement: a green line for an assertion that did not run is the same
+  # false comfort as a phase that stopped executing.
+  :
 else
   fail "the phase registries in tests/run.sh do not match the scripts; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing. The line above says which"
 fi

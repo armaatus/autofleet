@@ -81,8 +81,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Every run of the runner COPY that is not ABOUT the variable goes through here;
-# the three that set it deliberately say so on the line. The prefix is the point:
+# Every run of the runner copy IN THE `skips` PHASE, except the three that set
+# the variable deliberately and say so on the line. The other phases call the
+# copy directly because they need their own bound or their own backgrounding, and
+# none of their fixtures can exit 77 -- if one ever does, it belongs here.
+# The prefix is the point:
 # AUTOFLEET_TEST_NO_SKIP is read from the environment, so `AUTOFLEET_TEST_NO_SKIP=1
 # ./tests/run.sh` -- the strict form of this very suite -- otherwise reaches the
 # copy and fails its skip rows on a harness artefact rather than a defect. That
@@ -92,7 +95,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # form nobody runs locally. A helper makes forgetting impossible rather than
 # noticed. Found by the independent review.
 run_copy() {
-  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT="${COPY_TIMEOUT:-10}" \
+  AUTOFLEET_TEST_NO_SKIP= AUTOFLEET_TEST_TIMEOUT=10 \
     "$WORK/tests/run.sh" "$@" >"$WORK/out" 2>&1
 }
 ok()   { echo "  ok: $*"; }
