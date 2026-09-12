@@ -131,7 +131,33 @@ STARTED_DIR="$STATE_DIR/started"
 # one would then quietly change what they all import.
 ISSUE_REFS="$REPO_ROOT/.github/scripts"
 # One pass's worth of answers, and no longer. Emptied at the top of every poll
-# and once at startup, so a dispatcher never trusts a previous run's.
+# by `cmd_run`, and NOWHERE ELSE -- not at startup, not by any other command.
+#
+# The poll cache belongs to whoever is POLLING, and until #35 every command
+# emptied it at SOURCE TIME. So `status`, `stop`, `retry` and `resume` each
+# deleted it out from under a live dispatcher mid-pass -- and `interrupted-$n`
+# is the only thing stopping `reap_abandoned` re-interrupting an agent that
+# `enforce_timebox` interrupted earlier in that same pass. docs/WORKFLOW.md
+# tells you to run `status` in a loop until it says idle, so the way to hit it
+# was to watch the fleet. It also dropped `issue-$n`, making every watcher
+# re-issue the `gh issue view` that `poll_issue` exists to avoid.
+#
+# THERE IS NO CALL HERE AT ALL, which is #35's Acceptance in one line:
+# "fleet.sh status leaves $STATE_DIR byte-identical". The first fix kept the
+# source-time call and made it conditional on the dispatcher being dead, which
+# (a) still wrote to $STATE_DIR on the ordinary idle path, and (b) had to get
+# `dispatcher_alive`'s THREE answers right -- `||` collapses 2, "alive but ps
+# would not say", into "no dispatcher", so on a host where ps cannot answer
+# every `status` in the watch loop still wiped a live dispatcher's cache. The
+# bug unfixed, in an environment this repo keeps three phases for.
+#
+# Deleting it removes both problems, and costs nothing: `cmd_run` empties the
+# cache at the top of every pass before anything reads it, and NOTHING outSIDE
+# `cmd_run` reads it. `poll_issue` and `foundation_in_flight` are called only
+# from the poll body, from `launch`, and from the watchers the poll body calls.
+# So a cache left behind by a dispatcher that died is never read by anyone --
+# the staleness the conditional was protecting against is unobservable. Found by
+# the independent review, which proposed exactly this.
 POLL_CACHE="$STATE_DIR/poll-cache"
 forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
 LOG="$STATE_DIR/fleet.log"
@@ -174,7 +200,8 @@ BLOCKED_LABEL="${AUTOFLEET_BLOCKED_LABEL:-blocked}"
 ANSWER_SEP="$(printf '\t')"
 
 mkdir -p "$OWNED_DIR" "$STARTED_DIR"
-forget_poll_answers
+# The poll cache is emptied further down, and only when nobody is using it: see
+# the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
 say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
@@ -307,7 +334,10 @@ clear_issue_markers() {
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/merge-held-$1" "$STATE_DIR/warned-$1"
+        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1"
+  # ...and the two park reasons the names above do not already cover. The
+  # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
+  rm -f "$STATE_DIR/merge-held-$1"
   # ONLY the `*` is unquoted. $STATE_DIR is `${AUTOFLEET_DIR:-$HOME/.autofleet}`,
   # both user-supplied paths: leaving the whole word bare word-splits a directory
   # with a space in it into two operands that match nothing, and the markers are
@@ -344,6 +374,207 @@ disown_issue() {
 # on that order -- `waiting_worktrees`, `in_flight`, `foundation_in_flight` and
 # `cmd_status` -- and it is stated here because the `awk` alone does not say it.
 #
+# THE PARK REASONS, in one place, with the sentence a person is told for each.
+#
+# There are five, and the count and the two places that REPORT them drifted
+# apart the moment there were more than three: `count_parked_owned` learned
+# `held-` and `git-blind-` and the farewell list and `cmd_status` did not, so a
+# worktree could be counted as waiting for a person and then never named as one
+# -- present in the tally, absent from the list that says what to do about it.
+# That is worse than not counting it at all. One list, three readers.
+#
+# `why_parked <issue>` prints the reason, or nothing when that issue is not
+# parked. Order is deliberate where two can coexist: a refused removal is the
+# one a person acts on, so it wins over "git could not say".
+# THERE IS NO `PARK_REASONS` LIST, and that is deliberate. One was added here
+# under a comment promising "one list, three readers", and it had NO reader:
+# `why_parked`, `how_to_release` and the phase each enumerated the five by hand,
+# so the list was the drift it was added to prevent, one indirection later. An
+# attempt to make it load-bearing through `clear_issue_markers` failed too --
+# that function's existing `*-blind-` glob and explicit names already cover all
+# five, so removing a reason from the list changed nothing.
+#
+# `why_parked` below IS the single source: it is the only place that knows what
+# parks a worktree and what a person is told about it, and the three readers ask
+# IT rather than a list beside it. Found by the independent review.
+why_parked() {
+  local n="$1"
+  [ -e "$STATE_DIR/stuck-$n" ]       && { printf 'its removal was refused\n'; return 0; }
+  [ -e "$STATE_DIR/merge-held-$n" ]  && { printf 'merged, and it holds uncommitted work\n'; return 0; }
+  [ -e "$STATE_DIR/held-$n" ]        && { printf 'it holds uncommitted work\n'; return 0; }
+  [ -e "$STATE_DIR/merge-blind-$n" ] && { printf 'merged, and git could not say what it holds\n'; return 0; }
+  [ -e "$STATE_DIR/git-blind-$n" ]   && { printf 'git could not say what it holds\n'; return 0; }
+  return 1
+}
+
+# ...and what to DO about it, which is not the same line for all five.
+#
+# `BY_HAND_REMOVAL` is `git worktree remove --force`, and it was printed from one
+# place -- `park_worktree`, on the one path where the dispatcher had already
+# established that nothing goes with the worktree. Printed for every reason it
+# tells a person to discard exactly what the line above it says is in there:
+# "it holds uncommitted work", then `--force`. #37's Design notes are explicit --
+# "what must NOT happen is releasing the worktree to make the loop terminate:
+# the whole reason it is parked is that removing it would destroy something" --
+# and the dispatcher kept that promise itself while breaking it through the
+# operator, two lines apart. Found by the independent review.
+how_to_release() {
+  local n="$1" path="$2"
+  if [ -e "$STATE_DIR/stuck-$n" ]; then
+    printf "$BY_HAND_REMOVAL" "$path"
+    return 0
+  fi
+  # Everything else is "there is something in there", or "git would not say
+  # whether there is". Look first; the removal is the operator's call afterwards.
+  printf 'git -C %s status --short   # then commit, move or discard what is there' "$path"
+}
+
+# How many OWNED worktrees are waiting for a person rather than for an agent.
+#
+# EVERY reason a worktree waits for a person, and there are FIVE. `stuck-`
+# is a refused removal; `merge-held-` a merged worktree still holding
+# uncommitted work; `merge-blind-` one whose git could not say what it holds
+# -- which the change that added this counter also made permanent, since
+# nothing recreates a pruned upstream. `reap_abandoned` keeps two more, and
+# an earlier version of this comment asserted they did not exist: `held-`,
+# when the issue is closed, blocked or timed out and the worktree holds
+# uncommitted work, and `git-blind-`, when its git state could not be read.
+# Neither is exotic -- an agent whose issue goes `blocked` with one commit in
+# its worktree reaches `held-` -- and uncounted, `owned` never reaches 0 and
+# the drain never ends. That is #37's unbounded drain through a different
+# door, in the PR that closes #37. Found by the independent review.
+#
+# COUNTED PER ISSUE, not per marker, which is the other half of the same
+# finding. One worktree can carry two of these at once: `reap_merged` writes
+# `merge-blind-42` and keeps it owned, then `reap_abandoned` runs on that
+# same entry in the same pass -- its own header wrongly assumes a merged
+# worktree has been disowned by now -- reads `origin/main` rather than `@{u}`
+# so it CAN answer, finds nothing held, and a refused removal writes
+# `stuck-42` beside it. Two markers, one worktree, `parked` over-counts by
+# one, and `owned` goes to 0 with another worktree mid-work: the dispatcher
+# exits, its stack up under `restart: unless-stopped`. The `-lt 0` clamp is
+# what made that a silent wrong answer instead of a visible one.
+  # ...and only the ones that are actually OWNED. The two counts come from
+  # different directories, and a stale marker with no owned entry would make
+  # `owned` under-count and the dispatcher exit with a worktree still in
+  # flight -- the failure the drain bound exists to prevent, inverted.
+  # `disown_issue` -> `clear_issue_markers` keeps the pair together on
+  # release, and `reap_merged`'s `[ -d "$path" ] || disown_issue` self-heals
+  # a missing directory, so this test is what closes the remaining gap.
+# Still clamped, and now it should be unreachable: `parked` counts distinct
+# owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
+# ends the dispatcher with work in flight, and a clamp is cheaper than that.
+# Is this issue's worktree waiting for a PERSON, rather than for an agent?
+#
+# `why_parked` answers "does it carry a keep-marker", which is not the same
+# question: the two `reap_abandoned` markers are written while the agent is
+# deliberately left running. `count_parked_owned` wrapped that predicate in an
+# agent gate and `cmd_status` called it raw, so a worktree the counter refused
+# to call parked was printed by `status` as parked -- and told a person to go
+# and discard what is in a directory somebody is writing to. Same crack,
+# opposite direction. One predicate now. Found by the independent review.
+#
+# Prints the reason, or nothing. Non-zero when it is not waiting for a person.
+# The second argument is the VOICE, and it is the difference between a poll and
+# a look. `say` is `tee -a "$STATE_DIR/fleet.log"` and the `ps-blind-` latch is
+# per-issue dispatcher state, so a caller that does either is WRITING to
+# $STATE_DIR. #35's Acceptance -- the issue this PR closes -- is "fleet.sh
+# status leaves $STATE_DIR byte-identical", and `cmd_status` reached this
+# function for every live worktree. WORKFLOW.md tells an operator to run
+# `status` in a loop until it says idle, so the first look created the latch and
+# the dispatcher's own terminal then never printed the sentence explaining why
+# the drain had become unbounded -- it survived in fleet.log alone. A read-only
+# command consuming a live dispatcher's said-once marker because somebody
+# looked: the same shape as the bug #35 is about, through the door #37 opened.
+# Only `count_parked_owned`, which runs in the poll body, passes `say`. Found by
+# the independent review.
+parked_for_person() {
+  local n="$1" voice="${2:-quiet}" reason listing state
+  reason="$(why_parked "$n")" || return 1
+  # EVERY reason that means "there is something in there" is gated, not just the
+  # two `reap_abandoned` writes. The gate used to be reached only when a `held-`
+  # or `git-blind-` marker was on disk, so `merge-held-` and `merge-blind-`
+  # matched the pattern, failed that test, and were counted with no agent check
+  # at all -- and `reap_merged`'s own comment says why the tree is dirty there:
+  # "auto-merge fires the moment the last check passes, so review fixes made
+  # after it sit uncommitted here". That is an agent mid-work, in the window
+  # CLAUDE.md step 6 exists for. The last worktree's PR auto-merges while its
+  # agent is making review fixes, and two passes later the dispatcher signs off
+  # with it still writing.
+  #
+  # `stuck-` is the exception and stays ungated: a refused removal is the
+  # dispatcher having already ASKED and been told no, and gating it on a stale
+  # marker beside it is how the drain hung two rounds ago. Found by the
+  # independent review.
+  case "$reason" in
+    *"holds uncommitted work"|*"git could not say what it holds")
+      if ! listing="$(runner_agent_states)"; then
+        # SAID, once per pass. Taking the safe direction silently is #37's own
+        # complaint -- "nothing says the drain has become unbounded". One
+        # unreadable `worktree ps` is a hiccup; a persistent one means this
+        # worktree never counts, `owned` never reaches 0 and the drain never
+        # ends, and the operator has no way to know why. `live_worktrees`
+        # already says the equivalent for its own call. Found by the independent
+        # review.
+        # The `*-blind-` family idiom: one marker per issue, said once, and
+        # swept with the rest when the issue is released.
+        if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
+          : >"$STATE_DIR/ps-blind-$n"
+          say "  could not read the agent states, so whether #$n is still being"
+          say "  worked in cannot be answered -- it is NOT counted as waiting for"
+          say "  you, and a drain will not end while that stays true"
+        fi
+        return 1
+      fi
+      # Releasing the latch is the milder half of the same write -- it makes the
+      # dispatcher re-say a line it already said -- but it is still a write, so
+      # it is the poll's to make too.
+      if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
+      state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
+      case "$state" in working) return 1 ;; esac ;;
+  esac
+  printf '%s\n' "$reason"
+}
+
+count_parked_owned() {
+  local parked=0 n
+  # Over OWNED issues rather than over markers: one worktree can carry two
+  # reasons at once, and counting markers made `parked` exceed the worktrees it
+  # described. `why_parked` is the same predicate `status` and the farewell use.
+  #
+  # A MARKER MUST SURVIVE A PASS BEFORE IT COUNTS, and that is the difference
+  # between ending a drain and ending it too early. `stuck-` is terminal --
+  # written once on a refused removal and never retried. `held-` and
+  # `git-blind-` are RE-DERIVED every pass and cleared the moment the reason
+  # goes away, which is routine: `unblock.yml` rewrites `blocked` on every merged
+  # PR, so an issue can go blocked, be warned, come off `blocked` when its
+  # dependency lands, and go blocked again. Counting those the pass they appear
+  # let one transient label -- or one `worktree_holdings` hiccup -- drop `owned`
+  # to 0 and sign the dispatcher off with an agent still writing in there. That
+  # is #36's failure through a fifth door, opened by the fix for #37.
+  #
+  # Surviving a pass costs one poll of waiting on a worktree that really is
+  # parked, and costs nothing at all on `stuck-`, which is still there next pass.
+  for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+    if ! why_parked "$n" >/dev/null; then
+      rm -f "$STATE_DIR/parked-since-$n"
+      continue
+    fi
+    # ...and the agent gate, through the shared predicate so `status` cannot
+    # disagree with this count about the same worktree.
+    if ! parked_for_person "$n" say >/dev/null; then
+      rm -f "$STATE_DIR/parked-since-$n"
+      continue
+    fi
+    if [ -e "$STATE_DIR/parked-since-$n" ]; then
+      parked=$((parked + 1))
+    else
+      : >"$STATE_DIR/parked-since-$n"
+    fi
+  done
+  printf '%s\n' "$parked"
+}
+
 # NON-ZERO WHEN THE ANSWER COULD NOT BE READ, which is not the same as "nothing
 # is running": reading a failed call as zero live worktrees is how one transient
 # hiccup turns into three duplicate worktrees for issues that already have one,
@@ -1751,6 +1982,14 @@ park_worktree() {
   fi
   rm -f "$STATE_DIR/runner-blind-$num"
   : >"$STATE_DIR/stuck-$num"
+  # ...and the two re-derived markers go with it. After a refused removal they
+  # describe a question already answered: `held-` and `git-blind-` mean "the
+  # worktree holds something, or git would not say", and a removal that git
+  # itself refused has settled that. Left behind they are PERMANENT -- both reaps
+  # return early on `stuck-`, so nothing ever clears them -- and they then gate
+  # a worktree that is plainly waiting for a person. Found by the independent
+  # review.
+  rm -f "$STATE_DIR/held-$num" "$STATE_DIR/git-blind-$num"
   say "  could not remove it; it keeps its slot until you do: $byhand"
   card "$path" comment "#$num: $what, but the removal refused -- still here, still counted"
   return 0
@@ -1797,8 +2036,23 @@ reap_merged() {
     # how this guard fails open on the one thing it exists to protect, so it is
     # refused rather than guessed -- reap_abandoned's discipline exactly.
     holds=""; blind=0
-    unpushed="$(git -C "$path" log '@{u}..HEAD' --oneline 2>/dev/null | grep -c .)"
-    [ "${unpushed:-0}" != 0 ] && holds="$unpushed unpushed commit(s)"
+    # The EXIT STATUS, not just the count. `grep -c` prints 0 and succeeds when
+    # git printed nothing -- including when it printed nothing because `@{u}`
+    # does not resolve. GitHub deletes the head branch on merge, a `fetch
+    # --prune` in the worktree drops `origin/<branch>`, and from then on this
+    # read "holds nothing" for a worktree that may hold a commit made after
+    # auto-merge fired. Clean tree plus that answer is a `--force` removal, and
+    # the commit goes with the directory.
+    #
+    # The comment four lines up already said this is the third answer and must
+    # be refused rather than guessed; the discipline was applied to
+    # `worktree_dirty_count` below and skipped here. armaatus/autofleet#34.
+    if unpushed="$(git -C "$path" log '@{u}..HEAD' --oneline 2>/dev/null)"; then
+      unpushed="$(printf '%s' "$unpushed" | grep -c . || true)"
+      [ "${unpushed:-0}" != 0 ] && holds="$unpushed unpushed commit(s)"
+    else
+      blind=1
+    fi
     if ! dirty="$(worktree_dirty_count "$path")"; then
       blind=1
     elif [ "${dirty:-0}" != 0 ]; then
@@ -2612,8 +2866,28 @@ cmd_status() {
   fi
   echo
   echo "worktrees now:"
+  # A worktree waiting for a PERSON is not a worktree working, and after the
+  # drain learned to end with one outstanding, the state a reader actually meets
+  # is new: the dispatcher gone, `idle` on screen, and a directory still listed
+  # here with nothing saying why it survived or how to release it. Issue 37 asks
+  # this line to tell the two apart; the change that fixed the drain did not.
+  # Found by the independent review.
   live_worktrees | while IFS="$(printf '\t')" read -r num path; do
-    printf '  #%-5s %s\n' "$num" "$path"
+    # `parked_for_person`, not `why_parked`: a worktree whose agent is still
+    # working is not waiting for anybody, and printing the recovery line for it
+    # tells a person to discard what is being written.
+    #
+    # In the QUIET voice -- the default, spelled out here because this is the
+    # caller that makes it matter. `status` answers from $STATE_DIR and writes
+    # nothing back to it; see the note on `parked_for_person`. #35.
+    why="$(parked_for_person "$num" quiet)" && why="waiting for you -- $why" || why=""
+    if [ -n "$why" ]; then
+      printf '  #%-5s %s\n' "$num" "$path"
+      printf '         %s\n' "$why"
+      printf '         %s\n' "$(how_to_release "$num" "$path")"
+    else
+      printf '  #%-5s %s\n' "$num" "$path"
+    fi
   done
   echo
   echo "next up (ready, not in flight, not labelled $HUMAN_STEP_LABEL;"
@@ -2825,6 +3099,19 @@ print(int(spec))
 }
 
 cmd_run() {
+  # THE DRAIN LATCH, once. Three stop conditions were each spelling the same
+  # three lines -- set the flag, set the reason, say "-- launching nothing more,
+  # still reaping what is in flight" -- and a fourth arrived with this change.
+  # Three copies of a sentence are three chances for the stop conditions to stop
+  # saying the same thing, which is the property #36 is about. `reason` is what
+  # `fleet down: $reason` prints; `$2` is what this pass says on the way in.
+  # It closes over cmd_run's locals rather than taking them, because that is the
+  # whole of what it replaces. Found by the independent review.
+  enter_drain() {
+    drain_mode=true
+    reason="$1"
+    say "$2 -- launching nothing more, still reaping what is in flight"
+  }
   local auto=false deadline="" max_prs="" ; local -a wanted=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2945,15 +3232,9 @@ while that one is up."
     # dispatcher is what reaps a worktree once its PR merges, so killing it here
     # would strand every in-flight stack under `restart: unless-stopped`. It
     # keeps reaping and exits when nothing it owns is left.
-    if draining && ! $drain_mode; then
-      drain_mode=true
-      reason="you stopped it"
-      say "draining -- launching nothing more, still reaping what is in flight"
-    fi
+    if draining && ! $drain_mode; then enter_drain "you stopped it" "draining"; fi
     if [ -n "$deadline" ] && [ "$(date +%s)" -ge "$deadline" ] && ! $drain_mode; then
-      drain_mode=true
-      say "deadline passed -- launching nothing more, still reaping what is in flight"
-      reason="the deadline passed"
+      enter_drain "the deadline passed" "deadline passed"
     fi
 
     # Between passes, before anything writes: the log rotation must not land
@@ -2962,9 +3243,13 @@ while that one is up."
     prune_reviewed_markers
 
     forget_poll_answers
-    # The order is load-bearing in three places. reap_merged first, because a
-    # worktree whose PR merged is its business and reap_abandoned only ever looks
-    # at what is left owned. enforce_timebox before notice_stalled, because the
+    # ...here, once per pass, and nowhere else: see the note beside the
+    # definition.
+    #
+    # The order below is load-bearing in three places. reap_merged first,
+    # because a worktree whose PR merged is its business and reap_abandoned only
+    # ever looks at what is left owned. enforce_timebox before notice_stalled,
+    # because the
     # first writes `$POLL_CACHE/carded-` and the second reads it to avoid
     # repeating a board comment it has already made. And reap_abandoned LAST of
     # the four: it is the one that removes a worktree, and running it earlier
@@ -3000,8 +3285,23 @@ while that one is up."
       # `restart: unless-stopped` with nothing left to take them down. It stops
       # LAUNCHING here and keeps reaping, which is the same thing the top of the
       # loop does one pass later.
-      if check_drain; then drain_mode=true; reason="you stopped it"; break; fi
-      [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ] && { reason="it opened $opened worktree(s)"; break 2; }
+      if check_drain; then enter_drain "you stopped it" "draining"; break; fi
+      # A DRAIN, not an exit. `break 2` left the launch loop AND the poll loop,
+      # so the dispatcher stopped with its worktrees mid-work: nothing reaped
+      # them when their PRs merged, their stacks stayed up under
+      # `restart: unless-stopped`, and $OWNED_DIR kept entries the next
+      # dispatcher inherited and counted against its cap. The comment a few
+      # lines above records that exact bug being fixed for the drain path;
+      # `--until` and `--for` set `drain_mode` and keep reaping, and
+      # docs/WORKFLOW.md advertises all three as equivalent. They were not.
+      # armaatus/autofleet#36.
+      # No `! $drain_mode` guard: the enclosing loop is `while ! $drain_mode`,
+      # and the only assignment inside it breaks out at once, so it could never
+      # be false here and reading it suggested otherwise.
+      if [ -n "$max_prs" ] && [ "$opened" -ge "$max_prs" ]; then
+        enter_drain "it opened $opened worktree(s)" "opened $opened worktree(s)"
+        break
+      fi
 
       # EVERY ITERATION, which is what makes one check cover both halves of the
       # rule: it holds when a foundation issue was already running when this
@@ -3136,18 +3436,76 @@ while that one is up."
     # it keeps polling, because reaping a merged worktree and enforcing the
     # time-box are its job in both modes.
     local owned; owned="$(ls "$OWNED_DIR" 2>/dev/null | grep -c .)"
+    # ...minus the ones waiting for a PERSON. `park_worktree` keeps a worktree
+    # owned when its removal was refused, which is right -- releasing it would
+    # destroy what could not be removed. But the loop exits only on
+    # `owned == 0`, and under a drain `queued` is forced to 0, so a parked
+    # worktree made that the only exit and it never came: the dispatcher polled
+    # forever, `status` never said idle, and `cmd_run` refuses a second
+    # dispatcher while one is alive. `stop.sh` promises "exits once nothing is
+    # left". armaatus/autofleet#37.
+    local parked; parked="$(count_parked_owned)"
+    [ "$parked" -gt 0 ] && owned=$(( owned - parked ))
+    # Still clamped, and now it should be unreachable: `parked` counts distinct
+    # owned issues, so it cannot exceed `owned`. Kept because a wrong answer here
+    # ends the dispatcher with work in flight, and a clamp is cheaper than that.
+    [ "${owned:-0}" -lt 0 ] && owned=0
+    # THE DRAIN COMES FIRST, and in BOTH modes. Under a drain nothing launches,
+    # so what is still queued cannot keep the dispatcher alive -- only what it
+    # still owns can. The guard used to live on the `$auto` branch alone, and in
+    # LIST mode that was the wedge this PR's own `--max-prs` fix created:
+    #
+    #   `wanted` is pruned only INSIDE the launch loop, and that loop is gated
+    #   on `while ! $drain_mode`. So `run --max-prs 1 148` launches #148,
+    #   `remaining+=("$n")` keeps it in `wanted` because it is in flight rather
+    #   than done, the next iteration hits the cap, latches the drain, and the
+    #   launch loop is never entered again. `queued` is stuck at 1 forever --
+    #   including after #148's PR merges and `reap_merged` disowns it. `owned`
+    #   reaches 0; `queued` never does.
+    #
+    # That is #37's wedge re-created by #36's fix, in the one mode #37's fix does
+    # not cover, and `--auto --max-prs N` was fine (`wanted` is empty there),
+    # which is why the suite stayed green. `--until` and `--for` in list mode had
+    # the same shape already, so this fixes all three rather than `--max-prs`
+    # alone -- which is what makes "equivalent to the other two" true.
+    # Found by the independent review.
     local queued=0
-    if [ "${#wanted[@]}" -gt 0 ]; then
+    if $drain_mode; then
+      queued=0
+    elif [ "${#wanted[@]}" -gt 0 ]; then
       queued="${#wanted[@]}"
-    elif $auto && ! $drain_mode; then
+    elif $auto; then
       # Counted from the lists already in hand rather than by asking `in_flight`
       # per issue: that made two API calls each, and a 200-issue backlog on a
       # 60-second poll is how you meet gh's secondary rate limit.
-      queued="$(count_startable)"
+      # ...and its documented non-zero kept. Discarded, `queued` was empty and
+      # `[ "" -eq 0 ]` wrote a bash error to stderr every poll during a `gh`
+      # outage -- exactly when the log most needs to be readable. "Could not
+      # tell" is not "nothing left": it keeps polling.
+      queued="$(count_startable)" || queued=1
     fi
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
+      if [ "${parked:-0}" -gt 0 ]; then
+        # Named on the way out, every time, because a worktree nobody mentions
+        # is one nobody releases.
+        say "$parked worktree(s) are waiting for you rather than for an agent:"
+        for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+          why="$(why_parked "$n")" || continue
+          say "  #$n -- $why"
+          say "    $(how_to_release "$n" "$(owned_path "$n")")"
+        done
+      fi
       if $drain_mode; then
-        reason="${reason:-you stopped it}; everything in flight has landed"
+        # NOT "everything in flight has landed" when something has not: the
+        # parked worktrees named just above are exactly the work that did not
+        # land, and signing off with the one thing that did not happen is how a
+        # reader stops reading the lines that say what to do about it. Found by
+        # the independent review.
+        if [ "${parked:-0}" -gt 0 ]; then
+          reason="${reason:-you stopped it}; everything else in flight has landed, and $parked worktree(s) are waiting for you"
+        else
+          reason="${reason:-you stopped it}; everything in flight has landed"
+        fi
       elif $auto && $declined; then
         reason="the backlog has nothing startable left, and what it was given was declined"
       elif $auto; then
@@ -3168,9 +3526,9 @@ while that one is up."
 
 # Sourced by tests/test_fleet.sh, which exercises one function at a time against
 # a stubbed runner. Executed, it dispatches as usual. (It said
-# `tests/test_orca_fleet.sh` until the independent review of this change: that
-# file was renamed with the runner seam and the sweep that fixed the sibling
-# reference in `remove_worktree` passed over this one.)
+# `tests/test_orca_fleet.sh` until the independent review of #1: that file was
+# renamed with the runner seam and the sweep that fixed the sibling reference in
+# `remove_worktree` passed over this one.)
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
