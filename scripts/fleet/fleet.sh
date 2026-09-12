@@ -883,7 +883,11 @@ prune_review_logs() {
     # A PR with a reviewer still writing is not eligible for anything: the
     # deleting loop skips it, and granting grace here would mean the pass after
     # the reviewer finishes deletes with no grace at all.
-    [ -e "$REVIEWING_DIR/$num_seen" ] && continue
+    if [ -e "$REVIEWING_DIR/$num_seen" ]; then
+      local held_seen=""
+      read -r held_seen _ <"$REVIEWING_DIR/$num_seen" 2>/dev/null || true
+      reviewer_alive "$held_seen" && continue
+    fi
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
   done
   for num_seen in $closed; do
@@ -904,7 +908,16 @@ prune_review_logs() {
     # had that review's output unlinked under the agent still writing it, and
     # the sweep would have SAID it swept it. `rotate_fleet_log` was given this
     # guard for the sibling file; this sweep was not. Found by `/code-review`.
-    [ -e "$REVIEWING_DIR/$num" ] && continue
+    # A LIVE reviewer, asked the same way the rotation asks -- the comment
+    # claimed parity and the code tested mere existence, so a marker left by a
+    # SIGKILL blocked this PR's transcripts from ever being swept. Only a
+    # definite 0 blocks, for the same reason as there: a 2-marker is never
+    # cleared, so blocking on it is permanent. Found by the independent review.
+    if [ -e "$REVIEWING_DIR/$num" ]; then
+      local held_by=""
+      read -r held_by _ <"$REVIEWING_DIR/$num" 2>/dev/null || true
+      reviewer_alive "$held_by" && continue
+    fi
     case " $open_prs " in
       *" $num "*) rm -f "$dir/.closed-$num"; continue ;;   # still open
     esac
@@ -1065,15 +1078,23 @@ prune_reviewed_markers() {
   # comment and #74's Scope both claimed otherwise. The phase could not catch it
   # either: it built markers under the same path the code used. Found by the
   # independent review.
-  local roots="$REPO_ROOT" w
+  # NEWLINE-DELIMITED, and read as lines. A space-joined list word-splits, and
+  # `$FLEET_DIR` and the worktree paths are both things a host sets -- so a
+  # worktree under `/Users/me/my projects/...` was silently skipped, which is the
+  # same shape as the `$STATE_DIR`-with-a-space glob this file already guards.
+  # Found by the independent review.
+  local roots w
+  roots="$REPO_ROOT"
   for w in "$OWNED_DIR"/*; do
     [ -e "$w" ] || continue
     w="$(cat "$w" 2>/dev/null)"
-    [ -d "$w/.autofleet/run" ] && roots="$roots $w"
+    [ -d "$w/.autofleet/run" ] && roots="$roots
+$w"
   done
-  local dir f sha removed=0
-  for dir in $roots; do
-  dir="$dir/.autofleet/run"
+  local dir f sha removed=0 root
+  while IFS= read -r root; do
+  [ -n "$root" ] || continue
+  dir="$root/.autofleet/run"
   # `continue`, NOT `return 0`. This was left over from the single-root version,
   # where returning was right. Multi-root it exits the whole function on the
   # FIRST root -- the dispatcher checkout -- and that is the one most likely to
@@ -1088,7 +1109,7 @@ prune_reviewed_markers() {
     sha="$(basename "$f")"; sha="${sha#reviewed-}"
     case "$sha" in *[!0-9a-f]*|"") continue ;; esac
     # `cat-file -e` first: a sha git has never heard of is not ours to judge.
-    git -C "$dir/../.." cat-file -e "$sha^{commit}" 2>/dev/null || continue
+    git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || continue
     # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
     # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
     # 141 -- so past a few hundred refs this said "on no branch" about a commit
@@ -1099,12 +1120,14 @@ prune_reviewed_markers() {
     # It fails SAFE now, like the `cat-file -e` above it: anything other than a
     # confidently empty answer keeps the record.
     local on_branch
-    on_branch="$(git -C "$dir/../.." branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
+    on_branch="$(git -C "$root" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
       || continue
     [ -n "$on_branch" ] && continue
     rm -f "$f" && removed=$((removed + 1))
   done
-  done
+  done <<EOF
+$roots
+EOF
   [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
   return 0
 }

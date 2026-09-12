@@ -474,13 +474,45 @@ import merge_gate; print(merge_gate.review_mode())'); }
   # unlinked under the agent still writing it. Found by `/code-review`.
   : >"$AUTOFLEET_DIR/reviews/pr-98-99999999.log"
   mkdir -p "$AUTOFLEET_DIR/reviewing"
-  printf '%s %s\n' "$$" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/98"
+  # A pid `reviewer_alive` accepts as OURS. The sweep asks that rather than
+  # testing the marker's existence -- a marker left by a SIGKILL would otherwise
+  # block this PR's transcripts from ever being swept -- so the harness's own
+  # `$$` is correctly rejected and would make this assert nothing.
+  printf '#!/bin/sh\nsleep "$@"\n' >"$WORK/bin/review.sh"; chmod +x "$WORK/bin/review.sh"
+  "$WORK/bin/review.sh" 30 & keeper=$!
+  printf '%s %s\n' "$keeper" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/98"
   AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   [ -e "$AUTOFLEET_DIR/reviews/pr-98-99999999.log" ] \
     || fail "a transcript was swept while a reviewer for that PR was still writing to it"
+  kill "$keeper" 2>/dev/null; wait "$keeper" 2>/dev/null
   rm -f "$AUTOFLEET_DIR/reviewing/98"
   ok "a transcript is not swept under its own running reviewer"
+
+  # ...and a STALE marker does not block it forever. The sweep used to test the
+  # marker's existence, so one left by a SIGKILL meant that PR's transcripts
+  # were never swept again -- the same permanent block the rotation had, for the
+  # same reason. Found by the independent review.
+  # ...and a marker whose holder `ps` CANNOT NAME does not block it forever.
+  # A dead-pid marker is not the case to worry about -- `live_reviewers` reaps
+  # those in the same pass -- so the only marker that can persist is
+  # `reviewer_alive`'s rc 2, which nothing ever clears. Testing the marker's
+  # EXISTENCE rather than asking meant that PR's transcripts were never swept
+  # again. Same permanent block as the rotation had, for the same reason, and
+  # asserted the same way: the decision, not the OS condition. Found by the
+  # independent review.
+  : >"$AUTOFLEET_DIR/reviews/pr-98-99999999.log"
+  rm -f "$AUTOFLEET_DIR/reviews/.closed-98"
+  printf '%s %s\n' 999999 "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/98"
+  for _ in 1 2; do
+    ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh >/dev/null 2>&1
+      reviewer_alive() { return 2; }
+      AUTOFLEET_KEEP_REVIEWS=2 prune_review_logs "42" yes ) >/dev/null 2>&1
+  done
+  rm -f "$AUTOFLEET_DIR/reviewing/98"
+  [ -e "$AUTOFLEET_DIR/reviews/pr-98-99999999.log" ] \
+    && fail "a marker whose holder ps cannot name blocked the sweep permanently, so that PR's transcripts are never collected"
+  ok "...and a marker ps cannot name does not block it forever"
 
   # ...and now the grace, from a clean slate: the passes above already spent
   # PR 99's, which is the rule working rather than a fixture problem.
