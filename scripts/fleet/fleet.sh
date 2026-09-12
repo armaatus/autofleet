@@ -891,11 +891,39 @@ prune_review_logs() {
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
   done
   for num_seen in $closed; do
-    if [ -e "$dir/.closed-$num_seen" ]; then
-      graced="$graced$num_seen "
-    else
-      : >"$dir/.closed-$num_seen"
+    if [ ! -e "$dir/.closed-$num_seen" ]; then
+      : >"$dir/.closed-$num_seen"       # first pass seeing it closed: grace it
+      continue
     fi
+    # CONFIRMED CLOSED, not merely absent from an author-scoped list -- and
+    # asked ONCE PER PULL REQUEST, here, rather than once per transcript in the
+    # loop below. The open list comes from `gh pr list --author "@me"`, which is
+    # right for deciding whom to REVIEW and wrong for "is this PR still open":
+    # on a host where the worktrees open PRs under a different account than the
+    # dispatcher's `gh` login, every one of them reads as closed and loses its
+    # transcripts. The comment above named that hazard among three and the code
+    # guarded the other two.
+    #
+    # The call used to sit in the deleting loop, so the PR with thirteen
+    # transcripts #70 measured cost thirteen identical calls -- every poll,
+    # forever, because a PR that answers OPEN is never deleted and so never
+    # stops being a candidate. At the default 60s poll that is ~18,700 calls a
+    # day against the same budget `next_issue` and `review_open_prs` spend, and
+    # gh's secondary rate limit is how this dispatcher breaks. Found by the
+    # independent review.
+    #
+    # An OPEN answer puts the PR BACK ON THE OPEN LIST for the rest of this
+    # sweep, which is what it is. Leaving it a permanent candidate meant its
+    # transcripts were never swept AND never trimmed either -- the newest-N cap
+    # below iterates `$open_prs`, which by construction did not contain it -- so
+    # the one case this call exists to protect was the one case that grew
+    # without bound. Anything but a confident answer keeps the files and keeps
+    # the grace, so a `gh` blip costs a pass rather than a store.
+    case "$(GH_PAGER=cat gh pr view "$num_seen" --json state --jq .state 2>/dev/null)" in
+      CLOSED|MERGED) graced="$graced$num_seen " ;;
+      OPEN) open_prs="$open_prs $num_seen"; rm -f "$dir/.closed-$num_seen" ;;
+      *) ;;
+    esac
   done
 
   for f in "$dir"/pr-*.log; do
@@ -931,22 +959,11 @@ prune_review_logs() {
     # its own comment claimed it did. The `sweeps` phase could not catch it
     # because no PR there ever had two transcripts alive at once. Found by the
     # independent review.
+    # `$graced` is "past its grace pass AND confirmed closed by gh", both
+    # decided per pull request above. Everything else keeps its transcripts.
     case " $graced " in
       *" $num "*) ;;                # eligible since a previous pass: sweep it
       *) continue ;;                # first pass seeing it closed: keep them all
-    esac
-    # CONFIRMED CLOSED, not merely absent from an author-scoped list. The open
-    # list comes from `gh pr list --author "@me"`, which is right for deciding
-    # whom to REVIEW and wrong for "is this PR still open": on a host where the
-    # worktrees open PRs under a different account than the dispatcher's `gh`
-    # login, every one of them reads as closed and loses its transcripts. The
-    # comment above named that hazard among three and the code guarded the other
-    # two. One `gh` call per candidate, and candidates are rare -- a PR reaches
-    # here only after a grace pass. Anything but a confident CLOSED or MERGED
-    # keeps the file. Found by the independent review.
-    case "$(GH_PAGER=cat gh pr view "$num" --json state --jq .state 2>/dev/null)" in
-      CLOSED|MERGED) ;;
-      *) continue ;;
     esac
     rm -f "$f" && removed=$((removed + 1))
   done
@@ -973,8 +990,7 @@ EOF
   for f in "$dir"/.closed-*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"; num="${num#.closed-}"
-    ls "$dir"/pr-"$num"-"*.log" >/dev/null 2>&1 || \
-      ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
+    ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
   done
   [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
   return 0
@@ -1148,9 +1164,15 @@ review_open_prs() {
   # is a thing to opt into deliberately, not a side effect of turning on local
   # review. `@me` is the account gh is logged in as, which in the fleet's case
   # is also the account every worktree opens PRs with.
-  local listing
+  # ONE NUMBER, because the guard below only guards while it equals the limit.
+  # Both were literal `50`, and a page size changed in one place would have left
+  # the guard passing a truncated listing through as an answer -- which empties
+  # the transcript store once, permanently, and that is the single failure the
+  # `prs_answered` split exists to prevent. Hard rule 3. Found by the
+  # independent review.
+  local listing pr_page=50
   listing="$(GH_PAGER=cat gh pr list --state open --author "@me" \
-               --json number,isDraft,headRefOid --limit 50 2>/dev/null)" || {
+               --json number,isDraft,headRefOid --limit "$pr_page" 2>/dev/null)" || {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
 
@@ -1174,7 +1196,7 @@ print(" ".join(str(p["number"]) for p in json.load(sys.stdin)))
   if [ "$(printf '%s' "$listing" | python3 -c '
 import json, sys
 print(len(json.load(sys.stdin)))
-' 2>/dev/null)" = 50 ]; then
+' 2>/dev/null)" = "$pr_page" ]; then
     prs_answered=no
   fi
   # `yes` only when the parse produced something we can trust: `gh` succeeding
@@ -2607,9 +2629,13 @@ while that one is up."
   # are cleared before this dispatcher counts anything, rather than reaped
   # one-by-one against a `kill -0` that cannot tell the difference.
   stop_reviewers >/dev/null
-  # ...and the "already said it" marker, so this dispatcher explains its own
-  # holds rather than inheriting a previous run's silence.
-  rm -f "$FOUNDATION_HOLD_SAID"
+  # ...and the "already said it" markers, so this dispatcher explains its own
+  # holds rather than inheriting a previous run's silence. `rotate-blind` is the
+  # same shape and was cleared by nothing at all, so "rotating with a pid ps
+  # cannot name" was said once per MACHINE -- an operator debugging truncated
+  # reviewer output next month got no line at all. Found by the independent
+  # review.
+  rm -f "$FOUNDATION_HOLD_SAID" "$STATE_DIR/rotate-blind"
 
   record_dispatcher
   echo $$ >"$PIDFILE"
