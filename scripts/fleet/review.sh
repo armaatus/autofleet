@@ -402,7 +402,16 @@ on_exit() {
   signal_reviewer TERM
   rm -f "${AUTOFLEET_REVIEW_MARKER:-}"
 }
-trap 'kill_reviewer; exit 143' TERM INT
+# Refunded, like the stop path below and for the same reason: a reviewer killed
+# is not a reviewer that submitted nothing, and #33's Acceptance groups the two
+# retryable cases together. `stop_reviewers` heals the dispatcher's own kills by
+# deleting the records; a person pressing Ctrl-C at the terminal has nothing
+# doing that for them, so this was the one kill path that charged the cap for a
+# run the reviewer never got to finish. `unspent_try` rather than
+# `unspent_try_any`: this trap is installed after `head` is resolved, which is
+# the distinction three rounds got wrong on one path or another.
+# Found by the independent review.
+trap 'kill_reviewer; unspent_try; exit 143' TERM INT
 
 waited=0
 while kill -0 "$reviewer" 2>/dev/null; do

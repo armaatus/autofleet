@@ -1164,18 +1164,27 @@ rotate_fleet_log() {
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   [ "$size" -gt "$max" ] || return 0
   # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
-  # silent. It called `is_review_record`, which does not exist on this branch --
-  # it arrives with #42 -- so `command not found` was swallowed by `2>/dev/null`,
-  # the `&& continue` never fired, and EVERY file in the directory blocked
-  # rotation while the dispatcher ran a nonexistent command once per file per
-  # poll. And blocking on any marker rather than a live pid means rotation
-  # starves: `fleet.sh` deliberately keeps a marker whose pid `ps` cannot
-  # identify, and that one survives for the dispatcher's life, after which
+  # silent. It called `is_review_record` when that predicate did not yet exist on
+  # this branch, so `command not found` was swallowed by `2>/dev/null`, the
+  # `&& continue` never fired, and EVERY file in the directory blocked rotation
+  # while the dispatcher ran a nonexistent command once per file per poll. And
+  # blocking on any marker rather than a live pid means rotation starves:
+  # `fleet.sh` deliberately keeps a marker whose pid `ps` cannot identify, and
+  # that one survives for the dispatcher's life, after which
   # AUTOFLEET_LOG_MAX_BYTES is not a bound at all. Found by `/code-review`, which
   # reproduced the 127.
+  #
+  # The predicate DOES exist now -- merging main brought it -- so this loop uses
+  # it rather than leaning on a record's first field being a sha that
+  # `reviewer_alive` happens to reject. That is the rule stated where
+  # `is_review_record` is defined: use the predicate, do not respell the suffix
+  # list or rely on what the contents happen to look like. This was the one loop
+  # over the directory still doing neither, and the comment above it still said
+  # the predicate was unavailable. Found by the independent review.
   if [ -d "$REVIEWING_DIR" ]; then
     for live in "$REVIEWING_DIR"/*; do
       [ -e "$live" ] || continue
+      is_review_record "$live" && continue
       local held=""
       read -r held _ <"$live" 2>/dev/null || true
       # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,

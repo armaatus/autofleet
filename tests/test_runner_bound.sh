@@ -95,6 +95,10 @@ WATCH_NAP=4931   # what the watchdog waits on, i.e. the bound itself
 # `blocker` blocks forever, `quick` returns at once. run.sh derives its own
 # REPO_ROOT from its path, so the copy looks there and finds only these.
 make_runner() {
+  # The previous one first. `guards` calls this twice and `cleanup` only ever saw
+  # the last $WORK, so every run of that phase left a temp directory holding a
+  # copy of run.sh behind. Found by the independent review.
+  [ -n "$WORK" ] && rm -rf "$WORK"
   WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
   mkdir -p "$WORK/tests"
   python3 - "$REPO_ROOT/tests/run.sh" "$WORK/tests/run.sh" "$@" <<'PY2'

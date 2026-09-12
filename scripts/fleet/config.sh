@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # The knobs a host project sets, and their defaults. Sourced by lib.sh, never
-# executed.
+# executed -- but not therefore harmless: the validation at the foot of this file
+# `exit`s on a knob it cannot accept, and in a sourced file that ends the
+# SOURCING shell. A bad value in `.autofleet/config` is fatal to every fleet
+# command, `stop.sh` included. Deliberate, and argued where the check is.
 #
 # autofleet ships no knowledge of any one project. Everything it needs to know
 # about the repo it is driving -- what a worktree has to provision, which labels
@@ -114,13 +117,13 @@
 # refuse the value; this is the same reasoning tests/run.sh applies to
 # AUTOFLEET_TEST_TIMEOUT, which had the check this one only had the argument
 # for. Found by the independent review.
-case "$AUTOFLEET_REVIEW_MAX_TRIES" in
-  ''|*[!0-9]*|0)
-    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
-         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
-    exit 2 ;;
-esac
-
+#
+# The check itself is at the BOTTOM of this file, after `.autofleet/config` is
+# sourced. Here it could only ever see the environment route: the host config is
+# read last so it can override these defaults, so a project writing
+# `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
+# the cap unchecked and the guard was decorative for the one route that matters.
+# Found by the independent review of the change that added it.
 # ------------------------------------------------------------- what is KEPT ---
 #
 # Every store under $FLEET_DIR only ever grew. On this machine the reviewer
@@ -194,3 +197,26 @@ esac
 if [ -f "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}" ]; then
   . "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}"
 fi
+
+# ----------------------------------------------------- knobs that must be sane
+#
+# AFTER the host config, because that is the route that matters: a value only
+# checked before it is checked on the one path nobody uses. See the note by
+# AUTOFLEET_REVIEW_MAX_TRIES above for why this knob in particular cannot be
+# allowed through wrong -- a non-number makes `[ N -ge X ]` return 2, the cap
+# test false, and the cap itself absent.
+#
+# FATAL, and fatal to every fleet command, not just the dispatcher: this file is
+# sourced by lib.sh, so `exit` here takes the sourcing shell with it -- including
+# `stop.sh`, which is the one you reach for when something is wrong. That is the
+# intended trade and it is named here rather than discovered: the message says
+# exactly which knob and what it got, and the fix is a one-line edit to the file
+# the message is about. A cap that is silently absent is the failure this exists
+# to prevent, and it cannot be prevented by a warning nobody reads in a
+# dispatcher log.
+case "$AUTOFLEET_REVIEW_MAX_TRIES" in
+  ''|*[!0-9]*|0)
+    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
+         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+    exit 2 ;;
+esac

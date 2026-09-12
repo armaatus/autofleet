@@ -698,6 +698,34 @@ GHSTUB
     done
     ok "...and a cap that is not a positive number is refused, not ignored"
 
+    # THROUGH THE CONFIG FILE, which is the route that matters and the one the
+    # check could not see: `.autofleet/config` is sourced LAST so it can override
+    # the defaults, and the check sat with the defaults. A host project writing
+    # `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file docs/CONFIGURATION.md
+    # documents this knob in reached the cap unchecked, so the guard was
+    # decorative for every real user of it and green here. The row above passes
+    # either way; this one is the one that failed. Found by the independent
+    # review of the change that added the check.
+    hostcfg="$WORK/hostcfg"
+    for bad in three 0 ""; do
+      printf 'AUTOFLEET_REVIEW_MAX_TRIES=%s\n' "$bad" >"$hostcfg"
+      cfg_out="$( (cd "$WORK/repo" \
+        && env -u AUTOFLEET_REVIEW_MAX_TRIES AUTOFLEET_CONFIG="$hostcfg" \
+             bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "a config file setting the cap to '$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a positive whole number" <<<"$cfg_out" \
+        || fail "a config file setting the cap to '$bad' failed without saying why: $cfg_out"
+    done
+    ok "...including when it arrives through .autofleet/config, which is read last"
+
+    printf 'AUTOFLEET_REVIEW_MAX_TRIES=5\n' >"$hostcfg"
+    ( cd "$WORK/repo" && env -u AUTOFLEET_REVIEW_MAX_TRIES AUTOFLEET_CONFIG="$hostcfg" \
+        bash -c '. ./scripts/fleet/config.sh' ) >/dev/null 2>&1 \
+      || fail "a valid cap in .autofleet/config was refused"
+    ok "...while a whole number there is accepted"
+
     ( cd "$WORK/repo" && AUTOFLEET_REVIEW_MAX_TRIES=4 bash -c '. ./scripts/fleet/config.sh' ) \
       >/dev/null 2>&1 || fail "a valid cap was refused"
     ok "...while a whole number is accepted"
@@ -798,6 +826,82 @@ GHSTUB
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
   ok "...and a stop clears the records"
+
+  # --------------------------------------------- when the sweep must NOT run
+  #
+  # The sweep decides what is gone by ABSENCE from a listing, so it is only ever
+  # as good as the listing. Both refusals below are argued at length where they
+  # are written and neither was pinned: deleting either `return 0` left the whole
+  # suite green, which is the shape this PR calls out twice and the standard
+  # CLAUDE.md hard rule 3 sets. Found by the independent review.
+  #
+  # The records are a live PR's `.done` -- the one thing stopping a reviewed head
+  # being handed a reviewer every poll -- and its attempt count. Sweeping them
+  # for want of a readable listing puts back the loop this PR removes.
+  plant_records() {
+    mkdir -p "$AUTOFLEET_DIR/reviewing"
+    printf '%s\n' "$PR_HEAD"   >"$AUTOFLEET_DIR/reviewing/$1.done"
+    printf '%s 1\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/$1.tries"
+  }
+  survived() { [ -e "$AUTOFLEET_DIR/reviewing/$1.done" ] && [ -e "$AUTOFLEET_DIR/reviewing/$1.tries" ]; }
+
+  # 1. A listing that does not parse. `open_prs` comes back EMPTY, which is
+  #    indistinguishable from "no PR is open" -- and those are opposite
+  #    instructions. Empty means sweep nothing, not sweep everything.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  printf 'not json at all\n' >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 77 \
+    || fail "an unparseable PR listing swept a live PR's records, so its reviewed head gets a reviewer again every poll"
+  ok "a listing that does not parse sweeps nothing"
+
+  # 1b. ...and an EMPTY BUT VALID listing, which is the only case the emptiness
+  #     guard still catches on its own. `[]` parses, so `prs_answered` is `yes`
+  #     and the refusal above does not fire; `open_prs` is empty and means "no PR
+  #     is open" rather than "could not tell", and the two reach the sweep as the
+  #     same string. Written as its own row because the obvious one -- the
+  #     unparseable listing above -- is pinned by `prs_answered` and leaves the
+  #     emptiness guard free to be deleted with the suite still green. That is
+  #     the "passes for a reason other than the one it claims" this file keeps a
+  #     tally of; this is the row that actually holds it.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  printf '[]\n' >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 77 \
+    || fail "an empty PR listing swept the records, so a transient 'no PRs' answer loses a live PR's attempt count"
+  ok "...and neither does an empty but valid one"
+
+  # 2. A listing at the PAGE LIMIT. `open_prs` is NON-EMPTY here and still not an
+  #    answer: an absent PR and one on the next page cannot be told apart, so the
+  #    emptiness guard above does not see this case at all. #72 added
+  #    `prs_answered` for its own sweep; this one reads the same signal.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 77
+  python3 - "$GH_PRLIST" "$PR_HEAD" <<'PY2'
+import json, sys
+# Exactly `pr_page` entries, none of them 77 -- so on a listing this size the
+# sweep must refuse rather than conclude 77 is gone.
+json.dump([{"number": 100 + i, "isDraft": False, "headRefOid": sys.argv[2]}
+           for i in range(50)], open(sys.argv[1], "w"))
+PY2
+  poll_review_open_prs
+  survived 77 \
+    || fail "a listing at the page limit swept the records of a PR that may simply be on the next page"
+  ok "...and neither does one truncated at the page limit"
+
+  # 3. A DRAFT is open. The review loop skips drafts, and the sweep must not read
+  #    that as gone: sweeping a draft's records restarts its attempt count the
+  #    moment it is marked ready. The one draft fixture in this file plants no
+  #    records, so the guarantee `review_open_prs` states was unasserted.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  plant_records 78
+  printf '[{"number":78,"isDraft":true,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
+  poll_review_open_prs
+  survived 78 \
+    || fail "a poll swept an open DRAFT's records, so its attempt count restarts when it is marked ready"
+  ok "...and a draft counts as open, so its records are left alone"
   ;;
 
   holds)
