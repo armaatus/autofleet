@@ -1032,9 +1032,16 @@ def phases_in(path):
     return set(re.findall(r"^  ([a-z0-9_]+)\)$", body, re.M))
 
 bad = covered = 0
+# The label each phase is REPORTED under, collected on the way past: `suite/phase`
+# for a suite with phases, bare `suite` for one that runs whole. Built here rather
+# than walked again below, so a change to the registry syntax needs one edit and
+# not two. Found by the independent review.
+labels = set()
 for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
     if not listed.strip():
+        labels.add(suite)
         continue
+    labels.update(f"{suite}/{name}" for name in listed.split())
     script = f"tests/test_{suite}.sh"
     try:
         defined = phases_in(script)
@@ -1065,15 +1072,6 @@ if not skippable:
     print("tests/run.sh has no SKIPPABLE registry; the skip allowlist now asserts nothing")
     bad = 1
 else:
-    # The label a phase is REPORTED under, which is what SKIPPABLE is matched
-    # against: `suite/phase` for a suite with phases, bare `suite` for one that
-    # runs whole.
-    labels = set()
-    for suite, listed in re.findall(r'"([a-z_]+):([^"]*)"', block.group(1)):
-        if listed.strip():
-            labels.update(f"{suite}/{name}" for name in listed.split())
-        else:
-            labels.add(suite)
     for name in sorted(set(skippable.group(1).split()) - labels):
         print(f"{name}: allowed to skip in tests/run.sh, but no such phase is registered")
         bad = 1

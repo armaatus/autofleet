@@ -17,7 +17,9 @@
 # means "this phase could not judge anything" and is reported as a skip. It is
 # the autotools convention. A phase may only use it if it is named in SKIPPABLE
 # below -- see the comment there for why a skip is a registry entry and not a
-# decision the phase gets to make alone.
+# decision the phase gets to make alone. AUTOFLEET_TEST_NO_SKIP=1 refuses even
+# those: a place where judging nothing is not an acceptable answer, which is what
+# a CI runner is.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -68,11 +70,21 @@ skipped=0; skips=""
 #
 # A registry rather than a label on the phase, for the same reason SUITES is a
 # registry: a list something else can read is what lets a reviewer see, in one
-# place, every phase that is allowed to judge nothing. Both entries below are
-# test_teardown.sh reap, which declines when docker is not running and when the
-# machine already carries an orphan stack a real sweep would destroy.
+# place, every phase that is allowed to judge nothing. ONE entry today, with two
+# reasons behind it: test_teardown.sh reap declines when docker is not running,
+# and again when the machine already carries an orphan stack a real sweep would
+# destroy.
 SKIPPABLE="teardown/reap"
-may_skip() { printf '%s\n' $SKIPPABLE | grep -qxF -- "$1"; }
+may_skip() {
+  # ...and nowhere at all when the caller says skips are not acceptable here.
+  # "Machine state, not diff state" is true of a laptop and false of CI: a
+  # missing docker on a runner is an infrastructure regression, and a green run
+  # with a count in it is how that goes unnoticed for a month. The allowlist
+  # bounds WHICH phase may decline; this bounds WHERE. Found by the independent
+  # review. Off by default, because the local ergonomics are what #78 was about.
+  [ -z "${AUTOFLEET_TEST_NO_SKIP:-}" ] || return 1
+  printf '%s\n' $SKIPPABLE | grep -qxF -- "$1"
+}
 
 # Every phase runs under a bound, because the failure this runner is worst at
 # reporting is the one that produces nothing. CI run 34658821929 printed
@@ -314,10 +326,18 @@ run_one() {
     # named as the specific one, because "add it to SKIPPABLE" and "this phase
     # has a bug" are different answers and the reader has to pick.
     report_fail "$label"
-    printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
-      "$SKIP_RC" "$label"
-    printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
-    printf '       in that list where a reviewer can see it.\n'
+    if [ -n "${AUTOFLEET_TEST_NO_SKIP:-}" ]; then
+      # Nothing to add to a list here: the run was told that skipping is not an
+      # acceptable answer in this place, and a message about SKIPPABLE would send
+      # the reader to edit a list that is not what refused them.
+      printf '       exited %s (skip), and AUTOFLEET_TEST_NO_SKIP is set: this run\n' "$SKIP_RC"
+      printf '       does not accept a phase that judged nothing.\n'
+    else
+      printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
+        "$SKIP_RC" "$label"
+      printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
+      printf '       in that list where a reviewer can see it.\n'
+    fi
     sed 's/^/       /' "$out"
   else
     report_fail "$label"
@@ -368,7 +388,7 @@ echo
 # the standards review, which reproduced `1 failed, 0 passed, 1 skipped: skipper:
 # failer` and could not say which name had failed.
 skip_note=""
-[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped ($(echo $skips))"
+[ "$skipped" -gt 0 ] && skip_note=", $skipped skipped (${skips# })"
 if [ "$fail" -gt 0 ]; then
   echo "$fail failed, $pass passed$skip_note. failed:$failed" >&2
   exit 1

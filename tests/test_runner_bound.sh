@@ -140,9 +140,10 @@ if n != 1:
     sys.exit("could not find the SUITES registry in %s" % src)
 # The copy gets its own allowlist for the same reason it gets its own suites:
 # the fixtures are throwaway names the real one has never heard of. `skipper*`
-# fixtures are listed, `rogue*` fixtures deliberately are NOT -- that pair is
-# what the `skips` phase uses to tell an agreed skip from an unlisted one.
-allowed = " ".join(n for n in names if n.startswith("skipper"))
+# and `marker*` fixtures are listed, `rogue*` fixtures deliberately are NOT --
+# that pair is what the `skips` phase uses to tell an agreed skip from an
+# unlisted one.
+allowed = " ".join(n for n in names if n.startswith(("skipper", "marker")))
 s, n = re.subn(r'SKIPPABLE="[^"]*"', 'SKIPPABLE="%s"' % allowed, s, count=1)
 if n != 1:
     sys.exit("could not find the SKIPPABLE registry in %s" % src)
@@ -178,6 +179,21 @@ EOF
         cat >"$WORK/tests/test_$name.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "SKIP: nothing here to judge"
+exit 77
+EOF
+        ;;
+      marker*)
+        # The marker race, made deterministic. The watchdog writes the marker and
+        # THEN kills, so a phase that exits on its own in that window leaves one
+        # behind having exited. Rather than time it, the fixture writes the
+        # marker itself: it is started by the runner as a background job, so its
+        # $PPID is the runner pid the marker is named after. Then it exits 77 --
+        # marker present, rc=77, which is exactly the state the BLOCKED branch
+        # has to read as a skip and not as a kill.
+        cat >"$WORK/tests/test_$name.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "SKIP: declined, and the marker is there too"
+: >"/tmp/autofleet-suite.$PPID.blocked"
 exit 77
 EOF
         ;;
@@ -325,6 +341,58 @@ case "${1:-}" in
   grep -q "1 failed" "$WORK/out" \
     || fail "the summary did not count the failure: $(cat "$WORK/out")"
   ok "...while any other non-zero is still a failure"
+
+  # The RED summary line, whole. It is the line somebody reads at a glance to
+  # learn what happened, and it carried both defects the review passes found: the
+  # skip was not counted on this path at all, and the two name lists sat behind
+  # two bare colons -- `1 failed, 0 passed, 1 skipped: skipper: failer`, in which
+  # `skipper` reads as a phase that failed. Grepping `1 failed` could not see
+  # either, so the line is pinned in full. Found by the independent review.
+  grep -q "1 failed, 0 passed, 1 skipped (skipper). failed: failer" "$WORK/out" \
+    || fail "the red summary line does not separate the skipped from the failed: $(cat "$WORK/out")"
+  ok "...and the red summary says which name is which"
+
+  # The marker race: a phase that exits 77 in the window between the watchdog
+  # writing the marker and its kill landing. It EXITED, so it was not blocked --
+  # a killed phase comes back 137 -- and reporting it BLOCKED both misnames it
+  # and counts it toward MAX_BLOCKED, which can end the whole run early. The
+  # fixture writes the marker itself rather than racing for it, so this is a
+  # state assertion and not a flake. Found by the independent review.
+  make_runner marker
+  AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  grep -q "BLOCKED" "$WORK/out" \
+    && fail "a phase that exited 77 with the marker present was reported BLOCKED: $(cat "$WORK/out")"
+  grep -q "skip marker" "$WORK/out" \
+    || fail "a phase that exited 77 with the marker present was not a skip: $(cat "$WORK/out")"
+  [ "$rc" = 0 ] || fail "the marker made a skip fail the run (rc=$rc): $(cat "$WORK/out")"
+  ok "a skip that leaves the blocked marker behind is still a skip"
+
+  # AUTOFLEET_TEST_NO_SKIP: the allowlist bounds WHICH phase may decline, this
+  # bounds WHERE. On a runner a missing docker is an infrastructure regression,
+  # not a local detail, and a green run with a count in it is how that goes
+  # unnoticed. Found by the independent review.
+  make_runner skipper
+  AUTOFLEET_TEST_NO_SKIP=1 AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 1 ] \
+    || fail "AUTOFLEET_TEST_NO_SKIP let a skip pass (rc=$rc): $(cat "$WORK/out")"
+  grep -q "FAIL skipper" "$WORK/out" \
+    || fail "AUTOFLEET_TEST_NO_SKIP did not report the skip as a failure: $(cat "$WORK/out")"
+  grep -q "AUTOFLEET_TEST_NO_SKIP is set" "$WORK/out" \
+    || fail "the refusal did not name what refused it: $(cat "$WORK/out")"
+  grep -q "SKIPPABLE" "$WORK/out" \
+    && fail "the refusal sent the reader to edit a list that did not refuse them: $(cat "$WORK/out")"
+  ok "AUTOFLEET_TEST_NO_SKIP makes an allowed skip a failure, and says so"
+
+  # ...and an empty value is not "set". The obvious way to write the guard reads
+  # a cleared variable as a request for strictness, which is the opposite of the
+  # normal shell reading of one.
+  AUTOFLEET_TEST_NO_SKIP="" AUTOFLEET_TEST_TIMEOUT=10 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  rc=$?
+  [ "$rc" = 0 ] \
+    || fail "an empty AUTOFLEET_TEST_NO_SKIP was read as strict (rc=$rc): $(cat "$WORK/out")"
+  ok "...and an empty value leaves the skip alone"
 
   # ...and the half that keeps 77 from becoming a way to go green quietly. A
   # phase that exits it without being in SKIPPABLE is the phase that BROKE into
