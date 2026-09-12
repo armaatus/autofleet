@@ -1018,8 +1018,15 @@ import os, re, sys
 try:
     runner = open("tests/run.sh").read()
 except OSError:
-    if os.path.isdir("tests"):
-        sys.exit("tests/ exists but tests/run.sh does not; this check now asserts nothing")
+    # WHICH repository is this. Not `tests/` existing -- that is the commonest
+    # test-directory name there is, and a host project with pytest or jest under
+    # it would be told its agent configuration is broken. The discriminator has
+    # to name autofleet SUITE, not a generic directory: one of the scripts
+    # tests/run.sh dispatches is here exactly when the registry it reads should
+    # be here too. Found by the independent review, on the previous attempt at
+    # this branch, which used the directory.
+    if os.path.exists("tests/test_runner_bound.sh"):
+        sys.exit("autofleet's suite is here but tests/run.sh is not; this check now asserts nothing")
     print("  (no tests/run.sh -- not vendored, so there is no phase registry here)")
     sys.exit(0)
 block = re.search(r"SUITES=\((.*?)\n\)", runner, re.S)

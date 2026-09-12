@@ -273,7 +273,7 @@ report_fail() {
 run_one() {
   local label="$1"; shift
   local out="/tmp/autofleet-suite.$$" marker="/tmp/autofleet-suite.$$.blocked"
-  local rc=0 pid watcher skip_why=0
+  local rc=0 pid watcher skip_refusal=0
   rm -f "$marker"
 
   # The phase's output goes to a FILE, not a pipe. A pipe would keep this runner
@@ -325,7 +325,7 @@ run_one() {
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
-  elif [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_why=$?; [ "$skip_why" = 0 ]; }; then
+  elif [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_refusal=$?; [ "$skip_refusal" = 0 ]; }; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
     # ever running again.
@@ -338,7 +338,7 @@ run_one() {
     # to different places, and a phase that BROKE into exiting 77 needs the first
     # one even under the second.
     report_fail "$label"
-    if [ "$skip_why" = 1 ]; then
+    if [ "$skip_refusal" = 1 ]; then
       printf '       exited %s (skip), but %s is not in SKIPPABLE in tests/run.sh.\n' \
         "$SKIP_RC" "$label"
       printf '       Either the phase is broken, or the skip is legitimate and belongs\n'
