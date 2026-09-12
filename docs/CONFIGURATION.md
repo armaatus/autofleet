@@ -192,6 +192,52 @@ what the second opinion is actually for. It does not protect against an author
 determined to forge one. If you need that, keep `github`, or give the reviewer
 its own account and log `gh` in as that.
 
+### What the fleet keeps
+
+Every store under `$FLEET_DIR` only ever grew until these two knobs arrived, and
+the cost is not the bytes: stale state gets read as current. A transcript named
+for a head nobody is reviewing is a file the next reader opens looking for an
+answer. Set either to `0` to keep everything, which is what a host project
+debugging its own reviewer wants.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_KEEP_REVIEWS` | `3` | Reviewer transcripts kept **per open pull request**, and the off switch for the `reviewed-<sha>` sweep too, so `0` means every piece of review state the dispatcher would otherwise delete. |
+| `AUTOFLEET_LOG_MAX_BYTES` | `1048576` | Bytes of `fleet.log` kept before it rotates to `fleet.log.1`. **One** generation, because the point is a bound and two files at the cap is twice the cap. |
+
+**What goes, and when.** Older transcripts for an open PR go; every transcript
+for a PR that is no longer open goes regardless, because a review of a closed PR
+is answering a question nobody is asking. Never on the pass the PR drops off the
+open list, though, and never while a reviewer for it is still writing: the sweep
+keeps one bookkeeping file per closed PR, `reviews/.closed-<n>`, recording that
+it was already seen closed on an earlier pass, and collects that file as soon as
+the transcripts it tracks are gone.
+
+**What it costs.** `review_open_prs` runs the sweep from the open list it already
+has, plus **one `gh pr view <n> --json state` per candidate pull request per
+pass** — per pull request, not per transcript, and only after a whole grace pass.
+The open list is `--author "@me"`, which is right for deciding whom to review and
+wrong for "is this PR still open": on a host whose worktrees open PRs under a
+different account than the dispatcher's `gh` login, absence from it would mean
+every PR looked closed. Anything but a confident `CLOSED`/`MERGED` keeps the file.
+An `OPEN` answer returns the PR to the open list for the rest of that sweep, so
+its transcripts are capped like any other open PR's rather than accumulating with
+nothing to trim them — and drops the `.closed-<n>` marker, so the question is
+asked again on the pass after next rather than on every one. The sweep says how
+many it took.
+
+**The rotation** is `mv` rather than truncate-in-place, and **not while a
+reviewer is running** — `review.sh` is spawned with `>>` on `fleet.log` and holds
+the inode for up to `AUTOFLEET_REVIEW_TIMEOUT`, so rotating under it sends its
+output to a file nobody reads and the next rotation unlinks what it is still
+writing. The dispatcher's own writes are `tee -a`, fresh per call, and follow a
+rename without noticing. So the cap is a bound the fleet reaches **between**
+reviews, not a hard ceiling: on a busy fleet the log can sit above it until the
+reviewers finish. If the rotation cannot happen at all — a read-only state
+directory, an undeletable `fleet.log.1` — it says so once per dispatcher, and
+again after a rotation that works.
+
+
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,
