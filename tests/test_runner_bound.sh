@@ -588,9 +588,16 @@ PY2
   ok "a host installation is told the check does not apply, not that it failed"
 
   # ...and the caller turns that into silence rather than a green line.
-  # By behaviour, not by spelling: grepping for the `elif` line reds this row for
-  # a reformat that changes nothing. The shell fragment around the check is
-  # extracted and driven with a stub that exits 77 in its place.
+  # By behaviour, not by assertion-on-spelling: grepping for the `elif` line reds
+  # this row for a reformat that changes nothing. The shell fragment around the
+  # check is extracted and driven with a stub that exits 77 in its place.
+  #
+  # The EXTRACTION still anchors on text -- the `ok` line's opening words, and the
+  # second of this file's three then/fi ranges. That is a spelling, and it is one
+  # that fails LOUDLY: a missed match leaves caller.sh with an unterminated `if`,
+  # a syntax error and a red row, rather than a row that quietly stops asserting.
+  # Said here because that distinction is this phase's whole subject. Found by
+  # the independent review.
   cat >"$WORK/caller.sh" <<EOF
 ok()   { echo "OK: \$*"; }
 fail() { echo "FAIL: \$*"; exit 1; }
@@ -633,12 +640,19 @@ SUITES=(
 )
 SKIPPABLE="runner_bound/nosuch"
 EOF
-  printf '#!/usr/bin/env bash
+  # A HEREDOC, not printf. evals/lint.sh strips heredoc bodies and nothing else
+  # before looking for phase arms, so a `  bounds)` spelled outside one is a
+  # phase this file appears to define -- agreeing with the real arm today, and
+  # becoming a phantom the moment that arm is renamed together with its SUITES
+  # entry. The lint would then report a file that is correct. Found by the
+  # independent review.
+  cat >"$WORK/stale/tests/test_runner_bound.sh" <<'EOF'
+#!/usr/bin/env bash
 case "${1:-}" in
   bounds)
   ;;
 esac
-'     >"$WORK/stale/tests/test_runner_bound.sh"
+EOF
   out="$(cd "$WORK/stale" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && fail "a SKIPPABLE entry naming no registered phase was accepted: $out"
   grep -q "runner_bound/nosuch: allowed to skip" <<<"$out" \

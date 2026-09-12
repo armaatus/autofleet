@@ -88,6 +88,7 @@ SKIPPABLE="teardown/reap"
 # reason inheriting whichever message was written last. Found by the independent
 # review.
 may_skip() {
+  # shellcheck disable=SC2086 -- SKIPPABLE is a deliberate word list, like SUITES
   printf '%s\n' $SKIPPABLE | grep -qxF -- "$1" || return 1
   # Listed, and still refused HERE. "Machine state, not diff state" is true of a
   # laptop and false of a runner, where a missing docker is an infrastructure
@@ -322,6 +323,14 @@ run_one() {
   # reports `teardown/reap` as BLOCKED, and counts it toward MAX_BLOCKED, for a
   # phase that was never killed. The comment above exempted the pass and stopped
   # there. Found by /code-review.
+  # Asked ONCE, above the cascade. Assigning it inside one arm's condition and
+  # reading it from another couples the two: insert an arm between them, or
+  # reorder, and the reader is told AUTOFLEET_TEST_NO_SKIP refused a phase whose
+  # real problem was a missing SKIPPABLE entry -- the exact confusion the reason
+  # codes were added to remove. Latent, not live; found by the independent
+  # review.
+  [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_refusal=$?; }
+
   if [ -e "$marker" ] && [ "$rc" != 0 ] && [ "$rc" != "$SKIP_RC" ]; then
     blocked=$((blocked + 1))
     report_fail "$label"
@@ -331,7 +340,7 @@ run_one() {
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
     printf '  ok   %s\n' "$label"
-  elif [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_refusal=$?; [ "$skip_refusal" = 0 ]; }; then
+  elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
     # ever running again.
