@@ -315,10 +315,70 @@ something a test or a command can demonstrate).
 
 Below a `<!-- blockers -->` marker, `Blocked by #N` lines name its dependencies.
 [`unblock.yml`](../.github/workflows/unblock.yml) derives `blocked`/`ready` from
-those lines on every merge, and `fleet.sh` reads the same lines to order its
-queue. **Never hand-edit those labels.** The lines are editable, but changing one
-changes what other agents may start — do it deliberately, alone, and say so in
-the PR body.
+those lines, and `fleet.sh` reads the same lines to order its queue. **Never
+hand-edit those labels.** The lines are editable, but changing one changes what
+other agents may start — do it deliberately, alone, and say so in the PR body.
+
+It runs on a merged pull request, and on an issue `opened`, `edited`, `closed` or
+`reopened` — not only on a merge. Two consequences worth holding on to, because
+this file tells you to edit issue bodies as you work:
+
+- **Your edit relabels the whole backlog**, not just the issue you touched: every
+  run recomputes every open issue. That is deliberate and idempotent, and the
+  runs are serialised by a `concurrency` group on the job, newest wins. A
+  cancelled run can still stop partway through the backlog — so the stale label
+  is removed *before* the new one is added, which leaves an issue with neither
+  label rather than both. Neither is the fail-open state: `fleet.sh` starts
+  nothing that does not carry `ready`, and the next run finishes the job.
+
+  The ordering alone was not enough, and it took two goes to say so accurately.
+  It covers a run that *dies* between the calls. A run whose *removal fails* fell
+  straight through to the add, because the label list is a pre-run snapshot — so
+  a rate-limited `removeLabel('ready')` was recorded and `addLabels('blocked')`
+  ran anyway, producing the both-labels state the reorder was supposed to rule
+  out. The add is now **gated on the removal succeeding**: either both writes
+  land or neither does, and the issue keeps the single label it had.
+
+  What that leaves, stated because it is the honest end of it: an issue whose
+  removal failed keeps its old label. One that should have become `blocked` still
+  carries `ready`, and `ready_issues()` will start it on an open blocker until a
+  later run repairs it. The failure is recorded, the rest of the backlog is still
+  relabelled, and the run goes red — but a red check is not something `fleet.sh`
+  reads. Closing that last gap means teaching `ready_issues()` to consult
+  `blocked`, which is its own change.
+- **Only a line below the marker counts — when the body has one.** `Blocked by
+  #N` has to begin a line, below the **first** `<!-- blockers -->` marker;
+  everything under the earliest one is read, so pasting a second marker lower
+  down does not supersede the section above it, it adds to it. Below a marker,
+  prose in Goal, Scope or Design notes does not block anything — including a
+  sentence like *"no longer blocked by #7"*, which used to register as a blocker
+  and could get the agent that wrote it interrupted and its worktree reaped
+  (#47).
+
+  **A body with no marker is read whole**, and that is the case to be careful in.
+  The fallback is deliberate — reading those as unblocked would start work on a
+  foundation that has not landed — but it means any line that *begins* with
+  `Blocked by #N`, or with a list bullet and then `Blocked by #N`, counts
+  wherever it appears. Writing `- Blocked by #12 until that lands` into Design
+  notes on such an issue marks it `blocked`, and `fleet.sh` reads `blocked` as
+  "this worktree will never produce a merged PR": it interrupts the agent and
+  reclaims the slot. **If you are adding blocker lines to an issue that has no
+  marker, add the marker too** — that is what makes the rest of the body inert.
+
+  Three boundaries either way. The anchor sees the start of a line and nothing
+  before it, so a negation that *wrapped* onto the previous line still counts —
+  keep a blocker line, and any sentence about one, on one line. The prefix accepts
+  `-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]` and `**bold**`, so a bulleted mention is
+  a blocker as surely as a bare one. And **neither reader knows what a fenced code
+  block is** — a `<!-- blockers -->` line inside one is a marker like any other,
+  and being first it wins, so everything below it (ordinary prose included) is
+  read as blocker space. A pasted example is the body most likely to trip this,
+  and the two obvious dodges do not work: **indenting** it does not help (the
+  pattern allows leading whitespace) and **splitting it across two lines** does
+  not either (the pattern allows a newline inside the comment). What works is
+  leaving anything else on the line — write it inline in backticks the way this
+  page's prose does, or put a note after it. A line that contains only the marker
+  is a marker, however it is indented or wrapped.
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the
@@ -799,7 +859,8 @@ using this* — every by-hand check behind it was made on a worktree that was
 already finished — and this file is where the two come apart: **an agent plans
 before it edits**, so a worktree forty minutes into real work is legitimately
 empty. `blocked` is not a label a person types either —
-`unblock.yml` re-derives it on every merge, so it can arrive under an agent that
+`unblock.yml` re-derives it on any issue or merge event, so it can arrive under
+an agent that
 is mid-plan, as `needs-human-step` can arrive from the agent's own hand. So the
 first pass that finds a reason **warns**: it interrupts the agent, says on the
 card that the worktree goes next pass, and leaves it. The pass after that asks

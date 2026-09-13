@@ -94,7 +94,12 @@ find it**, including issues other than your own. Agents in parallel worktrees
 cannot see each other's findings; these bodies are the only channel between them.
 
 Never hand-edit the `blocked`/`ready` labels — `.github/workflows/unblock.yml`
-derives them from the `Blocked by #N` lines below the `<!-- blockers -->` marker.
+derives them from the `Blocked by #N` lines below the *first* `<!-- blockers -->`
+marker. **A body with no marker is read whole**, so on one of those any line that
+begins `Blocked by #N` — bullet or not, anywhere in Goal, Scope or Design notes —
+is a blocker. Writing one into your own issue marks it `blocked`, and the
+dispatcher reads that as "this worktree will never produce a merged PR": it
+interrupts you and reclaims the slot. Add the marker when you add the lines.
 Those lines *are* editable, and a genuinely missing dependency should be added,
 but changing one changes what other agents may start: do it deliberately, alone,
 and say so in the PR body.
