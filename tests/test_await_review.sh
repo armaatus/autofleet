@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Covers scripts/fleet/await-review.sh -- the half of the loop that decides what
+# an agent does about a review, which until now was one sentence regardless of
+# what the review said.
+#
+#   test_await_review.sh nitonly      a review declaring no Important findings ->
+#                                     the agent is told to answer, and told that
+#                                     answering costs no commit. It is NOT told
+#                                     to fix, because a fix moves the head, a
+#                                     moved head invalidates the review, and the
+#                                     next round starts. Measured on #85/#86/#88:
+#                                     three PRs stuck in exactly that cycle with
+#                                     answer-review.sh never once run.
+#   test_await_review.sh important    the same review with an Important finding ->
+#                                     the old instruction, unchanged. The floor is
+#                                     for nits; a data-loss bug still costs a
+#                                     round and should.
+#   test_await_review.sh untrailered  a review from before the trailer existed ->
+#                                     also the old instruction. Absent is not
+#                                     zero, and the direction that must not fail
+#                                     open is "said nothing" read as "said none".
+#
+# `gh` is stubbed on PATH and the fleet state dir is a temp dir, so nothing here
+# touches a pull request or the machine's fleet.
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok()   { echo "ok: $*"; }
+
+WORK=""
+cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; return 0; }
+trap cleanup EXIT
+
+# A worktree holding just the scripts under test, as its own git repo so the
+# branch and head lookups answer. Same shape as test_answer_review.sh's, and for
+# the same reason: await-review.sh imports merge_gate.py rather than
+# paraphrasing what counts as a review, so the whole .py set has to be here.
+make_fixture() {
+  WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
+  mkdir -p "$WORK/repo/scripts/fleet" "$WORK/repo/.github/scripts" "$WORK/bin"
+  cp -R "$REPO_ROOT"/scripts/fleet/. "$WORK/repo/scripts/fleet/"
+  cp "$REPO_ROOT"/.github/scripts/*.py \
+     "$REPO_ROOT/.github/scripts/pr_payload.sh" "$WORK/repo/.github/scripts/"
+  git -C "$WORK/repo" init -q -b work
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+
+  # Which trailers the stubbed review carries. Written to a file rather than
+  # exported into the stub's text, so the stub stays one string for every phase
+  # and a phase cannot silently test a stub it did not mean to write.
+  GH_TRAILERS="$WORK/trailers"; printf '%s' "${1:-}" >"$GH_TRAILERS"
+  GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
+  GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
+
+  cat >"$WORK/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+case "$*" in
+  *"repo view"*) echo "armaatus/autofleet"; exit 0 ;;
+  *"pr list"*)   echo 42; exit 0 ;;
+  # The rollup, which gates the red-build, dead-review and conflict paths. Green
+  # and MERGEABLE, so none of them fires and the wait reaches the review.
+  *statusCheckRollup*)
+    echo '{"statusCheckRollup":[{"name":"suite","status":"COMPLETED","conclusion":"SUCCESS"}],"mergeStateStatus":"BLOCKED","baseRefName":"main"}'
+    exit 0 ;;
+  *"pulls/42/comments"*) exit 0 ;;
+  *graphql*)
+    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" <<'PY'
+import json, sys
+oid, trailers = sys.argv[1], sys.argv[2]
+body = ("Nit: the comment above sync_tick() says what, not why.\n"
+        "Nit: the helper below it could be named for what it returns.\n"
+        + trailers)
+print(json.dumps({"data": {"repository": {"pullRequest": {
+    "headRefOid": oid,
+    "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+    "author": {"login": "armaatus"},
+    "reviews": {"nodes": [
+        {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+         "commit": {"oid": oid}, "author": {"login": "claude"},
+         "body": body, "comments": {"totalCount": 0}}]},
+    "comments": {"nodes": []},
+    "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                      "nodes": []}}}}}))
+PY
+    exit 0 ;;
+esac
+exit 0
+STUB
+  chmod +x "$WORK/bin/gh"
+  export GH_CALLS GH_HEAD GH_TRAILERS
+  # One poll, and a deadline it cannot reach: every phase here ends on the first
+  # payload, and a phase that does not should say so as a hang, not as a pass.
+  export AWAIT_REVIEW_POLL=1 AWAIT_REVIEW_DEADLINE=30
+  export AUTOFLEET_DIR="$WORK/fleet"
+  mkdir -p "$AUTOFLEET_DIR"
+  PATH="$WORK/bin:$PATH"
+}
+
+# No `timeout` wrapper: macOS does not ship one, and tests/run.sh already bounds
+# every phase (PHASE_TIMEOUT) and reaps the process group. A hang here is a phase
+# timeout, which is the report it should be.
+run_it() { (cd "$WORK/repo" && ./scripts/fleet/await-review.sh 42 2>&1); }
+
+NIT_ONLY='<!-- review-important: 0 -->
+<!-- review-findings: 2 -->'
+IMPORTANT='<!-- review-important: 1 -->
+<!-- review-findings: 2 -->'
+UNTRAILERED='<!-- review-findings: 2 -->'
+
+# The sentence the old path prints unconditionally, and the one the new path
+# prints instead. Matched on a fragment rather than the whole line so a reflow
+# does not turn a real regression into a passing test.
+FIX_LINE='Fix what is real'
+ANSWER_LINE='not a commit'
+
+case "${1:-}" in
+# ------------------------------------------------------------------- nitonly
+  nitonly)
+  make_fixture "$NIT_ONLY"
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  grep -qF "$ANSWER_LINE" <<<"$out" \
+    || { echo "$out" >&2; fail "a nit-only review did not say the answer is a comment, so the agent pushes and buys a round"; }
+  grep -qF "$FIX_LINE" <<<"$out" \
+    && { echo "$out" >&2; fail "a nit-only review still leads with 'Fix what is real', which is the instruction that costs the round"; }
+  grep -q 'answer-review.sh' <<<"$out" \
+    || fail "the one command that clears the hold was not named"
+  ok "a nit-only review sends the agent to answer-review.sh, not to a commit"
+  # The findings themselves are not suppressed -- this is a floor on what a
+  # round costs, not on what a reviewer may say.
+  grep -q 'sync_tick' <<<"$out" || fail "the nits were not printed; the floor is on the round, not on the findings"
+  ok "...and the nits are still printed in full"
+  ;;
+# ----------------------------------------------------------------- important
+  important)
+  make_fixture "$IMPORTANT"
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  grep -qF "$FIX_LINE" <<<"$out" \
+    || { echo "$out" >&2; fail "an Important finding no longer tells the agent to fix it"; }
+  grep -qF "$ANSWER_LINE" <<<"$out" \
+    && { echo "$out" >&2; fail "an Important finding was offered the nit remedy"; }
+  ok "an Important finding still costs a fix and a round"
+  ;;
+# --------------------------------------------------------------- untrailered
+  untrailered)
+  make_fixture "$UNTRAILERED"
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  grep -qF "$FIX_LINE" <<<"$out" \
+    || { echo "$out" >&2; fail "a review with no severity trailer stopped behaving as it did before the trailer existed"; }
+  grep -qF "$ANSWER_LINE" <<<"$out" \
+    && { echo "$out" >&2; fail "a MISSING review-important was read as zero -- this is the failure that fails open"; }
+  ok "no severity trailer means not said, not none"
+  ;;
+  *)
+  echo "usage: $0 {nitonly|important|untrailered}" >&2; exit 2 ;;
+esac
