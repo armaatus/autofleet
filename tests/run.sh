@@ -32,7 +32,7 @@ SUITES=(
 "brief:stage1 stage2 reading"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes skips hostlint guards interrupt orphans"
+"runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "cost:sums json empty attempts long_path filtered reaped subcommand"
