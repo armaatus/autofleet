@@ -301,6 +301,16 @@ SELFTEST = [
     # one, prose does not reach the parser at all. Every spelling that fits on a
     # line IS caught, above. Raised by the independent review.
     ("#40 is no longer\nblocked by #7", [], [7]),
+    # THE SECOND KNOWN LIMIT, and the same treatment. Neither reader knows what a
+    # fenced code block is, so a marker inside one is a marker: it is on its own
+    # line, and being first it wins. An issue that DOCUMENTS this convention by
+    # pasting an example is the body that trips it -- this change's own pull
+    # request carries that shape. Not a regression (an unanchored whole-body read
+    # found it too), and skipping fenced regions is a real change needing its own
+    # parity assertion in both readers, so it is recorded here rather than half
+    # done. Raised by the independent review.
+    ("```\n<!-- blockers -->\nBlocked by #51\n```\n\n<!-- blockers -->\n",
+     [], [51]),
     # No marker at all: the whole body, still anchored. 14 of this repo's open
     # issues have no marker, and a host project may never adopt one -- reading
     # those as unblocked is the direction that starts work on a foundation that

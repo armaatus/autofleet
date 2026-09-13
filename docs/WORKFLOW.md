@@ -365,11 +365,16 @@ this file tells you to edit issue bodies as you work:
   reclaims the slot. **If you are adding blocker lines to an issue that has no
   marker, add the marker too** — that is what makes the rest of the body inert.
 
-  Two boundaries either way. The anchor sees the start of a line and nothing
+  Three boundaries either way. The anchor sees the start of a line and nothing
   before it, so a negation that *wrapped* onto the previous line still counts —
-  keep a blocker line, and any sentence about one, on one line. And the prefix
-  accepts `-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]` and `**bold**`, so a bulleted
-  mention is a blocker as surely as a bare one.
+  keep a blocker line, and any sentence about one, on one line. The prefix accepts
+  `-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]` and `**bold**`, so a bulleted mention is
+  a blocker as surely as a bare one. And **neither reader knows what a fenced code
+  block is** — a `<!-- blockers -->` line inside one is a marker like any other,
+  and being first it wins, so everything below it (ordinary prose included) is
+  read as blocker space. If you are quoting the convention in an issue body,
+  indent the example or break the marker across the line; a pasted example is
+  the body most likely to trip this.
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the
