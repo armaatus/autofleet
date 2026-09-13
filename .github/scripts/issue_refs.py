@@ -92,8 +92,17 @@ CLOSES = re.compile(r"\b(?:" + _KEYWORDS + r")\s+#(\d+)\b", re.IGNORECASE)
 # JavaScript's does not, so `Blocked by #\u0667` was a blocker to the fleet and
 # invisible to the workflow -- a disagreement no parity check written in one of
 # the two languages can see.
+# NO `\*{1,2}` BRANCH. `*` is already in the class, so `**` is two iterations of
+# the outer group and the extra branch matched the same text two ways -- which
+# under a `*` quantifier is exponential, not merely redundant. A line of 22
+# asterisks took 15 SECONDS to fail; 30 would not finish. That is a line an issue
+# body can plausibly carry (a separator, a bold run), and it would hang the
+# workflow on every issue edit AND the dispatcher's queue, which reads this same
+# pattern through `ready_issues()`. Deleting the branch changes nothing about
+# what matches -- `**Blocked by #7**` still parses -- and 2000 asterisks now fail
+# in a tenth of a millisecond. Found by the independent review.
 BLOCKED_BY = re.compile(
-    r"^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\]|\*{1,2})[ \t]*)*"
+    r"^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\])[ \t]*)*"
     r"blocked\s+by\s+#([0-9]+)",
     re.IGNORECASE | re.MULTILINE)
 
@@ -254,6 +263,9 @@ SELFTEST = [
     ("- [x] Blocked by #7", [], [7]),
     ("> Blocked by #7", [], [7]),
     ("**Blocked by #7**", [], [7]),
+    # A separator line, which used to take exponential time to NOT match.
+    ("*" * 40, [], []),
+    ("<!-- blockers -->\n" + "*" * 40 + "\nBlocked by #7\n", [], [7]),
     ("<!-- blockers -->\n- [ ] Blocked by #7\n1. Blocked by #8\n", [], [7, 8]),
     # ...and the prefix stays a PREFIX. Prose is still prose.
     ("1. no longer blocked by #7", [], []),

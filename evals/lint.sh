@@ -1398,6 +1398,28 @@ def literal(name):
 
 wf_blocked, wf_marker = literal("BLOCKED_BY"), literal("BLOCKERS_MARKER")
 
+# ...and the prefix stays UNAMBIGUOUS. `\*{1,2}` alongside `*` in the character
+# class matched the same text two ways under a `*` quantifier, which is
+# exponential: 22 asterisks took 15 seconds to fail, and a separator line in an
+# issue body would hang this workflow on every edit and the dispatcher with it.
+# Timed rather than pattern-matched, because the next way to reintroduce it will
+# not be spelled the same. Found by the independent review.
+# TWENTY, not more. The probe has to be long enough that a reintroduced
+# ambiguity is unmistakably slow and short enough that it still RETURNS: at 40
+# asterisks the bad pattern never finishes and this check hangs the lint instead
+# of failing it, which is a worse outcome than the bug. Measured on the two
+# patterns: 20 asterisks is 2.6s ambiguous and 5 microseconds not.
+import time as _time
+_probe = "*" * 20 + "x"
+_t0 = _time.time()
+wf_blocked.search(_probe)
+m.BLOCKED_BY.search(_probe)
+if _time.time() - _t0 > 1.0:
+    sys.exit("the blocker pattern backtracks exponentially on a line of "
+             "asterisks; a separator line in any issue body would hang unblock.yml "
+             "and ready_issues() with it -- an alternative that overlaps the "
+             "character class has been reintroduced")
+
 # Character for character first, which is what #47's acceptance asked for: two
 # differently-spelled but equivalent patterns pass the behavioural run below and
 # are still the drift this section exists to catch, because the NEXT edit to
@@ -1488,6 +1510,20 @@ if not re.search(r"writeFailures\.push", code):
     sys.exit("unblock.yml no longer records a failed label write; a rate limit on "
              "one removal goes unreported and the run stays green with an issue "
              "left startable on an open blocker (#47)")
+# BOTH writes go through writeFailures, not just the removal. The policy was
+# stated in the diff and applied to one of the two: a 403 on addLabels threw,
+# abandoning every issue after it in the loop and discarding the failures already
+# collected -- and, since the removal now runs first, leaving that issue with
+# NEITHER label. Found by the independent review.
+add_call = re.search(r"addLabels\(\{(?:[^}]|\n)*?\}\)((?:[^;]|\n)*?);", code)
+if not add_call:
+    sys.exit("unblock.yml no longer has a readable addLabels call; this check "
+             "cannot see whether it handles its own failure")
+if "catch" not in add_call.group(1):
+    sys.exit("unblock.yml's addLabels has no catch; a rate limit there throws "
+             "mid-loop, abandons every issue after it, discards the writeFailures "
+             "already collected, and leaves that issue carrying NEITHER label "
+             "(#47)")
 if not re.search(r"core\.setFailed\(", code):
     sys.exit("unblock.yml no longer fails the run when a label write failed; a "
              "partly-relabelled backlog behind a green check is what Scope 3 was "
