@@ -47,11 +47,16 @@ jobs:
       # env.sh writes the .env the reap phase reads back. On a runner there is
       # no worktree to provision, but the derivation is a pure function of the
       # path and this is the same call setup.sh makes.
+      # --verbose, because a log is not a context window: the suite is quiet by
+      # default so an agent's context does not carry 137 lines of `ok` through
+      # three review rounds (#52), and a human opening a failed run here wants
+      # to see which phases got there before it. tests/test_runner_bound.sh
+      # quiet is the row that notices if this flag goes away.
       - name: the suite
         run: |
           set -euo pipefail
           ./scripts/fleet/env.sh
-          ./tests/run.sh
+          ./tests/run.sh --verbose
 
   install:
     # The installer is the only thing a new user runs, and the way it breaks is

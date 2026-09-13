@@ -4,6 +4,7 @@
 #   ./tests/run.sh                 # everything
 #   ./tests/run.sh fleet           # one suite
 #   ./tests/run.sh fleet card_says # one phase of one suite
+#   ./tests/run.sh --verbose       # ...and one line per phase while it runs
 #
 # The suites are shell, and several of them dispatch on a PHASE argument: one
 # process per case, so a case that wedges cannot take the rest of the file with
@@ -49,8 +50,58 @@ suite_command() {
   esac
 }
 
-want_suite="${1:-}"
-want_phase="${2:-}"
+# QUIET by default: a failing phase's whole captured output, a skip and its
+# reason, and the summary. Nothing per phase that passed, and no per-suite
+# header.
+#
+# The reader of this runner is usually an agent, and its context has to survive
+# an implementation plus three review rounds. 123 `ok` rows and 8 headers is 137
+# lines carrying exactly what `123 passed.` carries, and the brief makes the
+# suite run at least three times per issue -- so the useless part landed four or
+# five times over, and grew with every phase added here (#52). A dot per phase
+# is no better: a line of 123 dots is still a line, saying the same thing again.
+#
+# --verbose is today's output, unchanged, for a human debugging a wedged phase.
+# AUTOFLEET_TEST_VERBOSE=1 says it where the flag cannot be threaded through: a
+# CI matrix, a wrapper, a `make test` somebody else owns. Empty means unset, the
+# normal shell reading of a variable someone cleared -- the same reading
+# AUTOFLEET_TEST_NO_SKIP gets above.
+VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
+
+# The arguments, parsed rather than read off $1 and $2, because a flag has to be
+# accepted WHEREVER it appears: `./tests/run.sh fleet card_says --verbose` is
+# where somebody actually types it, and positionally that is a phase named
+# --verbose and a run that matches nothing.
+#
+# An unknown flag is REFUSED, and that is the whole reason this is a parser and
+# not a `case` on $1. The way this change breaks CI is a typo -- `--verbsoe` in
+# the workflow, read as a suite name, nothing matched, and a quiet exit nobody
+# reads twice. Exit 2 is what a mistyped suite name has always got.
+want_suite=""; want_phase=""; positional=0
+for arg in "$@"; do
+  case "$arg" in
+    --verbose) VERBOSE=1 ;;
+    -*)
+      echo "unknown option '$arg'; usage: $0 [--verbose] [suite [phase]]" >&2
+      exit 2 ;;
+    *)
+      positional=$((positional + 1))
+      case "$positional" in
+        1) want_suite="$arg" ;;
+        2) want_phase="$arg" ;;
+        *) echo "too many arguments at '$arg';" \
+                "usage: $0 [--verbose] [suite [phase]]" >&2
+           exit 2 ;;
+      esac ;;
+  esac
+done
+
+# Per-phase chatter, and the only thing --verbose brings back. A function rather
+# than an `if` at each site so there is one place that decides, and so a line
+# printed through it cannot quietly become unconditional. The format string is a
+# literal at every call, which is what makes passing it through `printf` safe.
+say() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
+
 pass=0; fail=0; failed=""
 # A phase that could not judge anything is not a phase that judged and found
 # nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
@@ -341,7 +392,9 @@ run_one() {
     show_output "$out"
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
-    printf '  ok   %s\n' "$label"
+    # The one line quiet drops. Everything else in this cascade is a failure, a
+    # skip, or the reason for one, and quiet must never mean quieter about those.
+    say '  ok   %s\n' "$label"
   elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
@@ -406,7 +459,7 @@ for entry in "${SUITES[@]}"; do
   suite="${entry%%:*}"
   phases="${entry#*:}"
   [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
-  echo "== $suite"
+  say '== %s\n' "$suite"
   # shellcheck disable=SC2046 -- suite_command is a deliberate word list
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }
