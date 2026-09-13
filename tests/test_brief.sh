@@ -160,9 +160,18 @@ case "${1:-}" in
     # a file the review WRITES rather than one it reads. One list drives both the
     # allowance and the sum, so the phase cannot forbid a document and then leave
     # its words out of the total, or allow one and never charge for it.
-    # evals/lint.sh's reading table is the authority; this is the same rule
-    # applied to the rendered output, which is what the agent actually gets.
-    COUNTED="CLAUDE.md REVIEW.md"
+    #
+    # And the list is READ OUT OF evals/lint.sh's reading table rather than
+    # restated here. Hardcoded, this phase kept summing two files when a third
+    # required document was added there -- green under an unchanged ceiling,
+    # while the header above claims to measure "every document it is told to
+    # read". armaatus/autofleet#56 folds the NUMBER into one table; the
+    # MEMBERSHIP is this, and it has to travel with it. Found by the independent
+    # review.
+    COUNTED="$(sed -n 's/^ *"\([A-Za-z0-9_./-]*\)": *("count".*/\1/p' \
+               "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
+    [ -n "${COUNTED// /}" ] \
+      || fail "no \"count\" rows found in evals/lint.sh's reading table; this phase would sum nothing and pass"
     allowed="$(printf '%s\n' $COUNTED findings.md | sed 's/\./\\./g' | paste -sd'|' -)"
     named="$(grep -oE '[A-Za-z0-9_./-]+\.md' <<<"$brief" | sort -u \
              | grep -vxE "$allowed" || true)"

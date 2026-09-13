@@ -1319,7 +1319,14 @@ NAMED = re.compile(r"[A-Za-z0-9_./-]+\.md")
 # document named in stage 1 is both reported here AND counted into the ceiling
 # below, because that is what it costs.
 required = {p for p, v in DOCS.items() if v[0] == "count"}
-scanned = [("the brief, stage 1", texts["the brief, stage 1"], ("count", "written"))]
+# BOTH STAGES are scanned for pointers, though only stage 1's words are in the
+# ceiling. The first version scanned stage 1 alone, which left the guard watching
+# half the brief: a `docs/WORKFLOW.md` added to stage 2 tripped nothing -- not
+# this scan, not the ceiling, not tests/test_brief.sh -- and that is the
+# regression armaatus/autofleet#54 is about, one stage over. Found by the
+# independent review.
+scanned = [("the brief, stage 1", texts["the brief, stage 1"], ("count", "written")),
+           ("the brief, stage 2", texts["the brief, stage 2"], ("count", "written"))]
 if IN_AUTOFLEET:
     scanned.append(("CLAUDE.md", texts["CLAUDE.md"], ("count", "map", "written")))
 for where, text, may_name in scanned:
@@ -1345,8 +1352,17 @@ if "REVIEW.md" in s1 and "/code-review" in s1 \
     bad.append("the brief names REVIEW.md before it names /code-review, so it is "
                "read in the preamble rather than at the step it is the policy for")
 
-# WORD_CEILING is the acceptance of armaatus/autofleet#54: CLAUDE.md, the brief
-# and anything either names as required reading, before the first edit.
+# WORD_CEILING is the acceptance of armaatus/autofleet#54: CLAUDE.md, the OPENING
+# brief, and anything either names as required reading, before the first edit.
+#
+# STAGE 2 IS DELIBERATELY OUTSIDE THE SUM, and this is the only place that says
+# so. "Before its first edit" is the measurement, and stage 2 is fetched after
+# the PR exists -- counting its ~1,100 words would put the total near 4,500 and
+# make the ceiling mean something other than its name. What stage 2 does NOT get
+# is a free pointer: the scan above reads both halves, so neither can send an
+# agent to a document whose words nobody counted. Found by the independent
+# review, which caught the ceiling's comment claiming "either" while the sum took
+# one.
 #
 # `rendered` is stage 1 with the issue number substituted and __TEST_COMMAND__
 # left standing as the one word it is -- the same figure the budget check above
@@ -1415,6 +1431,14 @@ blocks = re.findall(r"```[A-Za-z]*\n(.*?)```", page, re.S)
 fenced = set()
 for m in re.finditer(r"```.*?```", page, re.S):
     fenced.update(range(m.start(), m.end()))
+# ACCEPTED COST: this cannot tell an indented code block from a nested bullet or
+# a wrapped list item at four spaces. A prose sentence under a nested bullet that
+# happens to say `await-review.sh` fails with "still prints a runnable copy of
+# the loop", which will read as a lie to whoever hits it. The trade is deliberate
+# -- the indented form is how the brief writes commands, so a scan that skipped
+# it would let the whole second copy back in under the more natural spelling --
+# but the next reader deserves to know it is a trade. Found by the independent
+# review.
 for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
     if m.start() not in fenced:
         blocks.append(m.group(0))
@@ -1436,7 +1460,11 @@ if found:
 # The title is dropped first, then everything up to the first blank line.
 # Found by the local /mattpocock-skills:code-review pass.
 body = page.split("\n", 1)[1] if page.startswith("#") else page
-opening = body.strip().split("\n\n", 1)[0]
+# `paragraphs()` above, not a literal "\n\n": a blank line carrying one trailing
+# space is invisible, nothing here strips it, and the split would then make
+# `opening` the whole page -- so the check would pass on a page that names its
+# audience in the last paragraph. Found by the independent review.
+opening = [p for p in re.split(r"\n\s*\n", body) if p.strip()][0]
 for needle in ("maintainer", "issue-command.sh"):
     if needle not in opening:
         sys.exit("docs/WORKFLOW.md's OPENING PARAGRAPH does not say who reads it "
