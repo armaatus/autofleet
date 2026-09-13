@@ -195,6 +195,9 @@ jobs:
               }
 
               const labels = issue.labels.map((l) => (typeof l === 'string' ? l : l.name));
+              // Did the stale label actually come off? Nothing is added until it
+              // has -- see the gate below.
+              let removed = true;
               const shouldBlock = open.length > 0;
               const add = shouldBlock ? 'blocked' : 'ready';
               const remove = shouldBlock ? 'ready' : 'blocked';
@@ -236,17 +239,31 @@ jobs:
                 // relabelling them correctly and then going red. Found by the
                 // independent review, twice: once for the swallow, once for the
                 // claim the throw did not support.
-                await github.rest.issues.removeLabel({
+                removed = await github.rest.issues.removeLabel({
                   owner, repo, issue_number: issue.number, name: remove,
-                }).catch((err) => {
+                }).then(() => true).catch((err) => {
+                  // A 404 is the label already being gone, which IS removed.
                   if (!err || err.status !== 404) {
                     writeFailures.push(`#${issue.number}: could not remove ` +
-                      `\`${remove}\` (${err && err.status}) -- it may still be ` +
-                      `startable with an open blocker until the next run`);
+                      `\`${remove}\` (${err && err.status}) -- left carrying ` +
+                      `\`${remove}\` alone, so a later run has to finish it`);
+                    return false;
                   }
+                  return true;
                 });
               }
-              if (!labels.includes(add)) {
+              // GATED ON THE REMOVAL. Reordering the two writes closed the
+              // case where a run DIES between them; it left open the case where
+              // the removal FAILS and control falls through, because `labels` is
+              // the pre-run snapshot and knows nothing about what just happened.
+              // A 403 on `removeLabel('ready')` was recorded and then
+              // `addLabels('blocked')` ran anyway -- the both-labels state, which
+              // `ready_issues()` starts because it selects on `ready` and never
+              // consults `blocked`. Exactly what the comment above said had been
+              // closed, and three places said so. Now: either both writes land or
+              // neither does, and the issue keeps the single label it had. Found
+              // by the independent review.
+              if (removed && !labels.includes(add)) {
                 // Recorded, not thrown -- the same policy as the removal above,
                 // which this call did not follow. A 403 here used to fail the
                 // step outright, abandoning every issue after this one in the
