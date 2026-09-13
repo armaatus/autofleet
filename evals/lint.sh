@@ -267,12 +267,12 @@ echo "== local review mode"
 # 1. The reviewer's brief. review.sh inlines it into the prompt, so a missing
 #    file is a review submitted against no policy at all.
 if [ -f .claude/agents/reviewer.md ]; then
-  for needle in "review-findings" "independent-review: local" "REVIEW.md" \
-                "mattpocock-skills:code-review"; do
+  for needle in "review-findings" "review-important" "independent-review: local" \
+                "REVIEW.md" "mattpocock-skills:code-review"; do
     grep -q -- "$needle" .claude/agents/reviewer.md \
       || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to write or read"
   done
-  ok "the reviewer brief names both trailers, REVIEW.md and the standards pass"
+  ok "the reviewer brief names all three trailers, REVIEW.md and the standards pass"
 else
   fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
 fi
@@ -304,6 +304,46 @@ if flat REVIEW.md | qgrep 'request changes on your own pull request' \
   ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
 else
   fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
+fi
+
+# 2c. The severity trailer, in all four places that have to agree about it.
+#     It is what tells a nit-only review from an Important one, and the failure
+#     it exists to prevent is silent in the cheap direction: a brief that stops
+#     asking for it produces reviews with no `review-important` line, the gate
+#     reads that as "did not say" forever, and the nit-only wording -- the whole
+#     point of the trailer -- is never printed again. Nothing goes red. The loop
+#     just quietly costs what it used to.
+#
+#     `github` mode gets the trailer too. It has no round number to gate the
+#     late-round rule on, but the count is what `merge_gate.py` reads, and the
+#     gate does not know which mode wrote the review it is looking at.
+sev_missing=""
+for f in REVIEW.md .claude/agents/reviewer.md scripts/fleet/review.sh \
+         .github/workflows/claude-review.yml; do
+  grep -q -- 'review-important' "$f" || sev_missing="$sev_missing $f"
+done
+if [ -z "$sev_missing" ]; then
+  ok "the severity trailer is asked for by both briefs, the policy and the spawner"
+else
+  fail "review-important is missing from:$sev_missing -- severity stops reaching merge_gate.py, and the nit-only remedy stops being printed"
+fi
+
+# 2d. ...and merge_gate.py still reads it. A trailer three files ask for and
+#     nothing parses is worse than no trailer: every reviewer pays to write it
+#     and no reader is any better off.
+if grep -q 'review-important:\\s\*(' .github/scripts/merge_gate.py \
+   && grep -q 'declared_important' .github/scripts/merge_gate.py; then
+  ok "merge_gate.py parses the severity trailer the briefs write"
+else
+  fail "merge_gate.py no longer parses review-important, so the trailer every review writes reaches nothing"
+fi
+
+# 2e. The floor itself, in both files a reviewer reads. Prose, so `flat`.
+if flat REVIEW.md | grep -q 'round three' \
+   && flat .claude/agents/reviewer.md | grep -q 'round three'; then
+  ok "both REVIEW.md and the brief carry the late-round floor"
+else
+  fail "the late-round floor is gone from REVIEW.md or the brief, so a reviewer can spend rounds on nits again"
 fi
 
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer

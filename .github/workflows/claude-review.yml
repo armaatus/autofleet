@@ -265,13 +265,21 @@ jobs:
             a pass found nothing, say so in one line rather than padding it. End
             with the counts, so the numbers can be compared between PRs.
 
-            THEN END THE BODY WITH THIS EXACT LINE, and get the number right:
+            THEN END THE BODY WITH THESE TWO EXACT LINES, in this order, and
+            get both numbers right:
 
+              <!-- review-important: M -->
               <!-- review-findings: N -->
 
             N is how many findings you are leaving behind -- Important plus Nit,
             across all three passes, inline comments included. `0` means you
-            found nothing.
+            found nothing. M is how many of those N were Important.
+
+            M does not decide whether the branch merges -- N above zero holds it
+            either way. What M == 0 does is tell the author that answering in
+            words costs no commit, and that pushing a nit fix instead moves the
+            head and invalidates this review. Omitting M is read as "did not
+            say", not as zero, so write it even when M equals N.
 
             `merge-gate` reads it, and it is the only thing that can tell "five
             nits" from "nothing at all": both are a COMMENTED verdict, and both

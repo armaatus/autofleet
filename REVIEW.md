@@ -70,6 +70,27 @@ formulation of something already correct.
 Report at most **five nits**, and summarise the rest as a count. A review whose
 signal is buried in twenty preferences costs more attention than it saves.
 
+## A late round with no Important finding files issues, not findings
+
+From **round three onward**, a review that finds nothing Important does not
+leave findings behind. Name the nits in the body, say plainly that they belong
+in a follow-up issue rather than in this pull request, and report
+`review-findings: 0` with `review-important: 0`.
+
+The nits are not lost — they are in the body a person can read, and the author
+files them. What is lost is the round they would have cost.
+
+This exists because the loop has no other floor. A reviewer can always name one
+more assertion, an author can always add one, and a fix moves the head, and a
+head move invalidates the review that asked for it, which buys another round.
+Eight rounds on #79 converged on behaviour after two and spent six more on the
+same finding one level further down; every one was correct. Round one and round
+two are unchanged, because behaviour findings arrive early and this rule must
+not suppress them.
+
+`scripts/fleet/review.sh` tells you which round you are on. If it did not, treat
+it as round one.
+
 ## Say how many findings you left
 
 Every review of a pull request ends its body with this line:
@@ -78,8 +99,16 @@ Every review of a pull request ends its body with this line:
 <!-- review-findings: N -->
 ```
 
-One thing may follow it, and only one. Under `AUTOFLEET_REVIEW_MODE=local` the
-reviewer adds a second trailer naming the commit it judged:
+Two more things may follow it, and only those two.
+
+The first says how many of those findings were Important:
+
+```
+<!-- review-important: M -->
+```
+
+The second, under `AUTOFLEET_REVIEW_MODE=local` only, names the commit the
+review judged:
 
 ```
 <!-- independent-review: local <head-sha> -->
@@ -92,10 +121,29 @@ discarded a review that had been written, read and submitted, and the pull
 request blocked on a review that already existed. Found by the independent
 review that hit it. See
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review); in the default
-`github` mode there is no second trailer and this line is still the last one.
+`github` mode there is no local-review marker, and `review-important` is the
+last line.
+
+The list grew from one to two for the same reason it grew from zero to one, and
+the rule that survived both is the one worth keeping: **this file names every
+trailer that is allowed, and never says how many there are anywhere else.** A
+count stated twice is a count that goes stale in one of the two places.
 
 `N` is Important plus Nit, across all three passes, inline comments included.
-`0` means the review found nothing.
+`0` means the review found nothing. `M` is the Important subset of `N`, counted
+the same way; `0` means everything you found was a nit.
+
+**`M` does not decide whether the branch merges.** `N` above zero holds the pull
+request until its author answers, whatever `M` says. What `M` buys is that the
+author is told the answer may be *words*: a nit answered with
+`./scripts/fleet/answer-review.sh` costs no commit, and a nit answered with a
+commit moves the head, invalidates this review, and buys the next round. Three
+pull requests were measured sitting on that difference with nobody having run
+that script once.
+
+Omitting `M` is not the same as writing `0`. A review that does not say is read
+as not having said, which is the behaviour that predates the trailer — held
+until answered, exactly as before.
 
 It is an HTML comment, so it does not show up in the rendered review. It exists
 because `merge-gate` cannot otherwise tell a review that found five nits from

@@ -86,6 +86,36 @@ LOG_DIR="$FLEET_DIR/reviews"
 # one of them inline is how the pair drifts apart.
 DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
 TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
+# A third record, and the one that counts the thing the other two do not.
+# `.tries` is per HEAD and counts reviewers that submitted NOTHING; a reviewer
+# that submits findings clears it. `.autofleet/run/review-rounds` is per
+# WORKTREE and increments only where a round was read back, so it undercounts:
+# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
+# on #88. Neither answers "how many reviews has this pull request had", which is
+# what the late-round floor and the dispatcher's cap both need. This does, and
+# it survives a head move because it is not keyed to one.
+ROUNDS_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.rounds}"
+
+# Which round this run is -- 1 when nothing has counted yet, and 1 when a person
+# ran this by hand and there is no marker to read. The brief says to treat an
+# absent round as the first, which is the safe direction: round one and two
+# suppress nothing.
+review_round() {
+  local n=0
+  [ -n "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER" 2>/dev/null
+  case "${n:-0}" in (*[!0-9]*|"") n=0 ;; esac
+  printf '%s\n' "$(( n + 1 ))"
+}
+
+# Counted on ONE exit path: 0, a review this run actually submitted. Not on 8,
+# where the review being counted was somebody else's and has already been
+# counted, and not on 5 or 7, where nothing was submitted at all. Getting that
+# wrong in the generous direction retires a pull request the reviewer never
+# reviewed.
+record_round() {
+  [ -n "$ROUNDS_MARKER" ] || return 0
+  printf '%s\n' "$(review_round)" >"$ROUNDS_MARKER" 2>/dev/null || true
+}
 
 # The dispatcher counts a try BEFORE the spawn, because it has to decide from
 # something. That makes the count a count of SPAWNS -- and a spawn that never
@@ -290,6 +320,10 @@ log="$LOG_DIR/pr-$pr-${head:0:8}.log"
 # reviewer being handed the text directly.
 brief="$(awk 'BEGIN{n=0} /^---$/{n++; next} n>=2' "$BRIEF")"
 
+# Read before the prompt is built, not after: the brief's late-round rule is
+# keyed to this number, and a reviewer told nothing treats it as round one.
+round="$(review_round)"
+
 prompt="$brief
 
 ---
@@ -299,14 +333,16 @@ prompt="$brief
 Repository: $fleet_owner/$fleet_repo_name
 Pull request: #$pr
 Head commit: $head
+Review round: $round
 
 The number and the sha are stated here because you have no event context to read
 them from. Use \`gh pr view $pr --json title,body\` and \`gh pr diff $pr\` rather
 than assuming the checkout in front of you is on this branch -- it is not. This
 runs from the repository root, on whatever branch that happens to be.
 
-Your last two lines, verbatim, with the counts and the sha filled in:
+Your last three lines, verbatim, with the counts and the sha filled in:
 
+<!-- review-important: M -->
 <!-- review-findings: N -->
 <!-- independent-review: local $head -->"
 
@@ -458,8 +494,9 @@ wait "$reviewer"; rc=$?
 #
 # The SAME question as before the run, deliberately -- see counting_review().
 if counting_review; then
-  echo "==> a counting review is on ${head:0:8}"
+  echo "==> a counting review is on ${head:0:8} (round $round)"
   record_done
+  record_round
   exit 0
 fi
 
