@@ -29,7 +29,7 @@ cd "$REPO_ROOT"
 # `suite:phase phase ...`, or `suite:` for a script that runs whole.
 SUITES=(
 "lint:"
-"brief:stage1 stage2"
+"brief:stage1 stage2 reading"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
 "runner_bound:bounds passes skips hostlint guards interrupt orphans"

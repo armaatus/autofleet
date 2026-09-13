@@ -135,9 +135,9 @@ and its author has to answer a review that said nothing. Write the line.
 
 ## What findings do and do not do
 
-No review here approves, and no agent merges its own work (CLAUDE.md, "Finishing
-a task"). Findings do not decide whether a PR is good enough; a human reading
-them does.
+No review here approves, and no agent merges its own work — the brief's step 4
+states that rule, and `guard.py` refuses the command either way. Findings do not
+decide whether a PR is good enough; a human reading them does.
 
 They do hold the branch, though, and that is not the same thing. `merge-gate`
 refuses a PR while a `--request-changes` is standing, while a review thread is
