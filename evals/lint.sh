@@ -1146,6 +1146,224 @@ else
   fi
 fi
 
+echo "== the rule of one home"
+# The loop was written three times: CLAUDE.md, the brief, and docs/WORKFLOW.md,
+# which is the longest of the three and which the brief's first sentence sent
+# every agent to read. CLAUDE.md plus the brief plus WORKFLOW.md was roughly
+# 10,000 words -- about 13k tokens -- before the first edit, and then again in
+# the prompt prefix of every request for the rest of the session
+# (armaatus/autofleet#54).
+#
+# Two assertions, and they are different shapes:
+#
+#   the rule of one home  for each rule that is actually ENFORCED, exactly one
+#                         agent-facing text states it in full, and that text is
+#                         the one named as its home. Everything else links.
+#   the reading ceiling   what a fleet agent is told to read before its first
+#                         edit, counted in words, against a number that has to
+#                         be raised deliberately.
+#
+# This is the same shape as check 4e, which pins the Orca seam pipeline to
+# docs/RUNNERS.md and fails if CLAUDE.md grows a second copy. That one was added
+# after the rule went stale in prose twice. The six below are the rules whose
+# second copy costs something worse than staleness: an agent that reads the copy
+# and not the original does the wrong thing with the merge.
+#
+# docs/WORKFLOW.md is deliberately NOT in the agent-facing set. It is the
+# maintainer's explanation and the record of why each rule exists -- the reason
+# this repo's comment density is high on purpose -- and nothing here is deleted
+# from it for being long. What changed is who is told to read it. The assertion
+# that keeps that true is further down: a page whose agent-instruction sections
+# are pointers has no copy-pasteable fence for a step of the loop.
+if [ -n "$stage1" ] && [ -n "$stage2" ]; then
+  if stage1="$stage1" stage2="$stage2" rendered="$rendered" python3 - <<'PYEOF'; then
+import os, re, sys
+
+# The agent-facing texts, in the order a failure should name them.
+texts = {
+    "CLAUDE.md":          open("CLAUDE.md").read(),
+    "REVIEW.md":          open("REVIEW.md").read(),
+    "the brief, stage 1": os.environ["stage1"],
+    "the brief, stage 2": os.environ["stage2"],
+}
+
+def paragraphs(text):
+    return re.split(r"\n\s*\n", text)
+
+def without_tables(par):
+    """A markdown table row is a MAP, not an instruction.
+
+    CLAUDE.md's Layout table names `.claude/`, `.github/workflows/` and
+    `.github/scripts/` on three consecutive rows, and a table has no blank line
+    in it -- so paragraph-level matching reads the whole table as one statement
+    of the merge rule, which it plainly is not. Saying where a directory lives
+    is the one thing that file has to be able to do without tripping this.
+    """
+    return "\n".join(l for l in par.splitlines() if not l.lstrip().startswith("|"))
+
+def triple(text):
+    """All three human-only prefixes in ONE paragraph: the merge rule stated."""
+    return any(all(p in without_tables(par)
+                   for p in (".claude/", ".github/workflows/", ".github/scripts/"))
+               for par in paragraphs(text))
+
+# (the rule, its home, what "stated in full" looks like)
+#
+# Each signature is the OPERATIVE form, chosen so that naming the rule in
+# passing does not match it:
+#
+#   record-review.sh    with its argument. Stage 2 names the script bare, in the
+#                       rebase remedy, and that is a pointer rather than the
+#                       instruction to record a review before pushing.
+#   at most three rounds  the phrasing IS the rule. Stage 1 says "three review
+#                       rounds" about the context budget, which is a different
+#                       claim and does not match.
+RULES = [
+    ("record a local review before pushing", "the brief, stage 1",
+     lambda t: "record-review.sh findings.md" in t),
+    ("arm `--auto --squash` the moment the PR exists", "the brief, stage 2",
+     lambda t: "--auto --squash" in t),
+    ("the three-round cap", "the brief, stage 2",
+     lambda t: re.search(r"at most\s+three\s+rounds", t, re.I) is not None),
+    ("the paths only a person may merge", "the brief, stage 2", triple),
+    ("the STOP file", "the brief, stage 1",
+     lambda t: ".autofleet/STOP" in t),
+    ("`Closes #N`, and what merge-gate reads from the body", "the brief, stage 2",
+     lambda t: "Closes #" in t),
+]
+
+bad = []
+for rule, home, states in RULES:
+    where = [name for name, text in texts.items() if states(text)]
+    if where == [home]:
+        continue
+    if not where:
+        bad.append(f'{rule} is stated nowhere; its home is {home}')
+    elif home not in where:
+        bad.append(f'{rule} has left {home}, its home; it is now stated in '
+                   + ", ".join(where))
+    else:
+        bad.append(f'{rule} is stated in {home}, its home, AND restated in '
+                   + ", ".join(w for w in where if w != home)
+                   + " -- link to the home instead")
+
+# The reading ceiling.
+#
+# Every `*.md` path CLAUDE.md or the brief's stage 1 may name, and what its
+# words cost an agent before its first edit. A path missing from this table
+# fails: adding a pointer to a document is how the 8,674-word one got into the
+# brief, and the table is where that decision is made rather than noticed later.
+#
+#   count    required reading. Its words are inside the ceiling.
+#   map      may be NAMED but is not required reading. CLAUDE.md says which
+#            document is whose, so it may name these; stage 1 may not, because
+#            the brief telling an agent to read something is what makes it
+#            required regardless of what any table says.
+#   written  a file the agent WRITES. Not reading at all.
+DOCS = {
+    "CLAUDE.md":                    ("count", "read in full at the start of every session"),
+    "REVIEW.md":                    ("count", "the policy the brief names at step 3; a ceiling that left it out would just move words here"),
+    "docs/WORKFLOW.md":             ("map",   "the maintainer's explanation, and the reference an agent consults when it needs one; not per-issue reading"),
+    "docs/CONFIGURATION.md":        ("map",   "read when wiring a host project"),
+    "docs/RUNNERS.md":              ("map",   "read when touching the runner seam (hard rule 4)"),
+    "README.md":                    ("map",   "read when deciding whether to install it, not before editing"),
+    "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
+    ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
+    ".claude/agents/verifier.md":   ("map",   "read by the subagent, in the subagent's own context"),
+    "findings.md":                  ("written", "the file the local review writes for record-review.sh"),
+}
+
+NAMED = re.compile(r"[A-Za-z0-9_./-]*\.md")
+# What the brief NAMES, it makes required -- whatever the table says. The table
+# records an intention; the brief is what the agent is actually told. So a `map`
+# document named in stage 1 is both reported here AND counted into the ceiling
+# below, because that is what it costs.
+required = {p for p, v in DOCS.items() if v[0] == "count"}
+for where, text, may_name in (("CLAUDE.md", texts["CLAUDE.md"], ("count", "map", "written")),
+                              ("the brief, stage 1", texts["the brief, stage 1"], ("count", "written"))):
+    for path in sorted(set(NAMED.findall(text))):
+        kind = DOCS.get(path)
+        if kind is None:
+            bad.append(f"{where} names {path}, which is not in the reading table "
+                       "above -- decide whether its words are inside the ceiling "
+                       "and say so there")
+        elif kind[0] not in may_name:
+            bad.append(f"{where} sends the agent to {path}, which is not required "
+                       f"reading ({kind[1]}). Name it in CLAUDE.md's document map "
+                       "if it needs naming at all")
+            if kind[0] == "map":
+                required.add(path)
+
+# ...and REVIEW.md is named where the passes are run, not in the preamble. An
+# agent reads the brief top to bottom; a policy named before step 1 is read
+# before step 1.
+s1 = texts["the brief, stage 1"]
+if "REVIEW.md" in s1 and "/code-review" in s1 \
+        and s1.index("REVIEW.md") < s1.index("/code-review"):
+    bad.append("the brief names REVIEW.md before it names /code-review, so it is "
+               "read in the preamble rather than at the step it is the policy for")
+
+# WORD_CEILING is the acceptance of armaatus/autofleet#54: CLAUDE.md, the brief
+# and anything either names as required reading, before the first edit.
+#
+# `rendered` is stage 1 with the issue number substituted and __TEST_COMMAND__
+# left standing as the one word it is -- the same figure the budget check above
+# measures, and for the same reason: this check is vendored, and a host
+# project's nine-word test command must not spend autofleet's margin in a repo
+# that did not write the text.
+WORD_CEILING = 3500
+parts = [(p, len(open(p).read().split())) for p in sorted(required)]
+parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
+total = sum(n for _, n in parts)
+if total >= WORD_CEILING:
+    bad.append(f"a fleet agent is told to read {total} words before its first edit "
+               f"(ceiling {WORD_CEILING}): "
+               + ", ".join(f"{p} {n}" for p, n in parts))
+
+if bad:
+    sys.exit("\n  ".join(bad))
+print(f"        {total} words before the first edit, ceiling {WORD_CEILING}")
+PYEOF
+    ok "each enforced rule is stated once, in the file that is its home"
+  else
+    fail "the loop is written more than once, or costs more than it may (above)"
+  fi
+fi
+
+# ...and docs/WORKFLOW.md's agent-instruction sections are POINTERS.
+#
+# The page keeps every word of explanation -- that is what it is for -- but a
+# fenced block holding a step of the loop is a copy an agent can work from, and
+# a copy is what drifts. The brief is the home; this page says where the home
+# is. Fences are the test because a fence is the only form an agent can act on
+# without reading the prose around it.
+if python3 - <<'PYEOF'; then
+import re, sys
+page = open("docs/WORKFLOW.md").read()
+fences = re.findall(r"```[a-z]*\n(.*?)```", page, re.S)
+# The loop's steps. `issue-command.sh` itself is NOT here: printing the command
+# that fetches the brief is the pointer this check is asking for.
+STEPS = ["record-review.sh", "await-review.sh", "review-status.sh",
+         "resolve-thread.sh", "answer-review.sh", "gh pr merge",
+         "/code-review", "/mattpocock-skills:code-review"]
+found = sorted({s for f in fences for s in STEPS if s in f})
+if found:
+    sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
+             + ", ".join(found)
+             + ". The brief is where those live; this page explains why they exist")
+# ...and it says whose page it is, before the first heading. An agent that is
+# told what a document is for does not read it per issue.
+opening = page.split("\n## ", 1)[0]
+for needle in ("maintainer", "issue-command.sh"):
+    if needle not in opening:
+        sys.exit("docs/WORKFLOW.md's opening does not say who reads it and where "
+                 f"the agent's instructions are instead (missing: {needle})")
+PYEOF
+  ok "docs/WORKFLOW.md names its audience and points at the brief rather than copying it"
+else
+  fail "docs/WORKFLOW.md is still a second copy of the loop (above)"
+fi
+
 echo "== every test phase actually runs"
 # A phase defined in one of the phase-dispatching test scripts and missing from
 # the SUITES registry in tests/run.sh never runs -- not locally, not in CI -- and

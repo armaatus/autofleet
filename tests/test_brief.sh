@@ -12,6 +12,14 @@
 #                         No spec, no steps 1-3, and the issue number still
 #                         substituted, because `Closes #N` and the board line
 #                         live in this half.
+#   test_brief.sh reading what the brief costs an agent BEFORE its first edit:
+#                         the rendered brief plus every document it is told to
+#                         read. #54 measured 13,425 words there, because the
+#                         first sentence sent the agent to docs/WORKFLOW.md and
+#                         that page is 10,036 words of a loop the brief had just
+#                         given it. evals/lint.sh asserts the same ceiling from
+#                         the heredoc; this phase asserts it on what the script
+#                         actually prints.
 #
 # The union of the two -- every instruction landing in exactly one stage -- is
 # asserted by evals/lint.sh, which reads the heredocs rather than running the
@@ -136,6 +144,42 @@ case "${1:-}" in
       '/mattpocock-skills:tdd' 'record-review.sh findings.md'
     echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
     ;;
+  reading)
+    make_fixture
+    out="$(run_it 42 2>&1)" || fail "issue-command.sh 42 exited non-zero: $out"
+    brief="$(brief_only <<<"$out")"
+
+    # The brief may not spend an agent's context on a document it does not need
+    # before its first edit. `docs/` is the whole of the long-form writing here,
+    # and WORKFLOW.md alone is 10,036 words -- a longer retelling of the brief
+    # the agent has just read (#54).
+    if named="$(grep -oE 'docs/[A-Za-z0-9_-]+\.md' <<<"$brief" | sort -u)"; then
+      [ -z "$named" ] \
+        || fail "the opening brief sends the agent to $(tr '\n' ' ' <<<"$named"), which it does not need before its first edit"
+    fi
+
+    # CLAUDE.md is read automatically, REVIEW.md is the policy the brief names
+    # at step 3, and the brief is the brief. Read from the real tree rather than
+    # the fixture: the fixture is scripts/fleet alone, and these are the files
+    # whose size the ceiling is about.
+    total=0
+    for f in CLAUDE.md REVIEW.md; do
+      n="$(wc -w <"$REPO_ROOT/$f" | tr -d ' ')"
+      total=$((total + n))
+      echo "  $f: $n"
+    done
+    n="$(wc -w <<<"$brief" | tr -d ' ')"
+    total=$((total + n))
+    echo "  the brief: $n"
+
+    # Held in evals/lint.sh too, which is the vendored copy, so a host project
+    # gets the ceiling even though tests/ is not vendored. Raise it there and
+    # here together, deliberately.
+    READING_CEILING=3500
+    [ "$total" -lt "$READING_CEILING" ] \
+      || fail "a fleet agent is told to read $total words before its first edit; the ceiling is $READING_CEILING"
+    echo "ok: a fleet agent reads $total words before its first edit, ceiling $READING_CEILING"
+    ;;
   *)
-    echo "usage: $0 {stage1|stage2}" >&2; exit 2 ;;
+    echo "usage: $0 {stage1|stage2|reading}" >&2; exit 2 ;;
 esac
