@@ -1202,8 +1202,21 @@ case "${1:-}" in
     # ...and the two hooks that run INSIDE a worktree, which reach the runtime
     # by a different path and were the other half of the grep.
     out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
-    grep -q "Closes #42" <<<"$out" \
+    # The stage-2 pointer, which is where the resolved number now lands in the
+    # opening brief: `Closes #42` moved to `--after-pr` with the rest of the
+    # post-PR contract (#49). What is asserted is unchanged -- the number came
+    # back through the driver rather than off an argument.
+    grep -q -- "--after-pr 42" <<<"$out" \
       || fail "issue-command.sh could not resolve this worktree's issue through the driver: $out"
+    # ...and the flag with NO number, which is the form an agent in a fleet
+    # worktree actually types: the flag is read before the issue is resolved so
+    # this falls back through the driver exactly as the bare form does. The
+    # comment that says so was the only thing asserting it. Found by the local
+    # /code-review pass.
+    out="$( cd "$WORK/repo" && ./scripts/fleet/issue-command.sh --after-pr 2>&1 )" \
+      || fail "--after-pr with no number could not resolve this worktree's issue: $out"
+    grep -q "Closes #42" <<<"$out" \
+      || fail "--after-pr fell back to no issue at all, so the post-PR half of the brief has no number in it: $out"
 
     # ...and its THREE-WAY read, which is the branch this change added and the
     # one branch it did not assert. `|| true` mapped rc 1 ("the runtime would not

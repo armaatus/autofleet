@@ -702,7 +702,11 @@ for p in prs:
 in_flight() {
   local list rc
   list="$(live_worktrees)" || return 2
-  printf '%s\n' "$list" | cut -f1 | grep -qx "$1" && return 0
+  # NOT `grep -qx`: `-q` exits on the first match, `cut` dies of EPIPE, and
+  # `set -o pipefail` makes the pipeline 141 -- the same race measured at
+  # `clear_stale_review_records` below. Past a long enough list this said "not
+  # in flight" about an issue that is.
+  printf '%s\n' "$list" | cut -f1 | grep -x "$1" >/dev/null && return 0
   has_open_pr "$1"; rc=$?
   [ "$rc" = 0 ] && return 0
   [ "$rc" = 2 ] && return 2
@@ -713,7 +717,9 @@ in_flight() {
 # must not answer for `ready-ish`, and `foundation` must not answer for
 # `foundational`. -F and -- keep that true for a label carrying a regex
 # metacharacter or a leading dash, both of which the env overrides above allow.
-has_label() { printf '%s' "$1" | tr ',' '\n' | grep -qxF -- "$2"; }
+# `grep -xF ... >/dev/null` rather than `grep -qxF`: see the comment above, and
+# `clear_stale_review_records` for where this race was first measured.
+has_label() { printf '%s' "$1" | tr ',' '\n' | grep -xF -- "$2" >/dev/null; }
 is_foundation() { has_label "$1" "$FOUNDATION_LABEL"; }
 
 FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
@@ -1029,7 +1035,7 @@ slug() {
 agent_brief() {
   cat <<BRIEF
 Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $1\` first and follow
-everything it prints, including the review loop at the end. You were started by
+everything it prints, including anything it points you at. You were started by
 the fleet dispatcher: work autonomously to a pull request that is waiting only on
 GitHub's auto-merge, and do not stop to ask for confirmation on anything this
 repo's working agreement already decides.
@@ -1139,7 +1145,7 @@ reviewer_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -Eq '(^|[[:space:]/])review\.sh([[:space:]]|$)'
+  printf '%s\n' "$line" | grep -E '(^|[[:space:]/])review\.sh([[:space:]]|$)' >/dev/null
 }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
@@ -2595,7 +2601,7 @@ dispatcher_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -Eq 'fleet\.sh[[:space:]]+run([[:space:]]|$)'
+  printf '%s\n' "$line" | grep -E 'fleet\.sh[[:space:]]+run([[:space:]]|$)' >/dev/null
 }
 
 # How to make a change live, said wherever the change is not. The cap is here

@@ -21,6 +21,19 @@ fails=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 ok()   { echo "  ok: $*"; }
 
+# `grep -q` on the RIGHT of a pipe is a flaky assertion here, and this file runs
+# with `pipefail`. `-q` exits on the first match, the producer on the left then
+# writes into a closed pipe, and the pipeline's exit status is that producer's
+# EPIPE rather than grep's match -- so an assertion that HELD is reported as a
+# FAIL. GNU sed says it out loud ("sed: couldn't flush stdout: Broken pipe");
+# BSD sed dies quietly, which is why this is green on a Mac and red in CI, and
+# why it is a race rather than a constant: it needs the match to land before the
+# producer is done. It cost this PR a CI round on the one check at `cmd_status`
+# below, and the other nine sites are the same bug waiting its turn.
+#
+# `grep` without `-q` reads its whole input, so there is nothing to break.
+qgrep() { grep "$@" >/dev/null; }
+
 # CLAUDE.md is read in full at the start of every session, so its size is a real
 # cost paid on every task in every worktree. The cap is a smell test, not a
 # formatting rule: past it, the file has stopped being what a new joiner needs on
@@ -273,7 +286,7 @@ fi
 # moved "nothing else" onto the next line would silence a line-oriented grep,
 # and an assertion a reflow can switch off is not an assertion.
 flat() { tr -s '[:space:]' ' ' <"$1"; }
-if flat REVIEW.md | grep -q 'nothing else after it'; then
+if flat REVIEW.md | qgrep 'nothing else after it'; then
   fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
 elif grep -q 'independent-review: local' REVIEW.md; then
   ok "REVIEW.md allows the second trailer local review mode depends on"
@@ -286,8 +299,8 @@ fi
 #     CHANGES_REQUESTED on your own pull request -- so a brief that orders
 #     `--request-changes` for an Important finding ends the run with a non-zero
 #     exit on its last action and nothing submitted.
-if flat REVIEW.md | grep -q 'request changes on your own pull request' \
-   && flat .claude/agents/reviewer.md | grep -q 'request changes on your own pull request'; then
+if flat REVIEW.md | qgrep 'request changes on your own pull request' \
+   && flat .claude/agents/reviewer.md | qgrep 'request changes on your own pull request'; then
   ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
 else
   fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
@@ -842,7 +855,7 @@ ok "install.sh ships the reviewer and names the knob"
 #    `github`-mode repository with no token has a green review job, a waiting
 #    agent, and nothing anywhere saying which reviewer it is waiting for.
 if grep -q 'AUTOFLEET_REVIEW_MODE' scripts/fleet/fleet.sh \
-   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | grep -q 'review:'; then
+   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | qgrep 'review:'; then
   ok "fleet.sh status names the review mode on its first screen"
 else
   fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
@@ -985,14 +998,153 @@ for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh
   bash -n "$path" || { fail "$path does not parse"; continue; }
   ok "$script"
 done
-# ...and the brief must still name them.
+
+# ...and none of the payload pipes an assertion into `grep -q`.
+#
+# `-q` exits on the first match, the producer on the left writes into a closed
+# pipe, and `set -o pipefail` makes the pipeline 141 -- so a check that HELD
+# reports as failed, and a guard that was looking for something reports that it
+# found nothing. It is a RACE: it needs the match to land before the producer is
+# done, so it is green on small input and red on large, and GNU sed says
+# "couldn't flush stdout: Broken pipe" while BSD sed dies quietly -- green on a
+# Mac, red in CI.
+#
+# This repository has now paid for it twice: `clear_stale_review_records` in
+# fleet.sh carries the measurement (500 refs exits 0, 1000 exits 141, and a
+# reviewed commit lost its record), and the `cmd_status` check above cost this
+# change a CI round with every assertion in it actually holding. Twice is what
+# makes it a rule rather than a war story. `qgrep` above is the shape that is
+# safe: `grep` without `-q` reads its whole input.
+#
+# Every payload SHELL script, not only the ones that set `pipefail` themselves.
+# lib.sh does not set it -- it is SOURCED, and every caller does (fleet.sh,
+# issue-command.sh) -- so the first version of this check skipped the one file
+# where the bug was still live, which is the shared-helper case it most needed
+# to see. Found by the independent review. Continuations are joined first,
+# because a `|` at the end of one line with the `grep -q` at the start of the
+# next is the same pipeline; comments are excluded, because fleet.sh's QUOTES
+# the bad form and that quotation is the record of where it was measured.
+# Its own assertions first, the way guard.py's and merge_gate.py's are run: a
+# detector that has already shipped blind twice has the least claim to be the
+# one tool here with no selftest. Found by the independent review.
+python3 "$REPO_ROOT/evals/piped_quiet_grep.py" --selftest \
+  || fail "evals/piped_quiet_grep.py fails its own selftest, so the scan below means nothing"
+if bad="$(python3 "$REPO_ROOT/evals/piped_quiet_grep.py")"; then
+  if [ -n "$bad" ]; then
+    fail "these pipe an assertion into \`grep -q\`, which reports a holding check as failed under load -- and a sourced file inherits its caller's pipefail: $bad"
+  else
+    ok "no assertion in the payload is piped into \`grep -q\`"
+  fi
+else
+  fail "the \`grep -q\` scan could not run, so it is asserting nothing"
+fi
+
+# ...and the brief must still name them -- across BOTH of its stages.
+#
+# Since armaatus/autofleet#49 the brief arrives in two pieces out of the one
+# file: the bare form prints the spec, steps 1-3 and a pointer, and `--after-pr`
+# prints steps 4-6.
+# The risk the split carries is an instruction that lands in NEITHER stage,
+# which is a rule nobody enforces: armaatus/rommsync-nx#90's PR that nobody queued for
+# auto-merge, armaatus/rommsync-nx#88 and #89 sitting blocked on one unresolved thread.
+#
+# Asserted PER STAGE rather than over the union, which is strictly stronger and
+# is the union by construction. The union alone passed for the wrong reason and
+# all three review passes said so: stage 1 says "Two subagents in
+# `.claude/agents/`", so a union grep for `.claude/` matched forever, and
+# deleting `.claude/` from stage 2's list of paths no agent may merge still
+# printed ok. That is hard rule 3 -- a guard that silently stops guarding -- and
+# the cost of it is an agent spending its three review rounds turning green a
+# gate that can never pass.
+# The brief is ONE heredoc with a `@@AFTER-PR@@` line in it -- which is also
+# what keeps main's copy of this check readable, since its extraction is the
+# range from the `sed` line to `BRIEF` and two heredocs left it reading nothing.
 brief="$(sed -n "/^sed .*BRIEF/,/^BRIEF$/p" scripts/fleet/issue-command.sh)"
-for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
-              answer-review.sh; do
-  grep -q "$named" <<<"$brief" \
-    || fail "the agent brief no longer mentions $named, so the loop stops at that step"
-done
-ok "the brief still names the review loop"
+# The text begins at the `---` rule the brief opens with and ends at the
+# terminator; between them is exactly what the agent receives. Anchored on the
+# TEXT rather than on the shape of the command that prints it: keyed to `| awk `
+# this went blind the moment that command grew a second line, and counted awk's
+# own source as part of the brief. Found by the independent review, twice over
+# -- once as the nit about this file's line-oriented scanning, once as the
+# measurement being of something other than what it claims.
+body="$(sed -n '/^---$/,$p' <<<"$brief" | sed '$d')"
+stage1="$(sed -n "1,/^@@AFTER-PR@@$/p" <<<"$body" | sed '$d')"
+stage2="$(sed -n "/^@@AFTER-PR@@$/,\$p" <<<"$body" | sed '1d')"
+if [ -z "$stage1" ] || [ -z "$stage2" ]; then
+  fail "one of issue-command.sh's two brief heredocs could not be read, so everything below asserts nothing"
+else
+  brief_fails_before=$fails
+  # Stage 1: what is due before anything leaves the worktree -- including the
+  # pointer, without which stage 2 is unreachable and half the brief is dead
+  # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
+  # names them and the brief the fleet actually sends never did.
+  for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
+                --after-pr researcher verifier "gh pr diff --stat"; do
+    grep -qF -- "$named" <<<"$stage1" \
+      || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
+  done
+  # ...and none of what stage 2 owns, because carrying it here is the cost
+  # armaatus/autofleet#49 measured: it rides in the prompt prefix of every request made before the PR
+  # exists.
+  # `board.sh` and `Closes #` as well as the scripts: tests/test_brief.sh has
+  # both in its own negative list and tests/ is NOT vendored, so this loop is
+  # the only thing holding the split in a host installation. Found by the
+  # independent review.
+  for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh \
+                board.sh "--auto --squash" "Closes #"; do
+    grep -qF -- "$named" <<<"$stage1" \
+      && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
+  done
+  # Guarded on the counter: `ok` after a loop that may have called `fail` prints
+  # a green line for an assertion that just failed, two lines above it. Found by
+  # the independent review.
+  [ "$fails" = "$brief_fails_before" ] \
+    && ok "stage 1 names what is due before the push, and nothing that is not"
+  brief_fails_before=$fails
+
+  # Stage 2: every script of the loop, the closing line merge-gate demands, and
+  # the three paths no agent can merge itself.
+  for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
+                answer-review.sh "--auto --squash" "Closes #" \
+                ".github/workflows/" ".github/scripts/" ".claude/"; do
+    grep -qF -- "$named" <<<"$stage2" \
+      || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
+  done
+  [ "$fails" = "$brief_fails_before" ] \
+    && ok "stage 2 still names the whole review loop and the paths a person has to merge"
+
+  # The budget, in the vendored check and not only in autofleet's own suite: a
+  # host project gets the brief and the reason it was split, so it should get
+  # the thing that stops it growing back. armaatus/autofleet#56 folds this row
+  # into a ceilings table and will want it measured from what the agent
+  # RECEIVES; until then the
+  # placeholders are substituted with their defaults here, so the figure is the
+  # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
+  # measures the real output and holds the same number.
+  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
+  # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
+  # word it is and the host's command is never substituted in -- because this
+  # check is vendored and `agent-config.yml` runs it on every PR in every repo
+  # that installs the payload. Measured WITH the host's command, an ordinary
+  # nine-word `docker compose run --rm app pytest -q --tb=short --maxfail=1`
+  # puts a clean installation over the ceiling on its first PR, on a text it did
+  # not write, with a failure that tells it to edit a vendored file the next
+  # `install.sh` overwrites. That is hard rule 1, and it is what rounds 1 and 2
+  # of the review were both circling: the answer was not a better reader for
+  # `.autofleet/config`, it was not reading it at all.
+  #
+  # So the ceiling is on the 391 words autofleet ships, and a host's test command
+  # costs it nothing. tests/test_brief.sh measures the RENDERED brief against the
+  # same number with the command pinned to the four-word default, which is the
+  # closest thing to what an agent here receives.
+  rendered="${stage1//__ISSUE__/49}"
+  words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
+  if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
+    ok "the opening brief is $words words, spec excluded"
+  else
+    fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET (armaatus/autofleet#49). Raise it here, deliberately, or move something into --after-pr"
+  fi
+fi
 
 echo "== every test phase actually runs"
 # A phase defined in one of the phase-dispatching test scripts and missing from
@@ -1197,7 +1349,7 @@ if [ -f "$review_wf" ]; then
   # It must stay a COMMENT. A generated review would satisfy merge_gate.py's
   # requirement for an independent review while carrying no judgement at all --
   # worse than the silence it replaces, because it would merge things.
-  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | grep -q "gh pr review"; then
+  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | qgrep "gh pr review"; then
     fail "the no-verdict notice submits a REVIEW; that would satisfy merge-gate with no judgement"
   fi
   ok "the no-verdict notice is a comment, never a review"
@@ -1275,7 +1427,7 @@ REVIEWCMD
   # the day that job is renamed, and pick up the `mention` job's own
   # cancel-in-progress -- a failure about the wrong job.
   if sed -n '/^  review:/,/^  [a-z][a-z_-]*:$/p' "$review_wf" \
-       | grep -qE "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
+       | qgrep -E "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
     fail "the review job cancels in progress; a killed review leaves the head with no verdict and nothing that says so"
   fi
   ok "a review in flight is never cancelled by the next event"
@@ -1820,7 +1972,7 @@ for fn in ready_issues has_open_pr issue_is_done count_startable; do
   # Any regex of its own over either convention, in any spelling and either
   # language -- not just the two capitalisations it used to carry.
   if grep -inE '(close[sd]?|fix(e[sd])?|resolve[sd]?|blocked[^"]*by)[^"]*#' <<<"$body" \
-     | grep -vi '^ *[0-9]*: *#' | grep -q .; then
+     | grep -vi '^ *[0-9]*: *#' | qgrep .; then
     fail "fleet.sh's $fn() spells out a closing or blocker reference again; there is one place for those, .github/scripts/issue_refs.py"
     fleet_reads_shared=0
   fi
@@ -1846,7 +1998,7 @@ grep -q 'merge_gate.py' .github/workflows/merge-gate.yml \
 # A LIST now, not one path: `.autofleet/config` rides along so review_mode() can
 # read the mode in CI. Matched loosely enough to survive that becoming three
 # paths, and strictly enough that dropping this one is still caught.
-if ! grep -A6 'sparse-checkout' .github/workflows/merge-gate.yml | grep -q '\.github/scripts'; then
+if ! grep -A6 'sparse-checkout' .github/workflows/merge-gate.yml | qgrep '\.github/scripts'; then
   fail "merge-gate.yml no longer sparse-checks-out .github/scripts; the paths merge_gate.py imports from are no longer the ones it gets"
 fi
 sparse_tmp="$(mktemp -d)"
@@ -1869,7 +2021,7 @@ if [ -x .github/scripts/pr_payload.sh ]; then
       || fail "$reader does not read the PR through .github/scripts/pr_payload.sh, so it is paging threads on its own again"
     # Comment lines excluded: both files EXPLAIN what `reviewThreads(first:100)`
     # got wrong, and a bare grep flags its own explanation.
-    grep -vE '^[[:space:]]*#' "$reader" | grep -q 'reviewThreads(first:' \
+    grep -vE '^[[:space:]]*#' "$reader" | qgrep 'reviewThreads(first:' \
       && fail "$reader carries its own reviewThreads query again; the first page is not the list"
   done
   # merge-gate.yml runs BOTH of these out of the BASE branch's checkout, and a
@@ -1878,7 +2030,7 @@ if [ -x .github/scripts/pr_payload.sh ]; then
   # `No such file or directory` on exactly the PR introducing it.
   for needed in merge_gate.py pr_payload.sh; do
     sed -n '/agreed rule to judge this by/,/^      - name:/p' \
-      .github/workflows/merge-gate.yml | grep -q "$needed" \
+      .github/workflows/merge-gate.yml | qgrep "$needed" \
       || fail "merge-gate.yml runs $needed from the base checkout without checking the base has it; a base predating it dies with a shell error instead of the human-merge notice"
   done
   ok "a base without the gate's own scripts is told, not crashed into"

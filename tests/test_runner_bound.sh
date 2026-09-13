@@ -298,7 +298,13 @@ case "${1:-}" in
   started="$(date +%s)"
   AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" blocker >"$WORK/out" 2>&1
   rc=$?
-  elapsed=$(( "$(date +%s)" - started ))
+  # Unquoted, and the substitution read into a variable first: bash 3.2 -- which
+  # is the /bin/bash every macOS ships, and what `bash tests/test_*.sh` gets
+  # whenever brew's is not first on PATH -- refuses a quoted operand inside
+  # $(( )) outright. The phase died on a syntax error before it judged anything,
+  # which is a red that says nothing about the timeout it exists to assert.
+  now="$(date +%s)"
+  elapsed=$(( now - started ))
 
   [ "$rc" = 0 ] && fail "a phase that never returned was reported as a pass"
   ok "a blocked phase fails the run"
