@@ -987,11 +987,12 @@ for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh
 done
 # ...and the brief must still name them -- across BOTH of its stages.
 #
-# Since #49 the brief arrives in two pieces out of the one file: the bare form
+# Since armaatus/autofleet#49 the brief arrives in two pieces out of the one file: the bare
+# form
 # prints the spec, steps 1-3 and a pointer, and `--after-pr` prints steps 4-6.
 # The risk the split carries is an instruction that lands in NEITHER stage,
-# which is a rule nobody enforces: #90's PR that nobody queued for auto-merge,
-# #88 and #89 sitting blocked on one unresolved thread.
+# which is a rule nobody enforces: armaatus/rommsync-nx#90's PR that nobody queued for
+# auto-merge, armaatus/rommsync-nx#88 and #89 sitting blocked on one unresolved thread.
 #
 # Asserted PER STAGE rather than over the union, which is strictly stronger and
 # is the union by construction. The union alone passed for the wrong reason and
@@ -1015,17 +1016,23 @@ if [ -z "$stage1" ] || [ -z "$stage2" ]; then
 else
   # Stage 1: what is due before anything leaves the worktree -- including the
   # pointer, without which stage 2 is unreachable and half the brief is dead
-  # text -- and the three things #49 added because CLAUDE.md names them and the
+  # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md names them
+  # and the
   # brief the fleet actually sends never did.
   for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
                 --after-pr researcher verifier "gh pr diff --stat"; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
   done
-  # ...and none of what stage 2 owns, because carrying it here is the cost #49
-  # measured: it rides in the prompt prefix of every request made before the PR
+  # ...and none of what stage 2 owns, because carrying it here is the cost
+  # armaatus/autofleet#49 measured: it rides in the prompt prefix of every request made before the PR
   # exists.
-  for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh "--auto --squash"; do
+  # `board.sh` and `Closes #` as well as the scripts: tests/test_brief.sh has
+  # both in its own negative list and tests/ is NOT vendored, so this loop is
+  # the only thing holding the split in a host installation. Found by the
+  # independent review.
+  for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh \
+                board.sh "--auto --squash" "Closes #"; do
     grep -qF -- "$named" <<<"$stage1" \
       && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
   done
@@ -1043,18 +1050,28 @@ else
 
   # The budget, in the vendored check and not only in autofleet's own suite: a
   # host project gets the brief and the reason it was split, so it should get
-  # the thing that stops it growing back. #56 folds this row into a ceilings
+  # the thing that stops it growing back. armaatus/autofleet#56 folds this row into a
+  # ceilings
   # table and will want it measured from what the agent RECEIVES; until then the
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
-  BRIEF_WORD_BUDGET=400   # set by #49
-  words="$(sed -e 's/__ISSUE__/49/g' -e 's/__TEST_COMMAND__/the full test suite/g' <<<"$stage1" \
-             | wc -w | tr -d " ")"
+  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
+  # The HOST's test command, read the same way issue-command.sh reads it, and
+  # substituted with `${//}` rather than `sed` because a test command may hold
+  # any character a `s###` delimiter could be. A hardcoded default measured a
+  # text no host repo ships: stage 1 has five words of margin, so a nine-word
+  # test command puts a host over the ceiling while this check still printed
+  # 395. Found by the independent review. tests/test_brief.sh PINS the value
+  # instead, because that phase has to be deterministic -- the test wants a
+  # fixture and the vendored guard wants the real thing.
+  rendered="${stage1//__ISSUE__/49}"
+  rendered="${rendered//__TEST_COMMAND__/${AUTOFLEET_TEST_COMMAND:-the full test suite}}"
+  words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
   if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
     ok "the opening brief is $words words, spec excluded"
   else
-    fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET (#49). Raise it here, deliberately, or move something into --after-pr"
+    fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET (armaatus/autofleet#49). Raise it here, deliberately, or move something into --after-pr"
   fi
 fi
 

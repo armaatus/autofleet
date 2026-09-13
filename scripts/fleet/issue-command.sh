@@ -21,7 +21,8 @@
 # arming auto-merge, the review rounds, the BLOCKED/DIRTY/BEHIND triage. All of
 # it arrived before the agent had read a file, and then rode in the prompt prefix
 # of every request for the rest of the session, to be acted on an hour later if
-# at all (#49). Stage 2 is fetched at the moment it applies, which is also when
+# at all (armaatus/autofleet#49). Stage 2 is fetched at the moment it applies, which is
+# also when
 # it is most likely to be followed.
 #
 # The split is WITHIN this file, and within ONE heredoc: the brief is a single
@@ -35,8 +36,8 @@
 #
 # `evals/lint.sh` here asserts each stage separately -- an instruction that fell
 # out of both is a rule nobody enforces, and the failures the long tail was
-# written for (#90's unqueued auto-merge, #88/#89's unresolved thread) come
-# straight back.
+# written for (armaatus/rommsync-nx#90's unqueued auto-merge, armaatus/rommsync-nx#88/#89's unresolved
+# thread) come straight back.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
