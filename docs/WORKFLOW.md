@@ -532,9 +532,9 @@ point. A worktree you opened by hand is never gated: pushing a half-finished
 branch is normal, and a guard that argues about it is a guard people route
 around.
 
-The PR body carries `## Plan`, both sets of findings and what was done about
-them, any issue that was edited and why, and `Closes #N`. That body is not
-decoration — `merge-gate` reads it.
+What the PR body must carry is the brief's step 4, and it is not decoration:
+[`merge-gate`](#the-merge-gate) reads it — which is why the list lives in one
+place and not here as well.
 
 ### Stage 5 — Independent review, and the merge
 
@@ -768,8 +768,13 @@ waiting, so this is not something an agent has to remember. When it trips, the
 agent stops, comments saying exactly what is unresolved and why it disagrees, and flags
 the card. Another lap is not what a disagreement needs; your attention is.
 
-When it is green the agent runs `gh pr merge --auto --squash`. That does **not**
-merge — it asks GitHub to merge once the required checks pass. Then it stops.
+Nothing in this section is where the merge gets armed. It used to end by saying
+the agent runs `gh pr merge --auto --squash` "when it is green" — a second copy
+of the rule, ninety lines below the first, saying the opposite of it: the merge
+is armed the moment the PR exists, which is the whole of
+[#90](https://github.com/armaatus/rommsync-nx/issues/90) and what
+[the section above](#answering-the-review-and-why-the-branch-waits-for-it) opens
+with. That is what a second copy costs, and why the brief is the only one.
 
 ### The merge gate
 
