@@ -251,6 +251,26 @@ check_drain() {
 }
 
 # ------------------------------------------------------------- the runner ---
+# `cost` FIRST, because it is the one subcommand that needs no runner: it reads
+# transcripts off disk and opens no worktree, no terminal and no board. The
+# probe below is at SOURCE time and `die`s, so a `cost` arm in the case at the
+# foot of this file was unreachable on any machine without a runtime -- a CI
+# runner, a laptop with the app shut, the very machines somebody asks "what did
+# last night cost" from. It answered "the orca runner is not usable here, so
+# there is nothing to dispatch with", which is true and has nothing to do with
+# the question. Found by CI, which is exactly such a machine; the suite was
+# green on the laptop where the runtime answers.
+#
+# Guarded on BASH_SOURCE so sourcing this file for tests still defines
+# everything below rather than exec-ing away mid-source.
+if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ]; then
+  # A separate script rather than a cmd_* in here: it knows nothing about
+  # dispatching, and this file is 3.5k lines already. `exec` so its exit status
+  # is the one the caller sees.
+  shift
+  exec "$REPO_ROOT/scripts/fleet/cost.sh" "$@"
+fi
+
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep
 # reports the consequence instead of the cause. The driver has already said why
@@ -3565,10 +3585,8 @@ case "${1:-}" in
   stop)   shift; cmd_stop "${1:-}" ;;
   resume) cmd_resume ;;
   retry)  shift; cmd_retry "$@" ;;
-  # A separate script rather than a cmd_* in here: it reads transcripts the agent
-  # CLI wrote and knows nothing about dispatching, and this file is 3.5k lines
-  # already. `exec` so its exit status is the one the caller sees.
-  cost)   shift; exec "$REPO_ROOT/scripts/fleet/cost.sh" "$@" ;;
+  # `cost` is NOT here. It is dispatched before the runner probe near the top of
+  # this file, because it is the one subcommand that works without a runtime.
   *)
     cat >&2 <<USAGE
 usage: fleet.sh <command>

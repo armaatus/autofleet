@@ -26,9 +26,17 @@
 #   test_cost.sh reaped      a recorded worktree whose transcripts are gone is
 #                            named once and exits 0. A reporting command must
 #                            never be the thing that fails a run.
-#   test_cost.sh subcommand  `fleet.sh cost` actually reaches cost.sh. Wired
-#                            wrong, every assertion above passes against a
-#                            command nobody can invoke.
+#   test_cost.sh subcommand  `fleet.sh cost` reaches cost.sh ON A MACHINE WITH NO
+#                            RUNNER. Wired wrong, every assertion above passes
+#                            against a command nobody can invoke -- and the
+#                            runner is the specific way it was wrong: fleet.sh
+#                            probes for one at SOURCE time and dies, so `cost`
+#                            answered "the orca runner is not usable here" on
+#                            every machine without a runtime. That is a CI
+#                            runner, and a laptop with the app shut, and the
+#                            laptop is where somebody asks what last night cost.
+#                            The stub driver below makes the phase assert that
+#                            on a machine where the real runtime WOULD answer.
 #
 # The fleet state dir and the transcript root are both temp dirs, so nothing here
 # reads this machine's own fleet or its own transcripts.
@@ -239,8 +247,25 @@ $out"
   subcommand)
     make_fixture
     make_transcripts
-    out="$(cd "$WORK/repo" && ./scripts/fleet/fleet.sh cost --json 48 2>/dev/null)" \
-      || fail "fleet.sh cost exited non-zero: $out"
+    # A driver that answers "there is no runtime here", which is what a CI
+    # runner has and what a laptop with the app shut has. Only the two functions
+    # the source-time path touches; nothing here dispatches anything.
+    cat >"$WORK/repo/scripts/fleet/runner/none.sh" <<'DRIVER'
+#!/usr/bin/env bash
+runner_available() { echo "no runtime here" >&2; return 1; }
+runner_dispatcher_hint() { printf 'nothing to dispatch with
+'; }
+DRIVER
+    export AUTOFLEET_RUNNER=none
+    # ...and prove the stub really does refuse, or the assertion below passes
+    # for the wrong reason on a machine where nothing was ever going to fail.
+    (cd "$WORK/repo" && ./scripts/fleet/fleet.sh status >/dev/null 2>&1) \
+      && fail "the stub runner did not refuse, so this phase asserts nothing"
+    err="$WORK/subcommand.err"
+    out="$(cd "$WORK/repo" && ./scripts/fleet/fleet.sh cost --json 48 2>"$err")" \
+      || fail "fleet.sh cost exited non-zero with no runner.
+stdout: $out
+stderr: $(cat "$err")"
     printf '%s' "$out" | python3 -c '
 import json, sys
 if json.load(sys.stdin)["issues"][0]["output_tokens"] != 1122:
