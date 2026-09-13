@@ -1698,7 +1698,7 @@ fi
 # relabels the entire backlog. README.md is deliberately NOT checked here: a host
 # project keeps its own.
 if python3 - <<'PYEOF'; then
-import re, sys
+import re, sys, os
 src = open(".github/workflows/unblock.yml").read()
 hit = re.search(r"(?m)^  issues:\n\s+types:\s*\[([^\]]*)\]", src)
 types = [t.strip() for t in hit.group(1).split(",") if t.strip()] if hit else []
@@ -1739,18 +1739,27 @@ if not re.search(r"body with no marker is read whole", page):
              "-->` marker is read whole; an agent reading it will believe prose "
              "in Design notes is inert on an issue where it is a blocker (#47)")
 # BOTH pages that state the rule, not one. CLAUDE.md is loaded into every session
-# in this repo and is the file #47's harm path names -- "CLAUDE.md tells agents to
-# edit issue bodies as they work" -- so an agent that reads only it, and believes
-# the marker is always in play, is the same reaped worktree by a shorter route.
-# The previous commit fixed docs/WORKFLOW.md and asserted it, and left this one.
-# Found by the independent review.
-for _page, _path in (("CLAUDE.md", "CLAUDE.md"),):
-    _text = open(_path).read()
-    if not re.search(r"body with no marker is read whole", _text):
-        sys.exit(f"{_page} states the blocker convention without the no-marker "
-                 f"fallback; it is loaded into every session, and an agent that "
-                 f"believes prose is inert writes a blocker into its own issue "
-                 f"and has its worktree reaped (#47)")
+# and is the file #47's harm path names -- "CLAUDE.md tells agents to edit issue
+# bodies as they work" -- so an agent that reads only it, and believes the marker
+# is always in play, is the same reaped worktree by a shorter route.
+#
+# CONDITIONAL, because `evals/lint.sh` is vendored and `CLAUDE.md` is NOT (it is
+# absent from install.sh's PAYLOAD -- a host project writes its own). Demanding a
+# literal English sentence in a file this does not ship failed the lint in every
+# host repo on install, which is hard rule 1 exactly: a change that only works
+# here is a bug. So the rule is conditional on the page CLAIMING the convention:
+# a CLAUDE.md that never mentions the marker is not this check's business, and one
+# that does has to say what happens without it. Found by the independent review,
+# in the commit that added the unconditional form.
+_claude = "CLAUDE.md"
+if os.path.exists(_claude):
+    _text = open(_claude).read()
+    _states_rule = re.search(r"<!-- blockers -->", _text)
+    if _states_rule and not re.search(r"body with no marker is read whole", _text):
+        sys.exit("CLAUDE.md states the blocker convention without the no-marker "
+                 "fallback; it is loaded into every session, and an agent that "
+                 "believes prose is inert writes a blocker into its own issue and "
+                 "has its worktree reaped (#47)")
 PYEOF
   ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
 else
