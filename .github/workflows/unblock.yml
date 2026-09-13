@@ -126,11 +126,16 @@ jobs:
             // `Blocked by #\u0667` was a blocker to the fleet and invisible here.
             const BLOCKED_BY =
               /^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\]|\*{1,2})[ \t]*)*blocked\s+by\s+#([0-9]+)/gim;
-            // ...and only below the LAST marker that is alone on its own line.
-            // #47 quotes `<!-- blockers -->` mid-sentence while describing this
-            // bug and carries the real marker, empty, at the end: matching the
-            // bare string picks the quoted one and reads the rest of the issue
-            // as blockers, which is how #47 came to carry seven it does not have.
+            // ...and only below the FIRST marker that is alone on its own
+            // line. The own-line anchor is what handles #47, which quotes
+            // `<!-- blockers -->` mid-sentence while describing this bug and
+            // carries the real marker, empty, at the end: matching the bare
+            // string picks the quoted one and reads the rest of the issue as
+            // blockers. Anchoring to a whole line excludes the quote by itself,
+            // so taking the LAST marker bought nothing and cost a body that
+            // carries the template marker twice -- it read as NO blockers with
+            // one open. First-wins over-collects instead. Found by the
+            // independent review.
             const BLOCKERS_MARKER = /^[ \t]*<!--\s*blockers\s*-->[ \t]*$/gm;
 
             // CRLF folded first: a body edited through the GitHub WEB UI
@@ -143,13 +148,13 @@ jobs:
             // an engine difference in how `$` and `\r` interact.
             const blockersSection = (body) => {
               const text = (body || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-              let last = null;
-              for (const m of text.matchAll(BLOCKERS_MARKER)) last = m;
+              let first = null;
+              for (const m of text.matchAll(BLOCKERS_MARKER)) { first = m; break; }
               // No marker: the whole body, still line-anchored. Issues predating
               // the convention, and host projects that never adopt it, must not
               // read as unblocked -- that is the direction that starts work on a
               // foundation which has not landed.
-              return last ? text.slice(last.index + last[0].length) : text;
+              return first ? text.slice(first.index + first[0].length) : text;
             };
 
             // Collected so the log below can say it once, rather than per issue
@@ -194,9 +199,22 @@ jobs:
               // and the fleet starts nothing without `ready`. Found by the
               // independent review.
               if (labels.includes(remove)) {
+                // 404 ONLY. The catch used to swallow everything, which put the
+                // both-labels state back behind a green check by another door:
+                // `removeLabel('ready')` takes a 403 secondary rate limit, it is
+                // discarded, `addLabels('blocked')` succeeds, and the issue
+                // carries BOTH -- which `ready_issues()` starts, because it
+                // selects on `ready` and never consults `blocked`. Reordering the
+                // two calls fixes a run that DIES between them; it does nothing
+                // for one that fails the first and continues. A 404 is the label
+                // already being gone, which is the state we wanted; anything else
+                // fails the step, so the run is red and relabels nothing. Same
+                // trade as dropping `issues.get`. Found by the independent review.
                 await github.rest.issues.removeLabel({
                   owner, repo, issue_number: issue.number, name: remove,
-                }).catch(() => {});
+                }).catch((err) => {
+                  if (!err || err.status !== 404) throw err;
+                });
               }
               if (!labels.includes(add)) {
                 await github.rest.issues.addLabels({
