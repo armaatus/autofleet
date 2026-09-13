@@ -315,10 +315,26 @@ something a test or a command can demonstrate).
 
 Below a `<!-- blockers -->` marker, `Blocked by #N` lines name its dependencies.
 [`unblock.yml`](../.github/workflows/unblock.yml) derives `blocked`/`ready` from
-those lines on every merge, and `fleet.sh` reads the same lines to order its
-queue. **Never hand-edit those labels.** The lines are editable, but changing one
-changes what other agents may start — do it deliberately, alone, and say so in
-the PR body.
+those lines, and `fleet.sh` reads the same lines to order its queue. **Never
+hand-edit those labels.** The lines are editable, but changing one changes what
+other agents may start — do it deliberately, alone, and say so in the PR body.
+
+It runs on a merged pull request, and on an issue `opened`, `edited`, `closed` or
+`reopened` — not only on a merge. Two consequences worth holding on to, because
+this file tells you to edit issue bodies as you work:
+
+- **Your edit relabels the whole backlog**, not just the issue you touched: every
+  run recomputes every open issue. That is deliberate and idempotent, and the
+  runs are serialised by a `concurrency` group on the job, newest wins. A
+  cancelled run can still stop partway through the backlog — so the stale label
+  is removed *before* the new one is added, which leaves an issue with neither
+  label rather than both. Neither is the fail-open state: `fleet.sh` starts
+  nothing that does not carry `ready`, and the next run finishes the job.
+- **Only a line below the marker counts.** `Blocked by #N` has to begin a line,
+  below the last `<!-- blockers -->` marker. Prose in Goal, Scope or Design notes
+  does not block anything — including a sentence like *"no longer blocked by
+  #7"*, which used to register as a blocker and could get the agent that wrote it
+  interrupted and its worktree reaped (#47).
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the
@@ -799,7 +815,8 @@ using this* — every by-hand check behind it was made on a worktree that was
 already finished — and this file is where the two come apart: **an agent plans
 before it edits**, so a worktree forty minutes into real work is legitimately
 empty. `blocked` is not a label a person types either —
-`unblock.yml` re-derives it on every merge, so it can arrive under an agent that
+`unblock.yml` re-derives it on any issue or merge event, so it can arrive under
+an agent that
 is mid-plan, as `needs-human-step` can arrive from the agent's own hand. So the
 first pass that finds a reason **warns**: it interrupts the agent, says on the
 card that the worktree goes next pass, and leaves it. The pass after that asks

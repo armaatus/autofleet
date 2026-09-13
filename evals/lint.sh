@@ -1352,18 +1352,331 @@ else
 fi
 
 # unblock.yml is JavaScript inside YAML and cannot import the module, so the one
-# thing keeping the two in step is that they spell the pattern identically.
-# Asserted from BOTH ends: change either alone and this goes red.
-grep -qF 'blocked\s+by\s+#(\d+)/gi' .github/workflows/unblock.yml \
-  || fail "unblock.yml no longer matches blocked\\s+by\\s+#(\\d+)/gi; issue_refs.BLOCKED_BY is now a different rule from the one that maintains the labels"
+# thing keeping the two in step is that they spell the patterns identically.
+# Asserted from BOTH ends, and BEHAVIOURALLY rather than by grep: a textual
+# assertion passes the moment the two strings match and says nothing about the
+# marker scoping that now sits around them, which is half the rule. The workflow
+# regex literals are lifted out, translated into Python, and run over
+# issue_refs.SELFTEST -- the same table, the same expected answers. Anything the
+# two disagree about is an issue the fleet may start while the labels call it
+# blocked, or leave sitting while the labels call it ready.
+if python3 - <<'PYEOF'; then
+import importlib.util, re, sys
+
+spec = importlib.util.spec_from_file_location("r", ".github/scripts/issue_refs.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+src = open(".github/workflows/unblock.yml").read()
+
+
+# Over the CODE. `literal()` takes the FIRST assignment it finds, and this file
+# explains itself at length: a commented-out literal above the real one would be
+# the one compared, and the comparison would pass while the workflow ran
+# something else. Its sibling check below strips comments for the same reason.
+code = "\n".join(re.sub(r"//.*", "", line) for line in src.splitlines())
+
+
+def literal(name):
+    """The JS regex `name` is assigned, as a Python pattern and flags."""
+    hit = re.search(r"const\s+" + name + r"\s*=\s*/(.*)/([a-z]*);", code)
+    if not hit:
+        sys.exit(f"unblock.yml no longer assigns a {name} regex literal; this "
+                 f"check can no longer see what it matches")
+    pattern, js_flags = hit.group(1), hit.group(2)
+    flags = 0
+    if "i" in js_flags:
+        flags |= re.IGNORECASE
+    if "m" in js_flags:
+        flags |= re.MULTILINE
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        sys.exit(f"unblock.yml's {name} is not a pattern Python can read ({exc}); "
+                 f"the two readers can no longer be compared at all")
+
+
+wf_blocked, wf_marker = literal("BLOCKED_BY"), literal("BLOCKERS_MARKER")
+
+# Character for character first, which is what #47's acceptance asked for: two
+# differently-spelled but equivalent patterns pass the behavioural run below and
+# are still the drift this section exists to catch, because the NEXT edit to
+# either one starts from a different string.
+for name, workflow_side, module_side in (
+    ("BLOCKED_BY", wf_blocked, m.BLOCKED_BY),
+    ("BLOCKERS_MARKER", wf_marker, m.BLOCKERS_MARKER),
+):
+    if workflow_side.pattern != module_side.pattern:
+        sys.exit(f"unblock.yml spells {name} as {workflow_side.pattern!r} and "
+                 f"issue_refs.py spells it {module_side.pattern!r}")
+
+# ...and the workflow has to actually USE the scoping, not merely define it.
+# Nothing asserted the call: deleting `blockersSection(` from the loop and
+# matching over the raw body left every check here green while the workflow read
+# whole bodies again -- hard rule 3, the guard that stops guarding. Found by the
+# independent review.
+if not re.search(r"blockersSection\(\s*issue\.body\s*\)\.matchAll\(\s*BLOCKED_BY\s*\)",
+                 code):
+    sys.exit("unblock.yml no longer matches BLOCKED_BY over blockersSection("
+             "issue.body); the marker scoping is defined and not used, so prose "
+             "anywhere in a body blocks work again (#47)")
+if not re.search(r"matchAll\(\s*BLOCKERS_MARKER\s*\)", code):
+    sys.exit("unblock.yml no longer walks BLOCKERS_MARKER; blockersSection "
+             "cannot be finding the marker at all")
+
+# THE SHAPE OF THE WALK AND THE SLICE, not just the call.
+#
+# Everything above compares the workflow's two regex LITERALS, lifted into
+# Python. The scoping around them is a JavaScript arrow function, and the mirror
+# used to check it (`wf_blocked_by`) is re-typed here rather than executed -- so
+# these three one-line mutations of unblock.yml left this whole file green while
+# the workflow did something else, which the independent review demonstrated:
+#
+#   `{ first = m; break; }` -> `last = m`       : last marker wins again
+#   `: text`                -> `: ''`           : the 14 marker-less issues read
+#                                                 as UNBLOCKED -- fail-open, and
+#                                                 the collision the label exists
+#                                                 to prevent
+#   `slice(first.index + ...)` -> `slice(0, ...)`: reads only ABOVE the marker
+#
+# Pinned by shape, the way the call site already is. Executing the JS under node
+# would close it properly, but node is not a dependency this repo has (CLAUDE.md:
+# bash and python3, nothing to install) and a check that silently skips where node
+# is absent is hard rule 3 arriving through the door marked "not a failure".
+if not re.search(r"for\s*\(const\s+m\s+of\s+text\.matchAll\(\s*BLOCKERS_MARKER\s*\)\s*\)"
+                 r"\s*\{\s*first\s*=\s*m;\s*break;\s*\}", code):
+    sys.exit("unblock.yml no longer stops at the FIRST blockers marker; a body "
+             "carrying the template marker twice loses the section above the "
+             "last one, and goes ready with an open blocker (#47)")
+if not re.search(r"return\s+first\s*\?\s*text\.slice\(\s*first\.index\s*\+\s*"
+                 r"first\[0\]\.length\s*\)\s*:\s*text\s*;", code):
+    sys.exit("unblock.yml no longer returns everything BELOW the marker, with the "
+             "whole body as the fallback; slicing the other way, or returning '' "
+             "when there is no marker, reads issues as unblocked that are not")
+
+# The stale label comes off BEFORE the new one goes on. `cancel-in-progress`
+# makes a run that dies between the two calls reachable, and the other order
+# leaves the issue carrying both `blocked` and `ready` -- and fleet.sh\'s
+# ready_issues() selects on `ready` without ever consulting `blocked`, so that
+# issue is startable. This order leaves neither label, and the fleet starts
+# nothing without `ready`. Found by the independent review.
+if code.index("removeLabel") > code.index("addLabels"):
+    sys.exit("unblock.yml adds the new label before removing the stale one; a "
+             "cancelled run leaves an issue carrying both `blocked` and `ready`, "
+             "and fleet.sh will start it (#47)")
+# ...and the removal is not allowed to fail quietly. Ordering the two calls fixes
+# a run that DIES between them and does nothing for one that FAILS the first and
+# carries on: a swallowed 403 on removeLabel plus a successful addLabels is the
+# both-labels state again, behind a green check. Found by the independent review.
+if re.search(r"removeLabel\((?:[^;]|\n)*?\.catch\(\s*\(\s*\)\s*=>", code):
+    sys.exit("unblock.yml discards every error from removeLabel again; a rate "
+             "limit on the removal leaves the issue carrying both `blocked` and "
+             "`ready`, and ready_issues() starts it (#47)")
+if not re.search(r"err\.status\s*!==\s*404\s*\)\s*throw\s+err", code):
+    sys.exit("unblock.yml no longer rethrows a non-404 from removeLabel; only "
+             "the label already being gone is a safe failure to ignore")
+# CRLF is folded on the way in rather than patched into the pattern, because the
+# comparison above lifts the workflow\'s pattern text into Python and cannot see
+# an engine difference in how `$` and `\r` interact.
+if not re.search(r"replace\(\s*/\\r", code):
+    sys.exit("unblock.yml no longer folds CRLF before reading a body; a body "
+             "edited in the GitHub web UI loses its `<!-- blockers -->` marker "
+             "and the whole body is read as blockers again (#47)")
+
+# The workflow's own scoping, spelled here the way the JS spells it: the LAST
+# marker alone on a line, or the whole body when there is none.
+def wf_blocked_by(body):
+    # The same fold the workflow does on the way in, and asserted to be there
+    # below. Re-typed here rather than lifted, because a JS arrow function is not
+    # something Python can execute -- which is exactly why the assertion that the
+    # workflow still CALLS it matters more than this mirror does.
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    first = None
+    for hit in wf_marker.finditer(text):
+        first = hit
+        break
+    if first:
+        text = text[first.end():]
+    return [int(hit.group(1)) for hit in wf_blocked.finditer(text)]
+
+
+bad = []
+for body, _closes, want in m.SELFTEST:
+    got = wf_blocked_by(body)
+    if got != want:
+        bad.append(f"{body!r}: the workflow reads {got}, issue_refs reads {want}")
+if bad:
+    sys.exit("unblock.yml and issue_refs.py disagree about which issues block "
+             "which:\n  " + "\n  ".join(bad))
+# ...and the table has to still be saying something. A selftest emptied of its
+# blocker rows would pass the loop above without comparing anything.
+if sum(1 for _b, _c, want in m.SELFTEST if want) < 5:
+    sys.exit("issue_refs.SELFTEST no longer carries enough blocker rows for this "
+             "comparison to mean anything")
+PYEOF
+  ok "the fleet and unblock.yml read the same blockers, over the same table"
+else
+  fail "unblock.yml and issue_refs.py no longer derive the same blockers (above); an issue one calls blocked the other will start"
+fi
+
+# The blocker rule that cost #47: a blocker is a LINE, below the marker. Both
+# readers are checked on the two sentences CLAUDE.md actively invites agents to
+# write into issue bodies -- through the module, so this fails if either the
+# pattern or the scoping is loosened back.
 python3 -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("r", ".github/scripts/issue_refs.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
-sys.exit(0 if m.BLOCKED_BY.pattern == r"blocked\s+by\s+#(\d+)" else 1)
-' || fail "issue_refs.BLOCKED_BY no longer spells unblock.yml's pattern character for character"
-ok "the fleet and unblock.yml read the same blockers"
+prose = ["no longer blocked by #7", "#40 was unblocked by #12 when that merged"]
+sys.exit(0 if not any(m.blocked_by(p) for p in prose) else 1)
+' || fail "prose saying an issue is NOT blocked registers as a blocker again; an agent editing its own issue body can get its own worktree reaped (#47)"
+ok "negated prose does not block anything"
+
+# The concurrency group. Every other workflow here has one; this is the one that
+# now fires on every issue edit, from up to three worktrees that CLAUDE.md tells
+# to edit issue bodies as they work. Two interleaved runs can land an issue
+# `ready` with an open blocker, which is the foundation collision the label
+# exists to prevent.
+#
+# ON THE JOB, NOT THE WORKFLOW, and that distinction is the assertion: at
+# workflow level EVERY triggering event enters the group, including the
+# `pull_request: closed` of a PR that was never merged, which the job\'s `if:`
+# then skips -- so it cancels a reconcile in flight and does no relabelling of
+# its own. Found by the independent review, on the first version of this change.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open(".github/workflows/unblock.yml").read()
+if re.search(r"(?m)^concurrency:", src):
+    sys.exit("unblock.yml declares concurrency at WORKFLOW level; an event the "
+             "job skips still takes the group and cancels a run in flight, so a "
+             "PR closed without merging aborts a relabelling pass and does none")
+hit = re.search(r"(?m)^    concurrency:\n((?:[ \t]{6,}\S.*\n)+)", src)
+if not hit:
+    sys.exit("unblock.yml has no job-level concurrency: group; two runs from two "
+             "issue edits can interleave and land an issue ready with an open "
+             "blocker")
+block = hit.group(1)
+if not re.search(r"(?m)^\s+group:\s*\S", block):
+    sys.exit("unblock.yml\'s concurrency: has no group:")
+if not re.search(r"(?m)^\s+cancel-in-progress:\s*true", block):
+    sys.exit("unblock.yml\'s concurrency: does not cancel in progress; the older "
+             "run finishes last and writes the STALER labels, which is the "
+             "inversion the group is here to stop")
+# `github.ref` in the group would scope it per-branch, and every one of these
+# runs on the default branch: that is one group with a name that suggests
+# otherwise, and it would silently stop serialising if one ever did not.
+if "github.ref" in block:
+    sys.exit("unblock.yml scopes its concurrency group by ref; these runs are "
+             "not per-branch and would stop serialising")
+PYEOF
+  ok "unblock.yml serialises its runs and the newest one wins"
+else
+  fail "unblock.yml's concurrency group is missing or would not serialise (above)"
+fi
+
+# The trigger list, named. Nothing asserted it, and dropping `opened` returns the
+# repo to issues that carry no label and that `fleet.sh` will therefore never
+# start -- silently, because an unstartable backlog looks exactly like an empty
+# one. README.md and docs/WORKFLOW.md describe this list to agents, so it is
+# checked against them too, below.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open(".github/workflows/unblock.yml").read()
+want = {"opened", "edited", "closed", "reopened"}
+hit = re.search(r"(?m)^  issues:\n\s+types:\s*\[([^\]]*)\]", src)
+if not hit:
+    sys.exit("unblock.yml no longer lists issue trigger types inline; this check "
+             "cannot see them")
+got = {t.strip() for t in hit.group(1).split(",") if t.strip()}
+if got != want:
+    sys.exit(f"unblock.yml fires on issues {sorted(got)}; it has to fire on "
+             f"{sorted(want)} -- an issue filed with no blockers carries no "
+             f"label until one of these arrives, and fleet.sh starts nothing "
+             f"without `ready`")
+if not re.search(r"(?m)^  pull_request:\n\s+types:\s*\[\s*closed\s*\]", src):
+    sys.exit("unblock.yml no longer fires on a closed pull request; a merge would "
+             "stop unblocking its dependants")
+if not re.search(r"(?m)^  workflow_dispatch:", src):
+    sys.exit("unblock.yml can no longer be run by hand; it is the only way to "
+             "recover a backlog whose labels have drifted")
+PYEOF
+  ok "unblock.yml fires on the triggers the docs promise"
+else
+  fail "unblock.yml's trigger list has changed (above)"
+fi
+
+# ...and docs/WORKFLOW.md names the same list. It is vendored, and it is what an
+# agent reads before it edits an issue body -- so a page still saying the labels
+# are derived "on every merge" tells that agent its edit is local when the edit
+# relabels the entire backlog. README.md is deliberately NOT checked here: a host
+# project keeps its own.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open(".github/workflows/unblock.yml").read()
+hit = re.search(r"(?m)^  issues:\n\s+types:\s*\[([^\]]*)\]", src)
+types = [t.strip() for t in hit.group(1).split(",") if t.strip()] if hit else []
+if not types:
+    sys.exit("no issue trigger types to check the docs against")
+page = open("docs/WORKFLOW.md").read()
+missing = [t for t in types if f"`{t}`" not in page]
+if missing:
+    sys.exit("docs/WORKFLOW.md does not name the triggers unblock.yml fires on: "
+             + ", ".join(missing))
+if re.search(r"unblock\.yml[^.]{0,120}on every merge", page, re.S):
+    sys.exit("docs/WORKFLOW.md still says the labels are derived on every merge; "
+             "they are derived on every issue edit too, which is what makes an "
+             "agent editing an issue body a backlog-wide event")
+PYEOF
+  ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
+else
+  fail "docs/WORKFLOW.md describes a trigger set unblock.yml no longer has (above)"
+fi
+
+# ...and the blast radius that made #47 urgent: one `issues.get` per distinct
+# blocker, on a trigger that fires on every edit. A 5xx or a rate limit on one of
+# them marked every dependant `blocked` -- which fleet.sh reads as "this worktree
+# will never produce a merged PR" -- and reported it through `core.warning`, so
+# the check stayed GREEN while three slots froze. The open page already answers
+# "is #N open"; a regrown per-blocker lookup brings the whole path back.
+#
+# Over the CODE, not the comments. The file explains at length what it used to do
+# and why it stopped, in the comment density CLAUDE.md asks for, and a plain grep
+# reads that explanation as the thing itself -- the same reason hard rule 4's
+# check 4c excludes comments from its own seam grep.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open(".github/workflows/unblock.yml").read()
+hit = re.search(r"(?m)^\s*script: \|\n(.*)\Z", src, re.S)
+if not hit:
+    sys.exit("unblock.yml has no inline `script: |` block; this check cannot see "
+             "what the job runs")
+script = hit.group(1)
+# Line comments only. The file has no block comments and no string containing
+# `//`; a URL would be the usual counter-example and there is none.
+code = "\n".join(re.sub(r"//.*", "", line) for line in script.splitlines())
+problems = []
+if re.search(r"issues\.get\b", code):
+    problems.append("it looks blockers up one at a time again (`issues.get`); a "
+                    "transient failure on one of those marks every dependant "
+                    "blocked, and fleet.sh reaps a live worktree over it")
+if re.search(r"core\.warning\b", code):
+    problems.append("it reports through `core.warning` again, which leaves the "
+                    "run GREEN while the labels it just wrote are wrong")
+if not re.search(r"\bopenNumbers\b", code):
+    problems.append("it no longer answers `is #N open` from the page it already "
+                    "fetched, so the per-blocker lookups have somewhere to regrow")
+if not re.search(r"core\.info\([^)]*not open", code, re.S):
+    problems.append("it no longer logs which blockers it treated as not open; an "
+                    "issue filed before its own foundation goes `ready` with "
+                    "nothing in the log to read afterwards")
+if problems:
+    sys.exit("unblock.yml (#47): " + "; ".join(problems))
+PYEOF
+  ok "unblock.yml reads blocker state from the page it already has, and says what it concluded"
+else
+  fail "unblock.yml can freeze the backlog behind a green check again (above)"
+fi
 
 # ...and EVERY function in the fleet that reads one of the two conventions gets
 # it from the module. A `grep -q issue_refs` over the whole file would be

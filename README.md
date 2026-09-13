@@ -32,7 +32,10 @@ model runs in the dispatcher, and no agent merges its own work.
 4. **Gates the merge.** `merge-gate` is a required check that fails closed: no
    local review recorded, no independent review, an unanswered finding, an
    unresolved thread, no `Closes #N` — no merge. `unblock.yml` then re-derives
-   the `blocked`/`ready` labels so the next issue becomes startable.
+   the `blocked`/`ready` labels so the next issue becomes startable — on a merged
+   pull request, and on an issue `opened`, `edited`, `closed` or `reopened`,
+   because an issue filed with no blockers carries no label at all until one of
+   those fires and the dispatcher starts nothing without `ready`.
 5. **Reclaims the worktree** only when nothing goes with it: the PR merged and
    the tree is clean, or the issue can no longer produce a merged PR at all.
 
