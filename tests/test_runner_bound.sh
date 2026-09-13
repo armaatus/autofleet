@@ -125,18 +125,20 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # the copy and turn every "nothing per phase" row red on a harness artefact.
 #
 # Only the calls that come THROUGH HERE, which is less than the NO_SKIP
-# paragraph above promises for its own variable. Nine invocations in this file
+# paragraph above promises for its own variable. Most invocations in this file
 # drive the copy directly, because they need their own bound or their own
-# backgrounding, and exactly ONE of them clears this variable: `passes`, which
-# has to, because the `ok` row it greps for is the very thing verbose adds. The
-# other eight do not, and are fine only because none of them asserts that
-# something is ABSENT from the output -- a row added to any of them that greps
-# for a missing `ok` or `==` line must clear it on the line too, or it goes red
-# on a harness artefact rather than on a defect.
+# backgrounding, and those are fine only because they do not assert that
+# something is ABSENT from the output: a row added to one of them that greps for
+# a MISSING `ok` or `==` line has to clear the variable on its own line, or it
+# goes red on a harness artefact rather than on a defect. Two do clear it
+# already -- `passes`, so that the `ok` row it greps for is supplied by the
+# `--verbose` on its line and not by an inherited environment, and the `env -u`
+# row in `quiet`, whose whole subject is the variable being unset.
 #
-# Spelled out because a comment claiming a guarantee the code does not give is
-# itself the guard that stops guarding, and the first draft of this one claimed
-# it. Found by the independent review, which also counted them.
+# No count here, deliberately: the first two drafts of this comment each stated
+# one and each was wrong by the time it was read, once by a row the same commit
+# added. A comment claiming a guarantee the code does not give is itself the
+# guard that stops guarding. Both drafts found by the independent review.
 run_copy() {
   AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_VERBOSE="${COPY_VERBOSE-}" \
     AUTOFLEET_TEST_TIMEOUT=10 \
@@ -972,7 +974,19 @@ EOF
   # Nor quieter about a phase that judged NOTHING. A silent skip is
   # indistinguishable from a phase that quietly opted out of running months ago,
   # which is the reading run.sh's own SKIPPABLE comment exists to prevent.
-  make_runner skipper
+  # `quick` beside it, because on a registry of NOTHING BUT skips there is no
+  # `ok` line to suppress and the assertions below are green whatever the runner
+  # does -- and the shipped shape is a skip among 155 passing phases, not a run
+  # that is all skip. Found by the independent review.
+  #
+  # What that buys, honestly: these rows are the ONLY ones shaped like the run
+  # this repo actually performs, and they are regression ballast rather than the
+  # last line of defence. No mutation reaches them first -- the runner has no
+  # skip-specific verbosity path, so anything that puts the per-phase lines back
+  # reds the five-line row at the top of this phase before it gets here. Said
+  # because the previous draft of this comment claimed they closed a gap they
+  # could not even see. Found by /code-review.
+  make_runner skipper quick quick2
   run_copy
   [ "$?" = 0 ] || fail "a skip failed the run: $(cat "$WORK/out")"
   grep -q "skip skipper" "$WORK/out" \
@@ -992,9 +1006,11 @@ EOF
   # above could not see it.
   skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
   [ "$skipped_lines" -le 5 ] \
-    || fail "a green run with one skip printed $skipped_lines lines: $(cat "$WORK/out")"
+    || fail "a green run of two passes and one skip printed $skipped_lines lines: $(cat "$WORK/out")"
   grep -q "ok   " "$WORK/out" \
     && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
+  grep -q "== " "$WORK/out" \
+    && fail "a run with a skip printed the suite headers: $(cat "$WORK/out")"
   ok "...and a skip costs its own reason and nothing else"
 
   # --verbose is today's output, unchanged, for a human debugging a wedged phase.
@@ -1021,12 +1037,17 @@ EOF
   # inside the copy it is always set-and-empty. `COPY_VERBOSE="" run_copy` is
   # byte-identical to the plain call and pins nothing.
   #
-  # The mutation that survived: `${AUTOFLEET_TEST_VERBOSE-}` in place of
-  # `${AUTOFLEET_TEST_VERBOSE:-}` reads set-and-empty and unset differently, so
-  # every row in this phase stays green while a developer's `./tests/run.sh`
-  # goes back to printing all 137 lines -- #52's own acceptance criterion, gone.
-  # `env -u` is the same answer this file already gives for COPY_NO_SKIP fifty
-  # rows up, and for the same reason. Found by the independent review.
+  # The mutation that survived: `${AUTOFLEET_TEST_VERBOSE-1}` in place of
+  # `${AUTOFLEET_TEST_VERBOSE:-}` -- a default that applies on UNSET only, so
+  # set-and-empty stays quiet and unset turns verbose. Every row in this phase
+  # stayed green under it while a developer's `./tests/run.sh` went back to
+  # printing all 137 lines, which is #52's own acceptance criterion gone. Not
+  # the bare `-` form: with an empty word after the dash that is identical to
+  # `:-` in every state and changes nothing, which is a swap the next reader
+  # would try and then conclude this row asserts nothing. Found by the
+  # independent review, twice: once for the gap and once for the wrong name.
+  # `env -u` is the same answer this file already gives for COPY_NO_SKIP in the
+  # `skips` phase, and for the same reason. Found by the independent review.
   env -u AUTOFLEET_TEST_VERBOSE -u AUTOFLEET_TEST_NO_SKIP AUTOFLEET_TEST_TIMEOUT=10 \
     "$WORK/tests/run.sh" >"$WORK/out" 2>&1
   [ "$?" = 0 ] || fail "the shipped invocation failed: $(cat "$WORK/out")"
@@ -1108,10 +1129,22 @@ EOF
     || fail "ci.yml no longer runs the suite; this row asserts nothing"
   # The variable has to carry a VALUE. `AUTOFLEET_TEST_VERBOSE= ./tests/run.sh`
   # is a quiet run that mentions the variable, and #80's strict job is exactly
-  # where somebody writes a variable-prefixed invocation. Found by the
-  # independent review.
+  # where somebody writes a variable-prefixed invocation. Quoted counts:
+  # `="1"` is loud and only `=""` and `=''` are not, because a pattern that
+  # rejected every quote would red a CI file that is correct -- which is the
+  # more expensive way to be wrong than the one it was guarding against. Found
+  # by the standards review.
+  #
+  # And it has to be ON THE LINE. A step-level or job-level `env:` block is the
+  # normal YAML way to set one, and this row cannot see it: a workflow that is
+  # correct that way goes red here. That is the cheap direction to be wrong in
+  # -- the alternative is reading YAML with grep, and a false red says exactly
+  # where to look -- but it is a real constraint on how ci.yml may spell it, so
+  # it is written down rather than discovered. Both found by the independent
+  # review.
   ci_loud="$(grep -v "^[[:space:]]*#" "$ci" | grep "\./tests/run\.sh" \
-             | grep -c -e "--verbose" -e "AUTOFLEET_TEST_VERBOSE=[^[:space:]'\"]" || true)"
+             | grep -cE -e "--verbose" \
+                        -e "AUTOFLEET_TEST_VERBOSE=[\"']?[^[:space:]\"']" || true)"
   [ "${ci_loud:-0}" = "$ci_runs" ] \
     || fail "$((ci_runs - ci_loud)) of ci.yml's $ci_runs suite runs are quiet, so a failed run no longer says which phases ran"
   ok "every run of the suite in CI still asks for the per-phase lines"
