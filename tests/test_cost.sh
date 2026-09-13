@@ -278,7 +278,22 @@ $out"
     set -- $row
     [ "$2" = 1 ] || fail "sessions: expected 1, got $2 -- the truncated directory was not found"
     [ "$4" = 4 ] || fail "output: expected 4, got $4"
-    echo "ok: a worktree path past the slug cap is found by its truncated prefix"
+
+    # ...and a SECOND attempt at the same issue, as `fleet.sh retry 71` records.
+    # Two attempts differ by a trailing suffix, so past the cap their first 200
+    # slug characters are identical BY CONSTRUCTION and the prefix match hands
+    # back the same directory for both. Read once per recorded path, every file
+    # in it was summed twice and the row came out exactly double -- nothing on
+    # stderr, no zero to notice. Found by the independent review.
+    printf '%s\n' "$deep/second-attempt" >>"$AUTOFLEET_DIR/ran/71"
+    out="$(cost 71 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
+    row="$(printf '%s\n' "$out" | awk '$1 == 71')"
+    [ -n "$row" ] || fail "no row for #71 after the second attempt in:
+$out"
+    set -- $row
+    [ "$2" = 1 ] || fail "sessions: expected 1, got $2 -- one directory was counted once per path"
+    [ "$4" = 4 ] || fail "output: expected 4, got $4 -- 8 means the same directory was summed twice"
+    echo "ok: a worktree path past the slug cap is found by its prefix, and counted once"
     ;;
 
   filtered)

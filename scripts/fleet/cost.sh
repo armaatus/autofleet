@@ -67,8 +67,14 @@ done
 # the questions this report exists to answer. Duplicates are dropped downstream.
 worktree_paths() {
   local dir f n line
-  # $FLEET_OWNED answers "what is running" and $FLEET_RAN answers "what has
-  # run", which is the question a cost report is. Both come from lib.sh.
+  # BOTH, and the reason is the upgrade, not the wording. `own()` writes the two
+  # in the same breath and is the only writer, so on a fleet that has launched
+  # anything since this shipped every $FLEET_OWNED path is already in $FLEET_RAN
+  # and the first pass finds nothing new. What it is for is the worktree that was
+  # owned BEFORE this change existed: it has an $FLEET_OWNED entry and no ran/
+  # one, and dropping this loop would lose the live run somebody is most likely
+  # to be asking about. Both come from lib.sh. Found by the independent review,
+  # which pointed out the comment here argued for reading one of them.
   for dir in "$FLEET_OWNED" "$FLEET_RAN"; do
     [ -d "$dir" ] || continue
     for f in "$dir"/*; do
@@ -278,56 +284,70 @@ def measure(paths):
     sums = {key: 0 for _, key in FIELDS}
     sessions = 0
     found = False
+    # ONE PASS PER DIRECTORY, not per recorded path. `directories_for` falls back
+    # to a PREFIX match past SLUG_MAX, so two of the paths for ONE issue that agree on
+    # their first 200 slug characters return the SAME directory -- and two
+    # attempts at one issue are exactly that shape, since what tells them apart
+    # is a trailing suffix. Read once per path, every file was summed twice and
+    # `sessions` counted twice: a row exactly double, with nothing on stderr and
+    # no zero to notice. That is the failure this whole file calls the worst one
+    # available, arriving for the third time in this change. An ordered set, so
+    # the report still reads them in a stable order. Found by the independent
+    # review.
+    directories = []
     for path in paths:
         for directory in directories_for(path):
-            try:
-                entries = sorted(os.listdir(directory))
-            except OSError:
-                # A transcript directory that cannot be listed is one worktree
-                # with no figures, not a report that dies half way through.
-                bad_files += 1
-                continue
-            for name in entries:
-                full = os.path.join(directory, name)
-                if name.endswith(".jsonl") and os.path.isfile(full):
-                    # A file directly in the project directory is a SESSION.
-                    if add_file(full, sums):
-                        sessions += 1
-                        found = True
-                elif os.path.isdir(full) and os.path.isdir(
-                        os.path.join(full, "subagents")):
-                    # ...and everything under it belongs to that session.
-                    #
-                    # SUBAGENTS LIVE HERE, and missing them is not a rounding
-                    # error. A subagent writes its own transcript under
-                    # `<session-id>/subagents/agent-*.jsonl`, and this repo
-                    # REQUIRES subagents: verifier, researcher and two review
-                    # passes per issue (CLAUDE.md). Reading only the top level
-                    # dropped 92% of the cache-write tokens for one worktree and
-                    # reported 1 session where 4 agents had run.
-                    #
-                    # `<session-id>/subagents` BY NAME, and then walked to
-                    # the bottom. The walk has to be DEEP, because an agent that
-                    # spawns an agent nests one level further down again -- but
-                    # it must not be WIDE: a session directory carries siblings,
-                    # `tool-results` among them on this machine, and persisted
-                    # tool output landing there as `.jsonl` would be summed as if
-                    # an agent had spent it. Found by the independent review.
-                    # `onerror`, because os.walk SWALLOWS its errors by
-                    # default: a subagents/ directory that would not open
-                    # vanished silently, one level below the "each costs one
-                    # line on stderr" this file promises. Found by the
-                    # independent review.
-                    def unreadable(_error):
-                        global bad_files
-                        bad_files += 1
-                    subagents = os.path.join(full, "subagents")
-                    for here, _dirs, files in os.walk(subagents,
-                                                      onerror=unreadable):
-                        for nested in sorted(files):
-                            if nested.endswith(".jsonl"):
-                                if add_file(os.path.join(here, nested), sums):
-                                    found = True
+            if directory not in directories:
+                directories.append(directory)
+    for directory in directories:
+        try:
+            entries = sorted(os.listdir(directory))
+        except OSError:
+            # A transcript directory that cannot be listed is one worktree
+            # with no figures, not a report that dies half way through.
+            bad_files += 1
+            continue
+        for name in entries:
+            full = os.path.join(directory, name)
+            if name.endswith(".jsonl") and os.path.isfile(full):
+                # A file directly in the project directory is a SESSION.
+                if add_file(full, sums):
+                    sessions += 1
+                    found = True
+            elif os.path.isdir(full) and os.path.isdir(
+                    os.path.join(full, "subagents")):
+                # ...and everything under it belongs to that session.
+                #
+                # SUBAGENTS LIVE HERE, and missing them is not a rounding
+                # error. A subagent writes its own transcript under
+                # `<session-id>/subagents/agent-*.jsonl`, and this repo
+                # REQUIRES subagents: verifier, researcher and two review
+                # passes per issue (CLAUDE.md). Reading only the top level
+                # dropped 92% of the cache-write tokens for one worktree and
+                # reported 1 session where 4 agents had run.
+                #
+                # `<session-id>/subagents` BY NAME, and then walked to
+                # the bottom. The walk has to be DEEP, because an agent that
+                # spawns an agent nests one level further down again -- but
+                # it must not be WIDE: a session directory carries siblings,
+                # `tool-results` among them on this machine, and persisted
+                # tool output landing there as `.jsonl` would be summed as if
+                # an agent had spent it. Found by the independent review.
+                # `onerror`, because os.walk SWALLOWS its errors by
+                # default: a subagents/ directory that would not open
+                # vanished silently, one level below the "each costs one
+                # line on stderr" this file promises. Found by the
+                # independent review.
+                def unreadable(_error):
+                    global bad_files
+                    bad_files += 1
+                subagents = os.path.join(full, "subagents")
+                for here, _dirs, files in os.walk(subagents,
+                                                  onerror=unreadable):
+                    for nested in sorted(files):
+                        if nested.endswith(".jsonl"):
+                            if add_file(os.path.join(here, nested), sums):
+                                found = True
     return sessions, found, sums
 
 rows = []
