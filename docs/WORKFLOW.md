@@ -330,11 +330,27 @@ this file tells you to edit issue bodies as you work:
   is removed *before* the new one is added, which leaves an issue with neither
   label rather than both. Neither is the fail-open state: `fleet.sh` starts
   nothing that does not carry `ready`, and the next run finishes the job.
+
+  What that ordering does **not** cover, said plainly because the reverse is easy
+  to assume: a run that *dies* between the two calls is safe; a run whose
+  *removal itself fails* is not. If `removeLabel('ready')` takes a rate limit on
+  an issue that should become `blocked`, that issue keeps `ready` and never gains
+  `blocked` — and `ready_issues()` selects on `ready` without consulting
+  `blocked`, so it is startable with an open blocker until a later run repairs
+  it. The failure is recorded, the rest of the backlog is still relabelled, and
+  the run then goes red — but a red check is not something `fleet.sh` reads. This
+  is no worse than the order it replaced, which left both labels and was
+  startable just the same. It is simply not closed, and closing it means teaching
+  `ready_issues()` to consult `blocked`.
 - **Only a line below the marker counts.** `Blocked by #N` has to begin a line,
-  below the last `<!-- blockers -->` marker. Prose in Goal, Scope or Design notes
-  does not block anything — including a sentence like *"no longer blocked by
-  #7"*, which used to register as a blocker and could get the agent that wrote it
-  interrupted and its worktree reaped (#47).
+  below the **first** `<!-- blockers -->` marker — everything under the earliest
+  one is read, so pasting a second marker lower down does not supersede the
+  section above it, it adds to it. Prose in Goal, Scope or Design notes does not
+  block anything — including a sentence like *"no longer blocked by #7"*, which
+  used to register as a blocker and could get the agent that wrote it interrupted
+  and its worktree reaped (#47). One boundary: the anchor sees the start of a
+  line and nothing before it, so a negation that *wrapped* onto the previous line
+  still counts. Keep a blocker line, and any sentence about one, on one line.
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the

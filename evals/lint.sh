@@ -1460,7 +1460,13 @@ if not re.search(r"return\s+first\s*\?\s*text\.slice\(\s*first\.index\s*\+\s*"
 # ready_issues() selects on `ready` without ever consulting `blocked`, so that
 # issue is startable. This order leaves neither label, and the fleet starts
 # nothing without `ready`. Found by the independent review.
-if code.index("removeLabel") > code.index("addLabels"):
+# `find`, not `index`: a workflow that has stopped writing labels at all should
+# say so, not raise a ValueError out of the middle of a lint run.
+where_remove, where_add = code.find("removeLabel"), code.find("addLabels")
+if where_remove < 0 or where_add < 0:
+    sys.exit("unblock.yml no longer both removes and adds labels; it cannot be "
+             "maintaining blocked/ready, which is the only thing it is for")
+if where_remove > where_add:
     sys.exit("unblock.yml adds the new label before removing the stale one; a "
              "cancelled run leaves an issue carrying both `blocked` and `ready`, "
              "and fleet.sh will start it (#47)")
@@ -1472,9 +1478,24 @@ if re.search(r"removeLabel\((?:[^;]|\n)*?\.catch\(\s*\(\s*\)\s*=>", code):
     sys.exit("unblock.yml discards every error from removeLabel again; a rate "
              "limit on the removal leaves the issue carrying both `blocked` and "
              "`ready`, and ready_issues() starts it (#47)")
-if not re.search(r"err\.status\s*!==\s*404\s*\)\s*throw\s+err", code):
-    sys.exit("unblock.yml no longer rethrows a non-404 from removeLabel; only "
-             "the label already being gone is a safe failure to ignore")
+if not re.search(r"err\.status\s*!==\s*404", code):
+    sys.exit("unblock.yml no longer singles out a 404 from removeLabel; only the "
+             "label already being gone is a safe failure to pass over")
+# ...and the rest is REPORTED, after the loop. Throwing from inside the loop
+# abandons every issue after the failing one; swallowing leaves the run green
+# while the labels are wrong. Found by the independent review.
+if not re.search(r"writeFailures\.push", code):
+    sys.exit("unblock.yml no longer records a failed label write; a rate limit on "
+             "one removal goes unreported and the run stays green with an issue "
+             "left startable on an open blocker (#47)")
+if not re.search(r"core\.setFailed\(", code):
+    sys.exit("unblock.yml no longer fails the run when a label write failed; a "
+             "partly-relabelled backlog behind a green check is what Scope 3 was "
+             "about")
+if re.search(r"if\s*\(!err\s*\|\|\s*err\.status\s*!==\s*404\s*\)\s*throw", code):
+    sys.exit("unblock.yml throws from inside the relabelling loop; every issue "
+             "after the failing one is then left un-relabelled, which is worse "
+             "than finishing the pass and failing the step afterwards")
 # CRLF is folded on the way in rather than patched into the pattern, because the
 # comparison above lifts the workflow\'s pattern text into Python and cannot see
 # an engine difference in how `$` and `\r` interact.
@@ -1486,10 +1507,10 @@ if not re.search(r"replace\(\s*/\\r", code):
 # The workflow's own scoping, spelled here the way the JS spells it: the LAST
 # marker alone on a line, or the whole body when there is none.
 def wf_blocked_by(body):
-    # The same fold the workflow does on the way in, and asserted to be there
-    # below. Re-typed here rather than lifted, because a JS arrow function is not
-    # something Python can execute -- which is exactly why the assertion that the
-    # workflow still CALLS it matters more than this mirror does.
+    # The same fold and the same FIRST-marker walk the workflow does, asserted by
+    # shape below. Re-typed here rather than lifted, because a JS arrow function
+    # is not something Python can execute -- which is why the assertions that pin
+    # the workflow's walk and slice matter more than this mirror does.
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
     first = None
     for hit in wf_marker.finditer(text):
@@ -1627,6 +1648,20 @@ if re.search(r"unblock\.yml[^.]{0,120}on every merge", page, re.S):
     sys.exit("docs/WORKFLOW.md still says the labels are derived on every merge; "
              "they are derived on every issue edit too, which is what makes an "
              "agent editing an issue body a backlog-wide event")
+# ...and it agrees with the readers about WHICH marker wins. The page is the
+# vendored one an agent reads before editing an issue body, and it defines where
+# blocker lines go: `42f23d9` moved both readers to first-wins and left this page
+# saying "the last marker", so an agent appending a fresh marker would expect the
+# section above to be superseded when it is actually added to. Nothing caught
+# that -- the trigger check above only looks for the four event names. Found by
+# the independent review.
+if re.search(r"below the last `<!-- blockers -->` marker", page):
+    sys.exit("docs/WORKFLOW.md says blocker lines are read below the LAST marker; "
+             "both readers take the FIRST one and everything under it, so the page "
+             "describes a rule the code does not implement")
+if not re.search(r"below the \*\*first\*\* `<!-- blockers -->` marker", page):
+    sys.exit("docs/WORKFLOW.md no longer says which marker wins; it is the page "
+             "that defines the convention for every agent that edits an issue")
 PYEOF
   ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
 else
