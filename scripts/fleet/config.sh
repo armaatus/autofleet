@@ -104,6 +104,23 @@
 # more attempt per head and then leaves a comment saying a person decides. This
 # is that bound.
 : "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
+
+# How many reviews one PULL REQUEST may accrue before a person is asked.
+#
+# A different question from the one above, and nothing was answering it. That
+# cap is per HEAD and counts only reviewers that submitted NOTHING -- a reviewer
+# that submits findings clears it, so a PR whose every round produces findings
+# is bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the agent's
+# side, but only while the agent is alive and only on rounds it read back:
+# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
+# on #88. #85's agent stopped at its cap and a fourth review landed with nobody
+# left to answer it.
+#
+# So this bounds the DISPATCHER: after this many reviews on one PR, it stops
+# starting them and says so. Four rather than three, because it must not fire
+# before the agent's own three-round cap has had its say -- two caps at the same
+# number is one of them being dead code.
+: "${AUTOFLEET_REVIEW_MAX_ROUNDS:=4}"
 # Validated, because of how a bad value fails. The only consumer is
 # `[ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]` in fleet.sh: with a
 # non-number, `[` prints "integer expression expected" and returns 2, so the
@@ -230,4 +247,18 @@ esac
 [ "$AUTOFLEET_REVIEW_MAX_TRIES" -gt 0 ] || {
   echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
        "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
+  exit 2; }
+
+# The same validation, for the same reason: the only consumer is an integer `[`
+# test in fleet.sh, and a non-number makes that test FALSE rather than an error
+# anybody sees, so the cap silently does not exist.
+case "$AUTOFLEET_REVIEW_MAX_ROUNDS" in
+  ''|*[!0-9]*)
+    echo "AUTOFLEET_REVIEW_MAX_ROUNDS must be a positive whole number;" \
+         "got '$AUTOFLEET_REVIEW_MAX_ROUNDS'" >&2
+    exit 2 ;;
+esac
+[ "$AUTOFLEET_REVIEW_MAX_ROUNDS" -gt 0 ] || {
+  echo "AUTOFLEET_REVIEW_MAX_ROUNDS must be a positive whole number;" \
+       "got '$AUTOFLEET_REVIEW_MAX_ROUNDS'" >&2
   exit 2; }

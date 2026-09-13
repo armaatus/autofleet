@@ -1098,6 +1098,13 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                review does not get a reviewer started every poll.
 #   <pr>.tries   a RECORD. Holds `head n` -- how many reviewers this head has
 #                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
+#   <pr>.rounds  a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
+#                had that DID produce a verdict, across every head it has ever
+#                been on, against AUTOFLEET_REVIEW_MAX_ROUNDS. Written by
+#                review.sh on exit 0 only. The opposite population from
+#                `.tries`, which is why it is a separate file and not a second
+#                column: a review that submits findings clears `.tries` and
+#                increments this.
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
@@ -1108,7 +1115,7 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 # reviewers in flight, permanently, on the screen its own comment calls the
 # first anybody looks at. Found by the independent review, which noted the
 # comment two lines above already stated the rule this broke.
-is_review_record() { case "$1" in *.done|*.tries|*.said) return 0 ;; esac; return 1; }
+is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; esac; return 1; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1165,6 +1172,14 @@ stop_reviewers() {
     # The records go too: a dispatcher starting fresh re-derives what has been
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
+    #
+    # `.rounds` is the exception, and it is not an oversight. What it counts is
+    # a property of the PULL REQUEST -- how many reviews it has cost -- not of
+    # this dispatcher's run, and nothing here re-derives it. Clearing it would
+    # hand every open PR a fresh set of rounds on each drain, which is exactly
+    # the cap not existing for anybody who restarts the fleet. It is pruned when
+    # the PR closes, by the sweep at the end of review_open_prs.
+    case "$marker" in *.rounds) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
@@ -1733,6 +1748,27 @@ for p in prs:
     # `.said` keeps the claim unrepeated and uncorrected even after the running
     # one succeeds. Below the lock check the message is true whenever it prints.
     # Found by the independent review.
+    # The PR-level cap, checked before the head-level one because it is the
+    # broader claim: at this point no further reviewer is started for this pull
+    # request on ANY head, so a message about what this head's reviewers did
+    # would be answering a narrower question than the one that stopped it.
+    #
+    # This is the backstop, not the mechanism. If the nit-only path in
+    # await-review.sh does its job a PR converges in two rounds and never
+    # arrives here; a PR that does arrive here has an actual disagreement in it,
+    # or an agent that died mid-loop, and both of those want a person.
+    local rounds_n=0
+    read -r rounds_n <"$marker.rounds" 2>/dev/null || true
+    case "${rounds_n:-0}" in (*[!0-9]*|"") rounds_n=0 ;; esac
+    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
+      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
+        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
+        "  Not starting more, on this head or any later one. The reviews are in" \
+        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
+        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
+        "  genuinely still converging."
+      continue
+    fi
     if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
       # Its OWN marker, per pull request: sharing the foundation one made the
       # two holds overwrite each other every poll.
