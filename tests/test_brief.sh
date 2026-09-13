@@ -150,20 +150,32 @@ case "${1:-}" in
     brief="$(brief_only <<<"$out")"
 
     # The brief may not spend an agent's context on a document it does not need
-    # before its first edit. `docs/` is the whole of the long-form writing here,
-    # and WORKFLOW.md alone is 10,036 words -- a longer retelling of the brief
-    # the agent has just read (#54).
-    if named="$(grep -oE 'docs/[A-Za-z0-9_-]+\.md' <<<"$brief" | sort -u)"; then
-      [ -z "$named" ] \
-        || fail "the opening brief sends the agent to $(tr '\n' ' ' <<<"$named"), which it does not need before its first edit"
-    fi
+    # before its first edit. EVERY `.md` it names, not just the ones under
+    # `docs/`: the first spelling matched `docs/*.md` alone, so a brief that grew
+    # "read README.md first" passed this phase at an unchanged word total while
+    # the header above claimed to measure what the brief costs. Found by the
+    # local /code-review pass.
+    #
+    # What it may name is exactly what is COUNTED below, plus `findings.md` --
+    # a file the review WRITES rather than one it reads. One list drives both the
+    # allowance and the sum, so the phase cannot forbid a document and then leave
+    # its words out of the total, or allow one and never charge for it.
+    # evals/lint.sh's reading table is the authority; this is the same rule
+    # applied to the rendered output, which is what the agent actually gets.
+    COUNTED="CLAUDE.md REVIEW.md"
+    allowed="$(printf '%s\n' $COUNTED findings.md | sed 's/\./\\./g' | paste -sd'|' -)"
+    named="$(grep -oE '[A-Za-z0-9_./-]+\.md' <<<"$brief" | sort -u \
+             | grep -vxE "$allowed" || true)"
+    [ -z "$named" ] \
+      || fail "the opening brief names $(tr '\n' ' ' <<<"$named"), which an agent does not need before its first edit"
 
     # CLAUDE.md is read automatically, REVIEW.md is the policy the brief names
     # at step 3, and the brief is the brief. Read from the real tree rather than
     # the fixture: the fixture is scripts/fleet alone, and these are the files
     # whose size the ceiling is about.
     total=0
-    for f in CLAUDE.md REVIEW.md; do
+    # shellcheck disable=SC2086 -- COUNTED is a deliberate word list, like SUITES
+    for f in $COUNTED; do
       n="$(wc -w <"$REPO_ROOT/$f" | tr -d ' ')"
       total=$((total + n))
       echo "  $f: $n"

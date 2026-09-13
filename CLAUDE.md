@@ -4,16 +4,16 @@ A fleet of coding agents that turns a GitHub backlog into merged pull requests,
 unattended. A deterministic shell dispatcher opens worktrees, an agent works each
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
-**Which document is whose.** This file and the brief
-(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`) are the only
-required reading, and each rule the loop enforces is stated in full in exactly one
-of them, linked from everywhere else — `evals/lint.sh` asserts both, against a
-word ceiling. The rest are consulted, never read through:
-[REVIEW.md](REVIEW.md) at the review passes, [docs/WORKFLOW.md](docs/WORKFLOW.md)
-for why a rule exists — the maintainer's page, read once and not per issue —
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md) for a host project's knobs,
-[docs/RUNNERS.md](docs/RUNNERS.md) for the runner seam, [README.md](README.md)
-for what this is.
+**Which document is whose.** Required reading is this file, the brief
+(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`) and
+[REVIEW.md](REVIEW.md) at the review passes — `evals/lint.sh` holds those three
+plus stage 1 of the brief under a word ceiling, and asserts that each rule the
+loop enforces is stated in full in exactly one of them and linked from everywhere
+else. The rest are consulted, never read through:
+[docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
+page, read once and not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+for a host project's knobs, [docs/RUNNERS.md](docs/RUNNERS.md) for the runner
+seam, [README.md](README.md) for what this is.
 
 ## Hard rules
 

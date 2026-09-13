@@ -1179,13 +1179,48 @@ if [ -n "$stage1" ] && [ -n "$stage2" ]; then
   if stage1="$stage1" stage2="$stage2" rendered="$rendered" python3 - <<'PYEOF'; then
 import os, re, sys
 
-# The agent-facing texts, in the order a failure should name them.
+def read(path):
+    """A file this check cannot read must SAY so, not raise.
+
+    An unguarded `open` here surfaces a traceback under the message "the loop is
+    written more than once", which is a check reporting the wrong thing about a
+    file that is simply absent. Same reason the `== CLAUDE.md` block at the top
+    of this file guards with `[ ! -f ]`. Found by the local /code-review pass.
+    """
+    try:
+        return open(path).read()
+    except OSError as exc:
+        sys.exit(f"{path} cannot be read ({exc.strerror}), so the rule of one "
+                 "home and the reading ceiling assert nothing")
+
+# AUTOFLEET'S OWN TEXTS, AND THE HOST'S. This file is VENDORED and
+# `agent-config.yml` runs it on every PR in every repo that installs the payload
+# -- but `CLAUDE.md` is NOT vendored: a host project writes its own, and
+# install.sh's PAYLOAD does not carry it. So every assertion below that reads
+# `CLAUDE.md` is autofleet-only, and the vendored half is the one made of text
+# autofleet actually wrote: the brief, and `REVIEW.md`.
+#
+# The first version of this check asserted the whole table against whatever
+# `CLAUDE.md` said, anywhere. A host whose working agreement links
+# `CONTRIBUTING.md` -- most of them -- got a red REQUIRED check on its first PR,
+# about a document autofleet has never heard of, and the remedy in the message
+# was to edit a vendored file that the next `install.sh` overwrites. That is hard
+# rule 1, and it is the same trap the `BRIEF_WORD_BUDGET` comment above is
+# written about. Both local review passes found it independently.
+#
+# The probe is the one at `== every test phase actually runs` below, for the
+# reason given there: a file of autofleet's own suite is present exactly when
+# this is autofleet.
+IN_AUTOFLEET = os.path.exists("tests/test_runner_bound.sh")
+
 texts = {
-    "CLAUDE.md":          open("CLAUDE.md").read(),
-    "REVIEW.md":          open("REVIEW.md").read(),
+    "REVIEW.md":          read("REVIEW.md"),
     "the brief, stage 1": os.environ["stage1"],
     "the brief, stage 2": os.environ["stage2"],
 }
+if IN_AUTOFLEET:
+    # Ordered so a failure names CLAUDE.md first, where a second copy usually is.
+    texts = {"CLAUDE.md": read("CLAUDE.md"), **texts}
 
 def paragraphs(text):
     return re.split(r"\n\s*\n", text)
@@ -1249,10 +1284,11 @@ for rule, home, states in RULES:
 
 # The reading ceiling.
 #
-# Every `*.md` path CLAUDE.md or the brief's stage 1 may name, and what its
-# words cost an agent before its first edit. A path missing from this table
-# fails: adding a pointer to a document is how the 8,674-word one got into the
-# brief, and the table is where that decision is made rather than noticed later.
+# Every `*.md` path the brief's stage 1 -- and, in autofleet, CLAUDE.md -- may
+# name, and what its words cost an agent before its first edit. A path missing
+# from this table fails: adding a pointer to a document is how the 10,036-word
+# one got into the brief, and the table is where that decision is made rather
+# than noticed later.
 #
 #   count    required reading. Its words are inside the ceiling.
 #   map      may be NAMED but is not required reading. CLAUDE.md says which
@@ -1273,14 +1309,20 @@ DOCS = {
     "findings.md":                  ("written", "the file the local review writes for record-review.sh"),
 }
 
-NAMED = re.compile(r"[A-Za-z0-9_./-]*\.md")
+# `+`, not `*`. With `*` the prefix is optional, so the bare word `.md` in
+# ordinary prose -- "every `.md` under docs/" -- matched as a path, and the
+# failure named a file that does not exist. Found by the local /code-review pass.
+NAMED = re.compile(r"[A-Za-z0-9_./-]+\.md")
+
 # What the brief NAMES, it makes required -- whatever the table says. The table
 # records an intention; the brief is what the agent is actually told. So a `map`
 # document named in stage 1 is both reported here AND counted into the ceiling
 # below, because that is what it costs.
 required = {p for p, v in DOCS.items() if v[0] == "count"}
-for where, text, may_name in (("CLAUDE.md", texts["CLAUDE.md"], ("count", "map", "written")),
-                              ("the brief, stage 1", texts["the brief, stage 1"], ("count", "written"))):
+scanned = [("the brief, stage 1", texts["the brief, stage 1"], ("count", "written"))]
+if IN_AUTOFLEET:
+    scanned.append(("CLAUDE.md", texts["CLAUDE.md"], ("count", "map", "written")))
+for where, text, may_name in scanned:
     for path in sorted(set(NAMED.findall(text))):
         kind = DOCS.get(path)
         if kind is None:
@@ -1311,8 +1353,16 @@ if "REVIEW.md" in s1 and "/code-review" in s1 \
 # measures, and for the same reason: this check is vendored, and a host
 # project's nine-word test command must not spend autofleet's margin in a repo
 # that did not write the text.
+#
+# In a host repo CLAUDE.md is out of the sum for the same reason it is out of the
+# table above: it is the host's own file, and a ceiling stored in a vendored
+# script is not autofleet's to put on it. What remains -- the brief, REVIEW.md,
+# and anything the brief names -- is text autofleet ships, which is exactly what
+# a vendored ceiling may bound.
 WORD_CEILING = 3500
-parts = [(p, len(open(p).read().split())) for p in sorted(required)]
+if not IN_AUTOFLEET:
+    required.discard("CLAUDE.md")
+parts = [(p, len(read(p).split())) for p in sorted(required)]
 parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
 total = sum(n for _, n in parts)
 if total >= WORD_CEILING:
@@ -1322,7 +1372,8 @@ if total >= WORD_CEILING:
 
 if bad:
     sys.exit("\n  ".join(bad))
-print(f"        {total} words before the first edit, ceiling {WORD_CEILING}")
+whose = "" if IN_AUTOFLEET else " (this repo's own CLAUDE.md is not counted: autofleet did not write it)"
+print(f"        {total} words before the first edit, ceiling {WORD_CEILING}{whose}")
 PYEOF
     ok "each enforced rule is stated once, in the file that is its home"
   else
@@ -1346,14 +1397,34 @@ fi
 # without reading the prose around it.
 if python3 - <<'PYEOF'; then
 import re, sys
-page = open("docs/WORKFLOW.md").read()
-fences = re.findall(r"```[a-z]*\n(.*?)```", page, re.S)
+try:
+    page = open("docs/WORKFLOW.md").read()
+except OSError as exc:
+    sys.exit(f"docs/WORKFLOW.md cannot be read ({exc.strerror}); this check "
+             "asserts nothing")
+
+# BOTH forms of code block markdown has, because the repo writes in both: the
+# brief in `issue-command.sh` uses the four-space indented form throughout, so
+# that is the style an editor reaches for, and a check that only saw fences would
+# let the whole second copy back in under the more natural spelling. The language
+# tag is matched case-insensitively for the same reason -- ```Bash is one
+# keystroke from ```bash, and an unmatched opener shifts the non-greedy pairing
+# so the PROSE gets scanned and the block does not, which is hard rule 3 arriving
+# silently. Found by the local /code-review pass.
+blocks = re.findall(r"```[A-Za-z]*\n(.*?)```", page, re.S)
+fenced = set()
+for m in re.finditer(r"```.*?```", page, re.S):
+    fenced.update(range(m.start(), m.end()))
+for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
+    if m.start() not in fenced:
+        blocks.append(m.group(0))
+
 # The loop's steps. `issue-command.sh` itself is NOT here: printing the command
 # that fetches the brief is the pointer this check is asking for.
 STEPS = ["record-review.sh", "await-review.sh", "review-status.sh",
          "resolve-thread.sh", "answer-review.sh", "gh pr merge",
          "/code-review", "/mattpocock-skills:code-review"]
-found = sorted({s for f in fences for s in STEPS if s in f})
+found = sorted({s for b in blocks for s in STEPS if s in b})
 if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
              + ", ".join(found)
