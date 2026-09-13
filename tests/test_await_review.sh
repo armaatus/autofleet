@@ -61,6 +61,8 @@ make_fixture() {
   GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
   # Non-empty means the stubbed PR carries one UNRESOLVED review thread.
   GH_THREADS="$WORK/threads"; printf '%s' "${2:-}" >"$GH_THREADS"
+  # Non-empty means a SECOND, older reviewer left an Important finding.
+  GH_SECOND="$WORK/second"; printf '%s' "${3:-}" >"$GH_SECOND"
 
   cat >"$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -73,9 +75,16 @@ case "$*" in
   *statusCheckRollup*)
     echo '{"statusCheckRollup":[{"name":"suite","status":"COMPLETED","conclusion":"SUCCESS"}],"mergeStateStatus":"BLOCKED","baseRefName":"main"}'
     exit 0 ;;
-  *"pulls/42/comments"*) exit 0 ;;
+  # The inline comments await-review.sh prints. This is what an open review
+  # thread LOOKS LIKE to the agent, so the threads phase drives it from here
+  # rather than from reviewThreads alone -- reviewThreads is what merge_gate
+  # reads, and the agent never sees it.
+  *"pulls/42/comments"*)
+    [ -s "$GH_THREADS" ] || exit 0
+    printf 'src/app.c:12  claude\nNit: name this for what it returns.\n\n'
+    exit 0 ;;
   *graphql*)
-    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" "$(cat "$GH_THREADS")" <<'PY'
+    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" "$(cat "$GH_THREADS")" "$(cat "$GH_SECOND")" <<'PY'
 import json, sys
 oid, trailers = sys.argv[1], sys.argv[2]
 body = ("Nit: the comment above sync_tick() says what, not why.\n"
@@ -85,10 +94,19 @@ print(json.dumps({"data": {"repository": {"pullRequest": {
     "headRefOid": oid,
     "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
     "author": {"login": "armaatus"},
-    "reviews": {"nodes": [
-        {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
-         "commit": {"oid": oid}, "author": {"login": "claude"},
-         "body": body, "comments": {"totalCount": 0}}]},
+    "reviews": {"nodes": (
+        # An OLDER review by a DIFFERENT author, declaring an Important finding.
+        # merge_gate holds on the latest unanswered review of each author, so
+        # this one keeps refusing however clean the newer one is.
+        ([{"state": "COMMENTED", "submittedAt": "2026-09-06T01:00:00Z",
+           "commit": {"oid": oid}, "author": {"login": "someone-else"},
+           "body": "Important: the retry has no backoff and will spin.\n"
+                   "<!-- review-important: 1 -->\n<!-- review-findings: 1 -->",
+           "comments": {"totalCount": 0}}]
+         if len(sys.argv) > 4 and sys.argv[4] else [])
+        + [{"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+            "commit": {"oid": oid}, "author": {"login": "claude"},
+            "body": body, "comments": {"totalCount": 0}}])},
     "comments": {"nodes": []},
     "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                       "nodes": ([{"isResolved": False, "isOutdated": False,
@@ -103,7 +121,7 @@ esac
 exit 0
 STUB
   chmod +x "$WORK/bin/gh"
-  export GH_CALLS GH_HEAD GH_TRAILERS GH_THREADS
+  export GH_CALLS GH_HEAD GH_TRAILERS GH_THREADS GH_SECOND
   # One poll, and a deadline it cannot reach: every phase here ends on the first
   # payload, and a phase that does not should say so as a hang, not as a pass.
   export AWAIT_REVIEW_POLL=1 AWAIT_REVIEW_DEADLINE=30
@@ -164,6 +182,32 @@ case "${1:-}" in
   grep -qi 'resolve every thread' <<<"$out" \
     || { echo "$out" >&2; fail "it names the script without saying every thread has to close"; }
   ok "the nit-only path still says to resolve the threads the answer does not touch"
+  # AND THE FIXTURE HAS TO MATTER. The first version of this phase passed
+  # identically with and without its open thread, because the wording it greps
+  # for is unconditional -- so it guarded the sentence and tested nothing about
+  # threads, under a name that says otherwise. `nitonly` already guards the
+  # sentence. What is this phase's own is that the script SAW the thread.
+  # Found by the independent review.
+  grep -q 'src/app.c' <<<"$out" \
+    || { echo "$out" >&2; fail "the open thread was never printed, so this phase's fixture is inert and it is testing nothing"; }
+  ok "...and the open thread itself is printed, so the fixture is load-bearing"
+  ;;
+# --------------------------------------------------------------- tworeviewers
+  tworeviewers)
+  # merge_gate holds on the latest unanswered review of EVERY author, not just
+  # the newest overall. Reading severity from the newest alone is right for one
+  # reviewer and wrong for two: an older Important review from a second account
+  # keeps the gate refusing while the newest declares nothing Important, and the
+  # cheap remedy would be printed for a branch blocked on something the remedy
+  # does not touch. Found by the independent review.
+  make_fixture "$NIT_ONLY" "" second
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  grep -qF "$ANSWER_LINE" <<<"$out" \
+    && { echo "$out" >&2; fail "an unanswered Important review from a second author was offered the nit remedy"; }
+  grep -qF "$FIX_LINE" <<<"$out" \
+    || { echo "$out" >&2; fail "with one Important review still standing it did not print the fix instruction"; }
+  ok "one Important review among two is enough to decline the nit remedy"
   ;;
 # ----------------------------------------------------------------- important
   important)
@@ -188,5 +232,5 @@ case "${1:-}" in
   ok "no severity trailer means not said, not none"
   ;;
   *)
-  echo "usage: $0 {nitonly|threads|important|untrailered}" >&2; exit 2 ;;
+  echo "usage: $0 {nitonly|threads|tworeviewers|important|untrailered}" >&2; exit 2 ;;
 esac

@@ -784,10 +784,20 @@ pull requests were measured sitting in that cycle — #85, #86 and #88 — with
 any of them. Nothing forbade the cheap path. Nothing mentioned it either.
 
 The other half of the floor is in [REVIEW.md](../REVIEW.md): from round three
-on, a review that finds nothing Important names its nits for a follow-up issue
-and reports `0`. `review.sh` tells the reviewer which round it is, from
-`<pr>.rounds`. Rounds one and two are untouched — behaviour findings arrive
-early, and a floor that suppressed those would trade away what the review is for.
+on, a review that finds nothing Important stops asking for a diff. It names its
+nits **in the body**, not as inline threads, says they belong in a follow-up
+issue, and reports `review-important: 0` with **the real `review-findings: N`**.
+
+Not `0`. `0` releases the gate outright and auto-merge is armed from the moment
+the PR opens, so a `0` would land the branch before the follow-up issue existed —
+the opposite of the trade. The real count holds it until the author answers, and
+answering costs no commit, so the round is still not spent. Body rather than
+threads for the neighbouring reason: an unresolved thread holds the branch
+whatever the counts say, and `answer-review.sh` does not close threads.
+
+`review.sh` tells the reviewer which round it is, from `<pr>.rounds`. Rounds one
+and two are untouched — behaviour findings arrive early, and a floor that
+suppressed those would trade away what the review is for.
 
 **At most three rounds, counted by the script.** `await-review.sh` keeps the
 count in `.autofleet/run/review-rounds` and exits 5 on the fourth call rather than

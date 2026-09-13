@@ -338,7 +338,7 @@ else
   fail "merge_gate.py no longer parses review-important, so the trailer every review writes reaches nothing"
 fi
 
-# 2f. THE TRAILER BLOCK, CHARACTER FOR CHARACTER, in the three places that
+# 2e. THE TRAILER BLOCK, CHARACTER FOR CHARACTER, in the three places that
 #     dictate it and the one that documents it. Presence (2c) is not enough:
 #     the first draft of this change had REVIEW.md stating the two trailers in
 #     the OPPOSITE order from the block review.sh tells the reviewer to copy,
@@ -382,7 +382,7 @@ else
   fail "the trailer block has drifted between the policy and the prompts (above)"
 fi
 
-# 2g. ...and the round number reaches the reviewer at all. 2e asserts the floor
+# 2f. ...and the round number reaches the reviewer at all. 2g below asserts the floor
 #     is WRITTEN in both files; nothing asserted the one line that makes it
 #     reachable. Delete `Review round:` from review.sh's prompt and every
 #     reviewer falls back to the documented "treat it as round one", the floor
@@ -396,12 +396,39 @@ else
   fail "review.sh no longer passes the round number, so the late-round floor never fires and nothing else says so"
 fi
 
-# 2e. The floor itself, in both files a reviewer reads. Prose, so `flat`.
-if flat REVIEW.md | qgrep 'round three' \
-   && flat .claude/agents/reviewer.md | qgrep 'round three'; then
-  ok "both REVIEW.md and the brief carry the late-round floor"
+# 2g. The floor itself, in the three files that state it. Prose, so `flat`.
+#
+#     docs/WORKFLOW.md is in this list because it was NOT, and that cost a real
+#     defect: it kept the pre-correction sentence telling the floor to report
+#     `review-findings: 0`, which releases the gate outright -- so a reviewer
+#     following the page CLAUDE.md calls the loop would have let a PR with
+#     unanswered nits merge under an armed auto-merge. REVIEW.md and the brief
+#     were both corrected and this page was not, and none of 2c, 2e or 2g could
+#     see it, because none of their file lists had it. Found by the independent
+#     review. A third file stating a rule is a third file that can drift.
+floor_missing=""
+for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
+  flat "$f" | qgrep 'round three' || floor_missing="$floor_missing $f"
+done
+if [ -z "$floor_missing" ]; then
+  ok "REVIEW.md, the brief and WORKFLOW.md all carry the late-round floor"
 else
-  fail "the late-round floor is gone from REVIEW.md or the brief, so a reviewer can spend rounds on nits again"
+  fail "the late-round floor is gone from:$floor_missing -- a reviewer can spend rounds on nits again"
+fi
+
+# 2h. ...and none of them tells the floor to report a zero count. `0` releases
+#      the gate: merge_gate takes `if found == 0: continue`, so a floor that
+#      reported it would land a PR with unanswered nits under the auto-merge
+#      armed at open. Two of the three said the right thing and the third did
+#      not, which is exactly the shape a presence-grep cannot see.
+zero_floor=""
+for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
+  flat "$f" | qgrep 'follow-up issue and reports .0.' && zero_floor="$zero_floor $f"
+done
+if [ -z "$zero_floor" ]; then
+  ok "...and none of them tells it to report a zero count, which would release the gate"
+else
+  fail "the late-round floor is told to report 0 findings in:$zero_floor -- that releases the gate on unanswered nits"
 fi
 
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer

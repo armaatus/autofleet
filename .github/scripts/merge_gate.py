@@ -591,9 +591,19 @@ def evaluate(head_sha, pull_request, changed_files):
                 "this the branch merges while the fixes are still being "
                 "written. Address the findings, or say why you will not, and "
                 "then:  ./scripts/fleet/answer-review.sh \"<what you did>\""
-                + ("  --  and that alone clears this: the answer is a comment, "
-                   "not a commit. Pushing a nit fix instead moves the head, "
-                   "which invalidates this review and buys another round."
+                # "clears this LINE", not "clears this". An unresolved review
+                # thread is a separate refusal in the same list, and
+                # `answer-review.sh` does not close threads -- so "the answer
+                # clears it" is false for a PR that has one, which is the case
+                # the reviewer's brief PREFERS. `await-review.sh` was corrected
+                # for exactly this and the phrasing here was not; two files
+                # saying different things about one fact is what that finding
+                # was about. Found by the independent review, twice.
+                + ("  --  and that alone clears this line: the answer is a "
+                   "comment, not a commit. Pushing a nit fix instead moves the "
+                   "head, which invalidates this review and buys another round. "
+                   "Any unresolved thread is a separate line above, and the "
+                   "answer does not close those."
                    if important == 0 else "")
             )
 

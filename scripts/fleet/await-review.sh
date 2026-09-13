@@ -494,16 +494,20 @@ with open(stamp_path, "w") as fh:
 # uses, so the sentence printed here and the sentence the gate prints cannot
 # disagree about which review was nit-only.
 #
-# The NEWEST review decides, not all of them. Handing back three reviews of
-# which the oldest found something Important would otherwise offer a remedy for
-# a finding the latest reviewer no longer stands behind, and the latest is the
-# one merge-gate reads.
+# EVERY review being handed back has to say 0, not just the newest one. Taking
+# the newest alone is right for one reviewer and wrong for two: merge_gate holds
+# on the latest unanswered review of EACH author, so an older Important review
+# from a second reviewer keeps refusing while the newest says nothing is
+# Important -- and the cheap remedy would be printed for a branch the gate is
+# still blocking for a reason the remedy does not touch. `any` rather than
+# `all`, phrased as "no review said anything but 0", so a single unsaid keeps
+# the old instruction. Found by the independent review.
 #
 # Empty file means "did not say", which is not the same as zero -- see the
 # caller, which tests for the literal 0 and nothing else.
 with open(sev_path, "w") as fh:
-    important = declared_important(reviews[-1])
-    fh.write("" if important is None else str(important))
+    said = [declared_important(r) for r in reviews]
+    fh.write("0" if said and all(m == 0 for m in said) else "")
 for r in reviews:
     who = (r.get("author") or {}).get("login", "?")
     print(f"--- {r.get('state')} by {who} at {r.get('submittedAt')}")
@@ -575,8 +579,11 @@ PY
         echo "If you changed NOTHING -- nothing needed it, or you disagree -- say so, which"
         echo "is what keeps the branch from merging out from under the findings:"
         echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+        # Only here. The nit-only branch above already prints this WITH the gloss
+        # that says what it is for, and printing it again bare read as a second,
+        # different step. Found by the independent review.
+        echo "  ./scripts/fleet/review-status.sh $pr"
       fi
-      echo "  ./scripts/fleet/review-status.sh $pr"
       echo
       echo "Auto-merge was armed when this PR was opened, so from here the only thing"
       echo "holding the branch is that answer -- unless the review above said it found"
