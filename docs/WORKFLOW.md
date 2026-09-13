@@ -657,8 +657,9 @@ Then it fixes what is real, replies with a reason where it disagrees, and
 resolves every thread. If it changed anything it pushes and comes back for the
 next round; when a review arrives it is not going to change anything for, it says
 so and checks. `resolve-thread.sh`, then `answer-review.sh`, then
-`review-status.sh` — the brief's step 5 is the order and the exact invocations;
-the rest of this section is why each of the three has to exist.
+`review-status.sh`, whose exit 0 means every thread resolved and every check
+green — the brief's step 5 is the order and the exact invocations; the rest of
+this section is why each of the three has to exist.
 
 The order matters: an answer has to come *after* the review it answers, and a
 push invalidates that review. So answering a review you have just pushed over

@@ -173,8 +173,8 @@ sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk -v want="$stage" "
 
 Implement the issue above, end to end. CLAUDE.md and this brief are the only
 required reading. Work autonomously: do not stop to ask for confirmation on
-anything CLAUDE.md already decides. If a question is genuinely open, write it in the PR body and
-carry on with the rest of the scope.
+anything CLAUDE.md already decides. If a question is genuinely open, write it in
+the PR body and carry on with the rest of the scope.
 
 **1. Plan.** Stay in plan mode until the plan is right: Files that change, Order
 of work, Risks, Proof. The bar is that someone who never saw this conversation
