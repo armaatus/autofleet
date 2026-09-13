@@ -1370,11 +1370,25 @@ spec.loader.exec_module(m)
 src = open(".github/workflows/unblock.yml").read()
 
 
-# Over the CODE. `literal()` takes the FIRST assignment it finds, and this file
-# explains itself at length: a commented-out literal above the real one would be
-# the one compared, and the comparison would pass while the workflow ran
-# something else. Its sibling check below strips comments for the same reason.
-code = "\n".join(re.sub(r"//.*", "", line) for line in src.splitlines())
+# Over the CODE, and the code is the `script:` BODY -- not the file. `literal()`
+# takes the FIRST assignment it finds, and this file explains itself at length:
+# a commented-out literal above the real one would be the one compared, and the
+# comparison would pass while the workflow ran something else.
+#
+# Stripping `//` out of the whole file was only half of that, and the half that
+# was missing is the one that bites. The YAML header above `script:` is 67 lines
+# of `#` prose that survives a `//` strip, and the ordering assertion below uses
+# `find()` -- so extending the concurrency comment with a line like
+# `# so removeLabel runs before addLabels` puts the first hit inside a comment,
+# ahead of every line of code, and `where_remove > where_add` can never be true
+# again. The check then passes for ANY order, including the one it exists to
+# catch. Verified: one such comment is enough. Hard rule 3, arriving through the
+# prose that describes the rule. Found by the independent review.
+_body = re.search(r"(?m)^\s*script: \|\n(.*)\Z", src, re.S)
+if not _body:
+    sys.exit("unblock.yml has no inline `script: |` block; none of the checks "
+             "below can see what the job actually runs")
+code = "\n".join(re.sub(r"//.*", "", line) for line in _body.group(1).splitlines())
 
 
 def literal(name):
@@ -1698,6 +1712,17 @@ if re.search(r"below the last `<!-- blockers -->` marker", page):
 if not re.search(r"below the \*\*first\*\* `<!-- blockers -->` marker", page):
     sys.exit("docs/WORKFLOW.md no longer says which marker wins; it is the page "
              "that defines the convention for every agent that edits an issue")
+# ...and it says what happens with NO marker, which is the branch governing 14 of
+# this repo's own open issues and every host project that never adopts the
+# convention. The page used to say flatly that prose does not block anything.
+# That is true below a marker and false without one, and the agent who believes
+# it writes `- Blocked by #12 until that lands` into Design notes and has its own
+# worktree reaped -- the harm #47 was filed about, arriving through the sentence
+# that says it cannot happen. Found by the independent review.
+if not re.search(r"body with no marker is read whole", page):
+    sys.exit("docs/WORKFLOW.md does not say that a body with no `<!-- blockers "
+             "-->` marker is read whole; an agent reading it will believe prose "
+             "in Design notes is inert on an issue where it is a blocker (#47)")
 PYEOF
   ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
 else

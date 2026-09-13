@@ -342,15 +342,30 @@ this file tells you to edit issue bodies as you work:
   is no worse than the order it replaced, which left both labels and was
   startable just the same. It is simply not closed, and closing it means teaching
   `ready_issues()` to consult `blocked`.
-- **Only a line below the marker counts.** `Blocked by #N` has to begin a line,
-  below the **first** `<!-- blockers -->` marker — everything under the earliest
-  one is read, so pasting a second marker lower down does not supersede the
-  section above it, it adds to it. Prose in Goal, Scope or Design notes does not
-  block anything — including a sentence like *"no longer blocked by #7"*, which
-  used to register as a blocker and could get the agent that wrote it interrupted
-  and its worktree reaped (#47). One boundary: the anchor sees the start of a
-  line and nothing before it, so a negation that *wrapped* onto the previous line
-  still counts. Keep a blocker line, and any sentence about one, on one line.
+- **Only a line below the marker counts — when the body has one.** `Blocked by
+  #N` has to begin a line, below the **first** `<!-- blockers -->` marker;
+  everything under the earliest one is read, so pasting a second marker lower
+  down does not supersede the section above it, it adds to it. Below a marker,
+  prose in Goal, Scope or Design notes does not block anything — including a
+  sentence like *"no longer blocked by #7"*, which used to register as a blocker
+  and could get the agent that wrote it interrupted and its worktree reaped
+  (#47).
+
+  **A body with no marker is read whole**, and that is the case to be careful in.
+  The fallback is deliberate — reading those as unblocked would start work on a
+  foundation that has not landed — but it means any line that *begins* with
+  `Blocked by #N`, or with a list bullet and then `Blocked by #N`, counts
+  wherever it appears. Writing `- Blocked by #12 until that lands` into Design
+  notes on such an issue marks it `blocked`, and `fleet.sh` reads `blocked` as
+  "this worktree will never produce a merged PR": it interrupts the agent and
+  reclaims the slot. **If you are adding blocker lines to an issue that has no
+  marker, add the marker too** — that is what makes the rest of the body inert.
+
+  Two boundaries either way. The anchor sees the start of a line and nothing
+  before it, so a negation that *wrapped* onto the previous line still counts —
+  keep a blocker line, and any sentence about one, on one line. And the prefix
+  accepts `-`, `*`, `+`, `>`, `1.`, `1)`, `- [ ]` and `**bold**`, so a bulleted
+  mention is a blocker as surely as a bare one.
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the
