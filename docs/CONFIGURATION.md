@@ -270,6 +270,10 @@ so a host whose CLI writes that shape somewhere else points this at it — and a
 host whose CLI writes something else entirely sets it empty rather than getting
 a report of zeros.
 
+`scripts/fleet/cost.sh`'s header is the authority on how the report reads a
+transcript; this section describes the same rules for whoever is setting the
+knob, and if the two disagree, this one is wrong.
+
 **The four figures are never added together.** A cache read is roughly a tenth
 of an input token, so a run that looks expensive on `input` may be almost
 entirely cache, and one total would hide exactly the difference the report
@@ -287,7 +291,9 @@ the fleet ever starts.
 `<session-id>/subagents/`, and this repo mandates four of them per issue — the
 verifier, the researcher and two review passes. They are folded into the four
 token figures; `sessions` counts the top-level sessions only, so it stays the
-number of times an agent was started in that worktree.
+number of times an agent *produced* something in that worktree — a session
+interrupted before its first assistant message carries no `usage` and is not
+one.
 
 **It never fails a run.** No transcript root, a root that is not there, a
 worktree already reaped, an entry with no `usage`, a half-written last line in a

@@ -159,14 +159,15 @@
 #
 # Claude Code writes one JSONL per session under
 # `<root>/<cwd-slug>/<session-id>.jsonl`, where the slug is the absolute working
-# directory with every `/` and `.` turned into `-`. That is the whole of the tie
+# directory with every NON-ALPHANUMERIC character turned into `-`, truncated at
+# 200 characters with a hash appended past that. That is the whole of the tie
 # between a session and an issue: the fleet knows each issue's worktree path, and
 # the path is what names the directory.
 #
 # A knob rather than a constant because it is the one project-specific thing the
 # report needs, and hard rule 2 says a script may not know it. WHAT IT MOVES IS
 # THE PATH, NOT THE FORMAT: `cost.sh` reads the entry shape above and the
-# `/`-and-`.`-to-`-` slug rule, so a host whose CLI writes the same shape
+# non-alphanumeric-to-`-` slug rule, so a host whose CLI writes the same shape
 # somewhere else points this at it, and a host whose CLI writes something else
 # gets a report of zeros. That host sets it EMPTY, which `cost.sh` answers with
 # one line and exit 0 rather than an error -- a reporting command must never be

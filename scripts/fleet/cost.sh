@@ -13,6 +13,12 @@
 # on every assistant message. The worktree PATH is the whole of the tie between a
 # session and an issue, and the fleet knows that path for every issue it started.
 #
+# THIS HEADER IS THE AUTHORITY on how the report reads a transcript -- the entry
+# shape, the slug rule, the de-duplication. `config.sh` and
+# `docs/CONFIGURATION.md` describe the same things for a host project setting the
+# knob, and when they disagree with this file they are the ones that are wrong.
+# They have been once already, which is why this sentence is here.
+#
 # THE FOUR NUMBERS ARE NOT INTERCHANGEABLE AND ARE NEVER ADDED TOGETHER. A cache
 # read is roughly a tenth of an input token, so a run that looks expensive on
 # `input` may be almost entirely cache, and one total would hide exactly the
@@ -285,7 +291,15 @@ def measure(paths):
                     # reported 1 session where 4 agents had run. WALKED rather
                     # than named, because an agent that spawns an agent nests
                     # one level further down again.
-                    for here, _dirs, files in os.walk(full):
+                    # `onerror`, because os.walk SWALLOWS its errors by
+                    # default: a subagents/ directory that would not open
+                    # vanished silently, one level below the "each costs one
+                    # line on stderr" this file promises. Found by the
+                    # independent review.
+                    def unreadable(_error):
+                        global bad_files
+                        bad_files += 1
+                    for here, _dirs, files in os.walk(full, onerror=unreadable):
                         for nested in sorted(files):
                             if nested.endswith(".jsonl"):
                                 add_file(os.path.join(here, nested), sums)

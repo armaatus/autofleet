@@ -51,11 +51,21 @@ cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; return 0; }
 trap cleanup EXIT
 
 # The CLI's own naming: a transcript directory is the absolute working directory
-# with every `/` and `.` turned into `-`. Spelled out here rather than shared
-# with the script under test, so a change to either side has to be made twice
-# and deliberately -- a helper both call would agree with itself while agreeing
-# with nothing the CLI writes.
-transcript_slug() { printf '%s' "$1" | tr '/.' '--'; }
+# with every NON-ALPHANUMERIC character turned into `-`. Spelled out here rather
+# than shared with the script under test, so a change to either side has to be
+# made twice and deliberately -- a helper both call would agree with itself
+# while agreeing with nothing the CLI writes.
+#
+# `tr -c`, and the fixture paths below carry an `_` ON PURPOSE. This said
+# `tr '/.' '--'` while cost.sh said every non-alphanumeric, and the two agree on
+# any path made only of letters, digits, `/`, `.` and `-` -- so the widening had
+# NO TEST (reverting cost.sh left all seven phases green), and on a macOS
+# `$TMPDIR`, whose `/var/folders/<hash>/` component routinely contains `_`, the
+# fixture wrote its transcripts into a directory cost.sh would never look in and
+# four phases failed on a column value for a reason unrelated to what they test.
+# Found by the independent review -- the PR body reported the same class of bug
+# pointed the other way, silent agreement on the sample in front of you.
+transcript_slug() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '-'; }
 
 # A worktree holding just the payload, and a transcript root beside it.
 #
@@ -74,8 +84,11 @@ make_fixture() {
 
   # Two issues: #48 has transcripts, #49 has a recorded path and nothing behind
   # it, which is the worktree-already-reaped case.
-  WT48="$WORK/wt/48-measures-what-a-run-costs"
-  WT49="$WORK/wt/49-a-worktree-that-is-gone"
+  # The `_` is load-bearing: it is the one character in these paths where the
+  # narrow `/`-and-`.` rule and the CLI rule disagree, so it is what makes the
+  # four summing phases fail if cost.sh narrows again. See transcript_slug.
+  WT48="$WORK/wt/48_measures-what-a-run-costs"
+  WT49="$WORK/wt/49_a-worktree-that-is-gone"
   printf '%s\n' "$WT48" >"$AUTOFLEET_DIR/ran/48"
   printf '%s\n' "$WT49" >"$AUTOFLEET_DIR/ran/49"
 }
@@ -164,8 +177,15 @@ want = {"issue": "48", "sessions": 2, "input_tokens": 116, "output_tokens": 1122
 for key, value in want.items():
     if row.get(key) != value:
         sys.exit("%s: expected %r, got %r" % (key, value, row.get(key)))
-    if report["total"].get(key, value) != value:
-        sys.exit("total %s: expected %r, got %r" % (key, value, report["total"].get(key)))
+    # `.get(key, value)` defaulted to the expected answer, so a total that had
+    # LOST a key passed, and "issue" -- which a total never has -- was checked
+    # on every run. Found by the independent review.
+    if key == "issue":
+        continue
+    if key not in report["total"]:
+        sys.exit("the total block has no %s at all" % key)
+    if report["total"][key] != value:
+        sys.exit("total %s: expected %r, got %r" % (key, value, report["total"][key]))
 if not report["transcript_dir"]:
     sys.exit("the report does not say which transcript root it read")
 ' || fail "the JSON does not carry the same figures as the table"
@@ -193,7 +213,7 @@ $out"
     make_transcripts
     # A second worktree for the same issue, as `fleet.sh retry 48` opens: the
     # record APPENDS rather than replacing, so both attempts are still findable.
-    second="$WORK/wt/48-measures-what-a-run-costs-2"
+    second="$WORK/wt/48_measures-what-a-run-costs-2"
     printf '%s\n' "$second" >>"$AUTOFLEET_DIR/ran/48"
     dir="$AUTOFLEET_TRANSCRIPT_DIR/$(transcript_slug "$second")"
     mkdir -p "$dir"
