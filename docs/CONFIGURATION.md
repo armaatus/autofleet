@@ -96,6 +96,7 @@ it runs.
 | `AUTOFLEET_REVIEW_CMD` | `claude` | What `local` mode runs, with `-p` and a fixed tool allowlist. A command on `PATH`, so a wrapper can point it at another model or another account. |
 | `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
 | `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many attempts one head may get that end with **no verdict** — a reviewer that ran and submitted nothing, or one killed at the timeout. A run that never reached a reviewer (the fleet was stopped, `gh` would not answer, the command is not on `PATH`) does not spend one. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. **Must be a positive whole number: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included.** A cap that is silently absent is the failure the check exists to prevent, so it refuses rather than warns. |
+| `AUTOFLEET_REVIEW_MAX_ROUNDS` | `4` | How many reviews one **pull request** may accrue before the dispatcher stops starting them and asks a person. A different question from `AUTOFLEET_REVIEW_MAX_TRIES`, which is per *head* and counts only reviewers that submitted **nothing** — a reviewer that submits findings clears that one, so a PR whose every round produces findings was bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the *agent's* side and only while the agent is alive; a PR was measured collecting a fourth review after its agent had already stopped at that cap. The count lives in `<pr>.rounds` under the fleet's `reviewing/` directory, counts reviews **submitted** across every head, and survives `stop.sh` — what it counts belongs to the pull request, not to one dispatcher's run. Default is above the agent's `3` on purpose: two caps at the same number is one of them being dead code. **Must be a positive whole number**, refused the same way and for the same reason as its neighbour. |
 | `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
 
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
@@ -149,7 +150,16 @@ condition is unreachable, and `<!-- review-findings: N -->` is the only lever
 holding the branch. It is enough — any `N` above zero blocks the merge until the
 author answers — but a control that is documented and silently inapplicable is
 worse than one that is absent, so it is written down here, in
-[REVIEW.md](../REVIEW.md) and in the reviewer's brief. This was found by the
+[REVIEW.md](../REVIEW.md) and in the reviewer's brief.
+
+`<!-- review-important: M -->` rides alongside it and is **not** a second lever:
+it holds nothing and releases nothing. It exists because the verdict type used
+to carry severity and in this mode cannot, so with `N` alone every reader
+downstream saw "five nits" and "one data-loss bug" as the same integer. What `M`
+buys is the *instruction*: at `0`, `await-review.sh` tells the agent that
+`answer-review.sh` discharges the hold with no commit, where a fix would move the
+head and buy the next round. Omitting `M` is read as "did not say", never as
+zero. This was found by the
 local reviewer being unable to submit its own verdict.
 
 `merge_gate.independent_reviews()` normally discards anything the PR's author

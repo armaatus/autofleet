@@ -702,10 +702,17 @@ that run *is* the window.
 
 So the review declares what it left, and the author answers it:
 
-- every review body ends with `<!-- review-findings: N -->`
-  ([REVIEW.md](../REVIEW.md), and `claude-review.yml`'s prompt demands it). `0`
-  is the only thing that can tell "nothing at all" from "five nits" — both are a
-  `COMMENTED` verdict;
+- every review body ends with `<!-- review-important: M -->` and
+  `<!-- review-findings: N -->`
+  ([REVIEW.md](../REVIEW.md), and `claude-review.yml`'s prompt demands both).
+  `N` of `0` is the only thing that can tell "nothing at all" from "five nits" —
+  both are a `COMMENTED` verdict. `M` splits the second case again, into "five
+  nits" and "one data-loss bug", which nothing downstream could previously tell
+  apart either;
+- **`M` does not decide whether the branch merges.** `N` above zero holds the PR
+  either way. What `M == 0` changes is what `await-review.sh` tells the agent:
+  that the answer may be *words*, because `answer-review.sh` clears the hold with
+  no commit at all. That difference is worth a paragraph of its own, below;
 - a review reporting anything other than `0`, **or not saying**, holds the PR
   until its author comments an answer. `answer-review.sh` writes it, carrying the
   head sha, and re-runs the gate's failed run exactly as `resolve-thread.sh` does
@@ -762,11 +769,39 @@ Resolution comes from GitHub's own state through GraphQL, not from whether a
 reply exists — the REST endpoint for PR comments cannot report it, and
 `isOutdated` is not `isResolved`.
 
+**A nit is answered, not fixed.** When the review in hand declares
+`review-important: 0`, `await-review.sh` prints a different instruction: answer,
+open one follow-up issue for anything worth keeping, and push only if something
+there is genuinely worth a commit. It is not printing a weaker review — the nits
+are printed in full — it is printing the cheaper of two ways to discharge them.
+
+The expensive way was the default, and it was the default silently. A fix moves
+the head; a moved head invalidates the review that asked for the fix
+(`merge_gate.py` requires one on the *current* head); the dispatcher then starts
+a fresh reviewer, which reads the whole diff again and finds one more nit. Three
+pull requests were measured sitting in that cycle — #85, #86 and #88 — with
+`answer-review.sh`, which clears the same hold with no commit, never once run on
+any of them. Nothing forbade the cheap path. Nothing mentioned it either.
+
+The other half of the floor is in [REVIEW.md](../REVIEW.md): from round three
+on, a review that finds nothing Important names its nits for a follow-up issue
+and reports `0`. `review.sh` tells the reviewer which round it is, from
+`<pr>.rounds`. Rounds one and two are untouched — behaviour findings arrive
+early, and a floor that suppressed those would trade away what the review is for.
+
 **At most three rounds, counted by the script.** `await-review.sh` keeps the
 count in `.autofleet/run/review-rounds` and exits 5 on the fourth call rather than
 waiting, so this is not something an agent has to remember. When it trips, the
 agent stops, comments saying exactly what is unresolved and why it disagrees, and flags
 the card. Another lap is not what a disagreement needs; your attention is.
+
+**And at most `AUTOFLEET_REVIEW_MAX_ROUNDS` on the dispatcher's side**, which is
+a different cap answering a different question. That one is per-worktree and
+binds only while the agent is alive: #85's agent stopped at its three-round cap
+and a fourth review landed with nobody left to answer it. `<pr>.rounds` counts
+reviews *submitted* on the pull request, across every head, and at the cap the
+dispatcher stops starting them and says "needs you". It survives `stop.sh`,
+because what it counts belongs to the PR rather than to one dispatcher's run.
 
 When it is green the agent runs `gh pr merge --auto --squash`. That does **not**
 merge — it asks GitHub to merge once the required checks pass. Then it stops.

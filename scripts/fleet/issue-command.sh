@@ -321,6 +321,15 @@ Three of those reasons are NOT waiting for a review, and it says so in the outpu
 - **`GitHub says BEHIND`** means the base moved and the branch has to catch up.
   Rebase and push.
 
+**A nit is answered, not fixed.** When `await-review.sh` says the review left no
+Important findings, take it at its word: run `answer-review.sh` saying which
+nits you took and which you did not, open ONE follow-up issue for anything worth
+keeping, and name it in the answer. That clears the hold with no commit. A
+commit would move the head, and a moved head throws away the review that asked
+for it and buys another full round -- which is how three pull requests ended up
+with four reviews each and nothing merged. Push only if something in there is
+genuinely worth it, as a decision rather than a reflex.
+
 **At most THREE rounds of this.** If a third round still leaves something
 unresolved, stop: comment on the PR saying exactly what is unresolved and why you
 disagree, set the board comment to "#__ISSUE__: needs you -- 3 review rounds", and

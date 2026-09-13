@@ -157,6 +157,14 @@ than the permission does.
    said anything, so without that answer the branch merges while you are still
    fixing what it found.
 
+   **An answer is not a commit, and for a nit it should not be one.** When the
+   review declares no Important findings, answering discharges the hold on its
+   own: say which nits you took and which you did not, open one follow-up issue
+   for what is worth keeping, and name it. Fixing instead moves the head, which
+   throws away the review that asked for the fix and buys another full round.
+   Three pull requests were measured going round that way with this script never
+   once run.
+
 ## What is watching you
 
 - **Hooks** ([`.claude/hooks/guard.py`](.claude/hooks/guard.py)) block, with an
