@@ -4,10 +4,16 @@ A fleet of coding agents that turns a GitHub backlog into merged pull requests,
 unattended. A deterministic shell dispatcher opens worktrees, an agent works each
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
-Read [README.md](README.md) for what it is, [docs/WORKFLOW.md](docs/WORKFLOW.md)
-for the loop an agent runs inside a worktree, and
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the knobs a host project sets.
-This file is the short form.
+**Which document is whose.** This file and the brief
+(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`) are the only
+required reading, and each rule the loop enforces is stated in full in exactly one
+of them, linked from everywhere else — `evals/lint.sh` asserts both, against a
+word ceiling. The rest are consulted, never read through:
+[REVIEW.md](REVIEW.md) at the review passes, [docs/WORKFLOW.md](docs/WORKFLOW.md)
+for why a rule exists — the maintainer's page, read once and not per issue —
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md) for a host project's knobs,
+[docs/RUNNERS.md](docs/RUNNERS.md) for the runner seam, [README.md](README.md)
+for what this is.
 
 ## Hard rules
 
@@ -146,16 +152,12 @@ than the permission does.
    `merge_gate.py` refuses a body that does not name both, and
    [REVIEW.md](REVIEW.md) is the policy they follow.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
-4. Open a PR with `Closes #N`. `merge-gate` requires a closing line and a
-   workflow reads it to unblock dependants, so it is not optional.
-5. `gh pr merge --auto --squash` — it asks GitHub to merge once the required
-   checks pass, `merge-gate` among them, so the rules decide. Never merge
-   directly; `.claude/`, `.github/workflows/` and `.github/scripts/` need a
-   person.
-6. **Answer the independent review** — `./scripts/fleet/answer-review.sh "<what
-   you did, or why you did not>"`. Step 5 arms the merge before the review has
-   said anything, so without that answer the branch merges while you are still
-   fixing what it found.
+4. **The rest of the loop is one command**, fetched when it applies rather than
+   carried from the start: `./scripts/fleet/issue-command.sh --after-pr <n>`. It
+   is what the PR body must carry, how the merge is queued, which paths a person
+   has to merge, and how the review rounds end. Those rules are stated there and
+   nowhere else, on purpose: a second copy is what an agent reads instead of the
+   original.
 
 ## What is watching you
 

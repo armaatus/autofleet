@@ -38,6 +38,18 @@
 # written for (armaatus/rommsync-nx#90's unqueued auto-merge, and #88 and #89
 # of the same tracker sitting blocked on one unresolved thread) come straight
 # back.
+#
+# THE BRIEF IS THE HOME OF THE LOOP, and it sends the agent to no other document.
+# Its first sentence used to read "following this repo's CLAUDE.md and the loop in
+# docs/WORKFLOW.md", and that page is 10,036 words -- a longer retelling of the
+# brief the agent had just been handed. An agent that did as it was told read
+# 13,425 words before its first edit and then carried them in the prompt prefix of
+# every request for the rest of the session (armaatus/autofleet#54). WORKFLOW.md
+# still explains why each of these rules exists, which is what it is for; it is
+# the maintainer's page and a reference, not per-issue reading. `evals/lint.sh`
+# asserts both halves of that: each enforced rule is stated in full in exactly one
+# agent-facing text, and what an agent is told to read before its first edit has a
+# word ceiling.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -159,10 +171,10 @@ sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk -v want="$stage" "
 
 ---
 
-Implement the issue above, end to end, following this repo's CLAUDE.md and the
-loop in docs/WORKFLOW.md. Work autonomously: do not stop to ask for confirmation
-on anything CLAUDE.md already decides. If a question is genuinely open, write it
-in the PR body and carry on with the rest of the scope.
+Implement the issue above, end to end. CLAUDE.md and this brief are the only
+required reading. Work autonomously: do not stop to ask for confirmation on
+anything CLAUDE.md already decides. If a question is genuinely open, write it in the PR body and
+carry on with the rest of the scope.
 
 **1. Plan.** Stay in plan mode until the plan is right: Files that change, Order
 of work, Risks, Proof. The bar is that someone who never saw this conversation

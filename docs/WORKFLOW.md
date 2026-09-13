@@ -5,8 +5,25 @@ one human deciding what the rules are. This file is that loop end to end: what
 each stage produces, what starts the next, where a person is required, and how to
 stop the whole thing.
 
-New here? Read [CLAUDE.md](../CLAUDE.md) first — it is the working agreement and
-it is short. This file is the longer explanation behind it.
+**Whose page this is.** The maintainer's, read once — not an agent's, and not
+per issue. An agent's instructions are the brief
+([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`,
+then `--after-pr <n>`), and [CLAUDE.md](../CLAUDE.md) is the working agreement
+above it; between them they are the whole of what a fleet agent is told to read
+before its first edit. This file is the explanation *behind* those rules — why
+each one exists and what it cost to learn — plus the conventions an agent looks
+up when it needs one, the `<!-- blockers -->` marker in [Stage 2](#stage-2--spec)
+chief among them.
+
+So it does not restate a step of the loop as something to run. It used to: the
+brief opened by sending the agent here, and the agent that did as it was told
+read 13,425 words — CLAUDE.md, the brief, and this page's longer retelling of
+the brief — before its first edit, then carried them in the prompt prefix of
+every request for the rest of the session
+([#54](https://github.com/armaatus/autofleet/issues/54)). Nothing was deleted
+here for being long; what changed is who is told to read it. Where this page and
+the brief disagree about what to do, the brief is right, and `evals/lint.sh`
+keeps this one from growing a second copy of it.
 
 The shape is adapted from Anthropic's
 [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook).
@@ -503,20 +520,12 @@ the one grinding.
 ### Stage 4 — Local review, before anything leaves
 
 Two passes, because they look for different things and this machine has the time:
+one for defects, one for conformance, both against [REVIEW.md](../REVIEW.md).
+**What to run, and in what order, is the brief's step 3** — it names the two
+passes and the command that records them. This section is why that recording
+exists at all.
 
-```bash
-/code-review high                  # defects: correctness, efficiency, reuse
-/mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
-```
-
-[REVIEW.md](../REVIEW.md) is the policy both follow. Fix what is real, re-run the
-tests, then record it:
-
-```bash
-./scripts/fleet/record-review.sh findings.md
-```
-
-That writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
+Recording writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
 `gh pr create` from a fleet-owned worktree without it.** The marker records what
 it is given; it cannot tell whether a review really happened, so it is a
 checklist gate. What actually enforces the two passes is `merge-gate`, which
@@ -613,11 +622,8 @@ On GitHub, in `github` mode:
 - [`merge-gate.yml`](../.github/workflows/merge-gate.yml) — the required check
   that decides whether the PR may merge itself.
 
-Back in the worktree the agent waits with one blocking call:
-
-```bash
-./scripts/fleet/await-review.sh
-```
+Back in the worktree the agent waits with one blocking call, `await-review.sh`,
+which the brief's step 5 hands it at the moment it applies.
 
 This is the cheap half of the loop. An agent that waits by *thinking about
 whether the review has arrived* burns tokens the whole time. An agent that waits
@@ -650,13 +656,9 @@ than spending a second round on findings already in hand.
 Then it fixes what is real, replies with a reason where it disagrees, and
 resolves every thread. If it changed anything it pushes and comes back for the
 next round; when a review arrives it is not going to change anything for, it says
-so and checks:
-
-```bash
-./scripts/fleet/resolve-thread.sh <thread-id> ...   # close them, and re-ask the gate
-./scripts/fleet/answer-review.sh "<what you did, or why you did not>"
-./scripts/fleet/review-status.sh    # exit 0 = every thread resolved, every check green
-```
+so and checks. `resolve-thread.sh`, then `answer-review.sh`, then
+`review-status.sh` — the brief's step 5 is the order and the exact invocations;
+the rest of this section is why each of the three has to exist.
 
 The order matters: an answer has to come *after* the review it answers, and a
 push invalidates that review. So answering a review you have just pushed over
