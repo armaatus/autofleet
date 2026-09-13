@@ -119,6 +119,19 @@ STOP_FILE="$FLEET_STOP"
 DRAIN_FILE="$FLEET_DRAIN"
 OWNED_DIR="$FLEET_OWNED"
 STARTED_DIR="$STATE_DIR/started"
+# What the fleet HAS run, as opposed to what it is running: `issue -> worktree
+# path`, written by `own()` and deliberately never cleared by `disown_issue`.
+#
+# `cost.sh` is the only reader, and without this it could report only the
+# worktrees still open -- so the report emptied itself exactly when a run
+# finished, which is when somebody asks what it cost. The same exception
+# `gaveup-` gets, for the same reason: a record of what happened is not state
+# about what is happening, and a restart is not a decision about an issue.
+#
+# It grows by one short file per issue the fleet ever starts, which is bounded by
+# the backlog rather than by the clock -- unlike the two stores #72 capped, which
+# grew per review and per log line. Nothing evicts it on purpose.
+RAN_DIR="$STATE_DIR/ran"
 # The `Closes #N` and `Blocked by #N` patterns, shared with merge_gate.py so the
 # dispatcher, the gate and GitHub cannot read the same body three ways. It sits
 # under .github/scripts/ because merge-gate.yml sparse-checks out that directory
@@ -199,7 +212,7 @@ BLOCKED_LABEL="${AUTOFLEET_BLOCKED_LABEL:-blocked}"
 # issue_labels_in split it here.
 ANSWER_SEP="$(printf '\t')"
 
-mkdir -p "$OWNED_DIR" "$STARTED_DIR"
+mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 # The poll cache is emptied further down, and only when nobody is using it: see
 # the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
@@ -306,6 +319,8 @@ interrupt_agent_in() {
 # --------------------------------------------------------------- the state ---
 own() {
   printf '%s\n' "$2" >"$OWNED_DIR/$1"; date +%s >"$STARTED_DIR/$1"
+  # ...and the copy that OUTLIVES the worktree, for `cost.sh`. See RAN_DIR.
+  printf '%s\n' "$2" >"$RAN_DIR/$1"
   clear_issue_markers "$1"
 }
 owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
@@ -3547,6 +3562,10 @@ case "${1:-}" in
   stop)   shift; cmd_stop "${1:-}" ;;
   resume) cmd_resume ;;
   retry)  shift; cmd_retry "$@" ;;
+  # A separate script rather than a cmd_* in here: it reads transcripts the agent
+  # CLI wrote and knows nothing about dispatching, and this file is 3.5k lines
+  # already. `exec` so its exit status is the one the caller sees.
+  cost)   shift; exec bash "$REPO_ROOT/scripts/fleet/cost.sh" "$@" ;;
   *)
     cat >&2 <<USAGE
 usage: fleet.sh <command>
@@ -3559,6 +3578,7 @@ usage: fleet.sh <command>
   stop [--now]                       drain (or interrupt the agents too)
   resume                             clear the stop
   retry 44                           hand back an issue the time-box gave up on
+  cost [--json] [44 ...]             what each issue's worktree spent, in tokens
 
 Run it in a terminal the runner opens, so it is as visible as the work it starts:
   $(runner_dispatcher_hint)

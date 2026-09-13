@@ -20,6 +20,11 @@ precedence is **environment beats this file beats the defaults** — a one-off
 outright (`AUTOFLEET_MAX=1`) if you want this file to win over the environment
 too.
 
+One knob is `=` rather than `:=`, and it says why at its own default:
+`AUTOFLEET_TRANSCRIPT_DIR`, where **empty is the off switch**. `:=` substitutes
+on unset *or null*, which would hand an explicitly emptied value straight back
+the default and make the documented way to turn the cost report off do nothing.
+
 ### The dispatcher
 
 | Knob | Default | What it costs to change |
@@ -237,6 +242,49 @@ reviewers finish. If the rotation cannot happen at all — a read-only state
 directory, an undeletable `fleet.log.1` — it says so once per dispatcher, and
 again after a rotation that works.
 
+
+### What a run costs
+
+`./scripts/fleet/fleet.sh cost` reports what each issue's worktree spent, read
+back out of the agent CLI's own session transcripts — no extra instrumentation,
+because the CLI already wrote the answer.
+
+```
+issue  sessions  input  output  cache read  cache write
+   48         3    170  23,340   2,898,820      102,120
+   52         1     48  24,838   2,024,487       89,837
+-----  --------  -----  ------  ----------  -----------
+total         4    218  48,178   4,923,307      191,957
+```
+
+`--json` prints the same figures for something that is not a person, which is
+the point: these numbers are only useful compared across runs.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_TRANSCRIPT_DIR` | `~/.claude/projects` | Where the agent CLI writes one JSONL per session, under `<root>/<cwd-slug>/<session-id>.jsonl`. Set it **empty** to turn the report off — one explanatory line, exit 0. |
+
+**The four figures are never added together.** A cache read is roughly a tenth
+of an input token, so a run that looks expensive on `input` may be almost
+entirely cache, and one total would hide exactly the difference the report
+exists to show.
+
+**What ties a session to an issue** is the worktree path. The slug is the
+absolute working directory with every `/` and `.` turned into `-`, and `own()`
+records each issue's path under `$FLEET_DIR/ran/<issue>` — deliberately *not*
+cleared when the worktree is released, or the report would empty itself exactly
+when a run finishes. One short file per issue the fleet ever starts.
+
+**It never fails a run.** No transcript root, a root that is not there, a
+worktree already reaped, an entry with no `usage`, a half-written last line in a
+transcript a live agent is still appending to: each costs one line on stderr and
+exits 0. Explanations go to stderr in both shapes, so `--json` on stdout stays
+machine-readable.
+
+**What it does not see.** Only sessions whose working directory was the worktree
+itself. A reviewer run from the main checkout (`AUTOFLEET_REVIEW_MODE=local`)
+lands under the main checkout's slug, not the worktree's, so its tokens are not
+in that issue's row.
 
 ### Per-worktree isolation
 

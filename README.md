@@ -39,6 +39,13 @@ model runs in the dispatcher, and no agent merges its own work.
 5. **Reclaims the worktree** only when nothing goes with it: the PR merged and
    the tree is clean, or the issue can no longer produce a merged PR at all.
 
+6. **Says what it cost.** `./scripts/fleet/fleet.sh cost` reports input, output,
+   cache-read and cache-write tokens per issue, plus how many sessions ran there,
+   from the agent CLI's own transcripts. The four are printed separately and
+   never summed — a cache read is roughly a tenth of an input token, so a run
+   that looks expensive on `input` may be almost entirely cache. `--json` for
+   comparing runs to each other.
+
 Two files stop it, and they live outside every worktree because the case you
 most need a stop in is the one where something is unhealthy. `DRAIN` means start
 nothing new. `STOP` means nothing goes out — no push, no PR, no comment, from any

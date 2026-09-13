@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Covers scripts/fleet/cost.sh -- what a worktree run cost, read back out of the
+# agent CLI's own session transcripts.
+#
+#   test_cost.sh sums        the four figures and the session count, from a
+#                            fixture transcript directory. The fixture carries
+#                            every shape the reader has to survive: one assistant
+#                            message written as TWO entries with the same
+#                            `message.id` (which is what the CLI actually does,
+#                            and what makes a naive sum report double), an entry
+#                            with no `usage`, a non-assistant entry, and a
+#                            half-written last line.
+#   test_cost.sh json        --json prints the same figures, as integers.
+#   test_cost.sh empty       an empty AUTOFLEET_TRANSCRIPT_DIR is one explanatory
+#                            line and exit 0, and NO table: a table of zeros is a
+#                            measurement, and nothing was measured.
+#   test_cost.sh reaped      a recorded worktree whose transcripts are gone is
+#                            named once and exits 0. A reporting command must
+#                            never be the thing that fails a run.
+#   test_cost.sh subcommand  `fleet.sh cost` actually reaches cost.sh. Wired
+#                            wrong, every assertion above passes against a
+#                            command nobody can invoke.
+#
+# The fleet state dir and the transcript root are both temp dirs, so nothing here
+# reads this machine's own fleet or its own transcripts.
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+WORK=""
+cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; return 0; }
+trap cleanup EXIT
+
+# The CLI's own naming: a transcript directory is the absolute working directory
+# with every `/` and `.` turned into `-`. Spelled out here rather than shared
+# with the script under test, so a change to either side has to be made twice
+# and deliberately -- a helper both call would agree with itself while agreeing
+# with nothing the CLI writes.
+transcript_slug() { printf '%s' "$1" | tr '/.' '--'; }
+
+# A worktree holding just the payload, and a transcript root beside it.
+#
+# The WHOLE of scripts/fleet, not cost.sh alone: it sources lib.sh, which sources
+# config.sh and a runner driver, so a hand-picked subset is a fixture that cannot
+# load.
+make_fixture() {
+  WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
+  mkdir -p "$WORK/repo/scripts/fleet"
+  cp -R "$REPO_ROOT"/scripts/fleet/. "$WORK/repo/scripts/fleet/"
+
+  export AUTOFLEET_DIR="$WORK/fleet"
+  mkdir -p "$AUTOFLEET_DIR/ran" "$AUTOFLEET_DIR/worktrees"
+  export AUTOFLEET_TRANSCRIPT_DIR="$WORK/transcripts"
+  mkdir -p "$AUTOFLEET_TRANSCRIPT_DIR"
+
+  # Two issues: #48 has transcripts, #49 has a recorded path and nothing behind
+  # it, which is the worktree-already-reaped case.
+  WT48="$WORK/wt/48-measures-what-a-run-costs"
+  WT49="$WORK/wt/49-a-worktree-that-is-gone"
+  printf '%s\n' "$WT48" >"$AUTOFLEET_DIR/ran/48"
+  printf '%s\n' "$WT49" >"$AUTOFLEET_DIR/ran/49"
+}
+
+# The fixture transcripts for #48. Two sessions, and between them every entry
+# shape the reader is asked to survive.
+#
+# Expected, and asserted below: 2 sessions, 16 input, 122 output, 1503 cache
+# read, 79 cache write. A reader that did not de-duplicate on `message.id` would
+# report 26/222/2503/129 instead -- close enough to look like an answer, which is
+# the whole reason this fixture exists.
+make_transcripts() {
+  local dir="$AUTOFLEET_TRANSCRIPT_DIR/$(transcript_slug "$WT48")"
+  mkdir -p "$dir"
+  cat >"$dir/session-one.jsonl" <<'JSONL'
+{"type":"user","message":{"role":"user","content":"go"}}
+{"type":"assistant","message":{"id":"msg_a","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}
+{"type":"assistant","message":{"id":"msg_a","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}
+{"type":"assistant","message":{"id":"msg_b","usage":{"input_tokens":5,"output_tokens":20,"cache_read_input_tokens":500,"cache_creation_input_tokens":25}}}
+{"type":"assistant","message":{"id":"msg_c"}}
+JSONL
+  # ...and a half-written last line, with no trailing newline, exactly as a live
+  # agent's transcript looks while it is being appended to.
+  printf '%s' '{"type":"assistant","message":{"id":"msg_d","usa' >>"$dir/session-one.jsonl"
+
+  cat >"$dir/session-two.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_e","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
+JSONL
+
+  # A file that is not a transcript, and a transcript with no usage in it at all:
+  # neither is a session that cost anything, and neither may inflate the count.
+  printf 'not json\n' >"$dir/notes.txt"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+    >"$dir/session-three.jsonl"
+}
+
+cost() { (cd "$WORK/repo" && ./scripts/fleet/cost.sh "$@"); }
+
+case "${1:-}" in
+  sums)
+    make_fixture
+    make_transcripts
+    out="$(cost 48 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
+    row="$(printf '%s\n' "$out" | awk '$1 == 48')"
+    [ -n "$row" ] || fail "no row for #48 in:
+$out"
+    # Field by field rather than one string match, so a failure says WHICH
+    # column is wrong instead of printing two lines that differ somewhere.
+    set -- $row
+    [ "$2" = 2 ]     || fail "sessions: expected 2, got $2 (a file with no usage is not a session)"
+    [ "$3" = 16 ]    || fail "input: expected 16, got $3"
+    [ "$4" = 122 ]   || fail "output: expected 122, got $4 (222 means the duplicate entry was counted twice)"
+    [ "$5" = 1,503 ] || fail "cache read: expected 1,503, got $5"
+    [ "$6" = 79 ]    || fail "cache write: expected 79, got $6"
+    printf '%s\n' "$out" | grep -q '^ *total' \
+      || fail "there is no total row:
+$out"
+    echo "ok: the four figures are summed per issue, de-duplicated by message id"
+    ;;
+
+  json)
+    make_fixture
+    make_transcripts
+    out="$(cost --json 48 2>/dev/null)" || fail "cost.sh --json exited non-zero: $out"
+    printf '%s' "$out" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+issues = report["issues"]
+if len(issues) != 1:
+    sys.exit("expected one issue in the report, got %d" % len(issues))
+row = issues[0]
+want = {"issue": "48", "sessions": 2, "input_tokens": 16, "output_tokens": 122,
+        "cache_read_input_tokens": 1503, "cache_creation_input_tokens": 79}
+for key, value in want.items():
+    if row.get(key) != value:
+        sys.exit("%s: expected %r, got %r" % (key, value, row.get(key)))
+    if report["total"].get(key, value) != value:
+        sys.exit("total %s: expected %r, got %r" % (key, value, report["total"].get(key)))
+if not report["transcript_dir"]:
+    sys.exit("the report does not say which transcript root it read")
+' || fail "the JSON does not carry the same figures as the table"
+    echo "ok: --json prints the same figures, as integers"
+    ;;
+
+  empty)
+    make_fixture
+    make_transcripts
+    out="$(AUTOFLEET_TRANSCRIPT_DIR= cost 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || fail "an empty transcript root exited $rc; cost must never fail a run"
+    grep -qi 'AUTOFLEET_TRANSCRIPT_DIR' <<<"$out" \
+      || fail "it did not say which knob turned the report off: $out"
+    [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] \
+      || fail "an empty transcript root printed more than one line:
+$out"
+    printf '%s\n' "$out" | grep -q 'total' \
+      && fail "it printed a table of zeros, which reads as a measurement of nothing spent"
+    echo "ok: an empty transcript root is one line and exit 0"
+    ;;
+
+  reaped)
+    make_fixture
+    make_transcripts
+    # #49's worktree path is recorded and its transcripts were never there.
+    out="$(cost 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || fail "a reaped worktree exited $rc; cost must never fail a run"
+    grep -q '#49' <<<"$out" || fail "it did not say #49 has no transcripts: $out"
+    printf '%s\n' "$out" | awk '$1 == 48' | grep -q . \
+      || fail "the issue that DOES have transcripts was dropped along with it:
+$out"
+    echo "ok: a worktree already reaped costs one line and nothing else"
+    ;;
+
+  subcommand)
+    make_fixture
+    make_transcripts
+    out="$(cd "$WORK/repo" && ./scripts/fleet/fleet.sh cost --json 48 2>/dev/null)" \
+      || fail "fleet.sh cost exited non-zero: $out"
+    printf '%s' "$out" | python3 -c '
+import json, sys
+if json.load(sys.stdin)["issues"][0]["output_tokens"] != 122:
+    sys.exit("fleet.sh cost did not reach cost.sh with its arguments intact")
+' || fail "fleet.sh cost does not dispatch to cost.sh: $out"
+    echo "ok: fleet.sh cost reaches cost.sh, arguments and all"
+    ;;
+
+  *)
+    echo "usage: test_cost.sh sums|json|empty|reaped|subcommand" >&2; exit 2 ;;
+esac
