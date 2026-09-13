@@ -17,6 +17,10 @@
 #                                     on an open one whatever the counts say, so
 #                                     "answering alone clears the hold" was false
 #                                     in the case the reviewer's brief PREFERS.
+#   test_await_review.sh knob         AWAIT_REVIEW_MAX_ROUNDS refuses a value that
+#                                     is not a positive whole number, rather than
+#                                     letting `[ 4 -gt three ]` return 2 and read
+#                                     as "cap not reached" forever.
 #   test_await_review.sh important    the same review with an Important finding ->
 #                                     the old instruction, unchanged. The floor is
 #                                     for nits; a data-loss bug still costs a
@@ -192,6 +196,43 @@ case "${1:-}" in
     || { echo "$out" >&2; fail "the open thread was never printed, so this phase's fixture is inert and it is testing nothing"; }
   ok "...and the open thread itself is printed, so the fixture is load-bearing"
   ;;
+# ----------------------------------------------------------------------- knob
+  knob)
+  # AWAIT_REVIEW_MAX_ROUNDS became a documented knob with the round cap and was
+  # still read raw. `[ 4 -gt three ]` returns 2, which reads as false, so the
+  # cap never fires and the agent laps forever -- the same silent failure both
+  # its table neighbours in docs/CONFIGURATION.md are checked against. Found by
+  # the independent review.
+  make_fixture "$NIT_ONLY"
+  for bad in three 0 2x -1; do
+    out="$( (cd "$WORK/repo" && AWAIT_REVIEW_MAX_ROUNDS="$bad" \
+      ./scripts/fleet/await-review.sh 42) 2>&1 )"; rc=$?
+    [ "$rc" = 2 ] \
+      || { echo "$out" >&2; fail "AWAIT_REVIEW_MAX_ROUNDS='$bad' was accepted (rc=$rc)"; }
+    grep -q 'must be a positive whole number' <<<"$out" \
+      || fail "AWAIT_REVIEW_MAX_ROUNDS='$bad' failed without saying why: $out"
+  done
+  ok "a round cap that is not a positive number is refused, not ignored"
+  out="$( (cd "$WORK/repo" && AWAIT_REVIEW_MAX_ROUNDS=5 \
+    ./scripts/fleet/await-review.sh 42) 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a valid round cap was refused (rc=$rc)"; }
+  ok "...while a whole number is accepted"
+  # ...and an empty one means unset, so the default applies -- the same
+  # distinction test_runner_bound.sh draws for its own bound. `:-` has already
+  # substituted the default by the time the check runs, so this is asserting
+  # that the check did not grow an `''` arm that can never be right here.
+  #
+  # A FRESH fixture: the accepted run above handed a review back and wrote the
+  # round stamp, so a second wait in the same worktree correctly declines to
+  # report the same review twice and then times out at the deadline. That is
+  # the dedup working, and reading it as "the knob was refused" is the phase
+  # testing its own leftovers.
+  make_fixture "$NIT_ONLY"
+  out="$( (cd "$WORK/repo" && AWAIT_REVIEW_MAX_ROUNDS="" \
+    ./scripts/fleet/await-review.sh 42) 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "an empty round cap was refused rather than read as unset (rc=$rc)"; }
+  ok "...and an empty one means unset, so the default applies"
+  ;;
 # --------------------------------------------------------------- tworeviewers
   tworeviewers)
   # merge_gate holds on the latest unanswered review of EVERY author, not just
@@ -232,5 +273,5 @@ case "${1:-}" in
   ok "no severity trailer means not said, not none"
   ;;
   *)
-  echo "usage: $0 {nitonly|threads|tworeviewers|important|untrailered}" >&2; exit 2 ;;
+  echo "usage: $0 {nitonly|threads|tworeviewers|knob|important|untrailered}" >&2; exit 2 ;;
 esac

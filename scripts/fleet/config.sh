@@ -104,23 +104,6 @@
 # more attempt per head and then leaves a comment saying a person decides. This
 # is that bound.
 : "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
-
-# How many reviews one PULL REQUEST may accrue before a person is asked.
-#
-# A different question from the one above, and nothing was answering it. That
-# cap is per HEAD and counts only reviewers that submitted NOTHING -- a reviewer
-# that submits findings clears it, so a PR whose every round produces findings
-# is bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the agent's
-# side, but only while the agent is alive and only on rounds it read back:
-# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
-# on #88. #85's agent stopped at its cap and a fourth review landed with nobody
-# left to answer it.
-#
-# So this bounds the DISPATCHER: after this many reviews on one PR, it stops
-# starting them and says so. Four rather than three, because it must not fire
-# before the agent's own three-round cap has had its say -- two caps at the same
-# number is one of them being dead code.
-: "${AUTOFLEET_REVIEW_MAX_ROUNDS:=4}"
 # Validated, because of how a bad value fails. The only consumer is
 # `[ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]` in fleet.sh: with a
 # non-number, `[` prints "integer expression expected" and returns 2, so the
@@ -140,6 +123,32 @@
 # read last so it can override these defaults, so a project writing
 # `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
 # the cap unchecked and the guard was decorative for the one route that matters.
+
+# How many reviews one PULL REQUEST may accrue before a person is asked.
+#
+# A different question from the one above, and nothing was answering it. That
+# cap is per HEAD and counts only reviewers that submitted NOTHING -- a reviewer
+# that submits findings clears it, so a PR whose every round produces findings
+# is bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the agent's
+# side, but only while the agent is alive and only on rounds it read back:
+# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
+# on #88. #85's agent stopped at its cap and a fourth review landed with nobody
+# left to answer it.
+#
+# So this bounds the DISPATCHER: after this many reviews on one PR, it stops
+# starting them and says so. Four rather than three, because it must not fire
+# before the agent's own three-round cap has had its say -- two caps at the same
+# number is one of them being dead code.
+: "${AUTOFLEET_REVIEW_MAX_ROUNDS:=4}"
+# ABOVE the `.autofleet/config` source, like every other default here. Placed
+# below it once, in the same change that added it, and the empty-value refusal
+# became unreachable: the host file sets `KNOB=`, then a `:=` running afterwards
+# substitutes the default, and the check the tests drive through that file has
+# nothing left to refuse. Green here, dead for the one route that matters --
+# the same failure this knob's neighbour records two comments up.
+#
+# The check itself is at the BOTTOM, with its neighbour's, for that reason.
+
 # Found by the independent review of the change that added it.
 # ------------------------------------------------------------- what is KEPT ---
 #

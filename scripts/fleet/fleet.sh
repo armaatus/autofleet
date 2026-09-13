@@ -1712,7 +1712,16 @@ for p in prs:
     # an agent that died mid-loop, and both of those want a person.
     local rounds_n=0
     [ -f "$marker.rounds" ] && read -r rounds_n <"$marker.rounds"
-    case "${rounds_n:-0}" in (*[!0-9]*) rounds_n=0 ;; esac
+    # ASSIGN the defaulted value, then test THAT. `case "${rounds_n:-0}"` tests
+    # the default and leaves the variable empty, which an EMPTY `.rounds` file
+    # produces: `read` assigns "" and returns 1 at EOF. `[ "" -ge 4 ]` is not
+    # false, it is `integer expression expected` and exit 2 -- which reads as
+    # false, so the cap silently does not exist, and fleet.sh runs without `-e`
+    # to notice. The same shape config.sh's own validation comment warns about,
+    # one file over. Found by the independent review, round 1, and answered
+    # here rather than in words.
+    rounds_n="${rounds_n:-0}"
+    case "$rounds_n" in (*[!0-9]*) rounds_n=0 ;; esac
     if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
       hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
         "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \

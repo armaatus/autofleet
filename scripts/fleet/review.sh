@@ -109,7 +109,12 @@ review_round() {
   # review, which reproduced it. `fleet.sh`'s `.tries` read has the same shape
   # and the same bug, older than this.
   [ -n "$ROUNDS_MARKER" ] && [ -f "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER"
-  case "${n:-0}" in (*[!0-9]*) n=0 ;; esac
+  # Assigned, then tested -- see the same two lines in fleet.sh. An empty marker
+  # leaves `n` empty here too; arithmetic would forgive it and the `[ -ge ]` in
+  # fleet.sh would not, so both are written the one safe way rather than each
+  # being right about its own consumer.
+  n="${n:-0}"
+  case "$n" in (*[!0-9]*) n=0 ;; esac
   printf '%s\n' "$(( n + 1 ))"
 }
 

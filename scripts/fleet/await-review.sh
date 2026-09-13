@@ -57,6 +57,26 @@ POLL_SECONDS="${AWAIT_REVIEW_POLL:-30}"
 # an overnight wait. The review job itself is capped at 30 minutes.
 DEADLINE_SECONDS="${AWAIT_REVIEW_DEADLINE:-2700}"
 MAX_ROUNDS="${AWAIT_REVIEW_MAX_ROUNDS:-3}"
+# Validated here rather than in config.sh, because this is the only reader and
+# config.sh does not set it. It became a documented knob in
+# docs/CONFIGURATION.md with the round cap, and a documented knob that accepts
+# `three` is the same silent failure both its table neighbours are checked
+# against: `[ 4 -gt three ]` returns 2, which reads as false, so the cap never
+# fires and the agent laps forever. Refused rather than defaulted, so the
+# operator learns which value was wrong. Found by the independent review.
+# No `''` arm: `:-` above already turned an empty or unset value into the
+# default, so empty means "unset" here and never reaches this. Unlike
+# config.sh's knobs, which are `:=`-defaulted from a file a host project edits
+# and where an explicit `KNOB=` IS reachable and IS a mistake.
+case "$MAX_ROUNDS" in
+  *[!0-9]*)
+    echo "AWAIT_REVIEW_MAX_ROUNDS must be a positive whole number;" \
+         "got '$MAX_ROUNDS'" >&2
+    exit 2 ;;
+esac
+[ "$MAX_ROUNDS" -gt 0 ] || {
+  echo "AWAIT_REVIEW_MAX_ROUNDS must be a positive whole number; got '$MAX_ROUNDS'" >&2
+  exit 2; }
 ROUNDS_FILE="$REPO_ROOT/.autofleet/run/review-rounds"
 # Exit 8 is the one failure path with no natural bound: it fires on poll 1, so
 # the deadline never applies, and a conflict is not a round of disagreement so
@@ -499,9 +519,21 @@ with open(stamp_path, "w") as fh:
 # on the latest unanswered review of EACH author, so an older Important review
 # from a second reviewer keeps refusing while the newest says nothing is
 # Important -- and the cheap remedy would be printed for a branch the gate is
-# still blocking for a reason the remedy does not touch. `any` rather than
-# `all`, phrased as "no review said anything but 0", so a single unsaid keeps
-# the old instruction. Found by the independent review.
+# still blocking for a reason the remedy does not touch.
+#
+# `all(m == 0)`, and NOT `any`: one review declaring zero is not the claim. A
+# single review that said nothing (None) or said one, keeps the old
+# instruction. An earlier draft of this comment said `any` while the code said
+# `all` -- the code was right and the comment would have talked the next reader
+# into the failure the paragraph above argues against. Found by the independent
+# review, which has now caught this same class of drift three times in this
+# change.
+#
+# The set is the reviews being HANDED BACK, which on a second wait against an
+# unchanged head is the newly-arrived ones rather than every review the gate
+# still holds on. That narrowing is deliberate and costs nothing here: the
+# agent was handed the older Important review in the round that printed it, and
+# one `answer-review.sh` answer discharges every standing review at the gate.
 #
 # Empty file means "did not say", which is not the same as zero -- see the
 # caller, which tests for the literal 0 and nothing else.

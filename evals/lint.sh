@@ -420,10 +420,22 @@ fi
 #      the gate: merge_gate takes `if found == 0: continue`, so a floor that
 #      reported it would land a PR with unanswered nits under the auto-merge
 #      armed at open. Two of the three said the right thing and the third did
-#      not, which is exactly the shape a presence-grep cannot see.
+#      not.
+#
+#      STRUCTURAL, not the one historical sentence. The first version of this
+#      matched `follow-up issue and reports .0.` -- the exact pre-correction
+#      wording -- so it could only fire on a byte-exact revert, and the OTHER
+#      draft wording the same review found ("report both counts as 0") passed
+#      it green. A check that pins one string is a check that pins one commit.
+#      What it looks for now is any sentence that puts a zero count next to the
+#      floor: the counts named within a few words of "round three" or
+#      "follow-up issue". Found by the independent review, which pointed out
+#      the comment claimed a generality the pattern did not have.
 zero_floor=""
 for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
-  flat "$f" | qgrep 'follow-up issue and reports .0.' && zero_floor="$zero_floor $f"
+  flat "$f" \
+    | qgrep -E '(round three|follow-up issue)[^.]{0,120}(both counts as .?0|reports? .?0.?[ .]|review-findings: 0)' \
+    && zero_floor="$zero_floor $f"
 done
 if [ -z "$zero_floor" ]; then
   ok "...and none of them tells it to report a zero count, which would release the gate"

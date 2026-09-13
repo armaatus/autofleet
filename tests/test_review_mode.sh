@@ -926,12 +926,18 @@ GHSTUB
   printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.done"
   : >"$AUTOFLEET_DIR/reviewing/99.said"
   printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.tries"
+  # `.rounds` in the list too. It is the ONE record `stop_reviewers` keeps, and
+  # a reader who knows that could reasonably think the sweep keeps it as well --
+  # it does not, and must not: what it counts belongs to a pull request, and
+  # this pull request is closed. The two halves of that rule are asserted in the
+  # two places they differ. Found by the independent review.
+  printf '3\n' >"$AUTOFLEET_DIR/reviewing/99.rounds"
   poll_review_open_prs
-  for f in 99.done 99.said 99.tries; do
+  for f in 99.done 99.said 99.tries 99.rounds; do
     [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
       && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
   done
-  ok "...and a closed PR's records are swept"
+  ok "...and a closed PR's records are swept, .rounds included"
 
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a
@@ -941,10 +947,26 @@ GHSTUB
   # be signalled, and nothing guarantees a future record's first field is not
   # numeric. Said rather than asserted, because a phase claiming to pin it would
   # be the inert kind this suite has shipped twice.
+  printf '3\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
   in_poll stop_reviewers >/dev/null 2>&1
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
   ok "...and a stop clears the records"
+
+  # ...EXCEPT `.rounds`, and this is the assertion that rule did not have. The
+  # exemption is one `case ... continue` inside a loop whose stated purpose is
+  # "the records go too", so it reads as a special case somebody could tidy
+  # away -- and every phase in this suite would stay green. What breaks is
+  # invisible until it matters: AUTOFLEET_REVIEW_MAX_ROUNDS resets on every
+  # `stop.sh` and every dispatcher restart, both routine and both in CLAUDE.md's
+  # Environment block, so the PR-level cap is one drain from not existing.
+  # docs/CONFIGURATION.md and docs/WORKFLOW.md both promise it survives.
+  # Found by the independent review, which called it hard rule 3, and it is.
+  [ -e "$AUTOFLEET_DIR/reviewing/43.rounds" ] \
+    || fail "stop_reviewers cleared 43.rounds, so every drain hands each open PR a fresh set of rounds and the cap is one stop.sh from nothing"
+  [ "$(cat "$AUTOFLEET_DIR/reviewing/43.rounds")" = 3 ] \
+    || fail "stop_reviewers changed the round count rather than leaving it alone"
+  ok "...except .rounds, which counts the pull request and not this dispatcher's run"
 
   # --------------------------------------------- when the sweep must NOT run
   #
