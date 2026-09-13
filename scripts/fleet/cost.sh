@@ -195,11 +195,16 @@ elif not os.path.isdir(root):
 # "the fleet has no recorded worktree path for anything to measure yet" with
 # records for three other issues sitting right there, and then print a total row
 # of zeros anyway. Said precisely, naming the issues actually asked for.
-missing = sorted(want - set(order), key=int)
+#
+# NOT when the root is unusable. Two lines fired together on a host that has
+# vendored autofleet, not emptied the knob and not run the fleet yet -- and the
+# Acceptance of #48 asks for ONE explanatory line. The root is the bigger news
+# and it is already said; a second line about the registry is noise under it.
+missing = sorted(want - set(order), key=int) if usable else []
 if missing:
     note("no worktree path is recorded for #%s -- the fleet has not run it"
          % ", #".join(missing))
-elif not order:
+elif usable and not order:
     note("the fleet has no recorded worktree path for anything to measure yet")
 
 # Two counters, not one, because they are two different pieces of news and one
@@ -260,10 +265,19 @@ def add_file(path, sums):
     return counted
 
 def measure(paths):
-    """(sessions, {field: tokens}) for every worktree one issue has had."""
+    """(sessions, found, {field: tokens}) for every worktree one issue has had.
+
+    `found` is whether ANY transcript carried usage, subagents included, and is
+    what decides the "no transcripts -- reaped" line. `sessions` counts top-level
+    transcripts only, so a worktree whose session file carries no usage but whose
+    subagents do has sessions == 0 with real figures beside it -- and was then
+    told it had no transcripts, which is the one line in this file that states a
+    CAUSE, stating a false one. Found by the independent review.
+    """
     global bad_files
     sums = {key: 0 for _, key in FIELDS}
     sessions = 0
+    found = False
     for path in paths:
         for directory in directories_for(path):
             try:
@@ -279,7 +293,9 @@ def measure(paths):
                     # A file directly in the project directory is a SESSION.
                     if add_file(full, sums):
                         sessions += 1
-                elif os.path.isdir(full):
+                        found = True
+                elif os.path.isdir(full) and os.path.isdir(
+                        os.path.join(full, "subagents")):
                     # ...and everything under it belongs to that session.
                     #
                     # SUBAGENTS LIVE HERE, and missing them is not a rounding
@@ -288,9 +304,15 @@ def measure(paths):
                     # REQUIRES subagents: verifier, researcher and two review
                     # passes per issue (CLAUDE.md). Reading only the top level
                     # dropped 92% of the cache-write tokens for one worktree and
-                    # reported 1 session where 4 agents had run. WALKED rather
-                    # than named, because an agent that spawns an agent nests
-                    # one level further down again.
+                    # reported 1 session where 4 agents had run.
+                    #
+                    # `<session-id>/subagents` BY NAME, and then walked to
+                    # the bottom. The walk has to be DEEP, because an agent that
+                    # spawns an agent nests one level further down again -- but
+                    # it must not be WIDE: a session directory carries siblings,
+                    # `tool-results` among them on this machine, and persisted
+                    # tool output landing there as `.jsonl` would be summed as if
+                    # an agent had spent it. Found by the independent review.
                     # `onerror`, because os.walk SWALLOWS its errors by
                     # default: a subagents/ directory that would not open
                     # vanished silently, one level below the "each costs one
@@ -299,18 +321,21 @@ def measure(paths):
                     def unreadable(_error):
                         global bad_files
                         bad_files += 1
-                    for here, _dirs, files in os.walk(full, onerror=unreadable):
+                    subagents = os.path.join(full, "subagents")
+                    for here, _dirs, files in os.walk(subagents,
+                                                      onerror=unreadable):
                         for nested in sorted(files):
                             if nested.endswith(".jsonl"):
-                                add_file(os.path.join(here, nested), sums)
-    return sessions, sums
+                                if add_file(os.path.join(here, nested), sums):
+                                    found = True
+    return sessions, found, sums
 
 rows = []
 silent = []
 for issue in (order if usable else []):
     paths = by_issue[issue]
-    sessions, sums = measure(paths)
-    if sessions == 0:
+    sessions, found, sums = measure(paths)
+    if not found:
         silent.append(issue)
     rows.append({"issue": issue, "worktrees": paths, "sessions": sessions,
                  **{key: sums[key] for _, key in FIELDS}})

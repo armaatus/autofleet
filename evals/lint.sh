@@ -755,6 +755,69 @@ else
   fail "the seam check in the docs is not the seam check in the lint (above); hard rule 4 cites docs/RUNNERS.md as exact, and both pages ship to host repos"
 fi
 
+# 4f. THE SLUG RULE THE COST REPORT IMPLEMENTS IS THE ONE ITS PROSE PUBLISHES.
+#
+#    Same shape as 4d, and added because it already happened once inside the
+#    change that introduced it: `scripts/fleet/cost.sh` widened the rule to every
+#    non-alphanumeric character, `docs/CONFIGURATION.md` was reworded, and
+#    `scripts/fleet/config.sh` -- the file a host project actually has open at
+#    the moment it sets AUTOFLEET_TRANSCRIPT_DIR -- kept saying "`/` and `.`".
+#    config.sh is in install.sh PAYLOAD, so a stale rule there is a stale
+#    instruction in every host repo.
+#
+#    Worth a check rather than a comment because of HOW it fails: a wrong slug
+#    rule produces a confident table of zeros over the words "reaped, or run
+#    before the fleet recorded its worktree path". Nothing is red, nothing is
+#    empty, and the explanation on screen is wrong. Hard rule 3 -- a rule with
+#    no assertion is not shipped. Found by the independent review.
+if python3 - <<'PYEOF'
+import re, sys
+
+code = open("scripts/fleet/cost.sh").read()
+# The rule as the code states it. Read out rather than hardcoded, so widening it
+# again to something this check has never heard of fails here rather than
+# passing quietly.
+rule = re.search(r're\.sub\(r"\[\^([^"]*)\]", "-", path\)', code)
+if not rule:
+    sys.exit("cost.sh no longer derives the transcript slug with a re.sub over a "
+             "character class; this check now asserts nothing")
+if rule.group(1) != "A-Za-z0-9":
+    sys.exit("cost.sh now keeps [%s] in a slug, which no page here describes; "
+             "reword config.sh and docs/CONFIGURATION.md, then widen this check"
+             % rule.group(1))
+
+cap = re.search(r"^SLUG_MAX = (\d+)$", code, re.M)
+if not cap:
+    sys.exit("cost.sh no longer names a SLUG_MAX; this check now asserts nothing")
+
+# The two pages that ship the rule to a host project. `config.sh` is the one
+# somebody has open while setting the knob; the doc is the one they are sent to.
+pages = ("scripts/fleet/config.sh", "docs/CONFIGURATION.md")
+bad = []
+for path in pages:
+    prose = open(path).read()
+    if "non-alphanumeric" not in prose:
+        bad.append("%s does not say the slug replaces every non-alphanumeric "
+                   "character" % path)
+    # The rule it USED to state, which is the one that went stale. Matched on the
+    # phrasing both pages carried, not on the characters alone -- "/" and "." are
+    # in every one of these files for other reasons.
+    for stale in ("every `/` and `.` turned into", "`/`-and-`.`-to-`-`"):
+        if stale in prose:
+            bad.append("%s still describes the old `/`-and-`.` slug rule" % path)
+if cap.group(1) not in open("scripts/fleet/config.sh").read():
+    bad.append("scripts/fleet/config.sh does not name the %s-character slug cap "
+               "cost.sh applies" % cap.group(1))
+if bad:
+    sys.exit("the published slug rule has drifted from the one that runs:\n  "
+             + "\n  ".join(bad))
+PYEOF
+then
+  ok "the cost report's slug rule is the one config.sh and CONFIGURATION.md publish"
+else
+  fail "the slug rule in the docs is not the slug rule in cost.sh (above); config.sh ships to every host repo, and a wrong rule reports zeros rather than an error"
+fi
+
 # 4e. ...and CLAUDE.md does not restate it.
 #
 #    BELOW 4d's `fi`, not inside its success branch -- which is where this was

@@ -18,6 +18,9 @@
 #                            measurement, and nothing was measured.
 #   test_cost.sh attempts    an issue that ran in two worktrees (`fleet.sh retry`)
 #                            has both counted, not just the last one recorded.
+#   test_cost.sh long_path   a worktree path past the CLI slug cap is found by
+#                            its truncated prefix. Nothing exercised that branch,
+#                            and wrong it reports zeros rather than an error.
 #   test_cost.sh filtered    an issue filter that matches nothing says WHICH
 #                            issue it could not find and prints no table. "The
 #                            fleet has run nothing" is false with three other
@@ -195,6 +198,19 @@ if not report["transcript_dir"]:
   empty)
     make_fixture
     make_transcripts
+    # A root that is THERE but names nothing is a second line of explanation on
+    # top of the first, and the Acceptance of #48 asks for one. Asserted for the
+    # missing root as well as the empty one, because they take different
+    # branches and only the empty one was covered.
+    out="$(AUTOFLEET_TRANSCRIPT_DIR=/nope/not/here cost 999 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || fail "a missing transcript root exited $rc; cost must never fail a run"
+    [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] \
+      || fail "a missing transcript root printed more than one line:
+$out"
+    grep -q 'is not there' <<<"$out" \
+      || fail "the one line it printed was not about the missing root: $out"
+
     out="$(AUTOFLEET_TRANSCRIPT_DIR= cost 2>&1)"
     rc=$?
     [ "$rc" = 0 ] || fail "an empty transcript root exited $rc; cost must never fail a run"
@@ -221,13 +237,48 @@ $out"
 {"type":"assistant","message":{"id":"msg_r","usage":{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":11}}}
 JSONL
     out="$(cost 48 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
-    set -- $(printf '%s\n' "$out" | awk '$1 == 48')
+    row="$(printf '%s\n' "$out" | awk '$1 == 48')"
+    # Guarded like `sums` is: under `set -u` a missing row dies on `$2: unbound
+    # variable` three lines down, which is not this phase saying what went
+    # wrong. Found by the independent review.
+    [ -n "$row" ] || fail "no row for #48 in:
+$out"
+    set -- $row
     [ "$2" = 3 ]      || fail "sessions: expected 3 across both attempts, got $2"
     [ "$3" = 123 ]    || fail "input: expected 123 across both attempts, got $3"
     [ "$4" = 1,130 ]  || fail "output: expected 1,130 across both attempts, got $4"
     [ "$5" = 11,512 ] || fail "cache read: expected 11,512 across both attempts, got $5"
     [ "$6" = 590 ]    || fail "cache write: expected 590 across both attempts, got $6"
     echo "ok: an issue that ran twice is measured across both worktrees"
+    ;;
+
+  long_path)
+    make_fixture
+    # A worktree path past the 200-character cap. The CLI keeps the first 200
+    # characters of the slug and appends `-` plus a hash of the path, which is
+    # not reproducible here -- so cost.sh matches on the prefix, and NOTHING
+    # exercised that branch: get the constant, the separator or the premise
+    # wrong and the issue silently reports zeros, which is round one`s bug
+    # pointed at a rarer input. Found by the independent review.
+    deep="$WORK/wt"
+    while [ "${#deep}" -lt 210 ]; do deep="$deep/a-directory-with-a-long-name"; done
+    printf '%s\n' "$deep" >"$AUTOFLEET_DIR/ran/71"
+    slug="$(transcript_slug "$deep")"
+    [ "${#slug}" -gt 200 ] \
+      || fail "the fixture path is only ${#slug} characters, so this asserts nothing"
+    truncated="$AUTOFLEET_TRANSCRIPT_DIR/$(printf %s "$slug" | cut -c1-200)-1a2b3c"
+    mkdir -p "$truncated"
+    cat >"$truncated/session.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_long","usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":5,"cache_creation_input_tokens":6}}}
+JSONL
+    out="$(cost 71 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
+    row="$(printf '%s\n' "$out" | awk '$1 == 71')"
+    [ -n "$row" ] || fail "no row for #71 in:
+$out"
+    set -- $row
+    [ "$2" = 1 ] || fail "sessions: expected 1, got $2 -- the truncated directory was not found"
+    [ "$4" = 4 ] || fail "output: expected 4, got $4"
+    echo "ok: a worktree path past the slug cap is found by its truncated prefix"
     ;;
 
   filtered)
@@ -246,6 +297,11 @@ JSONL
     grep -q '#999' <<<"$out" || fail "the unmatched issue went unmentioned: $out"
     printf '%s\n' "$out" | awk '$1 == 48' | grep -q . \
       || fail "the issue that IS recorded was dropped along with it:
+$out"
+    # The row is what the rest of this phase is about, so say so rather than
+    # letting a later expansion die on it.
+    [ -n "$(printf '%s\n' "$out" | awk '$1 == 48')" ] \
+      || fail "no row for #48 in:
 $out"
     echo "ok: a filter that matches nothing says so precisely, and prints no table"
     ;;
@@ -295,5 +351,5 @@ if json.load(sys.stdin)["issues"][0]["output_tokens"] != 1122:
     ;;
 
   *)
-    echo "usage: test_cost.sh sums|json|empty|attempts|filtered|reaped|subcommand" >&2; exit 2 ;;
+    echo "usage: test_cost.sh sums|json|empty|attempts|long_path|filtered|reaped|subcommand" >&2; exit 2 ;;
 esac
