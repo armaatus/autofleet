@@ -547,9 +547,17 @@ PY
         echo
         echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
         echo
-        echo "That alone clears the hold. Say which nits you took, which you did not and"
-        echo "why, and open one follow-up issue for anything worth keeping -- name it in"
-        echo "the answer so the next reader can find it."
+        echo "Say which nits you took, which you did not and why, and open one follow-up"
+        echo "issue for anything worth keeping -- name it in the answer so the next reader"
+        echo "can find it."
+        echo
+        echo "Where you disagree with an inline finding, reply on the thread with the"
+        echo "reason rather than ignoring it, and RESOLVE EVERY THREAD -- the answer does"
+        echo "not do that for you. merge_gate blocks on an unresolved thread whatever the"
+        echo "counts say, so a nit left as an open thread holds the branch just as an"
+        echo "Important one would:"
+        echo "  ./scripts/fleet/review-status.sh $pr     # prints the open threads and their ids"
+        echo "  ./scripts/fleet/resolve-thread.sh <id>...  # and closes them"
         echo
         echo "Pushing a nit fix instead is what costs: the push moves the head, a moved"
         echo "head invalidates the review that asked for the fix, and the reviewer runs"

@@ -135,18 +135,27 @@ one line rather than padding it.
 ## From round three on, a nit is a follow-up issue
 
 The run block below tells you which round this is. On **round three or later**,
-if nothing you found is Important, leave no findings behind: name the nits in
-the body, say they belong in a follow-up issue rather than in this pull request,
-and report both counts as `0`.
+if nothing you found is Important, stop asking for a diff: name the nits in the
+**body**, say they belong in a follow-up issue rather than in this pull request,
+and report `review-important: 0` with the real `review-findings: N`.
+
+**The real N, not `0`.** `0` releases the gate outright and auto-merge is armed
+from the moment the PR opens, so a `0` would land the branch before the
+follow-up issue existed. The count holds it until the author answers, and the
+answer is where the issue gets named. Answering costs no commit, so the round is
+still not spent — that is the whole trade.
+
+Body, not inline threads, for the same reason: an unresolved thread holds the
+branch whatever the counts say, and `answer-review.sh` does not close threads.
+A nit left as a thread costs the author exactly what a fix would have.
 
 You are not being asked to lower your standard, and you are not being asked to
-stay quiet. The nits still go in the body, where the author reads them and files
-them. What stops is the *round* they would otherwise cost — because the author's
-fix moves the head, a moved head invalidates the review that asked for the fix,
-and the next round starts. Eight rounds on #79 converged on behaviour after two
-and spent six more on the same finding one level further down. Every one of the
-six was correct, and that is the problem this rule is about: correctness is not
-the constraint, and nothing else was bounding it.
+stay quiet. What stops is the *round* the nits would otherwise cost — because
+the author's fix moves the head, a moved head invalidates the review that asked
+for the fix, and the next round starts. Eight rounds on #79 converged on
+behaviour after two and spent six more on the same finding one level further
+down. Every one of the six was correct, and that is the problem this rule is
+about: correctness is not the constraint, and nothing else was bounding it.
 
 Rounds one and two are unchanged. Behaviour findings arrive early, and a floor
 that suppressed them would be trading the thing the review is for. If the run

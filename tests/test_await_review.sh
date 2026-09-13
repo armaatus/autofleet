@@ -11,6 +11,12 @@
 #                                     next round starts. Measured on #85/#86/#88:
 #                                     three PRs stuck in exactly that cycle with
 #                                     answer-review.sh never once run.
+#   test_await_review.sh threads      ...and the same review with an open inline
+#                                     thread still says to resolve it. The answer
+#                                     does not close threads and merge_gate blocks
+#                                     on an open one whatever the counts say, so
+#                                     "answering alone clears the hold" was false
+#                                     in the case the reviewer's brief PREFERS.
 #   test_await_review.sh important    the same review with an Important finding ->
 #                                     the old instruction, unchanged. The floor is
 #                                     for nits; a data-loss bug still costs a
@@ -53,6 +59,8 @@ make_fixture() {
   GH_TRAILERS="$WORK/trailers"; printf '%s' "${1:-}" >"$GH_TRAILERS"
   GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
   GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
+  # Non-empty means the stubbed PR carries one UNRESOLVED review thread.
+  GH_THREADS="$WORK/threads"; printf '%s' "${2:-}" >"$GH_THREADS"
 
   cat >"$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -67,7 +75,7 @@ case "$*" in
     exit 0 ;;
   *"pulls/42/comments"*) exit 0 ;;
   *graphql*)
-    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" <<'PY'
+    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" "$(cat "$GH_THREADS")" <<'PY'
 import json, sys
 oid, trailers = sys.argv[1], sys.argv[2]
 body = ("Nit: the comment above sync_tick() says what, not why.\n"
@@ -83,14 +91,19 @@ print(json.dumps({"data": {"repository": {"pullRequest": {
          "body": body, "comments": {"totalCount": 0}}]},
     "comments": {"nodes": []},
     "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
-                      "nodes": []}}}}}))
+                      "nodes": ([{"isResolved": False, "isOutdated": False,
+                                  "path": "src/app.c", "line": 12,
+                                  "comments": {"nodes": [{"author": {"login": "claude"},
+                                                          "body": "Nit: name."}]}}]
+                                if len(sys.argv) > 3 and sys.argv[3] else [])
+                      }}}}}))
 PY
     exit 0 ;;
 esac
 exit 0
 STUB
   chmod +x "$WORK/bin/gh"
-  export GH_CALLS GH_HEAD GH_TRAILERS
+  export GH_CALLS GH_HEAD GH_TRAILERS GH_THREADS
   # One poll, and a deadline it cannot reach: every phase here ends on the first
   # payload, and a phase that does not should say so as a hang, not as a pass.
   export AWAIT_REVIEW_POLL=1 AWAIT_REVIEW_DEADLINE=30
@@ -134,6 +147,24 @@ case "${1:-}" in
   grep -q 'sync_tick' <<<"$out" || fail "the nits were not printed; the floor is on the round, not on the findings"
   ok "...and the nits are still printed in full"
   ;;
+# ------------------------------------------------------------------- threads
+  threads)
+  # The nit-only branch used to say the answer "alone clears the hold". That is
+  # false the moment the reviewer left an inline finding: merge_gate blocks on
+  # an unresolved thread whatever the counts say, and `answer-review.sh` does
+  # not touch threads. The brief the reviewer runs under PREFERS inline comments
+  # for line-specific findings, so this is the common case, not the corner --
+  # and the agent would have been told it was done with the gate still red.
+  # Found by the independent review of this change.
+  make_fixture "$NIT_ONLY" open
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  grep -q 'resolve-thread.sh' <<<"$out" \
+    || { echo "$out" >&2; fail "the nit-only path does not mention resolving threads, and an open thread holds the branch"; }
+  grep -qi 'resolve every thread' <<<"$out" \
+    || { echo "$out" >&2; fail "it names the script without saying every thread has to close"; }
+  ok "the nit-only path still says to resolve the threads the answer does not touch"
+  ;;
 # ----------------------------------------------------------------- important
   important)
   make_fixture "$IMPORTANT"
@@ -157,5 +188,5 @@ case "${1:-}" in
   ok "no severity trailer means not said, not none"
   ;;
   *)
-  echo "usage: $0 {nitonly|important|untrailered}" >&2; exit 2 ;;
+  echo "usage: $0 {nitonly|threads|important|untrailered}" >&2; exit 2 ;;
 esac

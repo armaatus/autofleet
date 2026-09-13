@@ -289,7 +289,7 @@ flat() { tr -s '[:space:]' ' ' <"$1"; }
 if flat REVIEW.md | qgrep 'nothing else after it'; then
   fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
 elif grep -q 'independent-review: local' REVIEW.md; then
-  ok "REVIEW.md allows the second trailer local review mode depends on"
+  ok "REVIEW.md allows the trailers local review mode depends on"
 else
   fail "REVIEW.md does not mention the local-review marker, so a reviewer reading it in full does not know to write one"
 fi
@@ -336,6 +336,64 @@ if grep -q 'review-important:\\s\*(' .github/scripts/merge_gate.py \
   ok "merge_gate.py parses the severity trailer the briefs write"
 else
   fail "merge_gate.py no longer parses review-important, so the trailer every review writes reaches nothing"
+fi
+
+# 2f. THE TRAILER BLOCK, CHARACTER FOR CHARACTER, in the three places that
+#     dictate it and the one that documents it. Presence (2c) is not enough:
+#     the first draft of this change had REVIEW.md stating the two trailers in
+#     the OPPOSITE order from the block review.sh tells the reviewer to copy,
+#     and every grep for presence was green. Parsing is order-independent, so
+#     nothing would have broken -- but REVIEW.md is the file the brief calls
+#     the authority a reviewer reads "first and in full", and the last time it
+#     contradicted the dictated trailers a real review was discarded and the PR
+#     blocked on a review that already existed. That paragraph is still in
+#     REVIEW.md. Found by both independent reviews of this change.
+if python3 - <<'PYEOF'
+import re, sys
+
+def block(path):
+    """The dictated trailer block: the first two ADJACENT trailer lines.
+
+    Anchored on the literal `<!-- ... -->` lines, not on the names: every one of
+    these files also discusses the trailers in prose, in whatever order the
+    sentence wanted, and matching that reported drift where there was none.
+    Adjacency is what makes it the block a reviewer copies.
+    """
+    lines = [re.search(r"<!--\s*review-(important|findings):", ln)
+             for ln in open(path).read().split("\n")]
+    for i in range(len(lines) - 1):
+        if lines[i] and lines[i + 1]:
+            return [lines[i].group(1), lines[i + 1].group(1)]
+    return []
+
+want = ["important", "findings"]
+bad = []
+for path in ("REVIEW.md", ".claude/agents/reviewer.md", "scripts/fleet/review.sh",
+             ".github/workflows/claude-review.yml"):
+    got = block(path)
+    if got != want:
+        bad.append(f"{path} states the trailers as {got}, not {want}")
+if bad:
+    sys.exit("the trailer block has drifted:\n  " + "\n  ".join(bad))
+PYEOF
+then
+  ok "all four files state the two trailers in the same order"
+else
+  fail "the trailer block has drifted between the policy and the prompts (above)"
+fi
+
+# 2g. ...and the round number reaches the reviewer at all. 2e asserts the floor
+#     is WRITTEN in both files; nothing asserted the one line that makes it
+#     reachable. Delete `Review round:` from review.sh's prompt and every
+#     reviewer falls back to the documented "treat it as round one", the floor
+#     stops firing on every PR forever, and nothing goes red -- the same
+#     silent-in-the-cheap-direction failure 2c exists to prevent, one level
+#     down. Found by the independent review.
+if grep -q 'Review round: \$round' scripts/fleet/review.sh \
+   && grep -q 'review_round' scripts/fleet/review.sh; then
+  ok "review.sh tells the reviewer which round it is, so the floor can fire"
+else
+  fail "review.sh no longer passes the round number, so the late-round floor never fires and nothing else says so"
 fi
 
 # 2e. The floor itself, in both files a reviewer reads. Prose, so `flat`.

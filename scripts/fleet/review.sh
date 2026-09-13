@@ -102,16 +102,34 @@ ROUNDS_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.rounds}"
 # suppress nothing.
 review_round() {
   local n=0
-  [ -n "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER" 2>/dev/null
-  case "${n:-0}" in (*[!0-9]*|"") n=0 ;; esac
+  # `[ -f ]` first, and NOT `read ... 2>/dev/null`: bash opens the redirection
+  # before it applies `2>`, so the "No such file or directory" from a missing
+  # file goes to the REAL stderr and the suppression does nothing. Every poll,
+  # for every PR that has not been reviewed yet. Found by the independent
+  # review, which reproduced it. `fleet.sh`'s `.tries` read has the same shape
+  # and the same bug, older than this.
+  [ -n "$ROUNDS_MARKER" ] && [ -f "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER"
+  case "${n:-0}" in (*[!0-9]*) n=0 ;; esac
   printf '%s\n' "$(( n + 1 ))"
 }
 
-# Counted on ONE exit path: 0, a review this run actually submitted. Not on 8,
-# where the review being counted was somebody else's and has already been
-# counted, and not on 5 or 7, where nothing was submitted at all. Getting that
-# wrong in the generous direction retires a pull request the reviewer never
-# reviewed.
+# Counted on ONE exit path: 0, a review this run actually submitted. Not on 5 or
+# 7, where nothing was submitted at all, and not on 8, where a counting review
+# was already there before this run started.
+#
+# THIS UNDERCOUNTS, and knowingly. Three reviews it does not see: one submitted
+# by the GitHub workflow rather than by this script; one found on exit 8 that no
+# run of this script ever counted; and one a reviewer had already submitted when
+# the dispatcher killed it for a head move (the TERM trap exits 143 without
+# reaching here). Each leaves a real review on the PR that `.rounds` does not
+# know about, so a pull request can exceed AUTOFLEET_REVIEW_MAX_ROUNDS.
+#
+# Left that way because the alternative errs the other direction: counting a
+# review this fleet cannot attribute would retire a pull request nobody
+# reviewed, and a cap that fires early is worse than one that fires late -- late
+# still ends in a person, early ends in a person being asked about nothing. An
+# earlier comment here claimed exit 8's review "has already been counted", which
+# is only true of reviews this fleet submitted. Found by the independent review.
 record_round() {
   [ -n "$ROUNDS_MARKER" ] || return 0
   printf '%s\n' "$(review_round)" >"$ROUNDS_MARKER" 2>/dev/null || true

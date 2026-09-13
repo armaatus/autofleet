@@ -1494,8 +1494,7 @@ def selftest():
             says = (says,)
         blob = "\n".join(lines)
         wrong = [w for w in says
-                 if (w[1:] in blob) if w.startswith("!")]
-        wrong += [w for w in says if not w.startswith("!") and w not in blob]
+                 if (w[1:] in blob if w.startswith("!") else w not in blob)]
         if got != want:
             print(f"FAIL: {what} (expected {want}, got {got})", file=sys.stderr)
             failures += 1

@@ -1688,6 +1688,41 @@ for p in prs:
 ' | while IFS="$(printf '\t')" read -r pr head; do
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
+
+    # THE PR-LEVEL CAP, AND IT IS CHECKED FIRST -- above the `.done`
+    # short-circuit, which is the opposite of where the head-level cap belongs
+    # and for a reason worth stating. The run that reaches this cap is the one
+    # that just wrote BOTH `.done = head` and `.rounds = cap`. Checked below the
+    # short-circuit, every later poll takes that `continue` and the hold is
+    # never said: the message appears only after the next push, and the case it
+    # is FOR is the one where no next push comes -- an agent that stopped at its
+    # own three-round cap while reviews kept landing. That was #85 exactly.
+    # Found by the independent review, which called it unreachable in the steady
+    # state, and it was.
+    #
+    # Safe this early, unlike the tries cap below: `.rounds` is written only on
+    # review.sh exit 0, so at the cap that many reviews have DEFINITIVELY
+    # completed. There is no "the running one might still submit" ambiguity to
+    # get wrong, which is the whole reason the other cap has to wait for the
+    # lock.
+    #
+    # This is the backstop, not the mechanism. If the nit-only path in
+    # await-review.sh does its job a PR converges in two rounds and never
+    # arrives here; a PR that does arrive here has a real disagreement in it or
+    # an agent that died mid-loop, and both of those want a person.
+    local rounds_n=0
+    [ -f "$marker.rounds" ] && read -r rounds_n <"$marker.rounds"
+    case "${rounds_n:-0}" in (*[!0-9]*) rounds_n=0 ;; esac
+    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
+      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
+        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
+        "  Not starting more, on this head or any later one. The reviews are in" \
+        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
+        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
+        "  genuinely still converging."
+      continue
+    fi
+
     # ...and the record of a head already handled, which is not the same
     # question as "is a reviewer running". Without it, a head that HAS its
     # review had a reviewer started for it every poll -- each exiting 8 two API
@@ -1748,27 +1783,6 @@ for p in prs:
     # `.said` keeps the claim unrepeated and uncorrected even after the running
     # one succeeds. Below the lock check the message is true whenever it prints.
     # Found by the independent review.
-    # The PR-level cap, checked before the head-level one because it is the
-    # broader claim: at this point no further reviewer is started for this pull
-    # request on ANY head, so a message about what this head's reviewers did
-    # would be answering a narrower question than the one that stopped it.
-    #
-    # This is the backstop, not the mechanism. If the nit-only path in
-    # await-review.sh does its job a PR converges in two rounds and never
-    # arrives here; a PR that does arrive here has an actual disagreement in it,
-    # or an agent that died mid-loop, and both of those want a person.
-    local rounds_n=0
-    read -r rounds_n <"$marker.rounds" 2>/dev/null || true
-    case "${rounds_n:-0}" in (*[!0-9]*|"") rounds_n=0 ;; esac
-    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
-      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
-        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
-        "  Not starting more, on this head or any later one. The reviews are in" \
-        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
-        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
-        "  genuinely still converging."
-      continue
-    fi
     if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
       # Its OWN marker, per pull request: sharing the foundation one made the
       # two holds overwrite each other every poll.

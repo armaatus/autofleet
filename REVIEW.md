@@ -72,13 +72,22 @@ signal is buried in twenty preferences costs more attention than it saves.
 
 ## A late round with no Important finding files issues, not findings
 
-From **round three onward**, a review that finds nothing Important does not
-leave findings behind. Name the nits in the body, say plainly that they belong
-in a follow-up issue rather than in this pull request, and report
-`review-findings: 0` with `review-important: 0`.
+From **round three onward**, a review that finds nothing Important stops asking
+for a diff. Name the nits **in the body**, not as inline threads, say plainly
+that they belong in a follow-up issue rather than in this pull request, and
+report the real counts: `review-important: 0`, and `review-findings: N` with `N`
+the number of nits you actually named.
 
-The nits are not lost — they are in the body a person can read, and the author
-files them. What is lost is the round they would have cost.
+**Do not report `0` findings to end the round.** `0` releases the gate outright,
+and auto-merge is armed from the moment the pull request opens — the branch
+would land before the follow-up issue the paragraph exists to become was ever
+filed, which is the opposite of the trade this rule is making. The real count
+holds the branch until the author answers, and the answer is where the issue
+gets named. Answering costs no commit, so the round is still not spent.
+
+Body and not threads for the same reason: an unresolved thread holds the branch
+regardless of either count, and `answer-review.sh` does not close threads. A nit
+left as an open thread costs the author exactly what a fix would have.
 
 This exists because the loop has no other floor. A reviewer can always name one
 more assertion, an author can always add one, and a fix moves the head, and a
@@ -93,26 +102,24 @@ it as round one.
 
 ## Say how many findings you left
 
-Every review of a pull request ends its body with this line:
-
-```
-<!-- review-findings: N -->
-```
-
-Two more things may follow it, and only those two.
-
-The first says how many of those findings were Important:
+Every review of a pull request ends its body with these lines, **in this
+order** — the same block `scripts/fleet/review.sh` and `claude-review.yml`
+dictate verbatim, because a policy that disagrees with the prompt is a policy
+that gets a real review discarded:
 
 ```
 <!-- review-important: M -->
+<!-- review-findings: N -->
 ```
 
-The second, under `AUTOFLEET_REVIEW_MODE=local` only, names the commit the
+and, under `AUTOFLEET_REVIEW_MODE=local` only, one more naming the commit the
 review judged:
 
 ```
 <!-- independent-review: local <head-sha> -->
 ```
+
+Those three are the whole list. Nothing else follows them.
 
 That is what makes a review count at all in that mode. This file used to forbid
 any line following the count, which forbade that marker — so a reviewer obeying
@@ -121,8 +128,8 @@ discarded a review that had been written, read and submitted, and the pull
 request blocked on a review that already existed. Found by the independent
 review that hit it. See
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review); in the default
-`github` mode there is no local-review marker, and `review-important` is the
-last line.
+`github` mode there is no local-review marker, and `review-findings` is the last
+line.
 
 The list grew from one to two for the same reason it grew from zero to one, and
 the rule that survived both is the one worth keeping: **this file names every
