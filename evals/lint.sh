@@ -1533,6 +1533,19 @@ add_call = re.search(r"addLabels\(\{(?:[^}]|\n)*?\}\)((?:[^;]|\n)*?);", code)
 if not add_call:
     sys.exit("unblock.yml no longer has a readable addLabels call; this check "
              "cannot see whether it handles its own failure")
+# ...and the add is GATED on the removal. Ordering the writes and catching the
+# failure are both necessary and neither is sufficient: with `labels` a pre-run
+# snapshot, a recorded 403 on the removal still fell through to the add, and the
+# issue ended carrying BOTH labels -- the state ready_issues() starts. The
+# ordering check above and the catch check below each passed throughout. Found by
+# the independent review.
+if not re.search(r"if\s*\(\s*removed\s*&&\s*!labels\.includes\(add\)\s*\)", code):
+    sys.exit("unblock.yml adds a label without checking that the stale one came "
+             "off; a failed removal plus a successful add leaves the issue "
+             "carrying both `blocked` and `ready`, and fleet.sh starts it (#47)")
+if not re.search(r"removed\s*=\s*await\s+github\.rest\.issues\.removeLabel", code):
+    sys.exit("unblock.yml no longer records whether the removal succeeded; the "
+             "gate on the add cannot be meaningful without it")
 if "catch" not in add_call.group(1):
     sys.exit("unblock.yml's addLabels has no catch; a rate limit there throws "
              "mid-loop, abandons every issue after it, discards the writeFailures "
@@ -1554,8 +1567,10 @@ if not re.search(r"replace\(\s*/\\r", code):
              "edited in the GitHub web UI loses its `<!-- blockers -->` marker "
              "and the whole body is read as blockers again (#47)")
 
-# The workflow's own scoping, spelled here the way the JS spells it: the LAST
-# marker alone on a line, or the whole body when there is none.
+# The workflow's own scoping, spelled here the way the JS spells it: the FIRST
+# marker alone on a line, or the whole body when there is none. (This header said
+# LAST for one commit, in the file whose job is to notice that -- and three checks
+# below fail the build over the same word. Found by the independent review.)
 def wf_blocked_by(body):
     # The same fold and the same FIRST-marker walk the workflow does, asserted by
     # shape below. Re-typed here rather than lifted, because a JS arrow function
@@ -1723,6 +1738,19 @@ if not re.search(r"body with no marker is read whole", page):
     sys.exit("docs/WORKFLOW.md does not say that a body with no `<!-- blockers "
              "-->` marker is read whole; an agent reading it will believe prose "
              "in Design notes is inert on an issue where it is a blocker (#47)")
+# BOTH pages that state the rule, not one. CLAUDE.md is loaded into every session
+# in this repo and is the file #47's harm path names -- "CLAUDE.md tells agents to
+# edit issue bodies as they work" -- so an agent that reads only it, and believes
+# the marker is always in play, is the same reaped worktree by a shorter route.
+# The previous commit fixed docs/WORKFLOW.md and asserted it, and left this one.
+# Found by the independent review.
+for _page, _path in (("CLAUDE.md", "CLAUDE.md"),):
+    _text = open(_path).read()
+    if not re.search(r"body with no marker is read whole", _text):
+        sys.exit(f"{_page} states the blocker convention without the no-marker "
+                 f"fallback; it is loaded into every session, and an agent that "
+                 f"believes prose is inert writes a blocker into its own issue "
+                 f"and has its worktree reaped (#47)")
 PYEOF
   ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
 else

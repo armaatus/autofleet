@@ -184,7 +184,16 @@ def blockers_section(body):
     project vendoring this may never adopt it. Reading those as "no blockers"
     would mark a dependent issue `ready` and let the fleet start it on top of a
     foundation that has not landed -- the one collision the label exists to
-    prevent. Missing the marker costs a false `blocked`, which costs a wait.
+    prevent.
+
+    THE OTHER DIRECTION IS NOT FREE, and #47 Scope 3 says so by name: a false
+    `blocked` is not "a wait". `fleet.sh` reads `blocked` as "this worktree will
+    never produce a merged PR" -- it interrupts the agent and reclaims the slot a
+    poll later. So the trade is an interrupted agent and one of three slots
+    against starting work on a foundation that has not landed, and the second is
+    still worse because it is the one that produces a merge conflict nobody
+    asked for. Stated in full because this docstring is what a future reader
+    consults before deciding the fallback is still the right trade.
     """
     body = _normalised(body)
     first = None

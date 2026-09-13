@@ -331,17 +331,21 @@ this file tells you to edit issue bodies as you work:
   label rather than both. Neither is the fail-open state: `fleet.sh` starts
   nothing that does not carry `ready`, and the next run finishes the job.
 
-  What that ordering does **not** cover, said plainly because the reverse is easy
-  to assume: a run that *dies* between the two calls is safe; a run whose
-  *removal itself fails* is not. If `removeLabel('ready')` takes a rate limit on
-  an issue that should become `blocked`, that issue keeps `ready` and never gains
-  `blocked` — and `ready_issues()` selects on `ready` without consulting
-  `blocked`, so it is startable with an open blocker until a later run repairs
-  it. The failure is recorded, the rest of the backlog is still relabelled, and
-  the run then goes red — but a red check is not something `fleet.sh` reads. This
-  is no worse than the order it replaced, which left both labels and was
-  startable just the same. It is simply not closed, and closing it means teaching
-  `ready_issues()` to consult `blocked`.
+  The ordering alone was not enough, and it took two goes to say so accurately.
+  It covers a run that *dies* between the calls. A run whose *removal fails* fell
+  straight through to the add, because the label list is a pre-run snapshot — so
+  a rate-limited `removeLabel('ready')` was recorded and `addLabels('blocked')`
+  ran anyway, producing the both-labels state the reorder was supposed to rule
+  out. The add is now **gated on the removal succeeding**: either both writes
+  land or neither does, and the issue keeps the single label it had.
+
+  What that leaves, stated because it is the honest end of it: an issue whose
+  removal failed keeps its old label. One that should have become `blocked` still
+  carries `ready`, and `ready_issues()` will start it on an open blocker until a
+  later run repairs it. The failure is recorded, the rest of the backlog is still
+  relabelled, and the run goes red — but a red check is not something `fleet.sh`
+  reads. Closing that last gap means teaching `ready_issues()` to consult
+  `blocked`, which is its own change.
 - **Only a line below the marker counts — when the body has one.** `Blocked by
   #N` has to begin a line, below the **first** `<!-- blockers -->` marker;
   everything under the earliest one is read, so pasting a second marker lower
