@@ -397,8 +397,8 @@ else
 fi
 
 # 2e. The floor itself, in both files a reviewer reads. Prose, so `flat`.
-if flat REVIEW.md | grep -q 'round three' \
-   && flat .claude/agents/reviewer.md | grep -q 'round three'; then
+if flat REVIEW.md | qgrep 'round three' \
+   && flat .claude/agents/reviewer.md | qgrep 'round three'; then
   ok "both REVIEW.md and the brief carry the late-round floor"
 else
   fail "the late-round floor is gone from REVIEW.md or the brief, so a reviewer can spend rounds on nits again"
