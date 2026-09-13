@@ -26,7 +26,14 @@ fleet_stop_autostart_watcher() {
   local pid="${1:-}"
   [ -n "$pid" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  ps -o command= -p "$pid" 2>/dev/null | grep -q 'agent-autostart' || return 1
+  # `grep` without `-q`: every caller of this sources lib.sh under `pipefail`
+  # (fleet.sh, issue-command.sh), and `-q` exits on the first match, so `ps` can
+  # write into a closed pipe and the pipeline is 141 for a probe that MATCHED.
+  # `|| return 1` then reads that as "this pid is not the watcher", the watcher
+  # is never signalled, and `|| true` at the callsite hides it. CLAUDE.md carries
+  # the rule. Found by the independent review, which also pointed out that the
+  # sourced file is the one the detector could not see.
+  ps -o command= -p "$pid" 2>/dev/null | grep 'agent-autostart' >/dev/null || return 1
   kill "$pid" 2>/dev/null || true
   return 0
 }

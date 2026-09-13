@@ -1016,24 +1016,29 @@ done
 # makes it a rule rather than a war story. `qgrep` above is the shape that is
 # safe: `grep` without `-q` reads its whole input.
 #
-# Comments are excluded, because the one in fleet.sh QUOTES the bad form -- that
-# quotation is the record of where it was first measured.
-epipe=""
-for f in scripts/fleet/*.sh scripts/fleet/runner/*.sh evals/*.sh .github/scripts/*.sh; do
-  [ -f "$f" ] || continue
-  grep -q 'pipefail' "$f" || continue
-  grep -vE '^[[:space:]]*#' "$f" | grep '| *grep -q' >/dev/null && epipe="$epipe $(basename "$f")"
-done
-if [ -n "$epipe" ]; then
-  fail "these pipe an assertion into \`grep -q\` in a \`pipefail\` script, which reports a holding check as failed under load:$epipe"
+# EVERY payload script, not only the ones that set `pipefail` themselves.
+# lib.sh does not set it -- it is SOURCED, and every caller does (fleet.sh,
+# issue-command.sh) -- so the first version of this check skipped the one file
+# where the bug was still live, which is the shared-helper case it most needed
+# to see. Found by the independent review. Continuations are joined first,
+# because a `|` at the end of one line with the `grep -q` at the start of the
+# next is the same pipeline; comments are excluded, because fleet.sh's QUOTES
+# the bad form and that quotation is the record of where it was measured.
+if bad="$(python3 "$REPO_ROOT/evals/piped_quiet_grep.py")"; then
+  if [ -n "$bad" ]; then
+    fail "these pipe an assertion into \`grep -q\`, which reports a holding check as failed under load -- and a sourced file inherits its caller's pipefail: $bad"
+  else
+    ok "no assertion in the payload is piped into \`grep -q\`"
+  fi
 else
-  ok "no assertion in the payload is piped into \`grep -q\`"
+  fail "the \`grep -q\` scan could not run, so it is asserting nothing"
 fi
+
 # ...and the brief must still name them -- across BOTH of its stages.
 #
-# Since armaatus/autofleet#49 the brief arrives in two pieces out of the one file: the bare
-# form
-# prints the spec, steps 1-3 and a pointer, and `--after-pr` prints steps 4-6.
+# Since armaatus/autofleet#49 the brief arrives in two pieces out of the one
+# file: the bare form prints the spec, steps 1-3 and a pointer, and `--after-pr`
+# prints steps 4-6.
 # The risk the split carries is an instruction that lands in NEITHER stage,
 # which is a rule nobody enforces: armaatus/rommsync-nx#90's PR that nobody queued for
 # auto-merge, armaatus/rommsync-nx#88 and #89 sitting blocked on one unresolved thread.
@@ -1050,19 +1055,24 @@ fi
 # what keeps main's copy of this check readable, since its extraction is the
 # range from the `sed` line to `BRIEF` and two heredocs left it reading nothing.
 brief="$(sed -n "/^sed .*BRIEF/,/^BRIEF$/p" scripts/fleet/issue-command.sh)"
-# Drop the command that prints it and the terminator; what is left is the text
-# the agent receives, and the cut line divides it.
-body="$(sed -e '1,/| awk /d' -e '$d' <<<"$brief")"
+# The text begins at the `---` rule the brief opens with and ends at the
+# terminator; between them is exactly what the agent receives. Anchored on the
+# TEXT rather than on the shape of the command that prints it: keyed to `| awk `
+# this went blind the moment that command grew a second line, and counted awk's
+# own source as part of the brief. Found by the independent review, twice over
+# -- once as the nit about this file's line-oriented scanning, once as the
+# measurement being of something other than what it claims.
+body="$(sed -n '/^---$/,$p' <<<"$brief" | sed '$d')"
 stage1="$(sed -n "1,/^@@AFTER-PR@@$/p" <<<"$body" | sed '$d')"
 stage2="$(sed -n "/^@@AFTER-PR@@$/,\$p" <<<"$body" | sed '1d')"
 if [ -z "$stage1" ] || [ -z "$stage2" ]; then
   fail "one of issue-command.sh's two brief heredocs could not be read, so everything below asserts nothing"
 else
+  brief_fails_before=$fails
   # Stage 1: what is due before anything leaves the worktree -- including the
   # pointer, without which stage 2 is unreachable and half the brief is dead
-  # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md names them
-  # and the
-  # brief the fleet actually sends never did.
+  # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
+  # names them and the brief the fleet actually sends never did.
   for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
                 --after-pr researcher verifier "gh pr diff --stat"; do
     grep -qF -- "$named" <<<"$stage1" \
@@ -1080,7 +1090,12 @@ else
     grep -qF -- "$named" <<<"$stage1" \
       && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
   done
-  ok "stage 1 names what is due before the push, and nothing that is not"
+  # Guarded on the counter: `ok` after a loop that may have called `fail` prints
+  # a green line for an assertion that just failed, two lines above it. Found by
+  # the independent review.
+  [ "$fails" = "$brief_fails_before" ] \
+    && ok "stage 1 names what is due before the push, and nothing that is not"
+  brief_fails_before=$fails
 
   # Stage 2: every script of the loop, the closing line merge-gate demands, and
   # the three paths no agent can merge itself.
@@ -1090,27 +1105,44 @@ else
     grep -qF -- "$named" <<<"$stage2" \
       || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
   done
-  ok "stage 2 still names the whole review loop and the paths a person has to merge"
+  [ "$fails" = "$brief_fails_before" ] \
+    && ok "stage 2 still names the whole review loop and the paths a person has to merge"
 
   # The budget, in the vendored check and not only in autofleet's own suite: a
   # host project gets the brief and the reason it was split, so it should get
-  # the thing that stops it growing back. armaatus/autofleet#56 folds this row into a
-  # ceilings
-  # table and will want it measured from what the agent RECEIVES; until then the
+  # the thing that stops it growing back. armaatus/autofleet#56 folds this row
+  # into a ceilings table and will want it measured from what the agent
+  # RECEIVES; until then the
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
   BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
-  # The HOST's test command, read the same way issue-command.sh reads it, and
-  # substituted with `${//}` rather than `sed` because a test command may hold
-  # any character a `s###` delimiter could be. A hardcoded default measured a
-  # text no host repo ships: stage 1 has five words of margin, so a nine-word
-  # test command puts a host over the ceiling while this check still printed
-  # 395. Found by the independent review. tests/test_brief.sh PINS the value
-  # instead, because that phase has to be deterministic -- the test wants a
-  # fixture and the vendored guard wants the real thing.
+  # The HOST's test command, read where the SCRIPT gets it. issue-command.sh
+  # sources lib.sh -> config.sh, which reads `.autofleet/config`; this file
+  # sources neither, so reading the environment alone measured the four-word
+  # default on every repo that sets the variable in its config -- which is every
+  # repo that has one. Round 1 of the review reported this fixed and it was not:
+  # the proof exported the value on the command line, which is not how a host
+  # runs the lint. Found again, by the same review.
+  #
+  # THE LAST ASSIGNMENT, the way merge_gate.py's config reader takes it, so this
+  # cannot diverge from the shell in the permissive direction. Substituted with
+  # `${//}` rather than `sed`, because a test command may hold any character an
+  # `s###` delimiter could be.
+  #
+  # tests/test_brief.sh PINS the value instead: that phase has to be
+  # deterministic, so the test wants a fixture and the vendored guard wants the
+  # real thing.
+  brief_test_command="${AUTOFLEET_TEST_COMMAND:-}"
+  if [ -z "$brief_test_command" ] && [ -f .autofleet/config ]; then
+    brief_test_command="$(sed -n 's/^[[:space:]]*AUTOFLEET_TEST_COMMAND=//p' .autofleet/config | tail -1)"
+    # One layer of quotes, the way the shell strips them on source.
+    brief_test_command="${brief_test_command%\"}"; brief_test_command="${brief_test_command#\"}"
+    brief_test_command="${brief_test_command%\'}"; brief_test_command="${brief_test_command#\'}"
+  fi
+  : "${brief_test_command:=the full test suite}"
   rendered="${stage1//__ISSUE__/49}"
-  rendered="${rendered//__TEST_COMMAND__/${AUTOFLEET_TEST_COMMAND:-the full test suite}}"
+  rendered="${rendered//__TEST_COMMAND__/\`$brief_test_command\`}"
   words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
   if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
     ok "the opening brief is $words words, spec excluded"
@@ -1400,7 +1432,7 @@ REVIEWCMD
   # the day that job is renamed, and pick up the `mention` job's own
   # cancel-in-progress -- a failure about the wrong job.
   if sed -n '/^  review:/,/^  [a-z][a-z_-]*:$/p' "$review_wf" \
-       | qgrepE "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
+       | qgrep -E "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
     fail "the review job cancels in progress; a killed review leaves the head with no verdict and nothing that says so"
   fi
   ok "a review in flight is never cancelled by the next event"

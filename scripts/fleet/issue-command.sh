@@ -21,9 +21,8 @@
 # arming auto-merge, the review rounds, the BLOCKED/DIRTY/BEHIND triage. All of
 # it arrived before the agent had read a file, and then rode in the prompt prefix
 # of every request for the rest of the session, to be acted on an hour later if
-# at all (armaatus/autofleet#49). Stage 2 is fetched at the moment it applies, which is
-# also when
-# it is most likely to be followed.
+# at all (armaatus/autofleet#49). Stage 2 is fetched at the moment it applies,
+# which is also when it is most likely to be followed.
 #
 # The split is WITHIN this file, and within ONE heredoc: the brief is a single
 # text with a `@@AFTER-PR@@` line in it, and the stage is chosen by which side of
@@ -36,8 +35,9 @@
 #
 # `evals/lint.sh` here asserts each stage separately -- an instruction that fell
 # out of both is a rule nobody enforces, and the failures the long tail was
-# written for (armaatus/rommsync-nx#90's unqueued auto-merge, armaatus/rommsync-nx#88/#89's unresolved
-# thread) come straight back.
+# written for (armaatus/rommsync-nx#90's unqueued auto-merge, and #88 and #89
+# of the same tracker sitting blocked on one unresolved thread) come straight
+# back.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -135,8 +135,27 @@ fi
 # `if`, not `$after_pr && stage=2`: `set -e` is on, and that AND-list returns
 # non-zero on the bare form, which is the common one.
 if $after_pr; then stage=2; else stage=1; fi
-sed -e "s/__ISSUE__/$num/" -e "s#__TEST_COMMAND__#\`$test_command\`#" <<'BRIEF' \
-  | awk -v want="$stage" 'BEGIN{half=1} $0=="@@AFTER-PR@@"{half=2;next} half==want'
+# The test command does NOT go through `sed`: it comes from `.autofleet/config`
+# and may hold any character a `s###` delimiter could be, which would end the
+# expression early and print a broken brief -- with `make check # a/b&c` in the
+# config, `sed` refused outright ("bad flag in substitute command"). That is the
+# same hazard evals/lint.sh cites as its reason for using `${//}`. `awk`, and
+# through ENVIRON rather than `-v`, because `-v` interprets escape sequences in
+# what it assigns. `__ISSUE__` stays in the `sed`: it is digits, and that line is
+# also what main's copy of the lint matches on. Found by the independent review.
+#
+# The program is a VARIABLE so that the line feeding it the heredoc stays one
+# line. Inline and wrapped, awk's own source sat between the `sed` and the text,
+# where the lint's extraction counted it as part of the brief.
+brief_filter='
+  BEGIN { half = 1; cmd = "`" ENVIRON["tc"] "`" }
+  $0 == "@@AFTER-PR@@" { half = 2; next }
+  half != want { next }
+  { i = index($0, "__TEST_COMMAND__")
+    if (i) $0 = substr($0, 1, i - 1) cmd substr($0, i + length("__TEST_COMMAND__"))
+    print }
+'
+sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk -v want="$stage" "$brief_filter"
 
 ---
 

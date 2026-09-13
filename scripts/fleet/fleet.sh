@@ -1145,7 +1145,7 @@ reviewer_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -Eq '(^|[[:space:]/])review\.sh([[:space:]]|$)'
+  printf '%s\n' "$line" | grep -E '(^|[[:space:]/])review\.sh([[:space:]]|$)' >/dev/null
 }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
@@ -2601,7 +2601,7 @@ dispatcher_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -Eq 'fleet\.sh[[:space:]]+run([[:space:]]|$)'
+  printf '%s\n' "$line" | grep -E 'fleet\.sh[[:space:]]+run([[:space:]]|$)' >/dev/null
 }
 
 # How to make a change live, said wherever the change is not. The cap is here
