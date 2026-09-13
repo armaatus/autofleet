@@ -1149,10 +1149,10 @@ fi
 echo "== the rule of one home"
 # The loop was written three times: CLAUDE.md, the brief, and docs/WORKFLOW.md,
 # which is the longest of the three and which the brief's first sentence sent
-# every agent to read. CLAUDE.md plus the brief plus WORKFLOW.md was roughly
-# 10,000 words -- about 13k tokens -- before the first edit, and then again in
-# the prompt prefix of every request for the rest of the session
-# (armaatus/autofleet#54).
+# every agent to read. CLAUDE.md plus the brief plus REVIEW.md plus WORKFLOW.md
+# measured 13,425 words before the first edit -- and then rode in the prompt
+# prefix of every request for the rest of the session (armaatus/autofleet#54).
+# WORKFLOW.md alone was 10,036 of them.
 #
 # Two assertions, and they are different shapes:
 #
@@ -1328,6 +1328,13 @@ PYEOF
   else
     fail "the loop is written more than once, or costs more than it may (above)"
   fi
+else
+  # Hard rule 3. The extraction above already `fail`s when it comes back empty,
+  # so the run is red either way -- but a block that quietly asserts nothing
+  # prints no line saying so, and the next reader of a red log sees six checks
+  # where there were seven. The adjacent block at the top of this section is the
+  # shape being copied. Found by the local /mattpocock-skills:code-review pass.
+  fail "the brief's two stages could not be read, so the rule of one home and the reading ceiling asserted nothing"
 fi
 
 # ...and docs/WORKFLOW.md's agent-instruction sections are POINTERS.
@@ -1351,13 +1358,19 @@ if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
              + ", ".join(found)
              + ". The brief is where those live; this page explains why they exist")
-# ...and it says whose page it is, before the first heading. An agent that is
-# told what a document is for does not read it per issue.
-opening = page.split("\n## ", 1)[0]
+# ...and it says whose page it is in its OPENING PARAGRAPH, which is the
+# acceptance of armaatus/autofleet#54 word for word. Anywhere above the first
+# `##` was the first spelling and it is too loose: an audience stated in the
+# fourth paragraph is one an agent has already paid three paragraphs to reach.
+# The title is dropped first, then everything up to the first blank line.
+# Found by the local /mattpocock-skills:code-review pass.
+body = page.split("\n", 1)[1] if page.startswith("#") else page
+opening = body.strip().split("\n\n", 1)[0]
 for needle in ("maintainer", "issue-command.sh"):
     if needle not in opening:
-        sys.exit("docs/WORKFLOW.md's opening does not say who reads it and where "
-                 f"the agent's instructions are instead (missing: {needle})")
+        sys.exit("docs/WORKFLOW.md's OPENING PARAGRAPH does not say who reads it "
+                 "and where the agent's instructions are instead (missing: "
+                 f"{needle}). The paragraph read: {opening[:120]}...")
 PYEOF
   ok "docs/WORKFLOW.md names its audience and points at the brief rather than copying it"
 else

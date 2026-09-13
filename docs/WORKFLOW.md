@@ -1,21 +1,18 @@
 # How work happens here
 
 This project is built by agents working in parallel, one per Orca worktree, with
-one human deciding what the rules are. This file is that loop end to end: what
-each stage produces, what starts the next, where a person is required, and how to
-stop the whole thing.
-
-**Whose page this is.** The maintainer's, read once — not an agent's, and not
-per issue. An agent's instructions are the brief
+one human deciding what the rules are. **This page is the maintainer's**, read
+once and not per issue: it is that loop end to end — what each stage produces,
+what starts the next, where a person is required, how to stop the whole thing,
+and why each rule is the shape it is. An agent's own instructions are the brief
 ([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`,
-then `--after-pr <n>`), and [CLAUDE.md](../CLAUDE.md) is the working agreement
+then `--after-pr <n>`), with [CLAUDE.md](../CLAUDE.md) the working agreement
 above it; between them they are the whole of what a fleet agent is told to read
-before its first edit. This file is the explanation *behind* those rules — why
-each one exists and what it cost to learn — plus the conventions an agent looks
-up when it needs one, the `<!-- blockers -->` marker in [Stage 2](#stage-2--spec)
-chief among them.
+before its first edit.
 
-So it does not restate a step of the loop as something to run. It used to: the
+An agent comes here for the conventions behind a rule — the `<!-- blockers -->`
+marker in [Stage 2](#stage-2--spec) chief among them — and not for what to run.
+It used to be told otherwise: the
 brief opened by sending the agent here, and the agent that did as it was told
 read 13,425 words — CLAUDE.md, the brief, and this page's longer retelling of
 the brief — before its first edit, then carried them in the prompt prefix of
