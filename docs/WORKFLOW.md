@@ -372,9 +372,13 @@ this file tells you to edit issue bodies as you work:
   a blocker as surely as a bare one. And **neither reader knows what a fenced code
   block is** — a `<!-- blockers -->` line inside one is a marker like any other,
   and being first it wins, so everything below it (ordinary prose included) is
-  read as blocker space. If you are quoting the convention in an issue body,
-  indent the example or break the marker across the line; a pasted example is
-  the body most likely to trip this.
+  read as blocker space. A pasted example is the body most likely to trip this,
+  and the two obvious dodges do not work: **indenting** it does not help (the
+  pattern allows leading whitespace) and **splitting it across two lines** does
+  not either (the pattern allows a newline inside the comment). What works is
+  leaving anything else on the line — write it inline in backticks the way this
+  page's prose does, or put a note after it. A line that contains only the marker
+  is a marker, however it is indented or wrapped.
 
 One rule the labels cannot express: **a foundation issue lands alone.** An issue
 that defines an interface later issues include (M0-2's `HttpClient` is the

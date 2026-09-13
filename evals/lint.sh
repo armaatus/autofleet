@@ -1738,28 +1738,20 @@ if not re.search(r"body with no marker is read whole", page):
     sys.exit("docs/WORKFLOW.md does not say that a body with no `<!-- blockers "
              "-->` marker is read whole; an agent reading it will believe prose "
              "in Design notes is inert on an issue where it is a blocker (#47)")
-# BOTH pages that state the rule, not one. CLAUDE.md is loaded into every session
-# and is the file #47's harm path names -- "CLAUDE.md tells agents to edit issue
-# bodies as they work" -- so an agent that reads only it, and believes the marker
-# is always in play, is the same reaped worktree by a shorter route.
+# ...and NOT a matching demand on CLAUDE.md, deliberately.
 #
-# CONDITIONAL, because `evals/lint.sh` is vendored and `CLAUDE.md` is NOT (it is
-# absent from install.sh's PAYLOAD -- a host project writes its own). Demanding a
-# literal English sentence in a file this does not ship failed the lint in every
-# host repo on install, which is hard rule 1 exactly: a change that only works
-# here is a bug. So the rule is conditional on the page CLAIMING the convention:
-# a CLAUDE.md that never mentions the marker is not this check's business, and one
-# that does has to say what happens without it. Found by the independent review,
-# in the commit that added the unconditional form.
-_claude = "CLAUDE.md"
-if os.path.exists(_claude):
-    _text = open(_claude).read()
-    _states_rule = re.search(r"<!-- blockers -->", _text)
-    if _states_rule and not re.search(r"body with no marker is read whole", _text):
-        sys.exit("CLAUDE.md states the blocker convention without the no-marker "
-                 "fallback; it is loaded into every session, and an agent that "
-                 "believes prose is inert writes a blocker into its own issue and "
-                 "has its worktree reaped (#47)")
+# CLAUDE.md is absent from install.sh's PAYLOAD -- a host project writes its own
+# -- and this file IS vendored. An assertion here requiring a literal English
+# sentence there fails the lint in every host repo, which is hard rule 1 exactly.
+# The first version of this check was unconditional and did that; the second made
+# it conditional on the page mentioning the marker, which is better and still
+# wrong, because it demands OUR phrasing of a page whose author may reasonably
+# word it differently.
+#
+# So the vendored page carries the assertion and this repo's own CLAUDE.md does
+# not. What keeps that honest is that docs/WORKFLOW.md is where the convention is
+# specified and CLAUDE.md points at it. Raised twice by the independent review,
+# which is why it is written down rather than simply deleted.
 PYEOF
   ok "docs/WORKFLOW.md names the triggers unblock.yml actually fires on"
 else
