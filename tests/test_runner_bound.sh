@@ -1100,7 +1100,24 @@ EOF
   [ "$rc" = 2 ] || fail "a mistyped flag was accepted (rc=$rc): $(cat "$WORK/out")"
   grep -q -- "--verbsoe" "$WORK/out" \
     || fail "the refusal did not name the argument it refused: $(cat "$WORK/out")"
+  # ...and says what the arguments ARE. Both refusals share one `refuse()` in
+  # the runner, so a single edit that drops the usage clause takes both of them
+  # with it, and rc=2 plus the offending token stays green through that. Found
+  # by /code-review, which mutated exactly that and watched this phase pass.
+  grep -q "usage: " "$WORK/out" \
+    || fail "the refusal did not say what the arguments are: $(cat "$WORK/out")"
   ok "a mistyped flag is refused rather than read as a quiet run"
+
+  # ...on STDERR, which run_copy cannot see because it folds the two streams.
+  # A refusal on stdout is a refusal that a caller piping the run into a log
+  # reads as output of the suite -- and `refuse()` is one line, so the `>&2` is
+  # one deletion away from being gone for both of them.
+  env -u AUTOFLEET_TEST_VERBOSE -u AUTOFLEET_TEST_NO_SKIP \
+    "$WORK/tests/run.sh" --verbsoe >"$WORK/out" 2>"$WORK/err"
+  [ "$?" = 2 ] || fail "the split-stream refusal did not exit 2"
+  [ -s "$WORK/err" ] || fail "the refusal said nothing on stderr"
+  [ -s "$WORK/out" ] && fail "the refusal went to stdout: $(cat "$WORK/out")"
+  ok "...on stderr, where a refusal belongs"
 
   # ...and so is a third name. The runner has only ever had two positions, and
   # silently ignoring the rest is how `./tests/run.sh fleet card_says --verbose`

@@ -59,7 +59,7 @@ suite_command() {
 # an implementation plus three review rounds. One row per phase and one per
 # suite carried exactly what the summary line carries, the brief makes the suite
 # run at least three times per issue, and the bill grew with every phase added
-# to SUITES above -- so the useless half landed four or five times over and got
+# to SUITES above -- so the useless part landed four or five times over and got
 # bigger each time (#52). A dot per phase is no better: a line of dots is still
 # a line, saying the same thing again.
 #
@@ -93,8 +93,10 @@ VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
 # not a `case` on $1. The way this change breaks CI is a typo -- `--verbsoe` in
 # the workflow, read as a suite name, nothing matched, and a quiet exit nobody
 # reads twice. Exit 2 is what a mistyped suite name has always got.
-# Both refusals say the same sentence, so it is written once. Found by the
-# independent review.
+# Both refusals end in the same usage clause, so it is spelled once. Found by
+# the independent review. The `quiet` phase asserts the clause and the stream,
+# because one function is now the single point where losing either would go
+# unnoticed.
 refuse() { echo "$1; usage: $0 [--verbose] [suite [phase]]" >&2; exit 2; }
 want_suite=""; want_phase=""; positional=0
 for arg in "$@"; do
