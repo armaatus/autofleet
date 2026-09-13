@@ -84,6 +84,20 @@ MIN_ANSWER_BODY = 20
 REVIEW_FINDINGS_RE = re.compile(r"<!--\s*review-findings:\s*(\d+)\s*-->", re.I)
 ANSWER_RE = re.compile(r"<!--\s*review-answered\s+([0-9a-f]{6,40})\s*-->", re.I)
 
+# How many of those findings were Important. The count above cannot answer it:
+# REVIEW.md defines `review-findings: N` as Important PLUS Nit summed, so five
+# nits and one data-loss bug arrive here as the same integer, and every reader
+# downstream -- this gate, `await-review.sh`, the agent reading either -- has to
+# treat them the same. It did. Measured on #85/#86/#88: every nit was answered
+# with a commit, the commit moved the head, the head move invalidated the review
+# that asked for it, and the dispatcher started another. #86 burned four reviews
+# without one ever judging its current head.
+#
+# ABSENT IS NOT ZERO. A review written by an older brief has no trailer, and
+# `None` means "did not say", which every caller here reads as today's
+# behaviour: held until answered. Nothing that merges today stops merging.
+REVIEW_IMPORTANT_RE = re.compile(r"<!--\s*review-important:\s*(\d+)\s*-->", re.I)
+
 # What `scripts/fleet/review.sh` writes at the end of a review it submitted, and
 # the only thing that separates it from the PR author's own `gh pr review`.
 #
@@ -301,6 +315,28 @@ def declared_findings(review):
     # real count of 3, which fails OPEN: straight back into the race this
     # condition exists to close. Found in review of this PR.
     matches = REVIEW_FINDINGS_RE.findall(review.get("body") or "")
+    return int(matches[-1]) if matches else None
+
+
+def declared_important(review):
+    """How many of the findings the review called Important, or None.
+
+    Read the LAST match for the same reason `declared_findings` does: a review
+    of THIS repository quotes trailers out of the fixtures below, and reading
+    the first one would let a quoted `0` stand in for a real count.
+
+    None is not zero, and the difference is the whole safety of this trailer. A
+    review written before the trailer existed says nothing, and a caller that
+    read that as "no Important findings" would start clearing holds on reviews
+    that never claimed to be clean. Callers here ask `== 0`, never `!= 0`, so
+    None falls through to the behaviour that predates this.
+
+    It is not cross-checked against `declared_findings`. `M > N` is a reviewer
+    that miscounted, and the honest thing to do with a miscount is nothing:
+    every use below is a nit-only SHORTCUT, and `M > 0` -- coherent or not --
+    declines the shortcut.
+    """
+    matches = REVIEW_IMPORTANT_RE.findall(review.get("body") or "")
     return int(matches[-1]) if matches else None
 
 
@@ -534,8 +570,18 @@ def evaluate(head_sha, pull_request, changed_files):
                 continue
             if answered(pull_request, head_sha, review):
                 continue
+            # A nit-only review gets a different sentence, not a different
+            # decision. The hold is the same one; what changes is that the
+            # remedy stops reading as "go fix these". Every agent that has hit
+            # this message answered it with a commit, and a commit moves the
+            # head, and a head move invalidates the review that asked for it --
+            # so the fix bought a fresh full-diff review, which found one more
+            # nit. Answering costs no commit and clears this line, and until
+            # now nothing said so.
+            important = declared_important(review)
             problems.append(
                 (f"the review from {who} reports {found} finding(s)"
+                 + (", none of them Important" if important == 0 else "")
                  if found is not None else
                  f"the review from {who} does not say what it found -- no "
                  "`<!-- review-findings: N -->` trailer, so it is not read as "
@@ -545,6 +591,10 @@ def evaluate(head_sha, pull_request, changed_files):
                 "this the branch merges while the fixes are still being "
                 "written. Address the findings, or say why you will not, and "
                 "then:  ./scripts/fleet/answer-review.sh \"<what you did>\""
+                + ("  --  and that alone clears this: the answer is a comment, "
+                   "not a commit. Pushing a nit fix instead moves the head, "
+                   "which invalidates this review and buys another round."
+                   if important == 0 else "")
             )
 
     if not thread_list_is_complete(pull_request):
@@ -1295,6 +1345,114 @@ SELFTEST = [
         True,
         "local",
     ),
+    (
+        # THE FLOOR UNDER THE REVIEW LOOP, and the half of it that is NOT a
+        # change in behaviour. `review-important: 0` does not discharge
+        # anything on its own -- the author still has to answer. What the
+        # trailer buys is the wording of the refusal, which is the only part of
+        # this file an agent ever reads. Asserted because the tempting version
+        # of this feature -- "nits merge themselves" -- is one `continue` away
+        # from here, and it would put a reviewer's severity call in charge of
+        # whether anybody looks at the answer at all.
+        "a nit-only review still holds the PR until it is answered",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 1 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("none of them Important", "the answer is a comment, not a commit"),
+    ),
+    (
+        # ...and clears on the answer ALONE, with no push. This is the path
+        # #85, #86 and #88 all had open and none of them took:
+        # `answer-review.sh` had never been run on any of them, so every nit
+        # was answered with a commit, and every commit invalidated the review
+        # that asked for it. Nothing in the machinery forbade this; nothing
+        # said it was available either.
+        "...and a comment discharges it -- the head does not move",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 1 -->"},
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "armaatus"},
+                 "createdAt": "2026-09-06T02:06:00Z",
+                 "body": "<!-- review-answered abc123 -->\n"
+                         "Both are nits; filed as #99 rather than spent on a head move."},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+    ),
+    (
+        # ABSENT IS NOT ZERO. Every review submitted before this trailer
+        # existed has no `review-important` line, and the failure mode to rule
+        # out is the one that fails OPEN: a missing trailer read as "nothing
+        # Important", quietly relaxing a PR nobody re-reviewed. `None` is not
+        # `0`, the callers ask `== 0`, and this row is what says so.
+        "a review with no review-important trailer behaves exactly as before",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-findings: 1 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        # The old wording, unchanged, and none of the new.
+        ("reports 1 finding(s), and this PR's author has not said",
+         "!none of them Important", "!not a commit"),
+    ),
+    (
+        # A miscounted trailer declines the shortcut rather than being
+        # arithmetic-checked. `declared_important` deliberately does not
+        # cross-check M against N: the only thing M buys is a nit-only wording,
+        # and any M above zero -- coherent with N or not -- is not nit-only.
+        "an Important finding is not softened by the new trailer",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the retry has no backoff and will spin.\n"
+                         "<!-- review-important: 3 -->\n"
+                         "<!-- review-findings: 1 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("!none of them Important", "!not a commit"),
+    ),
 ]
 
 
@@ -1311,14 +1469,39 @@ def selftest():
         was = os.environ.get("AUTOFLEET_REVIEW_MODE")
         os.environ["AUTOFLEET_REVIEW_MODE"] = row[5] if len(row) > 5 else "github"
         try:
-            got, _ = evaluate(head, pr, files)
+            got, lines = evaluate(head, pr, files)
         finally:
             if was is None:
                 del os.environ["AUTOFLEET_REVIEW_MODE"]
             else:
                 os.environ["AUTOFLEET_REVIEW_MODE"] = was
+        # An optional 7th field: a substring the refusal has to contain.
+        #
+        # Most rows here assert only the verdict, and for most rules that is the
+        # whole of the behaviour. It is not the whole of THIS one: the nit-only
+        # branch deliberately does not change what the gate decides, only what it
+        # says -- and what it says is the only part of this file an agent reads.
+        # A row asserting `False` on a nit-only review passes just as well
+        # against the code that predates the branch, which makes it no test at
+        # all. Found while writing it.
+        # A string, or a tuple of them -- and a string prefixed `!` must NOT
+        # appear. The negative is not decoration: what distinguishes the
+        # Important branch from the nit-only one is the ABSENCE of the shortcut
+        # wording, and a check that can only assert presence cannot see a
+        # refusal that offers a nit remedy for a data-loss bug.
+        says = row[6] if len(row) > 6 else ()
+        if isinstance(says, str):
+            says = (says,)
+        blob = "\n".join(lines)
+        wrong = [w for w in says
+                 if (w[1:] in blob) if w.startswith("!")]
+        wrong += [w for w in says if not w.startswith("!") and w not in blob]
         if got != want:
             print(f"FAIL: {what} (expected {want}, got {got})", file=sys.stderr)
+            failures += 1
+        elif wrong:
+            print(f"FAIL: {what} (wrong wording: {wrong})", file=sys.stderr)
+            print("\n".join("      " + line for line in lines), file=sys.stderr)
             failures += 1
         else:
             print(f"  ok: {what}")
