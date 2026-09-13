@@ -119,19 +119,16 @@ STOP_FILE="$FLEET_STOP"
 DRAIN_FILE="$FLEET_DRAIN"
 OWNED_DIR="$FLEET_OWNED"
 STARTED_DIR="$STATE_DIR/started"
-# What the fleet HAS run, as opposed to what it is running: `issue -> worktree
-# path`, written by `own()` and deliberately never cleared by `disown_issue`.
+# What the fleet HAS run, as opposed to what it is running. From lib.sh, because
+# cost.sh reads the same path and two spellings of it is one chance for the
+# reader to look where the writer never wrote.
 #
-# `cost.sh` is the only reader, and without this it could report only the
-# worktrees still open -- so the report emptied itself exactly when a run
-# finished, which is when somebody asks what it cost. The same exception
-# `gaveup-` gets, for the same reason: a record of what happened is not state
-# about what is happening, and a restart is not a decision about an issue.
-#
-# It grows by one short file per issue the fleet ever starts, which is bounded by
-# the backlog rather than by the clock -- unlike the two stores #72 capped, which
-# grew per review and per log line. Nothing evicts it on purpose.
-RAN_DIR="$STATE_DIR/ran"
+# It gets the same exception `gaveup-` gets, and for the same reason: a record of
+# what happened is not state about what is happening, and a restart is not a
+# decision about an issue. It grows by one short file per issue the fleet ever
+# starts -- bounded by the backlog rather than by the clock, unlike the two
+# stores #72 capped, which grew per review and per log line. Nothing evicts it.
+RAN_DIR="$FLEET_RAN"
 # The `Closes #N` and `Blocked by #N` patterns, shared with merge_gate.py so the
 # dispatcher, the gate and GitHub cannot read the same body three ways. It sits
 # under .github/scripts/ because merge-gate.yml sparse-checks out that directory
@@ -320,7 +317,13 @@ interrupt_agent_in() {
 own() {
   printf '%s\n' "$2" >"$OWNED_DIR/$1"; date +%s >"$STARTED_DIR/$1"
   # ...and the copy that OUTLIVES the worktree, for `cost.sh`. See RAN_DIR.
-  printf '%s\n' "$2" >"$RAN_DIR/$1"
+  #
+  # APPENDED, not replaced, and only if new. `fleet.sh retry 44` opens a SECOND
+  # worktree for the same issue at a different path, and truncating here threw
+  # the first attempt away -- which is "did the abandoned attempt cost more than
+  # the one that landed", the question the report exists to answer. Found by
+  # `/code-review`.
+  grep -qxF "$2" "$RAN_DIR/$1" 2>/dev/null || printf '%s\n' "$2" >>"$RAN_DIR/$1"
   clear_issue_markers "$1"
 }
 owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
@@ -3565,7 +3568,7 @@ case "${1:-}" in
   # A separate script rather than a cmd_* in here: it reads transcripts the agent
   # CLI wrote and knows nothing about dispatching, and this file is 3.5k lines
   # already. `exec` so its exit status is the one the caller sees.
-  cost)   shift; exec bash "$REPO_ROOT/scripts/fleet/cost.sh" "$@" ;;
+  cost)   shift; exec "$REPO_ROOT/scripts/fleet/cost.sh" "$@" ;;
   *)
     cat >&2 <<USAGE
 usage: fleet.sh <command>

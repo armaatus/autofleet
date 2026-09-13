@@ -2595,7 +2595,16 @@ JSON
       && fail "disown_issue left the OWNED entry behind; the fixture proves nothing"
     [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
       || fail "releasing the worktree also erased the record that #42 ever ran"
-    echo "ok: the worktree path of an issue that has run survives its release"
+    # ...and a SECOND attempt, as `fleet.sh retry 42` opens: appended, not
+    # replaced. Truncating throws away the abandoned attempt, which is exactly
+    # the "did it cost more than the one that landed" comparison the report is
+    # for. Re-owning the SAME path must not duplicate the line.
+    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
+    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
+    [ "$(cat "$AUTOFLEET_DIR/ran/42")" = "$(printf '%s\n%s' "$WORK/wt" "$WORK/wt2")" ] \
+      || fail "a second worktree for #42 did not append cleanly; ran/42 holds:
+$(cat "$AUTOFLEET_DIR/ran/42")"
+    echo "ok: every worktree an issue has had survives its release, once each"
     ;;
   one_card)
     make_fixture ok

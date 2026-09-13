@@ -264,16 +264,30 @@ the point: these numbers are only useful compared across runs.
 |---|---|---|
 | `AUTOFLEET_TRANSCRIPT_DIR` | `~/.claude/projects` | Where the agent CLI writes one JSONL per session, under `<root>/<cwd-slug>/<session-id>.jsonl`. Set it **empty** to turn the report off — one explanatory line, exit 0. |
 
+It moves the **path**, not the format. `cost.sh` reads a fixed entry shape
+(`type: assistant`, `message.usage`, the four token keys) and a fixed slug rule,
+so a host whose CLI writes that shape somewhere else points this at it — and a
+host whose CLI writes something else entirely sets it empty rather than getting
+a report of zeros.
+
 **The four figures are never added together.** A cache read is roughly a tenth
 of an input token, so a run that looks expensive on `input` may be almost
 entirely cache, and one total would hide exactly the difference the report
 exists to show.
 
 **What ties a session to an issue** is the worktree path. The slug is the
-absolute working directory with every `/` and `.` turned into `-`, and `own()`
-records each issue's path under `$FLEET_DIR/ran/<issue>` — deliberately *not*
-cleared when the worktree is released, or the report would empty itself exactly
-when a run finishes. One short file per issue the fleet ever starts.
+absolute working directory with every non-alphanumeric character turned into
+`-`, and `own()` records each issue's path under `$FLEET_DIR/ran/<issue>` —
+*appended*, so an issue that `retry` ran twice is measured across both
+worktrees, and deliberately *not* cleared when the worktree is released, or the
+report would empty itself exactly when a run finishes. One short file per issue
+the fleet ever starts.
+
+**Subagent transcripts count.** A subagent writes its own file under
+`<session-id>/subagents/`, and this repo mandates four of them per issue — the
+verifier, the researcher and two review passes. They are folded into the four
+token figures; `sessions` counts the top-level sessions only, so it stays the
+number of times an agent was started in that worktree.
 
 **It never fails a run.** No transcript root, a root that is not there, a
 worktree already reaped, an entry with no `usage`, a half-written last line in a

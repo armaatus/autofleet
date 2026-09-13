@@ -164,10 +164,13 @@
 # the path is what names the directory.
 #
 # A knob rather than a constant because it is the one project-specific thing the
-# report needs, and hard rule 2 says a script may not know it. A host driving a
-# different CLI points this somewhere else; a host that does not want the report
-# at all sets it EMPTY, which `cost.sh` answers with one line and exit 0 rather
-# than an error -- a reporting command must never be the thing that fails a run.
+# report needs, and hard rule 2 says a script may not know it. WHAT IT MOVES IS
+# THE PATH, NOT THE FORMAT: `cost.sh` reads the entry shape above and the
+# `/`-and-`.`-to-`-` slug rule, so a host whose CLI writes the same shape
+# somewhere else points this at it, and a host whose CLI writes something else
+# gets a report of zeros. That host sets it EMPTY, which `cost.sh` answers with
+# one line and exit 0 rather than an error -- a reporting command must never be
+# the thing that fails a run.
 #
 # `=` AND NOT `:=`, alone among the knobs in this file. Every other default
 # substitutes on unset OR NULL, which is right when empty has no meaning; here

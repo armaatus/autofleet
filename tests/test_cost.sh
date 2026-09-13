@@ -8,12 +8,21 @@
 #                            message written as TWO entries with the same
 #                            `message.id` (which is what the CLI actually does,
 #                            and what makes a naive sum report double), an entry
-#                            with no `usage`, a non-assistant entry, and a
-#                            half-written last line.
+#                            with no `usage`, a non-assistant entry, a
+#                            half-written last line, and a SUBAGENT transcript a
+#                            directory deeper -- which this repo mandates four of
+#                            per issue and which a top-level-only read drops.
 #   test_cost.sh json        --json prints the same figures, as integers.
 #   test_cost.sh empty       an empty AUTOFLEET_TRANSCRIPT_DIR is one explanatory
 #                            line and exit 0, and NO table: a table of zeros is a
 #                            measurement, and nothing was measured.
+#   test_cost.sh attempts    an issue that ran in two worktrees (`fleet.sh retry`)
+#                            has both counted, not just the last one recorded.
+#   test_cost.sh filtered    an issue filter that matches nothing says WHICH
+#                            issue it could not find and prints no table. "The
+#                            fleet has run nothing" is false with three other
+#                            issues recorded, and a total row of zeros is a
+#                            measurement of a fleet that spent nothing.
 #   test_cost.sh reaped      a recorded worktree whose transcripts are gone is
 #                            named once and exits 0. A reporting command must
 #                            never be the thing that fails a run.
@@ -66,10 +75,14 @@ make_fixture() {
 # The fixture transcripts for #48. Two sessions, and between them every entry
 # shape the reader is asked to survive.
 #
-# Expected, and asserted below: 2 sessions, 16 input, 122 output, 1503 cache
-# read, 79 cache write. A reader that did not de-duplicate on `message.id` would
-# report 26/222/2503/129 instead -- close enough to look like an answer, which is
-# the whole reason this fixture exists.
+# Expected, and asserted below: 2 sessions, 116 input, 1122 output, 11503 cache
+# read, 579 cache write.
+#
+# Two ways to get that wrong, and both look like an answer rather than an error:
+# a reader that does not de-duplicate on `message.id` reports 126/1222/12503/629,
+# and one that reads only the top level of the project directory drops the
+# subagent entirely and reports 16/122/1503/79. The subagent is the bigger of the
+# two here on purpose -- so is it in a real worktree.
 make_transcripts() {
   local dir="$AUTOFLEET_TRANSCRIPT_DIR/$(transcript_slug "$WT48")"
   mkdir -p "$dir"
@@ -86,6 +99,14 @@ JSONL
 
   cat >"$dir/session-two.jsonl" <<'JSONL'
 {"type":"assistant","message":{"id":"msg_e","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
+JSONL
+
+  # The subagent, a directory deeper. A session that spawns agents writes them
+  # under `<session-id>/subagents/`, and an agent that spawns an agent nests
+  # further still, so the fixture nests too.
+  mkdir -p "$dir/session-one/subagents"
+  cat >"$dir/session-one/subagents/agent-reviewer.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_sub","usage":{"input_tokens":100,"output_tokens":1000,"cache_read_input_tokens":10000,"cache_creation_input_tokens":500}}}
 JSONL
 
   # A file that is not a transcript, and a transcript with no usage in it at all:
@@ -108,11 +129,11 @@ $out"
     # Field by field rather than one string match, so a failure says WHICH
     # column is wrong instead of printing two lines that differ somewhere.
     set -- $row
-    [ "$2" = 2 ]     || fail "sessions: expected 2, got $2 (a file with no usage is not a session)"
-    [ "$3" = 16 ]    || fail "input: expected 16, got $3"
-    [ "$4" = 122 ]   || fail "output: expected 122, got $4 (222 means the duplicate entry was counted twice)"
-    [ "$5" = 1,503 ] || fail "cache read: expected 1,503, got $5"
-    [ "$6" = 79 ]    || fail "cache write: expected 79, got $6"
+    [ "$2" = 2 ]      || fail "sessions: expected 2, got $2 (a file with no usage is not a session, and a subagent is not one either)"
+    [ "$3" = 116 ]    || fail "input: expected 116, got $3 (16 means the subagent transcript was never read)"
+    [ "$4" = 1,122 ]  || fail "output: expected 1,122, got $4 (122 = no subagent; 1,222 = the duplicate entry counted twice)"
+    [ "$5" = 11,503 ] || fail "cache read: expected 11,503, got $5"
+    [ "$6" = 579 ]    || fail "cache write: expected 579, got $6"
     printf '%s\n' "$out" | grep -q '^ *total' \
       || fail "there is no total row:
 $out"
@@ -130,8 +151,8 @@ issues = report["issues"]
 if len(issues) != 1:
     sys.exit("expected one issue in the report, got %d" % len(issues))
 row = issues[0]
-want = {"issue": "48", "sessions": 2, "input_tokens": 16, "output_tokens": 122,
-        "cache_read_input_tokens": 1503, "cache_creation_input_tokens": 79}
+want = {"issue": "48", "sessions": 2, "input_tokens": 116, "output_tokens": 1122,
+        "cache_read_input_tokens": 11503, "cache_creation_input_tokens": 579}
 for key, value in want.items():
     if row.get(key) != value:
         sys.exit("%s: expected %r, got %r" % (key, value, row.get(key)))
@@ -159,6 +180,48 @@ $out"
     echo "ok: an empty transcript root is one line and exit 0"
     ;;
 
+  attempts)
+    make_fixture
+    make_transcripts
+    # A second worktree for the same issue, as `fleet.sh retry 48` opens: the
+    # record APPENDS rather than replacing, so both attempts are still findable.
+    second="$WORK/wt/48-measures-what-a-run-costs-2"
+    printf '%s\n' "$second" >>"$AUTOFLEET_DIR/ran/48"
+    dir="$AUTOFLEET_TRANSCRIPT_DIR/$(transcript_slug "$second")"
+    mkdir -p "$dir"
+    cat >"$dir/session-retry.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_r","usage":{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":11}}}
+JSONL
+    out="$(cost 48 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
+    set -- $(printf '%s\n' "$out" | awk '$1 == 48')
+    [ "$2" = 3 ]      || fail "sessions: expected 3 across both attempts, got $2"
+    [ "$3" = 123 ]    || fail "input: expected 123 across both attempts, got $3"
+    [ "$4" = 1,130 ]  || fail "output: expected 1,130 across both attempts, got $4"
+    [ "$5" = 11,512 ] || fail "cache read: expected 11,512 across both attempts, got $5"
+    [ "$6" = 590 ]    || fail "cache write: expected 590 across both attempts, got $6"
+    echo "ok: an issue that ran twice is measured across both worktrees"
+    ;;
+
+  filtered)
+    make_fixture
+    make_transcripts
+    out="$(cost 999 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || fail "an unrecorded issue exited $rc; cost must never fail a run"
+    grep -q '#999' <<<"$out" || fail "it did not name the issue it could not find: $out"
+    grep -q 'anything to measure' <<<"$out" \
+      && fail "it reported an empty fleet while #48 and #49 are recorded: $out"
+    printf '%s\n' "$out" | grep -q 'total' \
+      && fail "it printed a total row of zeros, which is a measurement of nothing spent"
+    # ...and a filter that matches SOME of what it was given still reports those.
+    out="$(cost 48 999 2>&1)"
+    grep -q '#999' <<<"$out" || fail "the unmatched issue went unmentioned: $out"
+    printf '%s\n' "$out" | awk '$1 == 48' | grep -q . \
+      || fail "the issue that IS recorded was dropped along with it:
+$out"
+    echo "ok: a filter that matches nothing says so precisely, and prints no table"
+    ;;
+
   reaped)
     make_fixture
     make_transcripts
@@ -180,12 +243,12 @@ $out"
       || fail "fleet.sh cost exited non-zero: $out"
     printf '%s' "$out" | python3 -c '
 import json, sys
-if json.load(sys.stdin)["issues"][0]["output_tokens"] != 122:
+if json.load(sys.stdin)["issues"][0]["output_tokens"] != 1122:
     sys.exit("fleet.sh cost did not reach cost.sh with its arguments intact")
 ' || fail "fleet.sh cost does not dispatch to cost.sh: $out"
     echo "ok: fleet.sh cost reaches cost.sh, arguments and all"
     ;;
 
   *)
-    echo "usage: test_cost.sh sums|json|empty|reaped|subcommand" >&2; exit 2 ;;
+    echo "usage: test_cost.sh sums|json|empty|attempts|filtered|reaped|subcommand" >&2; exit 2 ;;
 esac
