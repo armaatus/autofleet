@@ -157,6 +157,10 @@ jobs:
               return first ? text.slice(first.index + first[0].length) : text;
             };
 
+            // Label writes that failed, reported after the loop rather than
+            // through it -- see the removeLabel catch below.
+            const writeFailures = [];
+
             // Collected so the log below can say it once, rather than per issue
             // -- but WITH the issues that named each one. A bare list of numbers
             // cannot answer the question the log exists for ("which issue went
@@ -199,21 +203,41 @@ jobs:
               // and the fleet starts nothing without `ready`. Found by the
               // independent review.
               if (labels.includes(remove)) {
-                // 404 ONLY. The catch used to swallow everything, which put the
-                // both-labels state back behind a green check by another door:
-                // `removeLabel('ready')` takes a 403 secondary rate limit, it is
-                // discarded, `addLabels('blocked')` succeeds, and the issue
-                // carries BOTH -- which `ready_issues()` starts, because it
-                // selects on `ready` and never consults `blocked`. Reordering the
-                // two calls fixes a run that DIES between them; it does nothing
-                // for one that fails the first and continues. A 404 is the label
-                // already being gone, which is the state we wanted; anything else
-                // fails the step, so the run is red and relabels nothing. Same
-                // trade as dropping `issues.get`. Found by the independent review.
+                // 404 ONLY, and the rest is recorded rather than swallowed.
+                //
+                // The catch used to discard everything, which put the both-labels
+                // state back behind a green check by another door: a 403
+                // secondary rate limit on `removeLabel('ready')` is dropped,
+                // `addLabels('blocked')` succeeds, and the issue carries BOTH --
+                // which `ready_issues()` starts, because it selects on `ready`
+                // and never consults `blocked`.
+                //
+                // WHAT THIS DOES AND DOES NOT FIX, because the reverse is easy to
+                // assume from the reorder above. Reordering covers a run that
+                // DIES between the two writes. It does not cover one whose
+                // removal FAILS: this issue then keeps `ready`, never gains
+                // `blocked`, and is startable with an open blocker until a later
+                // run repairs it. That is not a regression -- the old order left
+                // both labels and was startable just the same -- and it cannot be
+                // closed here: no ordering of two writes helps when the first is
+                // the one that fails. Closing it means teaching `ready_issues()`
+                // to consult `blocked`, which is its own change.
+                //
+                // So: a 404 is the label already being gone, which is the state
+                // wanted. Anything else is recorded and the run FAILS AFTER THE
+                // LOOP, rather than throwing here -- throwing mid-loop abandons
+                // every issue after this one, which is strictly worse than
+                // relabelling them correctly and then going red. Found by the
+                // independent review, twice: once for the swallow, once for the
+                // claim the throw did not support.
                 await github.rest.issues.removeLabel({
                   owner, repo, issue_number: issue.number, name: remove,
                 }).catch((err) => {
-                  if (!err || err.status !== 404) throw err;
+                  if (!err || err.status !== 404) {
+                    writeFailures.push(`#${issue.number}: could not remove ` +
+                      `\`${remove}\` (${err && err.status}) -- it may still be ` +
+                      `startable with an open blocker until the next run`);
+                  }
                 });
               }
               if (!labels.includes(add)) {
@@ -230,6 +254,12 @@ jobs:
             // #51 exists gets #50 marked `ready` with its foundation unfiled and
             // no line in any log to read afterwards. Same conclusion, said out
             // loud, once per run.
+            if (writeFailures.length) {
+              core.setFailed('label writes failed; the backlog is only partly ' +
+                             'relabelled and a later run has to finish it:\n  ' +
+                             writeFailures.join('\n  '));
+            }
+
             if (notOpen.size) {
               const said = [...notOpen.keys()].sort((a, b) => a - b).map((n) =>
                 `#${n} (named by ${notOpen.get(n).map((c) => '#' + c).join(', ')})`);
