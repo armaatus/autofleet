@@ -1016,7 +1016,7 @@ done
 # makes it a rule rather than a war story. `qgrep` above is the shape that is
 # safe: `grep` without `-q` reads its whole input.
 #
-# EVERY payload script, not only the ones that set `pipefail` themselves.
+# Every payload SHELL script, not only the ones that set `pipefail` themselves.
 # lib.sh does not set it -- it is SOURCED, and every caller does (fleet.sh,
 # issue-command.sh) -- so the first version of this check skipped the one file
 # where the bug was still live, which is the shared-helper case it most needed
@@ -1024,6 +1024,11 @@ done
 # because a `|` at the end of one line with the `grep -q` at the start of the
 # next is the same pipeline; comments are excluded, because fleet.sh's QUOTES
 # the bad form and that quotation is the record of where it was measured.
+# Its own assertions first, the way guard.py's and merge_gate.py's are run: a
+# detector that has already shipped blind twice has the least claim to be the
+# one tool here with no selftest. Found by the independent review.
+python3 "$REPO_ROOT/evals/piped_quiet_grep.py" --selftest \
+  || fail "evals/piped_quiet_grep.py fails its own selftest, so the scan below means nothing"
 if bad="$(python3 "$REPO_ROOT/evals/piped_quiet_grep.py")"; then
   if [ -n "$bad" ]; then
     fail "these pipe an assertion into \`grep -q\`, which reports a holding check as failed under load -- and a sourced file inherits its caller's pipefail: $bad"
@@ -1117,32 +1122,22 @@ else
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
   BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
-  # The HOST's test command, read where the SCRIPT gets it. issue-command.sh
-  # sources lib.sh -> config.sh, which reads `.autofleet/config`; this file
-  # sources neither, so reading the environment alone measured the four-word
-  # default on every repo that sets the variable in its config -- which is every
-  # repo that has one. Round 1 of the review reported this fixed and it was not:
-  # the proof exported the value on the command line, which is not how a host
-  # runs the lint. Found again, by the same review.
+  # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
+  # word it is and the host's command is never substituted in -- because this
+  # check is vendored and `agent-config.yml` runs it on every PR in every repo
+  # that installs the payload. Measured WITH the host's command, an ordinary
+  # nine-word `docker compose run --rm app pytest -q --tb=short --maxfail=1`
+  # puts a clean installation over the ceiling on its first PR, on a text it did
+  # not write, with a failure that tells it to edit a vendored file the next
+  # `install.sh` overwrites. That is hard rule 1, and it is what rounds 1 and 2
+  # of the review were both circling: the answer was not a better reader for
+  # `.autofleet/config`, it was not reading it at all.
   #
-  # THE LAST ASSIGNMENT, the way merge_gate.py's config reader takes it, so this
-  # cannot diverge from the shell in the permissive direction. Substituted with
-  # `${//}` rather than `sed`, because a test command may hold any character an
-  # `s###` delimiter could be.
-  #
-  # tests/test_brief.sh PINS the value instead: that phase has to be
-  # deterministic, so the test wants a fixture and the vendored guard wants the
-  # real thing.
-  brief_test_command="${AUTOFLEET_TEST_COMMAND:-}"
-  if [ -z "$brief_test_command" ] && [ -f .autofleet/config ]; then
-    brief_test_command="$(sed -n 's/^[[:space:]]*AUTOFLEET_TEST_COMMAND=//p' .autofleet/config | tail -1)"
-    # One layer of quotes, the way the shell strips them on source.
-    brief_test_command="${brief_test_command%\"}"; brief_test_command="${brief_test_command#\"}"
-    brief_test_command="${brief_test_command%\'}"; brief_test_command="${brief_test_command#\'}"
-  fi
-  : "${brief_test_command:=the full test suite}"
+  # So the ceiling is on the 391 words autofleet ships, and a host's test command
+  # costs it nothing. tests/test_brief.sh measures the RENDERED brief against the
+  # same number with the command pinned to the four-word default, which is the
+  # closest thing to what an agent here receives.
   rendered="${stage1//__ISSUE__/49}"
-  rendered="${rendered//__TEST_COMMAND__/\`$brief_test_command\`}"
   words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
   if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
     ok "the opening brief is $words words, spec excluded"

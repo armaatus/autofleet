@@ -455,10 +455,9 @@ prints the spec, steps 1 to 3 — plan, build, review yourself — and a pointer
 what the PR body must carry, arming auto-merge, and the review rounds. Whole,
 the brief was 1,521 words of which 1,272 were that second half, and all of it
 arrived before the agent had opened a file and then rode in the prompt prefix of
-every request it made for the rest of the session
-(armaatus/autofleet#49). Both stages are still
-written in that one file, so `orca.yaml` and `agent-autostart.sh` cannot drift
-from it, and `evals/lint.sh` asserts that the two together still name every
+every request it made for the rest of the session (armaatus/autofleet#49). Both
+stages are still written in that one file, so `orca.yaml` and
+`agent-autostart.sh` cannot drift from it, and `evals/lint.sh` asserts that the two together still name every
 script in the loop — an instruction that fell out of both halves is a rule
 nobody enforces.
 

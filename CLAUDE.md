@@ -84,7 +84,9 @@ differently. Departing from a plan is normal; departing silently is not.
 - **Never pipe an assertion into `grep -q`** in a file with `pipefail`. `-q`
   exits on the first match, the producer dies of EPIPE, the pipeline is 141, and
   a check that held reports as failed -- on large input only, so it is green on
-  a Mac and red in CI. `evals/lint.sh` asserts the payload has none.
+  a Mac and red in CI. `evals/piped_quiet_grep.py` asserts the payload's *shell*
+  has none; the `run:` blocks in `.github/workflows/` are not scanned yet and
+  have one (#90).
 
 ## The tracker is the spec
 

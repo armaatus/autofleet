@@ -90,7 +90,7 @@ SKIPPABLE="teardown/reap"
 # review.
 may_skip() {
   # shellcheck disable=SC2086 -- SKIPPABLE is a deliberate word list, like SUITES
-  printf '%s\n' $SKIPPABLE | grep -qxF -- "$1" || return 1
+  printf '%s\n' $SKIPPABLE | grep -xF -- "$1" >/dev/null || return 1
   # Listed, and still refused HERE. "Machine state, not diff state" is true of a
   # laptop and false of a runner, where a missing docker is an infrastructure
   # regression and a green run with a count in it is how that goes unnoticed for
