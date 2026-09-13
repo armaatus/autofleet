@@ -205,7 +205,7 @@ esac
 # for whatever the system hands that number to next.
 held="$(cat "$PIDFILE" 2>/dev/null)"
 if [ -n "$held" ] && kill -0 "$held" 2>/dev/null \
-   && ps -o command= -p "$held" 2>/dev/null | grep -q 'agent-autostart'; then
+   && ps -o command= -p "$held" 2>/dev/null | grep 'agent-autostart' >/dev/null; then
   echo "==> an autostart watcher is already running (pid $held)"
   exit 0
 fi

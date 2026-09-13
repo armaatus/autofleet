@@ -21,6 +21,19 @@ fails=0
 fail() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 ok()   { echo "  ok: $*"; }
 
+# `grep -q` on the RIGHT of a pipe is a flaky assertion here, and this file runs
+# with `pipefail`. `-q` exits on the first match, the producer on the left then
+# writes into a closed pipe, and the pipeline's exit status is that producer's
+# EPIPE rather than grep's match -- so an assertion that HELD is reported as a
+# FAIL. GNU sed says it out loud ("sed: couldn't flush stdout: Broken pipe");
+# BSD sed dies quietly, which is why this is green on a Mac and red in CI, and
+# why it is a race rather than a constant: it needs the match to land before the
+# producer is done. It cost this PR a CI round on the one check at `cmd_status`
+# below, and the other nine sites are the same bug waiting its turn.
+#
+# `grep` without `-q` reads its whole input, so there is nothing to break.
+qgrep() { grep "$@" >/dev/null; }
+
 # CLAUDE.md is read in full at the start of every session, so its size is a real
 # cost paid on every task in every worktree. The cap is a smell test, not a
 # formatting rule: past it, the file has stopped being what a new joiner needs on
@@ -273,7 +286,7 @@ fi
 # moved "nothing else" onto the next line would silence a line-oriented grep,
 # and an assertion a reflow can switch off is not an assertion.
 flat() { tr -s '[:space:]' ' ' <"$1"; }
-if flat REVIEW.md | grep -q 'nothing else after it'; then
+if flat REVIEW.md | qgrep 'nothing else after it'; then
   fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
 elif grep -q 'independent-review: local' REVIEW.md; then
   ok "REVIEW.md allows the second trailer local review mode depends on"
@@ -286,8 +299,8 @@ fi
 #     CHANGES_REQUESTED on your own pull request -- so a brief that orders
 #     `--request-changes` for an Important finding ends the run with a non-zero
 #     exit on its last action and nothing submitted.
-if flat REVIEW.md | grep -q 'request changes on your own pull request' \
-   && flat .claude/agents/reviewer.md | grep -q 'request changes on your own pull request'; then
+if flat REVIEW.md | qgrep 'request changes on your own pull request' \
+   && flat .claude/agents/reviewer.md | qgrep 'request changes on your own pull request'; then
   ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
 else
   fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
@@ -842,7 +855,7 @@ ok "install.sh ships the reviewer and names the knob"
 #    `github`-mode repository with no token has a green review job, a waiting
 #    agent, and nothing anywhere saying which reviewer it is waiting for.
 if grep -q 'AUTOFLEET_REVIEW_MODE' scripts/fleet/fleet.sh \
-   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | grep -q 'review:'; then
+   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | qgrep 'review:'; then
   ok "fleet.sh status names the review mode on its first screen"
 else
   fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
@@ -985,6 +998,37 @@ for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh
   bash -n "$path" || { fail "$path does not parse"; continue; }
   ok "$script"
 done
+
+# ...and none of the payload pipes an assertion into `grep -q`.
+#
+# `-q` exits on the first match, the producer on the left writes into a closed
+# pipe, and `set -o pipefail` makes the pipeline 141 -- so a check that HELD
+# reports as failed, and a guard that was looking for something reports that it
+# found nothing. It is a RACE: it needs the match to land before the producer is
+# done, so it is green on small input and red on large, and GNU sed says
+# "couldn't flush stdout: Broken pipe" while BSD sed dies quietly -- green on a
+# Mac, red in CI.
+#
+# This repository has now paid for it twice: `clear_stale_review_records` in
+# fleet.sh carries the measurement (500 refs exits 0, 1000 exits 141, and a
+# reviewed commit lost its record), and the `cmd_status` check above cost this
+# change a CI round with every assertion in it actually holding. Twice is what
+# makes it a rule rather than a war story. `qgrep` above is the shape that is
+# safe: `grep` without `-q` reads its whole input.
+#
+# Comments are excluded, because the one in fleet.sh QUOTES the bad form -- that
+# quotation is the record of where it was first measured.
+epipe=""
+for f in scripts/fleet/*.sh scripts/fleet/runner/*.sh evals/*.sh .github/scripts/*.sh; do
+  [ -f "$f" ] || continue
+  grep -q 'pipefail' "$f" || continue
+  grep -vE '^[[:space:]]*#' "$f" | grep '| *grep -q' >/dev/null && epipe="$epipe $(basename "$f")"
+done
+if [ -n "$epipe" ]; then
+  fail "these pipe an assertion into \`grep -q\` in a \`pipefail\` script, which reports a holding check as failed under load:$epipe"
+else
+  ok "no assertion in the payload is piped into \`grep -q\`"
+fi
 # ...and the brief must still name them -- across BOTH of its stages.
 #
 # Since armaatus/autofleet#49 the brief arrives in two pieces out of the one file: the bare
@@ -1278,7 +1322,7 @@ if [ -f "$review_wf" ]; then
   # It must stay a COMMENT. A generated review would satisfy merge_gate.py's
   # requirement for an independent review while carrying no judgement at all --
   # worse than the silence it replaces, because it would merge things.
-  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | grep -q "gh pr review"; then
+  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | qgrep "gh pr review"; then
     fail "the no-verdict notice submits a REVIEW; that would satisfy merge-gate with no judgement"
   fi
   ok "the no-verdict notice is a comment, never a review"
@@ -1356,7 +1400,7 @@ REVIEWCMD
   # the day that job is renamed, and pick up the `mention` job's own
   # cancel-in-progress -- a failure about the wrong job.
   if sed -n '/^  review:/,/^  [a-z][a-z_-]*:$/p' "$review_wf" \
-       | grep -qE "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
+       | qgrepE "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
     fail "the review job cancels in progress; a killed review leaves the head with no verdict and nothing that says so"
   fi
   ok "a review in flight is never cancelled by the next event"
@@ -1901,7 +1945,7 @@ for fn in ready_issues has_open_pr issue_is_done count_startable; do
   # Any regex of its own over either convention, in any spelling and either
   # language -- not just the two capitalisations it used to carry.
   if grep -inE '(close[sd]?|fix(e[sd])?|resolve[sd]?|blocked[^"]*by)[^"]*#' <<<"$body" \
-     | grep -vi '^ *[0-9]*: *#' | grep -q .; then
+     | grep -vi '^ *[0-9]*: *#' | qgrep .; then
     fail "fleet.sh's $fn() spells out a closing or blocker reference again; there is one place for those, .github/scripts/issue_refs.py"
     fleet_reads_shared=0
   fi
@@ -1927,7 +1971,7 @@ grep -q 'merge_gate.py' .github/workflows/merge-gate.yml \
 # A LIST now, not one path: `.autofleet/config` rides along so review_mode() can
 # read the mode in CI. Matched loosely enough to survive that becoming three
 # paths, and strictly enough that dropping this one is still caught.
-if ! grep -A6 'sparse-checkout' .github/workflows/merge-gate.yml | grep -q '\.github/scripts'; then
+if ! grep -A6 'sparse-checkout' .github/workflows/merge-gate.yml | qgrep '\.github/scripts'; then
   fail "merge-gate.yml no longer sparse-checks-out .github/scripts; the paths merge_gate.py imports from are no longer the ones it gets"
 fi
 sparse_tmp="$(mktemp -d)"
@@ -1950,7 +1994,7 @@ if [ -x .github/scripts/pr_payload.sh ]; then
       || fail "$reader does not read the PR through .github/scripts/pr_payload.sh, so it is paging threads on its own again"
     # Comment lines excluded: both files EXPLAIN what `reviewThreads(first:100)`
     # got wrong, and a bare grep flags its own explanation.
-    grep -vE '^[[:space:]]*#' "$reader" | grep -q 'reviewThreads(first:' \
+    grep -vE '^[[:space:]]*#' "$reader" | qgrep 'reviewThreads(first:' \
       && fail "$reader carries its own reviewThreads query again; the first page is not the list"
   done
   # merge-gate.yml runs BOTH of these out of the BASE branch's checkout, and a
@@ -1959,7 +2003,7 @@ if [ -x .github/scripts/pr_payload.sh ]; then
   # `No such file or directory` on exactly the PR introducing it.
   for needed in merge_gate.py pr_payload.sh; do
     sed -n '/agreed rule to judge this by/,/^      - name:/p' \
-      .github/workflows/merge-gate.yml | grep -q "$needed" \
+      .github/workflows/merge-gate.yml | qgrep "$needed" \
       || fail "merge-gate.yml runs $needed from the base checkout without checking the base has it; a base predating it dies with a shell error instead of the human-merge notice"
   done
   ok "a base without the gate's own scripts is told, not crashed into"
