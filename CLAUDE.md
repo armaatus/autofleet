@@ -4,14 +4,13 @@ A fleet of coding agents that turns a GitHub backlog into merged pull requests,
 unattended. A deterministic shell dispatcher opens worktrees, an agent works each
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
-**Which document is whose.** Required reading is this file, the brief
-(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`) and
-[REVIEW.md](REVIEW.md) at the review passes — `evals/lint.sh` holds those three
-plus stage 1 of the brief under a word ceiling, and asserts that each rule the
-loop enforces is stated in full in exactly one of them and linked from everywhere
-else. The rest are consulted, never read through:
+**Which document is whose.** Required reading: this file, the brief
+(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`), and
+[REVIEW.md](REVIEW.md) at the review passes. `evals/lint.sh` holds them under a
+word ceiling, and asserts each enforced rule is stated in full in exactly one of
+them and linked from everywhere else. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
-page, read once and not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 for a host project's knobs, [docs/RUNNERS.md](docs/RUNNERS.md) for the runner
 seam, [README.md](README.md) for what this is.
 
@@ -152,12 +151,11 @@ than the permission does.
    `merge_gate.py` refuses a body that does not name both, and
    [REVIEW.md](REVIEW.md) is the policy they follow.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
-4. **The rest of the loop is one command**, fetched when it applies rather than
-   carried from the start: `./scripts/fleet/issue-command.sh --after-pr <n>`. It
-   is what the PR body must carry, how the merge is queued, which paths a person
-   has to merge, and how the review rounds end. Those rules are stated there and
-   nowhere else, on purpose: a second copy is what an agent reads instead of the
-   original.
+4. **The rest of the loop is one command**, fetched when it applies:
+   `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must
+   carry, how the merge is queued, which paths a person has to merge, how the
+   review rounds end — stated there and nowhere else, because a second copy is
+   what an agent reads instead of the original.
 
 ## What is watching you
 
