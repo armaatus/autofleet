@@ -89,17 +89,13 @@
 #                                 fork the watchdog itself needs. The guard
 #                                 against running out of processes cannot be the
 #                                 thing consuming them.
-#   test_runner_bound.sh quiet    a green run is a summary and nothing else. The
-#                                 per-phase lines say what the summary says, and
-#                                 they say it in the one context that has to
-#                                 survive an implementation plus three review
-#                                 rounds -- 137 lines, at least three times over,
-#                                 growing with every phase this repo adds (#52).
-#                                 So the rows here are about what quiet must NOT
-#                                 take with it: a failing phase's whole captured
-#                                 output, a skip's reason, the summary, and the
-#                                 per-phase lines themselves the moment anything
-#                                 asks for them.
+#   test_runner_bound.sh quiet    a green run is a summary and nothing else
+#                                 (#52; the reasoning is over the VERBOSE block
+#                                 in tests/run.sh). The rows are about what quiet
+#                                 must NOT take with it: a failing phase's whole
+#                                 captured output, a skip's reason, the summary,
+#                                 and the per-phase lines themselves the moment
+#                                 anything asks for them.
 #
 # It drives a COPY of the real tests/run.sh rather than restating its logic, so
 # there is no second implementation of the bound to drift from the shipped one.
@@ -126,8 +122,16 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # AUTOFLEET_TEST_VERBOSE rides along for the same reason and with the same
 # hazard: it is read from the environment, so a human debugging this suite with
 # `AUTOFLEET_TEST_VERBOSE=1 ./tests/run.sh runner_bound` would otherwise reach
-# the copy and turn every quiet row red on a harness artefact. Cleared here,
-# set deliberately by COPY_VERBOSE on the rows that want it.
+# the copy and turn every "nothing per phase" row red on a harness artefact.
+#
+# Only the calls that come THROUGH HERE, which is less than the NO_SKIP
+# paragraph above promises for its own variable: eight invocations in this file
+# drive the copy directly, because they need their own bound or their own
+# backgrounding, and each of those clears it on the line -- `passes` is the one
+# that has to, since the `ok` row it greps for is the very thing verbose adds.
+# Said plainly because a comment claiming a guarantee the code does not give is
+# the guard that stops guarding. The `quiet` phase has the row that notices if
+# this clearing is dropped.
 run_copy() {
   AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_VERBOSE="${COPY_VERBOSE-}" \
     AUTOFLEET_TEST_TIMEOUT=10 \
@@ -893,16 +897,21 @@ EOF
 
 # ------------------------------------------------------------------ quiet
   quiet)
-  # A green run is a summary and nothing else. 123 `ok` rows carry exactly the
-  # information in `123 passed.`, and they carry it into the one context that has
-  # to survive an implementation plus three review rounds -- the brief makes an
-  # agent run this suite at least three times, so a run that lands nothing useful
-  # lands it four or five times over (#52).
+  # A green run is a summary and nothing else. Why that is worth a phase is
+  # written once, over the VERBOSE block in tests/run.sh; what is asserted here
+  # is the half a rationale cannot hold -- that quiet took the `ok` rows and
+  # NOTHING else with them.
   make_runner quick quick2 quick3
   run_copy
   rc=$?
   [ "$rc" = 0 ] || fail "a green run did not pass: $(cat "$WORK/out")"
   green="$(wc -l <"$WORK/out" | tr -d " ")"
+  # FIVE because that is #52's acceptance bar, not because five is the shape:
+  # a green run is two lines, a blank and the summary, and stays two however
+  # many suites are registered (the row below). The slack is what a phase that
+  # DECLINES costs -- its label and its own reason -- which is the one thing
+  # allowed to push a green run past two, and the skip row further down spends
+  # it deliberately.
   [ "$green" -le 5 ] \
     || fail "a green run printed $green lines: $(cat "$WORK/out")"
   ok "a green run is at most five lines"
@@ -925,6 +934,11 @@ EOF
   run_copy
   [ "$?" = 0 ] || fail "a green run of six suites did not pass: $(cat "$WORK/out")"
   grew="$(wc -l <"$WORK/out" | tr -d " ")"
+  # The count of what RAN as well as the count of lines. Comparing 2 against 2
+  # is also what a make_runner that quietly registered a subset would produce,
+  # and this row would call that "did not grow". Found by /code-review.
+  grep -q "6 passed." "$WORK/out" \
+    || fail "six suites did not run, so the line count proves nothing: $(cat "$WORK/out")"
   [ "$grew" = "$green" ] \
     || fail "twice the suites printed $grew lines against $green: $(cat "$WORK/out")"
   ok "...and does not grow when the registry does"
@@ -962,6 +976,22 @@ EOF
     || fail "the skip was reported without its reason: $(cat "$WORK/out")"
   ok "a phase that declined to judge still says so, and why"
 
+  # ...and the bound survives it. This is the only tension in #52's acceptance:
+  # a green run is at most five lines AND a skip prints the phase's whole reason,
+  # and the shipped suite has a skippable phase (`teardown/reap`, on a machine
+  # with no docker). The reason wins where they disagree -- a silent skip is the
+  # failure the SKIPPABLE registry exists to prevent -- so what is asserted is
+  # that a skip costs its OWN output and nothing else: still no `ok` row, still
+  # no header, and the label plus one line of reason fits the bar. Found by the
+  # spec review, which noticed the shipped suite can carry a skip and the row
+  # above could not see it.
+  skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
+  [ "$skipped_lines" -le 5 ] \
+    || fail "a green run with one skip printed $skipped_lines lines: $(cat "$WORK/out")"
+  grep -q "ok   " "$WORK/out" \
+    && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
+  ok "...and a skip costs its own reason and nothing else"
+
   # --verbose is today's output, unchanged, for a human debugging a wedged phase.
   make_runner quick quick2 quick3
   run_copy --verbose
@@ -979,6 +1009,30 @@ EOF
   grep -q "ok   quick" "$WORK/out" \
     || fail "AUTOFLEET_TEST_VERBOSE=1 did not restore the per-phase lines: $(cat "$WORK/out")"
   ok "...and AUTOFLEET_TEST_VERBOSE=1 does it without a flag"
+
+  # An EMPTY value is quiet, which is the normal shell reading of a variable
+  # somebody cleared and the reading `${AUTOFLEET_TEST_VERBOSE:-}` gives. The
+  # other half is deliberate and is NOT asserted here because it is a choice
+  # rather than a property: any non-empty value is on, so `=0` is verbose. It
+  # matches AUTOFLEET_TEST_NO_SKIP, which is the point.
+  COPY_VERBOSE="" run_copy
+  [ "$?" = 0 ] || fail "an empty AUTOFLEET_TEST_VERBOSE failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "an empty AUTOFLEET_TEST_VERBOSE was read as verbose: $(cat "$WORK/out")"
+  ok "...and an empty value means quiet"
+
+  # The clearing in run_copy itself. Without it, `AUTOFLEET_TEST_VERBOSE=1
+  # ./tests/run.sh runner_bound` -- one person debugging this very suite --
+  # reaches every runner copy below and turns each "nothing per phase" row red
+  # on a harness artefact. That is the failure the COPY_NO_SKIP helper exists to
+  # remove, and this is its row: drop the clearing and the whole suite stays
+  # green until somebody sets the variable. Found by /code-review.
+  ( export AUTOFLEET_TEST_VERBOSE=1
+    run_copy )
+  [ "$?" = 0 ] || fail "an outer AUTOFLEET_TEST_VERBOSE failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "an outer AUTOFLEET_TEST_VERBOSE reached the runner copy: $(cat "$WORK/out")"
+  ok "...and an outer one does not reach the copy these rows drive"
 
   # One phase of one suite still works, and still prints its result -- which,
   # quiet, is the summary. That is the invocation CLAUDE.md tells an agent to
@@ -1010,17 +1064,38 @@ EOF
     || fail "the refusal did not name the argument it refused: $(cat "$WORK/out")"
   ok "a mistyped flag is refused rather than read as a quiet run"
 
+  # ...and so is a third name. The runner has only ever had two positions, and
+  # silently ignoring the rest is how `./tests/run.sh fleet card_says --verbose`
+  # would have been read before the flag existed: as a run of one phase that
+  # said nothing about the argument it dropped. Found by the spec review, which
+  # noticed the refusal arrived with no row on it.
+  run_copy quickd one three
+  rc=$?
+  [ "$rc" = 2 ] || fail "a third argument was ignored (rc=$rc): $(cat "$WORK/out")"
+  grep -q "three" "$WORK/out" \
+    || fail "the refusal did not name the argument it refused: $(cat "$WORK/out")"
+  ok "...and a third positional argument is refused rather than dropped"
+
   # CI reads logs, not a context window: a human opening a failed run wants to
   # see which phases got there before it. The workflow asks for them, and this is
   # the row that notices if it stops -- the whole point of quiet is that nothing
   # else in this repo will.
+  #
+  # EVERY invocation, and comments do not count. Asking whether the file
+  # mentions the flag anywhere passes on the strength of this very row's
+  # counterpart comment in ci.yml, and asking whether ANY invocation carries it
+  # passes while a second job runs the suite quietly -- ci.yml is owed exactly
+  # such a job, the strict AUTOFLEET_TEST_NO_SKIP one tests/run.sh names as #80.
+  # Both found by /code-review.
   ci="$REPO_ROOT/.github/workflows/ci.yml"
-  grep -q "\./tests/run\.sh" "$ci" \
+  ci_runs="$(grep -v "^[[:space:]]*#" "$ci" | grep -c "\./tests/run\.sh" || true)"
+  [ "${ci_runs:-0}" -gt 0 ] \
     || fail "ci.yml no longer runs the suite; this row asserts nothing"
-  { grep "\./tests/run\.sh" "$ci" | grep -q -- "--verbose"; } \
-    || grep -q "AUTOFLEET_TEST_VERBOSE" "$ci" \
-    || fail "ci.yml runs the suite quietly, so a failed run no longer says which phases ran"
-  ok "CI still asks for the per-phase lines"
+  ci_loud="$(grep -v "^[[:space:]]*#" "$ci" | grep "\./tests/run\.sh" \
+             | grep -c -e "--verbose" -e "AUTOFLEET_TEST_VERBOSE" || true)"
+  [ "${ci_loud:-0}" = "$ci_runs" ] \
+    || fail "$((ci_runs - ci_loud)) of ci.yml's $ci_runs suite runs are quiet, so a failed run no longer says which phases ran"
+  ok "every run of the suite in CI still asks for the per-phase lines"
   ;;
 
   *)

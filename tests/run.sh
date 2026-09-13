@@ -5,6 +5,7 @@
 #   ./tests/run.sh fleet           # one suite
 #   ./tests/run.sh fleet card_says # one phase of one suite
 #   ./tests/run.sh --verbose       # ...and one line per phase while it runs
+#   AUTOFLEET_TEST_VERBOSE=1       # ...the same, where a flag cannot be threaded
 #
 # The suites are shell, and several of them dispatch on a PHASE argument: one
 # process per case, so a case that wedges cannot take the rest of the file with
@@ -63,9 +64,17 @@ suite_command() {
 #
 # --verbose is today's output, unchanged, for a human debugging a wedged phase.
 # AUTOFLEET_TEST_VERBOSE=1 says it where the flag cannot be threaded through: a
-# CI matrix, a wrapper, a `make test` somebody else owns. Empty means unset, the
-# normal shell reading of a variable someone cleared -- the same reading
-# AUTOFLEET_TEST_NO_SKIP gets above.
+# CI matrix, a wrapper, a `make test` somebody else owns. ANY non-empty value is
+# on, so `AUTOFLEET_TEST_VERBOSE=0` is verbose and not quiet -- the same reading
+# AUTOFLEET_TEST_NO_SKIP gets fifty lines down, because two variables in one
+# runner disagreeing about what "set" means is worse than either answer. A
+# matrix that spells off as 0 wants the empty string.
+#
+# What quiet costs, said rather than discovered: a run killed from OUTSIDE this
+# runner -- a job cap, an agent's tool timeout -- now prints NOTHING, where
+# before it printed every phase that had finished. The runner's own bound
+# already reports the phase it killed (PHASE_TIMEOUT below), so this is only the
+# case where something else does the killing, and --verbose is the answer to it.
 VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
 
 # The arguments, parsed rather than read off $1 and $2, because a flag has to be
@@ -96,11 +105,13 @@ for arg in "$@"; do
   esac
 done
 
-# Per-phase chatter, and the only thing --verbose brings back. A function rather
-# than an `if` at each site so there is one place that decides, and so a line
-# printed through it cannot quietly become unconditional. The format string is a
-# literal at every call, which is what makes passing it through `printf` safe.
-say() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
+# Per-phase chatter, and the only thing --verbose brings back. Named for the
+# CONDITION and not for the printing: `say` is what fleet.sh calls its
+# unconditional narrator, and a reader who carries that meaning here reads every
+# call site as a line that always prints. A function rather than an `if` at each
+# site so there is one place that decides. The format string is a literal at
+# every call, which is what makes passing it through `printf` safe.
+say_verbose() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
 
 pass=0; fail=0; failed=""
 # A phase that could not judge anything is not a phase that judged and found
@@ -394,7 +405,7 @@ run_one() {
     pass=$((pass + 1))
     # The one line quiet drops. Everything else in this cascade is a failure, a
     # skip, or the reason for one, and quiet must never mean quieter about those.
-    say '  ok   %s\n' "$label"
+    say_verbose '  ok   %s\n' "$label"
   elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
@@ -459,7 +470,7 @@ for entry in "${SUITES[@]}"; do
   suite="${entry%%:*}"
   phases="${entry#*:}"
   [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
-  say '== %s\n' "$suite"
+  say_verbose '== %s\n' "$suite"
   # shellcheck disable=SC2046 -- suite_command is a deliberate word list
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }
