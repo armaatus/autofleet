@@ -11,10 +11,54 @@
 # It prints the spec AND the marching orders, so this file is the single place
 # the opening brief is written. orca.yaml and agent-autostart.sh both only point
 # at it -- neither restates the workflow, so neither can drift from it.
+#
+# THE BRIEF ARRIVES IN TWO STAGES, and both are in this file:
+#
+#   issue-command.sh <n>              the spec, steps 1-3, and a pointer
+#   issue-command.sh --after-pr <n>   steps 4-6, the post-PR contract
+#
+# Whole, the brief was 1,521 words, of which 1,272 were steps 4 through 6 --
+# arming auto-merge, the review rounds, the BLOCKED/DIRTY/BEHIND triage. All of
+# it arrived before the agent had read a file, and then rode in the prompt prefix
+# of every request for the rest of the session, to be acted on an hour later if
+# at all (#49). Stage 2 is fetched at the moment it applies, which is also when
+# it is most likely to be followed.
+#
+# The split is WITHIN this file, and within ONE heredoc: the brief is a single
+# text with a `@@AFTER-PR@@` line in it, and the stage is chosen by which side of
+# that line gets printed. Not two heredocs, which was the first shape and which
+# `agent-config.yml` refused -- it re-runs main's `evals/lint.sh` against this
+# branch, main's extraction is the range from the `sed` line to `BRIEF`, and two
+# heredocs left it reading an empty brief and reporting that every script of the
+# loop had fallen out of it. The check was right: the property it is defending is
+# that the brief is one text, and keeping it one is cheaper than arguing.
+#
+# `evals/lint.sh` here asserts each stage separately -- an instruction that fell
+# out of both is a rule nobody enforces, and the failures the long tail was
+# written for (#90's unqueued auto-merge, #88/#89's unresolved thread) come
+# straight back.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/scripts/fleet/lib.sh"
+
+# Stage 2 on demand. Read BEFORE the issue is resolved so `--after-pr` with no
+# number still falls back to this worktree's linked issue, exactly as the bare
+# form does -- an agent in a fleet worktree types the flag and nothing else.
+#
+# Filtered out of the arguments wherever it appears, not matched against `$1`:
+# `issue-command.sh 42 --after-pr` is the order a person writes when the number
+# is already on the line, and matching `$1` alone printed stage 1 for it and
+# swallowed the flag as noise. Found by the local review.
+after_pr=false
+kept=()
+for arg in "$@"; do
+  if [ "$arg" = "--after-pr" ]; then after_pr=true; else kept+=("$arg"); fi
+done
+# `${kept[@]+...}`: `set -u` is on and bash 3.2 -- the /bin/bash every macOS
+# ships -- treats an empty array as unset, so the bare expansion is an error
+# here and only here.
+set -- ${kept[@]+"${kept[@]}"}
 
 ref="${1:-}"
 # Neither half may kill the script, because `set -e` is on and BOTH "no runner"
@@ -52,22 +96,10 @@ fi
 num="$(printf '%s' "$ref" | sed -nE 's#.*/issues/([0-9]+).*#\1#p; s#^([0-9]+)$#\1#p' | head -1)"
 [ -n "$num" ] || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
 
-# GH_PAGER: Orca runs this hook on a TTY, and `gh` pages TTY output through
-# less, which then waits for a keypress no one will press -- the hook never
-# exits, Orca never gets the spec, and the agent tab sits on a bare URL forever.
-GH_PAGER=cat gh issue view "$num" --json number,title,body,labels,milestone,url \
-  --template '{{printf "# %v: %v" .number .title}}
-{{.url}}
-Milestone: {{if .milestone}}{{.milestone.title}}{{else}}none{{end}}
-Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
-
-{{.body}}
-'
-
 # Quoted heredoc, and the number substituted afterwards: this block is full of
-# backticks, and in an unquoted heredoc the shell runs every one of them --
-# the project's own test command included, which is a whole test run in the
-# middle of printing a prompt.
+# backticks, and in an unquoted heredoc the shell runs every one of them -- the
+# project's own test command included, which is a whole test run in the middle of
+# printing a prompt.
 #
 # The repo's working agreement carries all of this in full; repeating the
 # checkable part here is what makes the opening prompt self-contained, so an
@@ -75,7 +107,35 @@ Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
 # __TEST_COMMAND__ comes from AUTOFLEET_TEST_COMMAND, so the prompt names the
 # command this project actually runs rather than one autofleet guessed.
 test_command="${AUTOFLEET_TEST_COMMAND:-the full test suite}"
-sed -e "s/__ISSUE__/$num/" -e "s#__TEST_COMMAND__#\`$test_command\`#" <<'BRIEF'
+
+# The spec belongs to stage 1 alone. An agent running `--after-pr` has it in
+# context already, and reprinting it is the duplication this split exists to
+# stop.
+if ! $after_pr; then
+  # GH_PAGER: Orca runs this hook on a TTY, and `gh` pages TTY output through
+  # less, which then waits for a keypress no one will press -- the hook never
+  # exits, Orca never gets the spec, and the agent tab sits on a bare URL forever.
+  GH_PAGER=cat gh issue view "$num" --json number,title,body,labels,milestone,url \
+    --template '{{printf "# %v: %v" .number .title}}
+{{.url}}
+Milestone: {{if .milestone}}{{.milestone.title}}{{else}}none{{end}}
+Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
+
+{{.body}}
+'
+fi
+
+# ONE brief, cut in two. `@@AFTER-PR@@` is the cut, `awk` prints the half that is
+# due, and the `sed` substitutes the placeholders for both halves at once so they
+# cannot come to mean different things in the part that arrives an hour later.
+#
+# Stage 1 is under 400 words and evals/lint.sh holds it there. Everything in it
+# is actionable in the first hour; anything that is not goes below the cut.
+# `if`, not `$after_pr && stage=2`: `set -e` is on, and that AND-list returns
+# non-zero on the bare form, which is the common one.
+if $after_pr; then stage=2; else stage=1; fi
+sed -e "s/__ISSUE__/$num/" -e "s#__TEST_COMMAND__#\`$test_command\`#" <<'BRIEF' \
+  | awk -v want="$stage" 'BEGIN{half=1} $0=="@@AFTER-PR@@"{half=2;next} half==want'
 
 ---
 
@@ -108,6 +168,27 @@ REVIEW.md is the policy. Fix what is real, re-run the tests, then:
 Until that marker exists for the exact commit you are pushing, the guard hook
 refuses `git push` and `gh pr create` here. A PR from the fleet arrives already
 reviewed or it does not arrive.
+
+**Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
+marker exists, run:
+
+    ./scripts/fleet/issue-command.sh --after-pr __ISSUE__
+
+It is what the body must carry, how the merge is queued, and the review loop.
+Skip it and the PR sits green forever, or merges over a review.
+
+**Two subagents in `.claude/agents/` keep reading out of this context.**
+`researcher` answers "where is this handled" with the answer, not the files it
+read; `verifier` gives an independent build-and-test verdict before the PR.
+
+**This context has to last** the plan, the build and three review rounds in one
+time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` over a
+range rather than a whole file, `researcher` before a wide search.
+
+At any point, if `~/.autofleet/STOP` exists, put the work down: say where you
+got to and do nothing further. Nothing can go out while it exists.
+
+@@AFTER-PR@@
 
 **4. Push, open the PR, and queue the merge -- in that order, now.**
 
@@ -245,7 +326,4 @@ their own PR, and a person merges them. All three, and the same three named
 above -- `merge_gate.py` refuses exactly this list, and a brief that named fewer
 would send an agent to spend its review rounds turning green a gate that never
 will. `merge-gate` will say so.
-
-At any point, if `~/.autofleet/STOP` exists, put the work down: say where you
-got to and do nothing further. Nothing can go out while it exists.
 BRIEF

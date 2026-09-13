@@ -985,14 +985,78 @@ for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh
   bash -n "$path" || { fail "$path does not parse"; continue; }
   ok "$script"
 done
-# ...and the brief must still name them.
+# ...and the brief must still name them -- across BOTH of its stages.
+#
+# Since #49 the brief arrives in two pieces out of the one file: the bare form
+# prints the spec, steps 1-3 and a pointer, and `--after-pr` prints steps 4-6.
+# The risk the split carries is an instruction that lands in NEITHER stage,
+# which is a rule nobody enforces: #90's PR that nobody queued for auto-merge,
+# #88 and #89 sitting blocked on one unresolved thread.
+#
+# Asserted PER STAGE rather than over the union, which is strictly stronger and
+# is the union by construction. The union alone passed for the wrong reason and
+# all three review passes said so: stage 1 says "Two subagents in
+# `.claude/agents/`", so a union grep for `.claude/` matched forever, and
+# deleting `.claude/` from stage 2's list of paths no agent may merge still
+# printed ok. That is hard rule 3 -- a guard that silently stops guarding -- and
+# the cost of it is an agent spending its three review rounds turning green a
+# gate that can never pass.
+# The brief is ONE heredoc with a `@@AFTER-PR@@` line in it -- which is also
+# what keeps main's copy of this check readable, since its extraction is the
+# range from the `sed` line to `BRIEF` and two heredocs left it reading nothing.
 brief="$(sed -n "/^sed .*BRIEF/,/^BRIEF$/p" scripts/fleet/issue-command.sh)"
-for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
-              answer-review.sh; do
-  grep -q "$named" <<<"$brief" \
-    || fail "the agent brief no longer mentions $named, so the loop stops at that step"
-done
-ok "the brief still names the review loop"
+# Drop the command that prints it and the terminator; what is left is the text
+# the agent receives, and the cut line divides it.
+body="$(sed -e '1,/| awk /d' -e '$d' <<<"$brief")"
+stage1="$(sed -n "1,/^@@AFTER-PR@@$/p" <<<"$body" | sed '$d')"
+stage2="$(sed -n "/^@@AFTER-PR@@$/,\$p" <<<"$body" | sed '1d')"
+if [ -z "$stage1" ] || [ -z "$stage2" ]; then
+  fail "one of issue-command.sh's two brief heredocs could not be read, so everything below asserts nothing"
+else
+  # Stage 1: what is due before anything leaves the worktree -- including the
+  # pointer, without which stage 2 is unreachable and half the brief is dead
+  # text -- and the three things #49 added because CLAUDE.md names them and the
+  # brief the fleet actually sends never did.
+  for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
+                --after-pr researcher verifier "gh pr diff --stat"; do
+    grep -qF -- "$named" <<<"$stage1" \
+      || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
+  done
+  # ...and none of what stage 2 owns, because carrying it here is the cost #49
+  # measured: it rides in the prompt prefix of every request made before the PR
+  # exists.
+  for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh "--auto --squash"; do
+    grep -qF -- "$named" <<<"$stage1" \
+      && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
+  done
+  ok "stage 1 names what is due before the push, and nothing that is not"
+
+  # Stage 2: every script of the loop, the closing line merge-gate demands, and
+  # the three paths no agent can merge itself.
+  for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
+                answer-review.sh "--auto --squash" "Closes #" \
+                ".github/workflows/" ".github/scripts/" ".claude/"; do
+    grep -qF -- "$named" <<<"$stage2" \
+      || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
+  done
+  ok "stage 2 still names the whole review loop and the paths a person has to merge"
+
+  # The budget, in the vendored check and not only in autofleet's own suite: a
+  # host project gets the brief and the reason it was split, so it should get
+  # the thing that stops it growing back. #56 folds this row into a ceilings
+  # table and will want it measured from what the agent RECEIVES; until then the
+  # placeholders are substituted with their defaults here, so the figure is the
+  # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
+  # measures the real output and holds the same number.
+  BRIEF_WORD_BUDGET=400   # set by #49
+  words="$(sed -e 's/__ISSUE__/49/g' -e 's/__TEST_COMMAND__/the full test suite/g' <<<"$stage1" \
+             | wc -w | tr -d " ")"
+  if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
+    ok "the opening brief is $words words, spec excluded"
+  else
+    fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET (#49). Raise it here, deliberately, or move something into --after-pr"
+  fi
+fi
 
 echo "== every test phase actually runs"
 # A phase defined in one of the phase-dispatching test scripts and missing from

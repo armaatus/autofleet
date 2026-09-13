@@ -448,6 +448,19 @@ Proof**, in the PR body under `## Plan`, at the bar that someone who never saw t
 conversation could implement it from the plan alone. Departing from a plan is
 normal; departing silently is not.
 
+**The brief arrives in two stages, and the second one is fetched, not pushed.**
+[`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`
+prints the spec, steps 1 to 3 — plan, build, review yourself — and a pointer;
+`issue-command.sh --after-pr <n>` prints steps 4 to 6, the post-PR contract:
+what the PR body must carry, arming auto-merge, and the review rounds. Whole,
+the brief was 1,521 words of which 1,272 were that second half, and all of it
+arrived before the agent had opened a file and then rode in the prompt prefix of
+every request it made for the rest of the session (#49). Both stages are still
+written in that one file, so `orca.yaml` and `agent-autostart.sh` cannot drift
+from it, and `evals/lint.sh` asserts that the two together still name every
+script in the loop — an instruction that fell out of both halves is a rule
+nobody enforces.
+
 Then it builds, with three things that are not negotiable:
 
 - **There is no mock for the service under test.** Tests run against a real service in Docker, per

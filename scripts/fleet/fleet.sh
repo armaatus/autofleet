@@ -1029,7 +1029,7 @@ slug() {
 agent_brief() {
   cat <<BRIEF
 Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $1\` first and follow
-everything it prints, including the review loop at the end. You were started by
+everything it prints, including anything it points you at. You were started by
 the fleet dispatcher: work autonomously to a pull request that is waiting only on
 GitHub's auto-merge, and do not stop to ask for confirmation on anything this
 repo's working agreement already decides.
