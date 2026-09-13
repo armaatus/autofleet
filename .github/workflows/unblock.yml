@@ -124,8 +124,14 @@ jobs:
             // foundation open. `[0-9]` and not `\d`, because Python's `\d` takes
             // any Unicode decimal digit and JavaScript's does not -- so
             // `Blocked by #\u0667` was a blocker to the fleet and invisible here.
+            // No `\*{1,2}` branch: `*` is already in the class, so `**` is two
+            // iterations and the extra branch matched the same text two ways --
+            // exponential under the outer `*`, not merely redundant. 22
+            // asterisks took 15 SECONDS to fail; a separator line in an issue
+            // body would hang this workflow on every edit, and the dispatcher's
+            // queue with it. Found by the independent review.
             const BLOCKED_BY =
-              /^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\]|\*{1,2})[ \t]*)*blocked\s+by\s+#([0-9]+)/gim;
+              /^[ \t]*(?:(?:[-*+>]|[0-9]+[.)]|\[[ xX]\])[ \t]*)*blocked\s+by\s+#([0-9]+)/gim;
             // ...and only below the FIRST marker that is alone on its own
             // line. The own-line anchor is what handles #47, which quotes
             // `<!-- blockers -->` mid-sentence while describing this bug and
@@ -241,11 +247,29 @@ jobs:
                 });
               }
               if (!labels.includes(add)) {
-                await github.rest.issues.addLabels({
+                // Recorded, not thrown -- the same policy as the removal above,
+                // which this call did not follow. A 403 here used to fail the
+                // step outright, abandoning every issue after this one in the
+                // loop, losing whatever `writeFailures` had already collected,
+                // and skipping the not-open log. Worse since the reorder: the
+                // removal has already run, so the issue is left carrying NEITHER
+                // label -- an issue that should be `ready` has just lost `ready`
+                // and does not get it back until some later event fires.
+                //
+                // No 404 exemption here: there is no safe failure for an add.
+                // Found by the independent review.
+                const added = await github.rest.issues.addLabels({
                   owner, repo, issue_number: issue.number, labels: [add],
+                }).then(() => true).catch((err) => {
+                  writeFailures.push(`#${issue.number}: could not add ` +
+                    `\`${add}\` (${err && err.status}) -- it now carries neither ` +
+                    `label, and nothing starts it until a later run`);
+                  return false;
                 });
-                core.info(`#${issue.number}: +${add}` +
-                  (shouldBlock ? ` (waiting on ${open.map((n) => '#' + n).join(', ')})` : ''));
+                if (added) {
+                  core.info(`#${issue.number}: +${add}` +
+                    (shouldBlock ? ` (waiting on ${open.map((n) => '#' + n).join(', ')})` : ''));
+                }
               }
             }
 
