@@ -933,10 +933,12 @@ EOF
     && fail "the per-suite headers are still printed: $(cat "$WORK/out")"
   ok "...with nothing per phase and nothing per suite"
 
-  # The cost is not the 137 lines, it is that they GROW: every phase this repo
-  # adds is another line in every run in every worktree. A budget that scales
-  # with the registry is not a budget, so the assertion is that the green run is
-  # the same size against twice the suites.
+  # The cost was never a fixed number of lines, it is that they GROW: every
+  # phase this repo adds is another line in every run in every worktree. A
+  # budget that scales with the registry is not a budget, so the assertion is
+  # that the green run is the same size against twice the suites. (No count
+  # here, and none over the VERBOSE block in tests/run.sh either: the one that
+  # used to be there was wrong twice. Found by the independent review.)
   make_runner quick quick2 quick3 quick4 quick5 quick6
   run_copy
   [ "$?" = 0 ] || fail "a green run of six suites did not pass: $(cat "$WORK/out")"
@@ -1013,7 +1015,7 @@ EOF
     && fail "a run with a skip printed the suite headers: $(cat "$WORK/out")"
   ok "...and a skip costs its own reason and nothing else"
 
-  # --verbose is today's output, unchanged, for a human debugging a wedged phase.
+  # --verbose, whose purpose is over the VERBOSE block in tests/run.sh.
   make_runner quick quick2 quick3
   run_copy --verbose
   [ "$?" = 0 ] || fail "--verbose failed the run: $(cat "$WORK/out")"
@@ -1023,8 +1025,8 @@ EOF
     || fail "--verbose did not restore the suite headers: $(cat "$WORK/out")"
   ok "--verbose restores the per-phase lines"
 
-  # ...and the environment does the same, for the case where the flag cannot be
-  # threaded through: a CI matrix, a wrapper, a `make test` somebody else owns.
+  # ...and the environment does the same, for the cases tests/run.sh lists over
+  # the VERBOSE block.
   COPY_VERBOSE=1 run_copy
   [ "$?" = 0 ] || fail "AUTOFLEET_TEST_VERBOSE=1 failed the run: $(cat "$WORK/out")"
   grep -q "ok   quick" "$WORK/out" \
@@ -1041,7 +1043,7 @@ EOF
   # `${AUTOFLEET_TEST_VERBOSE:-}` -- a default that applies on UNSET only, so
   # set-and-empty stays quiet and unset turns verbose. Every row in this phase
   # stayed green under it while a developer's `./tests/run.sh` went back to
-  # printing all 137 lines, which is #52's own acceptance criterion gone. Not
+  # printing a line per phase, which is #52's own acceptance criterion gone. Not
   # the bare `-` form: with an empty word after the dash that is identical to
   # `:-` in every state and changes nothing, which is a swap the next reader
   # would try and then conclude this row asserts nothing. Found by the

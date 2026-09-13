@@ -56,19 +56,26 @@ suite_command() {
 # header.
 #
 # The reader of this runner is usually an agent, and its context has to survive
-# an implementation plus three review rounds. 123 `ok` rows and 8 headers is 137
-# lines carrying exactly what `123 passed.` carries, and the brief makes the
-# suite run at least three times per issue -- so the useless part landed four or
-# five times over, and grew with every phase added here (#52). A dot per phase
-# is no better: a line of 123 dots is still a line, saying the same thing again.
+# an implementation plus three review rounds. One row per phase and one per
+# suite carried exactly what the summary line carries, the brief makes the suite
+# run at least three times per issue, and the bill grew with every phase added
+# to SUITES above -- so the useless half landed four or five times over and got
+# bigger each time (#52). A dot per phase is no better: a line of dots is still
+# a line, saying the same thing again.
+#
+# NO COUNT, deliberately. This paragraph carried one and it was wrong twice --
+# wrong arithmetic, and stale against a registry that had grown since -- which
+# is the defect class three review rounds of this change spent themselves on. It
+# is also not what the argument rests on: "one line per phase, and it grows" is
+# the whole of it.
 #
 # --verbose is today's output, unchanged, for a human debugging a wedged phase.
 # AUTOFLEET_TEST_VERBOSE=1 says it where the flag cannot be threaded through: a
 # CI matrix, a wrapper, a `make test` somebody else owns. ANY non-empty value is
 # on, so `AUTOFLEET_TEST_VERBOSE=0` is verbose and not quiet -- the same reading
-# AUTOFLEET_TEST_NO_SKIP gets fifty lines down, because two variables in one
-# runner disagreeing about what "set" means is worse than either answer. A
-# matrix that spells off as 0 wants the empty string.
+# `may_skip` gives AUTOFLEET_TEST_NO_SKIP, because two variables in one runner
+# disagreeing about what "set" means is worse than either answer. A matrix that
+# spells off as 0 wants the empty string.
 #
 # What quiet costs, said rather than discovered: a run killed from OUTSIDE this
 # runner -- a job cap, an agent's tool timeout -- now prints NOTHING, where
@@ -86,21 +93,20 @@ VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
 # not a `case` on $1. The way this change breaks CI is a typo -- `--verbsoe` in
 # the workflow, read as a suite name, nothing matched, and a quiet exit nobody
 # reads twice. Exit 2 is what a mistyped suite name has always got.
+# Both refusals say the same sentence, so it is written once. Found by the
+# independent review.
+refuse() { echo "$1; usage: $0 [--verbose] [suite [phase]]" >&2; exit 2; }
 want_suite=""; want_phase=""; positional=0
 for arg in "$@"; do
   case "$arg" in
     --verbose) VERBOSE=1 ;;
-    -*)
-      echo "unknown option '$arg'; usage: $0 [--verbose] [suite [phase]]" >&2
-      exit 2 ;;
+    -*) refuse "unknown option '$arg'" ;;
     *)
       positional=$((positional + 1))
       case "$positional" in
         1) want_suite="$arg" ;;
         2) want_phase="$arg" ;;
-        *) echo "too many arguments at '$arg';" \
-                "usage: $0 [--verbose] [suite [phase]]" >&2
-           exit 2 ;;
+        *) refuse "too many arguments at '$arg'" ;;
       esac ;;
   esac
 done
