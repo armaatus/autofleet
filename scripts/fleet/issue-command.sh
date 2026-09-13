@@ -171,8 +171,8 @@ sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk -v want="$stage" "
 
 ---
 
-Implement the issue above, end to end. CLAUDE.md and this brief are the only
-required reading. Work autonomously: do not stop to ask for confirmation on
+Implement the issue above, end to end. CLAUDE.md and this brief carry your
+instructions, and name anything else. Work autonomously: do not stop to ask for confirmation on
 anything CLAUDE.md already decides. If a question is genuinely open, write it in
 the PR body and carry on with the rest of the scope.
 

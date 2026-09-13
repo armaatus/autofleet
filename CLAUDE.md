@@ -7,9 +7,9 @@ issue to a PR, and the rules — not the agent — decide whether it merges.
 **Which document is whose.** Required reading: this file, the brief
 (`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`), and
 [REVIEW.md](REVIEW.md) at the review passes. `evals/lint.sh` asserts each
-enforced rule is stated in full in exactly one of them and linked from everywhere
-else, and holds what is read *before the first edit* — this file, REVIEW.md and
-the opening brief — under a word ceiling. The rest are consulted, never read through:
+enforced rule is stated in full in exactly one of them — not that the others link
+to it, which is on you — and holds what is read *before the first edit* — this
+file, REVIEW.md and the opening brief — under a word ceiling. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
 page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 for a host project's knobs, [docs/RUNNERS.md](docs/RUNNERS.md) for the runner
@@ -188,6 +188,6 @@ part of the work, not in a note to yourself.
 | `evals/` | Regression tests for the agent configuration itself. Vendored. |
 | `.autofleet/` | This repo's own config, guard rules and project hooks. Not vendored. |
 | `tests/` | autofleet's own suite. Not vendored. |
-| `docs/` | WORKFLOW (the loop), CONFIGURATION (the knobs), RUNNERS (the driver contract). |
+| `docs/` | WORKFLOW (why each rule is the shape it is), CONFIGURATION (the knobs), RUNNERS (the driver contract). |
 | `install.sh` | What a host project runs to vendor the payload. |
 | `AGENTS.md` | Symlink to this file, for agent tools that look for that name. |

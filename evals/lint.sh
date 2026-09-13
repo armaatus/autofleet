@@ -1263,8 +1263,13 @@ RULES = [
     ("the paths only a person may merge", "the brief, stage 2", triple),
     ("the STOP file", "the brief, stage 1",
      lambda t: ".autofleet/STOP" in t),
+    # All three, because the rule is BOTH halves: the closing line AND the two
+    # pass names `merge_gate.py` greps the body for. Keyed on `Closes #` alone,
+    # stage 2 could drop the pass names and this still printed ok, on a check
+    # named for a rule it was covering half of. Found by the independent review.
     ("`Closes #N`, and what merge-gate reads from the body", "the brief, stage 2",
-     lambda t: "Closes #" in t),
+     lambda t: all(n in t for n in ("Closes #", "/code-review",
+                                    "mattpocock-skills:code-review"))),
 ]
 
 bad = []
@@ -1422,12 +1427,16 @@ except OSError as exc:
 # BOTH forms of code block markdown has, because the repo writes in both: the
 # brief in `issue-command.sh` uses the four-space indented form throughout, so
 # that is the style an editor reaches for, and a check that only saw fences would
-# let the whole second copy back in under the more natural spelling. The language
-# tag is matched case-insensitively for the same reason -- ```Bash is one
-# keystroke from ```bash, and an unmatched opener shifts the non-greedy pairing
-# so the PROSE gets scanned and the block does not, which is hard rule 3 arriving
-# silently. Found by the local /code-review pass.
-blocks = re.findall(r"```[A-Za-z]*\n(.*?)```", page, re.S)
+# let the whole second copy back in under the more natural spelling.
+#
+# `[^\n]*` for the info string, not `[A-Za-z]*`: ANY opener, including a tag
+# carrying a digit, a dot or a space. An opener this does not match does not skip
+# one block -- it shifts the non-greedy pairing, so the PROSE between two fences
+# is scanned and the fences themselves are not, and the check goes quiet rather
+# than going red. That is hard rule 3 arriving silently, and the narrower class
+# had the hole its own comment described. Found by the local /code-review pass,
+# then again by the independent review one class wider.
+blocks = re.findall(r"```[^\n]*\n(.*?)```", page, re.S)
 fenced = set()
 for m in re.finditer(r"```.*?```", page, re.S):
     fenced.update(range(m.start(), m.end()))

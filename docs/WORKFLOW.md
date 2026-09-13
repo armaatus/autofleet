@@ -7,8 +7,9 @@ what starts the next, where a person is required, how to stop the whole thing,
 and why each rule is the shape it is. An agent's own instructions are the brief
 ([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`,
 then `--after-pr <n>`), with [CLAUDE.md](../CLAUDE.md) the working agreement
-above it; between them they are the whole of what a fleet agent is told to read
-before its first edit.
+above it. `evals/lint.sh` holds what an agent reads before its first edit — those
+two and [REVIEW.md](../REVIEW.md), which the brief names at its review step —
+under a word ceiling.
 
 An agent comes here for the conventions behind a rule — the `<!-- blockers -->`
 marker in [Stage 2](#stage-2--spec) chief among them — and not for what to run.
