@@ -28,6 +28,16 @@
 # disagreement needs -- a person is. The count lives in .autofleet/run/review-rounds,
 # which is per-worktree and gitignored, and resets when the PR number changes.
 #
+# WHAT THE AGENT IS TOLD TO DO depends on what the review found, which until
+# recently it did not: one instruction was printed whatever the verdict, and it
+# led with "Fix what is real". A fix moves the head, a moved head invalidates
+# the review that asked for it, and the reviewer runs again on the whole diff --
+# so a nit cost a full round, every time. Measured on three pull requests stuck
+# in that cycle with `answer-review.sh`, which clears the hold with no commit at
+# all, never once run. A review declaring `<!-- review-important: 0 -->` now gets
+# the cheap instruction instead. Not a weaker one: the nits are still printed in
+# full, and a commit is still available to an agent that decides one is worth it.
+#
 # WHAT COUNTS AS THE REVIEW IS NOT DECIDED HERE. This imports
 # .github/scripts/merge_gate.py and asks it, exactly as review-status.sh does,
 # because a wait that ends on a review merge-gate does not count ends it for
@@ -127,7 +137,10 @@ echo "round $round of $MAX_ROUNDS -- waiting for a review on PR #$pr, on its cur
 echo "  (polling every ${POLL_SECONDS}s; stop everything with ./scripts/fleet/stop.sh --now)"
 
 payload="$(mktemp)"; reviews_out="$(mktemp)"; stamp="$(mktemp)"; notes="$(mktemp)"
-trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes"' EXIT
+# How many Important findings the review being handed back declared. A file
+# rather than a `$(...)`, for the same bash 3.2 reason the payload is one.
+sev="$(mktemp)"
+trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes" "$sev"' EXIT
 waited=0
 checks_due=0
 broken_before=""
@@ -381,10 +394,10 @@ query($owner:String!,$name:String!,$pr:Int!){
     # syntax error, and the message it gives names neither the line nor the
     # quote. Outside `$(...)` the heredoc is just a heredoc.
     python3 - "$payload" "$head" "$seen_head" "$seen_stamp" "$stamp" "$notes" \
-      >"$reviews_out" <<'PY'
+      "$sev" >"$reviews_out" <<'PY'
 import json, sys
 
-path, local_head, seen_head, seen_stamp, stamp_path, notes_path = sys.argv[1:7]
+path, local_head, seen_head, seen_stamp, stamp_path, notes_path, sev_path = sys.argv[1:8]
 
 # Every reason this poll did not end the wait, for the caller to print once. A
 # reason discovered on poll 1 and said only at the deadline is a reason the agent
@@ -400,7 +413,8 @@ def stop(code):
 
 sys.path.insert(0, ".github/scripts")
 try:
-    from merge_gate import independent_reviews, is_substantive
+    from merge_gate import (independent_reviews, is_substantive,
+                            declared_important)
 except Exception as exc:  # missing, half-edited, or broken at import time
     # Not ImportError alone: merge_gate.py is a file agents in this repo edit --
     # this very PR edits it -- and a SyntaxError in it must not read as "no
@@ -474,6 +488,22 @@ if not reviews:
 
 with open(stamp_path, "w") as fh:
     fh.write("%s\n%s\n" % (head, reviews[-1].get("submittedAt") or ""))
+
+# What the caller needs to know to choose an instruction, asked of the gate
+# rather than re-derived: `declared_important` is the same function merge_gate
+# uses, so the sentence printed here and the sentence the gate prints cannot
+# disagree about which review was nit-only.
+#
+# The NEWEST review decides, not all of them. Handing back three reviews of
+# which the oldest found something Important would otherwise offer a remedy for
+# a finding the latest reviewer no longer stands behind, and the latest is the
+# one merge-gate reads.
+#
+# Empty file means "did not say", which is not the same as zero -- see the
+# caller, which tests for the literal 0 and nothing else.
+with open(sev_path, "w") as fh:
+    important = declared_important(reviews[-1])
+    fh.write("" if important is None else str(important))
 for r in reviews:
     who = (r.get("author") or {}).get("login", "?")
     print(f"--- {r.get('state')} by {who} at {r.get('submittedAt')}")
@@ -506,16 +536,38 @@ PY
         --jq '.[] | "\(.path):\(.line // .original_line)  \(.user.login)\n\(.body)\n"' \
         2>/dev/null | head -200
       echo
-      echo "Fix what is real. Where you disagree, reply on the thread with the reason"
-      echo "rather than ignoring it, and resolve every thread."
-      echo
-      echo "If you CHANGED anything: push, and come back here. The push re-runs the"
-      echo "reviewer, and the review of what you sent is the next round's -- there is no"
-      echo "review on the new head yet, so there is nothing to answer."
-      echo
-      echo "If you changed NOTHING -- nothing needed it, or you disagree -- say so, which"
-      echo "is what keeps the branch from merging out from under the findings:"
-      echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+      # The literal `0`, and nothing else. An empty file is a review that did
+      # not say -- from a brief that predates the trailer, or one that dropped
+      # it -- and reading that as "no Important findings" is the one way this
+      # branch can fail open: it would offer the cheap remedy for a finding
+      # nobody classified. Anything non-numeric lands here too, deliberately.
+      if [ "$(cat "$sev" 2>/dev/null)" = 0 ]; then
+        echo "The review above declares NO Important findings. So the cheap answer is the"
+        echo "right one, and it is not a commit:"
+        echo
+        echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+        echo
+        echo "That alone clears the hold. Say which nits you took, which you did not and"
+        echo "why, and open one follow-up issue for anything worth keeping -- name it in"
+        echo "the answer so the next reader can find it."
+        echo
+        echo "Pushing a nit fix instead is what costs: the push moves the head, a moved"
+        echo "head invalidates the review that asked for the fix, and the reviewer runs"
+        echo "again on the whole diff. Three pull requests were measured going round that"
+        echo "way with this script never once run. If something here IS worth a commit,"
+        echo "make it -- but make that a decision, not the default."
+      else
+        echo "Fix what is real. Where you disagree, reply on the thread with the reason"
+        echo "rather than ignoring it, and resolve every thread."
+        echo
+        echo "If you CHANGED anything: push, and come back here. The push re-runs the"
+        echo "reviewer, and the review of what you sent is the next round's -- there is no"
+        echo "review on the new head yet, so there is nothing to answer."
+        echo
+        echo "If you changed NOTHING -- nothing needed it, or you disagree -- say so, which"
+        echo "is what keeps the branch from merging out from under the findings:"
+        echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+      fi
       echo "  ./scripts/fleet/review-status.sh $pr"
       echo
       echo "Auto-merge was armed when this PR was opened, so from here the only thing"
