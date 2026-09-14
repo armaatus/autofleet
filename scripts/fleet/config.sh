@@ -150,6 +150,41 @@
 # The check itself is at the BOTTOM, with its neighbour's, for that reason.
 
 # Found by the independent review of the change that added it.
+
+# What a round-N reviewer is asked to read: `full` (the whole branch, every
+# round) or `delta` (what changed since the last reviewed head, plus what that
+# reaches).
+#
+# DEFAULTS TO `full`, and that is not timidity. `review.sh` inlines
+# `.claude/agents/reviewer.md` verbatim as the reviewer's brief, and that file
+# is under `.claude/`, which `merge_gate.HUMAN_ONLY_PREFIXES` refuses to let an
+# agent merge. So the machinery here can land before the brief does, and a
+# `review.sh` that started handing out ranges while the brief still said
+# "`gh pr diff <N>`" would produce a reviewer that read the whole diff anyway:
+# no saving, and a confused reviewer. The default flips in a one-line follow-up
+# once the brief knows what a range is. armaatus/autofleet#65.
+: "${AUTOFLEET_REVIEW_SCOPE:=full}"
+# ...and every Kth round is `full` regardless, so no pull request is ever judged
+# by an unbroken chain of deltas.
+#
+# The risk a delta review carries is that `git diff <last>..<head>` shows lines,
+# not reachability: a round-five commit that changes a helper's exit convention
+# shows three changed lines, and the caller it breaks was reviewed in round one
+# and is not in the delta at all. The brief buys most of that back by requiring
+# the touched files whole plus a grep for the callers of anything whose contract
+# moved -- and this is the backstop for what those two clauses miss. 4 means at
+# most three consecutive deltas.
+: "${AUTOFLEET_REVIEW_FULL_EVERY:=4}"
+# The byte ceiling on the carried-forward context file a delta round is handed.
+#
+# The file holds the previous round's findings, how they were answered, the
+# unresolved threads and the commits between the two heads -- all of it text
+# somebody else wrote on a pull request, and all of it unbounded in principle.
+# The whole point of this issue is a prompt that does not grow with the rounds,
+# so the file that replaces the growth needs a cap of its own or it becomes the
+# growth. 16K is about seven times the largest reviewer body PR #32 ever
+# produced (2,320 bytes).
+: "${AUTOFLEET_REVIEW_CONTEXT_MAX:=16384}"
 # ------------------------------------------------------------- what is KEPT ---
 #
 # Every store under $FLEET_DIR only ever grew. On this machine the reviewer
@@ -289,6 +324,26 @@ fi
 # the message is about. A cap that is silently absent is the failure this exists
 # to prevent, and it cannot be prevented by a warning nobody reads in a
 # dispatcher log.
+
+# ONE refusal, four knobs. Spelled out inline it was two copies; the third and
+# fourth would have been where a `-gt` met a `-ge` and one cap became
+# off-by-one silently. The comment blocks below stay attached to the knobs they
+# are about -- each of them is a failure somebody had -- and only the mechanism
+# is shared.
+#
+# $1 the name, $2 the value, $3 the smallest legal value, $4 how to say that.
+config_whole_number() {
+  case "$2" in
+    # Digits first, then a NUMERIC test for the floor. `''|*[!0-9]*|0` rejected
+    # the literal `0` and let `00` straight through -- all digits, not that
+    # literal -- and `[ 0 -ge 00 ]` is true.
+    ''|*[!0-9]*)
+      echo "$1 must be $4; got '$2'" >&2
+      exit 2 ;;
+  esac
+  [ "$2" -ge "$3" ] || { echo "$1 must be $4; got '$2'" >&2; exit 2; }
+}
+
 # Digits first, then a NUMERIC test for positive. `''|*[!0-9]*|0` rejected the
 # literal `0` and let `00` straight through -- all digits, not that literal --
 # and `[ 0 -ge 00 ]` is true, so the cap is zero attempts: no PR is ever
@@ -296,16 +351,8 @@ fi
 # announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
 # the exact untrue line the 0 rejection exists to prevent. One spare zero and the
 # guard was the failure. Found by the independent review.
-case "$AUTOFLEET_REVIEW_MAX_TRIES" in
-  ''|*[!0-9]*)
-    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
-         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
-    exit 2 ;;
-esac
-[ "$AUTOFLEET_REVIEW_MAX_TRIES" -gt 0 ] || {
-  echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
-       "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
-  exit 2; }
+config_whole_number AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES" \
+  1 "a positive whole number"
 
 # The same shape of failure as the one above, one step earlier: `[ "$words" -le
 # "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
@@ -322,24 +369,41 @@ esac
 # Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
 # non-number has to be refused, because only a non-number turns the guard off
 # without saying so.
-case "$AUTOFLEET_HANDOFF_MAX_WORDS" in
-  ''|*[!0-9]*)
-    echo "AUTOFLEET_HANDOFF_MAX_WORDS must be a whole number (0 turns the cap off);" \
-         "got '$AUTOFLEET_HANDOFF_MAX_WORDS'" >&2
-    exit 2 ;;
-esac
+config_whole_number AUTOFLEET_HANDOFF_MAX_WORDS "$AUTOFLEET_HANDOFF_MAX_WORDS" \
+  0 "a whole number (0 turns the cap off)"
 
 
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error
 # anybody sees, so the cap silently does not exist.
-case "$AUTOFLEET_REVIEW_MAX_ROUNDS" in
-  ''|*[!0-9]*)
-    echo "AUTOFLEET_REVIEW_MAX_ROUNDS must be a positive whole number;" \
-         "got '$AUTOFLEET_REVIEW_MAX_ROUNDS'" >&2
-    exit 2 ;;
+config_whole_number AUTOFLEET_REVIEW_MAX_ROUNDS "$AUTOFLEET_REVIEW_MAX_ROUNDS" \
+  1 "a positive whole number"
+
+# The two knobs armaatus/autofleet#65 added, refused for the same reason: each
+# is read by an arithmetic expansion or a command argument where a non-number
+# means the bound is absent rather than wrong.
+#
+#   FULL_EVERY  `$(( rounds % AUTOFLEET_REVIEW_FULL_EVERY ))` -- 0 is a division
+#               by zero, which prints an error and yields 1, so EVERY round
+#               would read as the Kth. The floor is 1, which means "every round
+#               is full" and is a legitimate way to turn the delta path off from
+#               the config file.
+#   CONTEXT_MAX `head -c "$AUTOFLEET_REVIEW_CONTEXT_MAX"` -- a non-number makes
+#               `head` fail and the context file empty, which is a delta review
+#               with nothing carried forward and no sign that anything is
+#               missing. 0 is legal and means "carry nothing".
+config_whole_number AUTOFLEET_REVIEW_FULL_EVERY "$AUTOFLEET_REVIEW_FULL_EVERY" \
+  1 "a positive whole number (1 makes every round a full review)"
+config_whole_number AUTOFLEET_REVIEW_CONTEXT_MAX "$AUTOFLEET_REVIEW_CONTEXT_MAX" \
+  0 "a whole number of bytes (0 carries nothing forward)"
+
+# Not a number, so not the helper. A misspelling here fails in the safe
+# direction anyway -- `review.sh` tests for the literal `delta` and anything
+# else is a full review -- but silently, and a project that wrote `deltas` in
+# its config would keep paying for full reviews and have no way to find out.
+case "$AUTOFLEET_REVIEW_SCOPE" in
+  full|delta) ;;
+  *) echo "AUTOFLEET_REVIEW_SCOPE must be 'full' or 'delta';" \
+          "got '$AUTOFLEET_REVIEW_SCOPE'" >&2
+     exit 2 ;;
 esac
-[ "$AUTOFLEET_REVIEW_MAX_ROUNDS" -gt 0 ] || {
-  echo "AUTOFLEET_REVIEW_MAX_ROUNDS must be a positive whole number;" \
-       "got '$AUTOFLEET_REVIEW_MAX_ROUNDS'" >&2
-  exit 2; }
