@@ -1065,7 +1065,7 @@ echo "== the flow's own scripts"
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
               resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
-              review.sh; do
+              review.sh handoff.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -1152,7 +1152,7 @@ else
   # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
   # names them and the brief the fleet actually sends never did.
   for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
-                --after-pr researcher verifier "gh pr diff --stat"; do
+                --after-pr researcher verifier "gh pr diff --stat" handoff.sh; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
   done
@@ -1177,8 +1177,14 @@ else
 
   # Stage 2: every script of the loop, the closing line merge-gate demands, and
   # the three paths no agent can merge itself.
+  # `handoff.sh` is in BOTH stages, and that is the one instruction here which
+  # deliberately is. Stage 1 asks for the note when the work is put down --
+  # armaatus/autofleet#55's other half, the attempt the time-box interrupts --
+  # and stage 2 asks for it at the push and after every round. An instruction
+  # that arrives only after the PR exists cannot serve a case that happens
+  # before one does; the independent review of #55 is where that was measured.
   for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
-                answer-review.sh "--auto --squash" "Closes #" \
+                answer-review.sh handoff.sh "--auto --squash" "Closes #" \
                 ".github/workflows/" ".github/scripts/" ".claude/"; do
     grep -qF -- "$named" <<<"$stage2" \
       || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
@@ -1194,6 +1200,15 @@ else
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
+  # The budget did NOT move for armaatus/autofleet#55, and the attempt to move
+  # it is worth recording. #55's other half is the attempt the time-box
+  # interrupts, and the only place an agent can be told to leave a note before a
+  # PR exists is stage 1 -- stage 2 is fetched after the push. The first
+  # spelling added a paragraph and raised this to 425; `agent-config.yml` re-runs
+  # MAIN's copy of this file against the branch and refused, which is the check
+  # doing exactly what it is for. The sentence was paid for out of stage 1
+  # instead: the STOP paragraph absorbed it (both are the work being put down),
+  # and three sentences elsewhere were tightened without losing a rule. 386.
   BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
   # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
   # word it is and the host's command is never substituted in -- because this
@@ -1206,8 +1221,10 @@ else
   # of the review were both circling: the answer was not a better reader for
   # `.autofleet/config`, it was not reading it at all.
   #
-  # So the ceiling is on the 391 words autofleet ships, and a host's test command
-  # costs it nothing. tests/test_brief.sh measures the RENDERED brief against the
+  # So the ceiling is on the words AUTOFLEET ships -- 386 at the time of writing,
+  # and the figure moves with the brief -- and a host's test command costs it
+  # nothing. A number written here as a standing fact goes stale the next time
+  # the brief is edited, which is what happened to the 391 this replaces. tests/test_brief.sh measures the RENDERED brief against the
   # same number with the command pinned to the four-word default, which is the
   # closest thing to what an agent here receives.
   rendered="${stage1//__ISSUE__/49}"

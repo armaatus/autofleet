@@ -153,6 +153,24 @@
 # the fleet reaches between reviews rather than a hard ceiling.
 : "${AUTOFLEET_LOG_MAX_BYTES:=1048576}"
 
+# ------------------------------------------------------------- the handoff
+# How long the note one attempt leaves the next may be, in words.
+#
+# `scripts/fleet/handoff.sh` REFUSES over this rather than truncating, and that
+# is the whole argument for the cap being a number a script enforces instead of
+# a sentence in the brief. Unbounded, the note grows into a second spec that the
+# next attempt reads in full before its first edit -- which is the cost
+# armaatus/autofleet#55 exists to remove, arriving through the fix. Truncated,
+# it is worse still: the reader cannot tell "nothing else was open" from "the
+# rest did not fit", and what falls off the end of a note written in that order
+# is exactly what is still open.
+#
+# 300 is a starting point. Set it to 0 to turn the cap off, the way
+# AUTOFLEET_KEEP_REVIEWS=0 turns the sweep off -- an unbounded note is then
+# something a host asked for, not something a mistyped value produced silently.
+# The check at the foot of this file is what makes that distinction hold.
+: "${AUTOFLEET_HANDOFF_MAX_WORDS:=300}"
+
 # --------------------------------------------------------------- the cost
 # Where the agent CLI writes its session transcripts, and therefore the only
 # place `cost.sh` can find out what a worktree run actually spent.
@@ -262,3 +280,26 @@ esac
   echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
        "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
   exit 2; }
+
+# The same shape of failure as the one above, one step earlier: `[ "$words" -le
+# "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
+# and returns 2, so the test is FALSE, `refuse_if_over_cap` returns early, and a
+# note of any length is accepted -- the guard absent, silently, which is hard
+# rule 3.
+#
+# BELOW the block above, and not between that block's comment and its `case`:
+# the paragraph ending "One spare zero and the guard was the failure" is about
+# AUTOFLEET_REVIEW_MAX_TRIES and has to stay next to it. Found by the local
+# /mattpocock-skills:code-review pass, which is the one that reads comments as
+# load-bearing.
+#
+# Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
+# non-number has to be refused, because only a non-number turns the guard off
+# without saying so.
+case "$AUTOFLEET_HANDOFF_MAX_WORDS" in
+  ''|*[!0-9]*)
+    echo "AUTOFLEET_HANDOFF_MAX_WORDS must be a whole number (0 turns the cap off);" \
+         "got '$AUTOFLEET_HANDOFF_MAX_WORDS'" >&2
+    exit 2 ;;
+esac
+
