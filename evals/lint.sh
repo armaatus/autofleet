@@ -1578,10 +1578,16 @@ def strip_comment(line):
     """The line with a trailing shell comment removed, quotes respected.
 
     A comment explaining the bad form has to name the bad form, and this rule
-    would otherwise fire on that. Nothing in the tree needs it TODAY -- the
-    first draft of this docstring implied otherwise, which was checkable and
-    false -- so `tests/test_runner_bound.sh bash32` pins it with a tree that
-    does, rather than leaving it as a line nothing would notice the loss of.
+    would otherwise fire on that. It is load-bearing on the real tree, not only
+    in the fixture: `tests/test_runner_bound.sh` carries prose about this very
+    rule that spells the form, so neutering this function reds autofleet on its
+    own documentation.
+
+    Two drafts of this docstring got that backwards in opposite directions --
+    one implied a hit that did not exist, then its correction claimed nothing in
+    the tree needed the stripping, in the same commit that added the lines that
+    do. `tests/test_runner_bound.sh bash32` pins the behaviour in a tree of its
+    own, so neither the claim nor the tree has to be re-counted to trust it.
     Same function as the runner contract check above, for the same reason.
     """
     out, quote = [], ""
@@ -1635,15 +1641,19 @@ def arith_spans(text):
 # lines avoiding, and this is the same shape one section up. Found by both local
 # passes.
 #
-# `tests/` and `install.sh` are autofleet's own and are NOT vendored, so they
-# are added only here -- keyed on the same sentinel the phase-registry check
-# uses, for the same reason it uses one.
-paths = sorted(set(
-    glob.glob("scripts/fleet/*.sh") + glob.glob("scripts/fleet/runner/*.sh")
-    + glob.glob(".claude/hooks/*.sh") + glob.glob(".github/scripts/*.sh")
-    + glob.glob("evals/*.sh")))
+# `tests/`, `install.sh` and `.autofleet/` are autofleet's own and are NOT
+# vendored, so they are added only here -- keyed on the same sentinel the
+# phase-registry check uses, for the same reason it uses one. `.autofleet/` is
+# the seeded ANSWER in a host project and the shipped template here, which is
+# why it sits on this side of the sentinel rather than in the payload above;
+# without it, `.autofleet/setup.sh` was the one tracked shell file in this
+# repository that nothing judged. Found by /code-review.
+paths = (glob.glob("scripts/fleet/*.sh") + glob.glob("scripts/fleet/runner/*.sh")
+         + glob.glob(".claude/hooks/*.sh") + glob.glob(".github/scripts/*.sh")
+         + glob.glob("evals/*.sh"))
 if os.path.exists("tests/test_runner_bound.sh"):
-    paths += glob.glob("tests/*.sh") + glob.glob("install.sh")
+    paths += (glob.glob("tests/*.sh") + glob.glob("install.sh")
+              + glob.glob(".autofleet/*.sh"))
 paths = sorted(set(paths))
 if not paths:
     # Unreachable where this file runs, because `evals/*.sh` always matches this

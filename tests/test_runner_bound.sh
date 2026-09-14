@@ -1211,12 +1211,18 @@ LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
 # quietly and was not counted at ALL -- which is the exact scenario the comment
 # above claims this now catches, passing because the other job supplied the
 # count. Found by /code-review.
-# The path prefix is ANY non-separator run ending in `/`, not just one starting
-# `.` or `/`: `"$GITHUB_WORKSPACE/tests/run.sh"` is a real spelling and the
-# first draft of this regex missed it. It cannot swallow `mytests/run.sh`,
-# because the prefix has to end in `/` and what precedes the match has to be a
-# separator.
-RUN = re.compile(r"(?:^|[\s;&|(=\"'])(?:[^\s;&|()]*/)?tests/run\.sh\b")
+# The path prefix is any run of characters ending in a slash that carries no
+# command separator, not just one starting with a dot or a slash: the spelling
+# "$GITHUB_WORKSPACE/tests/run.sh" is real and the first draft of this regex
+# missed it. Parentheses belong IN the prefix, because a command substitution
+# before the slash is another real spelling -- excluding them, as the second
+# draft did, made that one count zero, which is the false green this row exists
+# to prevent. Neither draft said what its character class actually held. Both
+# found by /code-review.
+#
+# It cannot swallow mytests/run.sh: the prefix has to end in a slash, and what
+# precedes the whole match has to be a separator or the start of the fragment.
+RUN = re.compile(r"(?:^|[\s;&|(=\"'])(?:[^\s;&|]*/)?tests/run\.sh\b")
 runs = quiet = 0
 for line in open(sys.argv[1]):
     for frag in re.split(r"&&|\|\||;", strip_comment(line)):
