@@ -158,7 +158,7 @@ fi
 # Stage 1 only. An agent running `--after-pr` has the note in context already --
 # it is the thing that resumed it -- and reprinting it is the duplication the
 # two-stage split exists to stop.
-handoff="$REPO_ROOT/.autofleet/run/handoff-$num.md"
+handoff="$(fleet_handoff_path "$REPO_ROOT" "$num")"
 if ! $after_pr && [ -f "$handoff" ]; then
   # Before the `---` the brief opens with, so tests/test_brief.sh and
   # evals/lint.sh go on measuring the brief rather than the brief plus whatever

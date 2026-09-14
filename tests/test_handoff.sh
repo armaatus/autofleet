@@ -25,11 +25,20 @@
 #   test_handoff.sh relaunch  ...and the dispatcher's opening prompt names it,
 #                             by absolute path, for the attempt that starts in a
 #                             worktree that is not this one.
+#   test_handoff.sh empty     a write with nothing in it is refused, and the
+#                             previous round's note survives. `write --stdin`
+#                             is what the brief tells an agent to run, and an
+#                             agent that runs it as a bare tool call gets EOF.
 #   test_handoff.sh refs      a .../issues/<n> URL resolves to <n>, and an
 #                             ambiguous worktree is refused rather than guessed
 #                             at. Both are how the number reaches the note's
 #                             filename, and a wrong one writes a note nothing
 #                             ever reads.
+#   test_handoff.sh retry     `fleet.sh retry N` names the note, which is the
+#                             one place on the retry path that is certainly
+#                             reached: the dispatcher's prompt only names it in
+#                             the narrow state where the old worktree's
+#                             directory outlives the runner's listing of it.
 #   test_handoff.sh brief     the post-PR half of the brief is what tells an
 #                             agent to write one. Nobody writes a note no
 #                             document asks for.
@@ -95,14 +104,20 @@ brief()   { in_repo env GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"; }
 # tests/test_fleet.sh's `in_fleet`.
 in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
 
-# What `owned_path` reads -- $FLEET_OWNED, which lib.sh puts at
-# `$AUTOFLEET_DIR/worktrees`. Written directly rather than through `own`, which
-# also cards the board and appends to the run list: neither is anything
-# agent_brief consults, and both would need a runner here.
-own_worktree() {
+# The record `launch` reads the note out of: $RAN_DIR, which `own` appends to
+# and which OUTLIVES the worktree. Written through `own` itself rather than by
+# hand, so the phase asserts against the record the dispatcher actually writes
+# -- keyed on $OWNED_DIR this branch was unreachable on the `retry` path it
+# exists for, and a fixture that wrote ownership by hand hid that.
+ran_in() {
   local num="$1" path="$2"
-  mkdir -p "$AUTOFLEET_DIR/worktrees"
-  printf '%s' "$path" >"$AUTOFLEET_DIR/worktrees/$num"
+  in_fleet own "$num" "$path" >/dev/null 2>&1
+}
+
+# ...and the state `launch` would actually be in when it opens a SECOND worktree
+# for an issue: the first one removed from $OWNED_DIR, its $RAN_DIR line kept.
+disowned() {
+  rm -f "$AUTOFLEET_DIR/worktrees/$1" "$AUTOFLEET_DIR/started/$1"
 }
 
 case "${1:-}" in
@@ -200,7 +215,7 @@ case "${1:-}" in
     grep -qiF -- 'handoff' <<<"$out" \
       && fail "the opening brief talks about a handoff that does not exist: $out"
 
-    own_worktree 42 "$WORK/repo"
+    ran_in 42 "$WORK/repo"
     out="$(in_fleet agent_brief 42 2>&1)" \
       || fail "agent_brief exited non-zero with no note: $out"
     grep -qF -- 'issue-command.sh 42' <<<"$out" \
@@ -235,17 +250,60 @@ case "${1:-}" in
     make_fixture
     sample_note | handoff write 42 --stdin >/dev/null 2>&1 \
       || fail "could not record the note the dispatcher has to name"
-    own_worktree 42 "$WORK/repo"
+    # The `fleet.sh retry` state, exactly: this worktree ran the issue and holds
+    # the note, it is no longer OWNED -- which is the only way the dispatcher
+    # would be launching a second one -- and its directory is still there.
+    ran_in 42 "$WORK/repo"
+    disowned 42
+    [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
+      && fail "the fixture still owns #42, so this asserts the case that cannot happen"
     out="$(in_fleet agent_brief 42 2>&1)" \
       || fail "agent_brief exited non-zero: $out"
-    # ABSOLUTE, because the attempt that reads this prompt may be starting in a
+    # ABSOLUTE, because the attempt that reads this prompt IS starting in a
     # different worktree from the one holding the note -- which is the whole of
     # the `fleet.sh retry` case.
     grep -qF -- "$WORK/repo/$NOTE" <<<"$out" \
       || fail "the dispatcher's opening prompt does not name the note: $out"
     grep -qF -- 'issue-command.sh 42' <<<"$out" \
       || fail "agent_brief stopped naming the opening command: $out"
+    # A worktree that is gone takes its note with it, and the prompt must not
+    # name a path nothing can read.
+    rm -rf "$WORK/repo/.autofleet/run"
+    out="$(in_fleet agent_brief 42 2>&1)" \
+      || fail "agent_brief exited non-zero once the note was gone: $out"
+    grep -qiF -- 'handoff' <<<"$out" \
+      && fail "the prompt still names a note that is gone: $out"
     echo "ok: a relaunched issue's opening prompt names the note by absolute path"
+    ;;
+
+  empty)
+    make_fixture
+    sample_note | handoff write 42 --stdin >/dev/null 2>&1 \
+      || fail "could not record the note the empty write must leave alone"
+    before="$(cat "$WORK/repo/$NOTE")"
+
+    out="$(handoff write 42 --stdin </dev/null 2>&1)" \
+      && fail "an empty write was accepted, so round one's note is gone: $out"
+    [ "$(cat "$WORK/repo/$NOTE")" = "$before" ] \
+      || fail "the empty write replaced the note it was refused for"
+    # Whitespace is empty too: a heredoc that delivered only its own newline is
+    # the same accident with a byte in it.
+    printf '   \n\n' | handoff write 42 --stdin >/dev/null 2>&1 \
+      && fail "a note of nothing but whitespace was accepted"
+    [ "$(cat "$WORK/repo/$NOTE")" = "$before" ] \
+      || fail "the whitespace-only write replaced the note"
+
+    # ...and with no note there yet, nothing is created.
+    rm -f "$WORK/repo/$NOTE"
+    handoff write 42 --stdin </dev/null >/dev/null 2>&1 \
+      && fail "an empty write was accepted when there was no note to keep"
+    [ -e "$WORK/repo/$NOTE" ] && fail "a refused empty write created $NOTE anyway"
+
+    # The header issue-command.sh prints must never stand over an empty body.
+    out="$(brief 42 2>&1)" || fail "issue-command.sh exited non-zero: $out"
+    grep -qiF -- 'What the last attempt' <<<"$out" \
+      && fail "the brief announces a note that was never written: $out"
+    echo "ok: an empty note is refused and the round before it survives"
     ;;
 
   refs)
@@ -277,7 +335,52 @@ case "${1:-}" in
       || fail "the refusal does not say what to do about it: $out"
     out="$(printf 'x\n' | handoff write --stdin 2>&1)" \
       && fail "write picked one of two notes rather than refusing: $out"
+
+    # The issue is decided before the source is read, and only while it is still
+    # unknown: a source path that happens to carry `/issues/<n>` is a FILE.
+    mkdir -p "$WORK/repo/docs/issues"
+    printf 'from a file under docs/issues\n' >"$WORK/repo/docs/issues/7-notes.md"
+    handoff write 42 docs/issues/7-notes.md >/dev/null 2>&1 \
+      || fail "a source path containing /issues/ was refused"
+    [ -e "$WORK/repo/.autofleet/run/handoff-7.md" ] \
+      && fail "the source path was read as the issue: the note went to #7"
+    grep -qF -- 'from a file under docs/issues' "$WORK/repo/$NOTE" \
+      || fail "the file was not read; #42's note holds $(cat "$WORK/repo/$NOTE")"
+
+    # ...and a relative source is the caller's, not the repo root's. The usage
+    # advertises `write 42 note.md` unqualified, and from a subdirectory that
+    # looked for it beside the repo root and said there was no such file.
+    mkdir -p "$WORK/repo/sub"
+    printf 'from the subdirectory\n' >"$WORK/repo/sub/note.md"
+    (cd "$WORK/repo/sub" && ../scripts/fleet/handoff.sh write 42 note.md) >/dev/null 2>&1 \
+      || fail "a relative source resolved against the repo root rather than the caller"
+    grep -qF -- 'from the subdirectory' "$WORK/repo/$NOTE" \
+      || fail "the subdirectory's file was not the one read"
     echo "ok: an issue URL resolves to its number, and an ambiguous worktree is refused"
+    ;;
+
+  retry)
+    make_fixture
+    sample_note | handoff write 42 --stdin >/dev/null 2>&1 \
+      || fail "could not record the note retry has to name"
+    ran_in 42 "$WORK/repo"
+    disowned 42
+    mkdir -p "$AUTOFLEET_DIR"
+    : >"$AUTOFLEET_DIR/gaveup-42"
+
+    out="$(in_fleet cmd_retry 42 2>&1)" || fail "fleet.sh retry exited non-zero: $out"
+    grep -qF -- 'is startable again' <<<"$out" \
+      || fail "retry stopped saying the issue is startable: $out"
+    grep -qF -- "$WORK/repo/$NOTE" <<<"$out" \
+      || fail "retry does not name the note the stopped attempt left: $out"
+
+    # An issue with no note gets the line it always got, and nothing else.
+    rm -f "$WORK/repo/$NOTE"
+    : >"$AUTOFLEET_DIR/gaveup-42"
+    out="$(in_fleet cmd_retry 42 2>&1)" || fail "fleet.sh retry exited non-zero: $out"
+    grep -qiF -- 'note' <<<"$out" \
+      && fail "retry names a note that does not exist: $out"
+    echo "ok: fleet.sh retry names the note the stopped attempt left"
     ;;
 
   brief)
@@ -294,5 +397,5 @@ case "${1:-}" in
     echo "ok: the post-PR half is what asks for the note"
     ;;
   *)
-    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|refs|brief}" >&2; exit 2 ;;
+    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|brief}" >&2; exit 2 ;;
 esac

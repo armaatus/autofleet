@@ -216,9 +216,15 @@ NOTE
 
 It holds the decisions taken and why, the files touched, what each review round
 said and how it was answered, and what is still open — not the plan, which is in
-the PR body, and not the diff. `issue-command.sh` prints it back at the top of
-the next session in that worktree, and the dispatcher's opening prompt names it
-by absolute path when the worktree that holds it is still standing.
+the PR body, and not the diff.
+
+Two things read it back. `issue-command.sh` prints it at the top of the next
+session **in that worktree**, which is the case it is for and the one that
+always works. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
+you hand the issue back, so a second worktree opened alongside a first one that
+is still standing can be pointed at it — the dispatcher's own opening prompt
+names it too, but only in the narrow state where the old worktree's directory
+outlives the runner's listing of it, so `retry` is the line to read.
 
 **It lives at `.autofleet/run/handoff-<issue>.md`, and it dies with the
 worktree.** That directory is gitignored and per worktree: the note survives a

@@ -5,7 +5,6 @@
 #   ./scripts/fleet/handoff.sh 42                print #42's
 #   ./scripts/fleet/handoff.sh write 42 note.md  record it, replacing what was there
 #   ./scripts/fleet/handoff.sh write 42 --stdin  ...from stdin
-#   ./scripts/fleet/handoff.sh path 42           where it would be
 #
 # WHY THIS EXISTS (armaatus/autofleet#55). One session covers the plan, the
 # implementation, both self-review passes, the push, the PR and up to three
@@ -44,6 +43,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# BEFORE the cd, because a relative source path on the command line means what
+# the person typing it meant -- `cd sub && ../scripts/fleet/handoff.sh write 42
+# note.md` looked for `<repo>/note.md` and said there was no such file, while
+# advertising that exact form in its own usage.
+CALLER_PWD="$PWD"
 cd "$REPO_ROOT"
 # For AUTOFLEET_HANDOFF_MAX_WORDS, which is a knob a host project sets and not a
 # constant this script owns. lib.sh is the route every other script takes to
@@ -59,12 +63,18 @@ usage:
   handoff.sh <issue>           print that issue's
   handoff.sh write <issue> FILE
   handoff.sh write <issue> --stdin
-  handoff.sh path <issue>      where it would be
+
+exits 2 on a reference that is not an issue, on a worktree holding more than one
+note with no issue named, and on a source file that is not there; 3 when the
+note is over AUTOFLEET_HANDOFF_MAX_WORDS.
 USAGE
   exit 2
 }
 
-path_for() { printf '%s/handoff-%s.md' "$RUN_DIR" "$1"; }
+# lib.sh spells the path, because issue-command.sh and fleet.sh need the same
+# one and three hand-written copies of `.autofleet/run/handoff-<n>.md` is three
+# places to get it wrong. Found by the local /mattpocock-skills:code-review pass.
+path_for() { fleet_handoff_path "$REPO_ROOT" "$1"; }
 
 # The issue number, from the argument if there is one.
 #
@@ -116,6 +126,25 @@ resolve_issue() {
 # Documented, so an unbounded note is something a host asked for rather than
 # something a mistyped value produced silently; config.sh refuses anything that
 # is not a whole number for exactly that reason.
+# ...and a note with nothing in it, which is the same refusal from the other end.
+#
+# `handoff.sh write <n> --stdin` is what the brief tells an agent to run, and an
+# agent that runs it as a bare tool call gets EOF straight away: zero bytes, 0
+# words, under any cap, and the `mv` lands over the round before it. The next
+# session was then handed a "What the last attempt left" header with nothing
+# under it -- which is exactly the "cannot tell 'nothing was open' from 'it did
+# not fit'" failure the cap refuses rather than truncates for. Found by the
+# local /code-review pass, which reproduced it.
+refuse_if_empty() {
+  local candidate="$1"
+  [ -s "$candidate" ] && [ -n "$(tr -d '[:space:]' <"$candidate")" ] && return 0
+  echo "handoff: that note is empty. Nothing was written -- the note that was" >&2
+  echo "  already there is still there. If the note is on stdin, make sure it" >&2
+  echo "  reaches this command; \`handoff.sh write <issue> <file>\` is the form" >&2
+  echo "  that cannot arrive empty by accident." >&2
+  return 1
+}
+
 refuse_if_over_cap() {
   local candidate="$1" cap="${AUTOFLEET_HANDOFF_MAX_WORDS}" words
   # `if`, not `[ ... ] && return 0`. `set -e` is on, and an AND-list whose left
@@ -130,11 +159,12 @@ refuse_if_over_cap() {
   if [ "$cap" -eq 0 ]; then return 0; fi
   words="$(wc -w <"$candidate" | tr -d ' ')"
   if [ "$words" -le "$cap" ]; then return 0; fi
-  echo "handoff: that note is $words words and the cap is $cap." >&2
-  echo "  Nothing was written. The note holds the decisions and why, the files" >&2
-  echo "  touched, what each review round said and how it was answered, and what" >&2
-  echo "  is still open -- not the plan, which is in the PR body, and not the" >&2
-  echo "  diff. Cut it to $cap words, or raise AUTOFLEET_HANDOFF_MAX_WORDS in" >&2
+  # SHORT, and it does not re-list what the note holds. That definition is in
+  # the brief and in docs/CONFIGURATION.md, and a third copy here is one more
+  # place it can come to say something else. What a refusal owes the reader is
+  # the two numbers and the two ways out.
+  echo "handoff: that note is $words words and the cap is $cap. Nothing was" >&2
+  echo "  written. Cut it, or raise AUTOFLEET_HANDOFF_MAX_WORDS in" >&2
   echo "  .autofleet/config deliberately." >&2
   # RETURN, not exit: the candidate is a temp file beside the note and the
   # caller is the only thing that knows to remove it. An `exit` here left one
@@ -155,10 +185,25 @@ cmd_write() {
   # below, which removes this itself. A trap here would also have to survive the
   # refusal's exit code, which is the thing the caller reads.
   case "$src" in
-    --stdin|"") cat >"$tmp" ;;
-    *) [ -f "$src" ] || { rm -f "$tmp"; echo "handoff: no such file: $src" >&2; exit 2; }
+    --stdin|"")
+      # SAID when there is a person there. `handoff.sh write 42` with no source
+      # is the stdin form, and on a terminal that is a script sitting silently
+      # on a read nobody knows it is doing. Only on a tty: in the fleet the note
+      # arrives on a pipe and a line on stderr is noise.
+      [ -t 0 ] && echo "handoff: reading the note from stdin; end it with ^D" >&2
+      cat >"$tmp" ;;
+    *) case "$src" in
+         /*) ;;
+         # Relative to where the caller stood, then to the repo root -- the
+         # second is what every other fleet script means by a relative path, and
+         # dropping it would break `handoff.sh write 42 findings.md` run from
+         # the root through a wrapper that had already cd'd.
+         *) [ -f "$CALLER_PWD/$src" ] && src="$CALLER_PWD/$src" ;;
+       esac
+       [ -f "$src" ] || { rm -f "$tmp"; echo "handoff: no such file: $src" >&2; exit 2; }
        cat "$src" >"$tmp" ;;
   esac
+  refuse_if_empty   "$tmp" || { rm -f "$tmp"; exit 3; }
   refuse_if_over_cap "$tmp" || { rm -f "$tmp"; exit 3; }
   # Below this line nothing may fail on the note's account: the cap is the only
   # refusal, and it has already been made.
@@ -177,8 +222,14 @@ cmd_print() {
 # The rc every dispatch below branches on. `set -e` is on, so the status has to
 # be caught rather than left to kill the script on the ordinary "no note here"
 # answer.
+#
+# NOT `resolve_or_die`, which was its name and which it is not: it dies only on
+# rc 2, and hands rc 1 back so each caller can say the thing that fits -- "no
+# note here yet, name the issue" for `write`, silence for the print form. A name
+# that promises an exit the function does not always take is the one a reader
+# stops checking. Found by the local /mattpocock-skills:code-review pass.
 resolved=""
-resolve_or_die() {
+try_resolve() {
   local rc=0
   resolved="$(resolve_issue "${1:-}")" || rc=$?
   case "$rc" in
@@ -203,26 +254,28 @@ case "${1:-}" in
       ''|*[!0-9]*) ;;
       *) ref="$1"; shift ;;
     esac
-    case "${1:-}" in
-      */issues/[0-9]*) ref="$1"; shift ;;
-    esac
-    resolve_or_die "$ref" || {
+    # ...and only while the issue is still unknown. Unguarded, this second case
+    # ran against the SOURCE argument once the first had consumed the number:
+    # `handoff.sh write 42 docs/issues/7-notes.md` wrote an empty note under
+    # issue 7, left 42's stale, and exited 0. Found by the local /code-review
+    # pass, which reproduced it.
+    if [ -z "$ref" ]; then
+      case "${1:-}" in
+        */issues/[0-9]*) ref="$1"; shift ;;
+      esac
+    fi
+    try_resolve "$ref" || {
       echo "handoff: this worktree holds no note yet, so name the issue --" >&2
       echo "  ./scripts/fleet/handoff.sh write <issue> [file|--stdin]" >&2
       exit 2; }
     cmd_write "$resolved" "${1:-}"
-    ;;
-  path)
-    shift
-    resolve_or_die "${1:-}" || { echo "handoff: name the issue" >&2; exit 2; }
-    path_for "$resolved"
     ;;
   -h|--help|help) usage ;;
   # The print form, which is also the no-argument form. Absent, it says nothing
   # and exits 0: no note is the ordinary state, and a reader that treated it as
   # an error would make every fresh worktree look broken.
   ''|*)
-    resolve_or_die "${1:-}" || exit 0
+    try_resolve "${1:-}" || exit 0
     cmd_print "$resolved"
     ;;
 esac

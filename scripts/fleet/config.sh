@@ -270,19 +270,6 @@ fi
 # announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
 # the exact untrue line the 0 rejection exists to prevent. One spare zero and the
 # guard was the failure. Found by the independent review.
-# The same shape of failure as the cap below, one step earlier: `[ "$words" -le
-# "$cap" ]` with a non-number prints "integer expression expected" and returns
-# 2, so the test is FALSE, `refuse_if_over_cap` returns early, and a note of any
-# length is accepted -- the guard absent, silently, which is hard rule 3. Unlike
-# the knob below, 0 is a LEGAL value here and means "no cap"; it is only a
-# non-number that has to be refused, because only a non-number turns the guard
-# off without saying so.
-case "$AUTOFLEET_HANDOFF_MAX_WORDS" in
-  ''|*[!0-9]*)
-    echo "AUTOFLEET_HANDOFF_MAX_WORDS must be a whole number (0 turns the cap off);" \
-         "got '$AUTOFLEET_HANDOFF_MAX_WORDS'" >&2
-    exit 2 ;;
-esac
 case "$AUTOFLEET_REVIEW_MAX_TRIES" in
   ''|*[!0-9]*)
     echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
@@ -293,3 +280,26 @@ esac
   echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
        "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
   exit 2; }
+
+# The same shape of failure as the one above, one step earlier: `[ "$words" -le
+# "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
+# and returns 2, so the test is FALSE, `refuse_if_over_cap` returns early, and a
+# note of any length is accepted -- the guard absent, silently, which is hard
+# rule 3.
+#
+# BELOW the block above, and not between that block's comment and its `case`:
+# the paragraph ending "One spare zero and the guard was the failure" is about
+# AUTOFLEET_REVIEW_MAX_TRIES and has to stay next to it. Found by the local
+# /mattpocock-skills:code-review pass, which is the one that reads comments as
+# load-bearing.
+#
+# Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
+# non-number has to be refused, because only a non-number turns the guard off
+# without saying so.
+case "$AUTOFLEET_HANDOFF_MAX_WORDS" in
+  ''|*[!0-9]*)
+    echo "AUTOFLEET_HANDOFF_MAX_WORDS must be a whole number (0 turns the cap off);" \
+         "got '$AUTOFLEET_HANDOFF_MAX_WORDS'" >&2
+    exit 2 ;;
+esac
+

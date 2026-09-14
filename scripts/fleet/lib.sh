@@ -236,6 +236,16 @@ fleet_issue_number() {
   printf '%s' "$num"
 }
 
+# Where a worktree keeps the note one attempt at an issue leaves the next.
+#
+# The ROOT is a parameter and not $REPO_ROOT, because the dispatcher is the one
+# caller that asks about a tree other than its own: `.autofleet/run/` is per
+# worktree, so fleet.sh has to name the worktree that HOLDS the note, not the
+# one it is standing in. The other two callers pass their own root and get the
+# path they would have spelled by hand -- which is what this exists to stop them
+# spelling three different ways.
+fleet_handoff_path() { printf '%s/.autofleet/run/handoff-%s.md' "$1" "$2"; }
+
 # The one contract function with no runner in it: the agent terminal in ONE
 # worktree, filtered out of the machine-wide listing the driver does provide.
 # Defined HERE, above the driver source, so a driver whose runtime can answer it
