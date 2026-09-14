@@ -32,9 +32,12 @@ jobs:
       - name: the payload parses
         run: |
           set -euo pipefail
+          # .autofleet/*.sh with them: it is this repo's own seam answer and
+          # the template install.sh seeds into a host, and nothing parsed it.
+          # Found by the standards review of #85.
           for script in scripts/fleet/*.sh scripts/fleet/runner/*.sh \
                         .claude/hooks/*.sh .github/scripts/*.sh \
-                        evals/*.sh tests/*.sh install.sh; do
+                        evals/*.sh tests/*.sh .autofleet/*.sh install.sh; do
             bash -n "$script" || { echo "::error file=$script::does not parse"; exit 1; }
           done
 

@@ -1169,15 +1169,30 @@ EOF
   # is a quiet run that mentions it. `="1"` counts, because a pattern rejecting
   # every quote reds a CI file that is correct -- the expensive direction.
   #
-  # What it still cannot see, both in the false-RED direction, which is the one
-  # this row is willing to be wrong in: a step- or job-level `env:` block (the
-  # normal YAML way to set one), and a backslash line continuation between the
-  # variable and the invocation. Both mean the same thing -- the flag has to be
-  # ON the invocation. That is a real constraint on how ci.yml may spell it
-  # rather than an oversight, it is written into #80 where the person who writes
-  # that line will read it, and the alternative is reading YAML with grep. A
-  # false red says exactly where to look; a false green is what this row exists
-  # to prevent. The continuation case was found by /code-review.
+  # What it cannot see, in the false-RED direction, which is the one this row is
+  # willing to be wrong in: a step- or job-level `env:` block (the normal YAML
+  # way to set one), and a backslash line continuation between the variable and
+  # the invocation. Both mean the same thing -- the flag has to be ON the
+  # invocation. That is a real constraint on how ci.yml may spell it rather than
+  # an oversight, and it is written into #80 where the person who writes that
+  # line will read it.
+  #
+  # And one in the false-GREEN direction, which is worth naming rather than
+  # implying this row is safe in that direction: a job that reaches the suite
+  # INDIRECTLY -- `make test`, a composite action, a wrapper script -- is
+  # invisible to anything grepping ci.yml, and the direct job satisfies the
+  # `ci_runs > 0` floor on its behalf. Reading YAML with grep is the limit
+  # being accepted here; a second route into the suite would need its own row.
+  # Both directions found by /code-review.
+  #
+  # NOTE FOR WHOEVER EDITS THE BLOCK BELOW: it is a heredoc inside `$( )`, and
+  # bash 3.2 -- the bash macOS ships -- tracks quotes across the whole command
+  # substitution, heredoc body included. So a lone apostrophe anywhere in there,
+  # in prose as readily as in code, is a SYNTAX ERROR on a mac and parses fine
+  # on the bash 5 in CI. Reword around it -- "the first draft" carries what the
+  # possessive would have. It cost a round of this review to find, by running
+  # it; nothing asserts it, because asserting it needs a bash 3.2 and the
+  # `bash -n` step in CI is bash 5.
   ci="$REPO_ROOT/.github/workflows/ci.yml"
   ci_report="$(python3 - "$ci" <<'CIPY'
 import re, sys
@@ -1211,14 +1226,19 @@ LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
 # quietly and was not counted at ALL -- which is the exact scenario the comment
 # above claims this now catches, passing because the other job supplied the
 # count. Found by /code-review.
-# The path prefix is any run of characters ending in a slash that carries no
-# command separator, not just one starting with a dot or a slash: the spelling
-# "$GITHUB_WORKSPACE/tests/run.sh" is real and the first draft of this regex
-# missed it. Parentheses belong IN the prefix, because a command substitution
-# before the slash is another real spelling -- excluding them, as the second
-# draft did, made that one count zero, which is the false green this row exists
-# to prevent. Neither draft said what its character class actually held. Both
-# found by /code-review.
+# The prefix class excludes whitespace and the three separators the fragments
+# were split on, and nothing else -- so a prefix may hold a command
+# substitution, a brace expansion, a quote or an equals sign, and must end in a
+# slash. Said by enumeration because two earlier drafts described this class in
+# words and both descriptions were wrong: the spelling
+# "$GITHUB_WORKSPACE/tests/run.sh" is real and the first draft missed it, and
+# excluding parentheses -- which the second draft did -- made a command
+# substitution before the slash count ZERO, which is the false green this row
+# exists to prevent. Found by /code-review, three times in a row.
+#
+# The leading class is wider: whatever may sit immediately before the path, so
+# start-of-fragment, whitespace, or one of the characters a shell word can begin
+# after.
 #
 # It cannot swallow mytests/run.sh: the prefix has to end in a slash, and what
 # precedes the whole match has to be a separator or the start of the fragment.
@@ -1339,6 +1359,18 @@ EOF
 #!/usr/bin/env bash
 x=$(( "1" + 2 ))
 EOF
+  # `.autofleet/` is the one that matters most here: `tests/` and `install.sh`
+  # are autofleet shapes a host may not have at all, but install.sh SEEDS
+  # `.autofleet/setup.sh` into every host project. Move that glob up into the
+  # payload list -- the single edit the comment beside it argues against -- and
+  # every host repository reds on its own seeded file while this phase stays
+  # green. It did, until this row. Found by both local passes, which each
+  # mutated it and watched all six rows pass.
+  mkdir -p "$WORK/host/.autofleet"
+  cat >"$WORK/host/.autofleet/setup.sh" <<'EOF'
+#!/usr/bin/env bash
+x=$(( "1" + 2 ))
+EOF
   out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] \
     || fail "a host project was failed for a quote in its OWN scripts: $out"
@@ -1351,6 +1383,26 @@ EOF
   out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && fail "autofleet's own tests/ and install.sh were not judged: $out"
   ok "...while in autofleet its own tests/ and install.sh are"
+
+  # ...and `.autofleet/` on its own, in a tree where it is the ONLY bad file.
+  # The row above would still pass with the glob deleted outright, because
+  # tests/run.sh is bad in that tree too. Deleting it is the other mutation both
+  # passes found surviving.
+  mkdir -p "$WORK/only/.autofleet" "$WORK/only/tests" "$WORK/only/scripts/fleet"
+  : >"$WORK/only/tests/test_runner_bound.sh"
+  cat >"$WORK/only/scripts/fleet/ok.sh" <<'EOF'
+#!/usr/bin/env bash
+x=$(( 1 + 2 ))
+EOF
+  cat >"$WORK/only/.autofleet/setup.sh" <<'EOF'
+#!/usr/bin/env bash
+x=$(( "1" + 2 ))
+EOF
+  out="$(cd "$WORK/only" && python3 "$WORK/check.py" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && fail "autofleet's own .autofleet/ was not judged at all: $out"
+  grep -q ".autofleet/setup.sh" <<<"$out" \
+    || fail "the bad line under .autofleet/ was not named: $out"
+  ok "...and .autofleet/, which install.sh seeds into every host project"
 
   # A tree with no payload at all is the check silently stopping -- the one case
   # that has to stay loud, and the reason the empty-paths branch exists at all:

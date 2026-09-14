@@ -1641,13 +1641,19 @@ def arith_spans(text):
 # lines avoiding, and this is the same shape one section up. Found by both local
 # passes.
 #
-# `tests/`, `install.sh` and `.autofleet/` are autofleet's own and are NOT
-# vendored, so they are added only here -- keyed on the same sentinel the
-# phase-registry check uses, for the same reason it uses one. `.autofleet/` is
-# the seeded ANSWER in a host project and the shipped template here, which is
-# why it sits on this side of the sentinel rather than in the payload above;
-# without it, `.autofleet/setup.sh` was the one tracked shell file in this
-# repository that nothing judged. Found by /code-review.
+# `tests/`, `install.sh` and `.autofleet/` are not PAYLOAD, so they are added
+# only here -- keyed on the same sentinel the phase-registry check uses, for the
+# same reason it uses one.
+#
+# Not "not vendored", which was the first wording and is wrong about the one
+# that matters: install.sh SEEDS `.autofleet/setup.sh` into every host project.
+# It is written there and then owned there -- the host's answer to the seam,
+# not autofleet's code -- which is why it sits on this side of the sentinel
+# rather than in the payload above. Get that backwards and every host
+# repository reds on its own seeded file. Without the glob at all,
+# `.autofleet/setup.sh` was the one tracked shell file here that nothing
+# judged. Both found by /code-review; `runner_bound/bash32` has a row on each
+# direction, because the first version of this had neither.
 paths = (glob.glob("scripts/fleet/*.sh") + glob.glob("scripts/fleet/runner/*.sh")
          + glob.glob(".claude/hooks/*.sh") + glob.glob(".github/scripts/*.sh")
          + glob.glob("evals/*.sh"))
