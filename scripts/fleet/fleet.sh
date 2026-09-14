@@ -1487,6 +1487,40 @@ stop_reviewers() {
 # and both stopped being true when the confirmation call and the two-valued `$2`
 # arrived. Found by the independent review -- the same class of stale claim this
 # branch had already fixed once.
+# The fetched PR refs of pull requests that are no longer open.
+#
+# `review.sh` fetches `refs/pull/<n>/head` into `refs/autofleet/review/<n>` so a
+# delta round's range resolves, and drops it in its EXIT trap -- which does not
+# run on a SIGTERM taken before the reviewer is spawned (the TERM trap is
+# installed after it), nor on a SIGKILL from `stop.sh --now`, nor on an OOM. A
+# ref left behind pins every object that pull request ever had, `git gc` can
+# never collect them, and nothing else in the fleet looks at these at all. This
+# is the only place that sees both the refs and the open list.
+#
+# ITS OWN FUNCTION, called past `prune_review_logs`'s `AUTOFLEET_KEEP_REVIEWS`
+# gate rather than from inside it. That knob is documented as "keep every piece
+# of review state", and a GC pin on a closed PR's objects is not review state --
+# a project that sets 0 to keep its transcripts has not asked to keep those.
+# Both found by the independent review.
+#
+# OPEN PRs ARE SPARED whatever their state, because a ref belonging to a
+# reviewer running right now is the one thing this must not take: the range it
+# was fetched for is resolved against it for the whole run. `$2` is the same
+# "could the caller answer" signal the record sweep reads, so a listing nobody
+# could answer for prunes nothing.
+prune_review_refs() {
+  local open_prs="$1" ref num
+  [ "${2:-no}" = yes ] || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    num="${ref##*/}"
+    case " $open_prs " in *" $num "*) continue ;; esac
+    git update-ref -d "$ref" 2>/dev/null || true
+  done <<EOF
+$(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
+EOF
+}
+
 prune_review_logs() {
   local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -1674,30 +1708,6 @@ EOF
   # the file they are looking for.
   [ "$orphans" -gt 0 ] && say "...and $orphans stray file(s) whose transcript is gone"
 
-  # ...and the fetched PR refs of pull requests that are no longer open.
-  #
-  # `review.sh` fetches `refs/pull/<n>/head` into `refs/autofleet/review/<n>` so
-  # a delta round's range resolves, and drops it in its EXIT trap -- which does
-  # not run on a SIGTERM taken before the reviewer is spawned (the TERM trap is
-  # installed after it), nor on a SIGKILL from `stop.sh --now`, nor on an OOM.
-  # A ref left behind pins every object that pull request ever had, `git gc` can
-  # never collect them, and nothing else in the fleet looks at these at all.
-  # This is the only place that sees both the refs and the open list. Found by
-  # the local review of armaatus/autofleet#65.
-  #
-  # OPEN PRs ARE SPARED whatever their state, because a ref belonging to a
-  # reviewer running right now is the one thing this must not take -- the range
-  # it was fetched for is resolved against it for the whole run. The same
-  # `$open_prs` guard the records above use, so a listing nobody could answer
-  # for has already returned.
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    num="${ref##*/}"
-    case " $open_prs " in *" $num "*) continue ;; esac
-    git update-ref -d "$ref" 2>/dev/null || true
-  done <<EOF
-$(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
-EOF
   return 0
 }
 
@@ -1945,6 +1955,8 @@ print(len(json.load(sys.stdin)))
   # `yes` only when the parse produced something we can trust: `gh` succeeding
   # is not enough, because the parse below it can fail silently.
   prune_review_logs "$open_prs" "$prs_answered"
+  # Past the keep-reviews gate on purpose -- see the function's own comment.
+  prune_review_refs "$open_prs" "$prs_answered"
 
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every

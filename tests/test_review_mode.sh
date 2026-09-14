@@ -319,10 +319,19 @@ stub_reviewer() {
   PROMPT_FILE="$WORK/reviewer-prompt"
   : >"$PROMPT_FILE"
   export PROMPT_FILE
+  # ...and the WHOLE argv. The prompt is not the only thing that decides what
+  # the reviewer can read: `--add-dir` is what puts the carried-forward context
+  # inside its workspace, and a review that names a file it cannot open proceeds
+  # on the range alone and prints `scope: delta` either way. Found by the
+  # independent review.
+  ARGV_FILE="$WORK/reviewer-argv"
+  : >"$ARGV_FILE"
+  export ARGV_FILE
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
 printf 'ran\n' >>"$REVIEWER_CALLS"
 printf '%s' "\$2" >"$PROMPT_FILE"
+printf '%s\n' "\$@" >"$ARGV_FILE"
 case "$1" in
   marked|unmarked|json|text)
     trailer=""
@@ -2034,7 +2043,9 @@ PY2
   ok "...and the same holds for the prose about the JSON output mode"
   grep -qF "$PROMPT_FILE" "$WORK/bin/fake-reviewer" \
     || fail "the stub cannot record the prompt; \$PROMPT_FILE did not expand"
-  ok "...and the prompt-capture path is baked in, so the prompt is assertable"
+  grep -qF "$ARGV_FILE" "$WORK/bin/fake-reviewer" \
+    || fail "the stub cannot record the argv; \$ARGV_FILE did not expand"
+  ok "...and the prompt- and argv-capture paths are baked in, so both are assertable"
   ;;
 
 # -------------------------------------------------------------- await_threads
@@ -2289,11 +2300,31 @@ XX
   [ -s "$ctx" ] || fail "no carried-forward context file at $ctx"
   prompt_has "$ctx" || fail "the prompt does not name the context file"
   ok "...and the prompt names a FILE, not third-party text spliced into itself"
+  # ...and the reviewer can actually open it. `$LOG_DIR` is outside the
+  # repository root the reviewer runs from, and `--allowed-tools Read` grants
+  # the tool, not the workspace: a headless `claude -p` denies a read outside
+  # its directories rather than asking. Without the grant every delta round
+  # named a path it could not open and said `scope: delta` regardless. Found by
+  # the independent review.
+  grep -qxF -- "--add-dir" "$ARGV_FILE"     || { cat "$ARGV_FILE" >&2; fail "the reviewer was not granted the directory the context file is in"; }
+  grep -qxF -- "$AUTOFLEET_DIR/reviews" "$ARGV_FILE"     || { cat "$ARGV_FILE" >&2; fail "--add-dir does not name the log directory"; }
+  ok "...and the reviewer is granted the directory that file is in"
   grep -q "It declared 2 findings" "$ctx" || { cat "$ctx" >&2; fail "the previous round's count was not carried"; }
   grep -q "PREVIOUS ROUND FINDING" "$ctx" || { cat "$ctx" >&2; fail "the previous round's findings were not carried"; }
   ok "...and the file carries what the last round found, by its declared count"
   grep -q "the line number was stale" "$ctx" || { cat "$ctx" >&2; fail "the answer was not carried"; }
   ok "...and how it was answered"
+  # THE OLD TRAILERS COME OFF. `plant_round` writes a body ending in
+  # `<!-- review-findings: N -->` and `<!-- independent-review: local <sha> -->`;
+  # carried through verbatim, in front of a reviewer whose own last two lines
+  # must be exactly those, an echoed stale sha makes `merge_gate` ignore the
+  # review and the PR blocks on one that was submitted. The count survives as a
+  # NUMBER, which is the honest form of it. Found by the independent review.
+  grep -q "independent-review: local" "$ctx" \
+    && { cat "$ctx" >&2; fail "the previous round's head marker was carried into the file the reviewer reads"; }
+  grep -q "review-findings:" "$ctx" \
+    && { cat "$ctx" >&2; fail "the previous round's findings trailer was carried verbatim"; }
+  ok "...with the previous round's trailers stripped, so none can be echoed back"
   grep -q "touch second.txt" "$ctx" || { cat "$ctx" >&2; fail "the commits between the heads were not carried"; }
   ok "...and the commits that stood between the two heads"
   ;;
@@ -2321,7 +2352,7 @@ XX
   scope_kth)
   # EVERY Kth ROUND IS FULL, so no pull request is judged by an unbroken chain
   # of deltas. With AUTOFLEET_REVIEW_FULL_EVERY=2 the second round is the one.
-  make_fixture; stub_reviewer marked; make_origin
+  make_fixture; stub_reviewer silent; make_origin
   first="$PR_HEAD"
   plant_round "$first" 1
   advance_head a.txt one
@@ -2329,19 +2360,20 @@ XX
   advance_head b.txt two
   export AUTOFLEET_REVIEW_SCOPE=delta AUTOFLEET_REVIEW_FULL_EVERY=2
   run_it 42 >"$WORK/out" 2>&1; rc=$?
-  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the Kth round did not submit (got $rc)"; }
+  [ "$rc" = 5 ] || { cat "$WORK/out" >&2; fail "the silent stub did not exit 5 (got $rc)"; }
   grep -q "scope: full" "$WORK/out" \
     || { cat "$WORK/out" >&2; fail "two rounds of review did not trip FULL_EVERY=2"; }
   ok "the Kth round reverts to a full review"
-  # ...and a round that is NOT the Kth is a delta, which is what says the K test
-  # is a test and not a scope that never fires. A new head, because the run
-  # above left a counting review on this one and a second run would exit 8.
-  advance_head c.txt three
+  # ...and the SAME ROUND COUNT with a wider K is a delta, which is what says K
+  # decided. ONE variable changes between the two runs: the stub submits
+  # nothing, so the head does not move and the derived count is 2 both times.
+  # The earlier version of this row advanced the head AND widened K together,
+  # so it established neither. Found by the independent review.
   export AUTOFLEET_REVIEW_FULL_EVERY=4
   run_it 42 >"$WORK/out2" 2>&1
   grep -q "scope: delta" "$WORK/out2" \
-    || { cat "$WORK/out2" >&2; fail "the same round with FULL_EVERY=4 was not a delta"; }
-  ok "...and the same round with a wider K is a delta, so K is what decided"
+    || { cat "$WORK/out2" >&2; fail "the same round count with FULL_EVERY=4 was not a delta"; }
+  ok "...and the same round count with a wider K is a delta, so K is what decided"
   ;;
 
 # ----------------------------------------------------------------- cost_row
@@ -2451,6 +2483,49 @@ XX
   grep -q "touch second.txt" "$ctx" \
     || { cat "$ctx" >&2; fail "the commits were pushed out of the file by the padded body"; }
   ok "...while the commits between the heads still survive it"
+
+  # `0` IS "CARRY NOTHING", not "carry a truncation notice". The prompt tells
+  # the reviewer the file holds what the last round found; at 0 the file held
+  # one line saying it had been cut. Found by the independent review.
+  advance_head third.txt again
+  export AUTOFLEET_REVIEW_CONTEXT_MAX=0
+  run_it 42 >"$WORK/out0" 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.context.md" ] \
+    && fail "a cap of 0 still wrote a context file"
+  ok "a cap of 0 writes no context file at all"
+  prompt_has "Carried forward:" \
+    && { cat "$PROMPT_FILE" >&2; fail "the prompt still told the reviewer to read a file that does not exist"; }
+  ok "...and the prompt does not name one"
+  prompt_has "Previously reviewed at:" \
+    || { cat "$PROMPT_FILE" >&2; fail "the range went with it; 0 caps the context, not the scope"; }
+  ok "...while the range is still handed over, because 0 caps the context and not the scope"
+  ;;
+
+# ------------------------------------------------------------ scope_ctxbroken
+  scope_ctxbroken)
+  # A CONTEXT BUILD THAT CANNOT RUN must not report `delta`. The python that
+  # writes the findings, the answer and the threads imports from `merge_gate.py`
+  # -- a file agents in this repository edit, which is why `counting_review`
+  # wraps its own import in a `try`. This block is `>"$ctx" 2>/dev/null` in a
+  # script with no `-e`, so a raise left the file holding the header and the
+  # commit list, printed `scope: delta`, and said nothing: a narrower read that
+  # really was a weaker read. Found by the independent review.
+  make_fixture; stub_reviewer marked; make_origin
+  first="$PR_HEAD"
+  plant_round "$first" 2
+  advance_head second.txt hello
+  # The one failure mode the comment above names, reproduced the way it happens:
+  # merge_gate.py does not import.
+  printf 'def broken(:
+' >>"$WORK/repo/.github/scripts/merge_gate.py"
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  # Exit 2 is also acceptable here -- `counting_review` refuses a gate it cannot
+  # load, which is the older and stronger guard. What must NOT happen is a run
+  # that reports `delta` while carrying nothing.
+  grep -q "scope: delta" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "it reported a delta review whose carried context could not be built"; }
+  ok "a context build that cannot run does not report a delta review (exit $rc)"
   ;;
 
 # ------------------------------------------------------------- status_rounds
@@ -2517,6 +2592,6 @@ XX
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_nofetch|scope_ctxcap|status_rounds|cost_row" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row" >&2
   exit 2 ;;
 esac

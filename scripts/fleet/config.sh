@@ -150,6 +150,7 @@
 # The check itself is at the BOTTOM, with its neighbour's, for that reason.
 
 # Found by the independent review of the change that added it.
+
 # What a round-N reviewer is asked to read: `full` (the whole branch, every
 # round) or `delta` (what changed since the last reviewed head, plus what that
 # reaches).
@@ -309,6 +310,22 @@ fi
 
 # ----------------------------------------------------- knobs that must be sane
 #
+#
+# AFTER the host config, because that is the route that matters: a value only
+# checked before it is checked on the one path nobody uses. See the note by
+# AUTOFLEET_REVIEW_MAX_TRIES above for why this knob in particular cannot be
+# allowed through wrong -- a non-number makes `[ N -ge X ]` return 2, the cap
+# test false, and the cap itself absent.
+#
+# FATAL, and fatal to every fleet command, not just the dispatcher: this file is
+# sourced by lib.sh, so `exit` here takes the sourcing shell with it -- including
+# `stop.sh`, which is the one you reach for when something is wrong. That is the
+# intended trade and it is named here rather than discovered: the message says
+# exactly which knob and what it got, and the fix is a one-line edit to the file
+# the message is about. A cap that is silently absent is the failure this exists
+# to prevent, and it cannot be prevented by a warning nobody reads in a
+# dispatcher log.
+
 # ONE refusal, four knobs. Spelled out inline it was two copies; the third and
 # fourth would have been where a `-gt` met a `-ge` and one cap became
 # off-by-one silently. The comment blocks below stay attached to the knobs they
@@ -328,21 +345,6 @@ config_whole_number() {
   [ "$2" -ge "$3" ] || { echo "$1 must be $4; got '$2'" >&2; exit 2; }
 }
 
-#
-# AFTER the host config, because that is the route that matters: a value only
-# checked before it is checked on the one path nobody uses. See the note by
-# AUTOFLEET_REVIEW_MAX_TRIES above for why this knob in particular cannot be
-# allowed through wrong -- a non-number makes `[ N -ge X ]` return 2, the cap
-# test false, and the cap itself absent.
-#
-# FATAL, and fatal to every fleet command, not just the dispatcher: this file is
-# sourced by lib.sh, so `exit` here takes the sourcing shell with it -- including
-# `stop.sh`, which is the one you reach for when something is wrong. That is the
-# intended trade and it is named here rather than discovered: the message says
-# exactly which knob and what it got, and the fix is a one-line edit to the file
-# the message is about. A cap that is silently absent is the failure this exists
-# to prevent, and it cannot be prevented by a warning nobody reads in a
-# dispatcher log.
 # Digits first, then a NUMERIC test for positive. `''|*[!0-9]*|0` rejected the
 # literal `0` and let `00` straight through -- all digits, not that literal --
 # and `[ 0 -ge 00 ]` is true, so the cap is zero attempts: no PR is ever
