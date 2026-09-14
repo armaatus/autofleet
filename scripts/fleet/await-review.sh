@@ -56,7 +56,14 @@ MAX_ROUNDS="${AWAIT_REVIEW_MAX_ROUNDS:-3}"
 # in the middle of the text the agent was being told to act on. Twenty is past
 # anything a review of one PR leaves, and what is withheld is named and pointed
 # at review-status.sh rather than dropped.
-MAX_THREADS="${AWAIT_REVIEW_MAX_THREADS:-20}"
+MAX_THREADS=20
+# Normalised HERE rather than in the Python block, so the default is stated once
+# and what reaches Python is always a number. A mistyped override falls back
+# instead of raising a traceback into the middle of the agent's instructions.
+case "${AWAIT_REVIEW_MAX_THREADS:-}" in
+  ""|*[!0-9]*|0) : ;;
+  *)             MAX_THREADS="$AWAIT_REVIEW_MAX_THREADS" ;;
+esac
 ROUNDS_FILE="$REPO_ROOT/.autofleet/run/review-rounds"
 # Exit 8 is the one failure path with no natural bound: it fires on poll 1, so
 # the deadline never applies, and a conflict is not a round of disagreement so
@@ -622,14 +629,28 @@ def moved(thread):
 # newer than the stamp written below and the next round prints it -- a bound,
 # not a loss. Cutting from the other end would bury the withheld ones forever.
 fresh = sorted((t for t in threads if moved(t)), key=newest)
-try:
-    keep = int(cap)
-except ValueError:
-    # Same reasoning as the guarded load above: a mistyped
-    # AWAIT_REVIEW_MAX_THREADS must not put a traceback in the middle of the
-    # instructions the agent is being handed.
-    keep = 20
-shown, withheld = fresh[:keep], fresh[keep:]
+keep = int(cap)
+shown = fresh[:keep]
+# THE CUT GOES BETWEEN TIMESTAMPS, NEVER INSIDE ONE. Straight slicing looks
+# right and is the same defect as the one this file's `cutoff` already fixes,
+# one step earlier: GitHub stamps every inline comment of a single submitted
+# review with the same `createdAt`, so a review leaving more than `keep` inline
+# findings gives them all ONE timestamp. The cap then falls inside that run,
+# every shown mark equals the oldest withheld one, the stamp cannot advance past
+# it, and the next round computes the identical split -- the same twenty
+# forever, and the rest never. So the tie group at the boundary is dropped
+# whole...
+if len(shown) < len(fresh):
+    edge = newest(fresh[len(shown)])
+    shown = [t for t in fresh if newest(t) < edge]
+    # ...unless dropping it leaves nothing, which is the case where the whole
+    # cap sits inside one instant. Then the group is printed whole, over the
+    # cap: a bound that yields rather than a round that hands back nothing and
+    # cannot ever hand back more.
+    if not shown:
+        first = newest(fresh[0])
+        shown = [t for t in fresh if newest(t) == first]
+withheld = fresh[len(shown):]
 
 print("--- unresolved review threads")
 for t in shown:

@@ -102,6 +102,12 @@
 #                                 moved since the round that handed it back is
 #                                 not handed back again. It is still open, so
 #                                 the output names review-status.sh.
+#   test_review_mode.sh await_moved
+#                                 ...while a thread that HAS moved -- the agent
+#                                 replied and the reviewer answered -- is. This
+#                                 is the row that goes red if the dedupe above
+#                                 is written as "never twice" rather than
+#                                 "not unless it changed".
 #   test_review_mode.sh await_own_reply
 #                                 ...but the agent's OWN reply is not the thread
 #                                 moving: that is the loop doing what it is told
@@ -118,12 +124,13 @@
 #                                 back rather than guessed at. Without this row,
 #                                 deleting the `local` disjunct leaves every
 #                                 other await phase green.
-#   test_review_mode.sh await_moved
-#                                 ...while a thread that HAS moved -- the agent
-#                                 replied and the reviewer answered -- is. This
-#                                 is the row that goes red if the dedupe above
-#                                 is written as "never twice" rather than
-#                                 "not unless it changed".
+#   test_review_mode.sh await_cap the cap cuts BETWEEN timestamps, never inside
+#                                 one. A review stamps every inline comment it
+#                                 leaves with the same createdAt, so a cut
+#                                 inside that run leaves the stamp unable to
+#                                 advance past it and the remainder is never
+#                                 handed back by any round. Three threads in one
+#                                 instant against a cap of two.
 #   test_review_mode.sh stubwrite the reviewer stub's heredoc is unquoted, so its
 #                                 body is expanded on the way to the file and a
 #                                 backtick in prose is a command. One named
@@ -1817,10 +1824,16 @@ PY2
   ok "a thread unchanged since the round that handed it back is not handed back again"
 
   # Not printing it is only half right: the thread is still open and still
-  # blocks the merge, so something has to say where to find it.
-  grep -qF "review-status.sh" "$WORK/out" \
-    || fail "nothing pointed at the script that lists every open thread"
-  ok "...and the output names review-status.sh, which lists every open thread"
+  # blocks the merge, so something has to say where to find it. Asserted on the
+  # sentence that BRANCH emits, not on `review-status.sh`, which the closing
+  # prose prints unconditionally -- a grep for the script name matches on every
+  # run that reaches exit 0 and so cannot fail. Found by round 2 of the
+  # independent review.
+  grep -qF "unresolved thread(s) not printed" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the still-open thread was not counted"; }
+  grep -qF "Every open thread, with its id:" "$WORK/out" \
+    || fail "the count did not say where the rest is"
+  ok "...and it is counted, with review-status.sh named beside the count"
   ;;
 
 # ---------------------------------------------------------------- await_moved
@@ -1876,9 +1889,10 @@ PY2
   grep -qF "the open finding" "$WORK/out" \
     && { cat "$WORK/out" >&2; fail "the agent's own reply counted as the thread moving"; }
   ok "a thread whose newest comment is the agent's own reply has not moved"
-  grep -qF "review-status.sh" "$WORK/out" \
-    || fail "nothing pointed at the script that lists every open thread"
-  ok "...and it is still counted as open, with review-status.sh named"
+  # The branch's own sentence, for the reason `await_quiet` gives.
+  grep -qF "unresolved thread(s) not printed" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the still-open thread was not counted"; }
+  ok "...and it is still counted as open, with review-status.sh named beside it"
   ;;
 
 # ------------------------------------------------------ await_own_reply_local
@@ -1908,7 +1922,46 @@ PY2
   ok "in local mode an author-authored reply is handed back, not guessed at"
   ;;
 
+# ------------------------------------------------------------------ await_cap
+  await_cap)
+  # The cap cuts BETWEEN timestamps, never inside one. GitHub stamps every
+  # inline comment of a single submitted review with the same `createdAt`, so a
+  # review leaving more than AWAIT_REVIEW_MAX_THREADS inline findings gives them
+  # all ONE. Cut inside that run and every printed thread carries the oldest
+  # withheld one's timestamp: the stamp cannot advance past it, the next round
+  # computes the identical split, and the remainder is never handed back at all
+  # -- `head -200`'s silent cut, moved one layer down and made permanent.
+  #
+  # Three threads in one instant against a cap of two, so the group can only be
+  # printed whole or cut wrong. Found by round 2 of the independent review, on
+  # the fix for the same defect one step earlier.
+  make_fixture
+  export AWAIT_REVIEW_MAX_THREADS=2
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_ONE   0 "the first finding"  "2026-09-10T10:00:01Z"
+  plant_thread T_TWO   0 "the second finding" "2026-09-10T10:00:01Z"
+  plant_thread T_THREE 0 "the third finding"  "2026-09-10T10:00:01Z"
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the wait did not end on a review (got $rc)"; }
+
+  for finding in "the first finding" "the second finding" "the third finding"; do
+    grep -qF "$finding" "$WORK/out" \
+      || { cat "$WORK/out" >&2
+           fail "the cap cut inside one timestamp and lost: $finding"; }
+  done
+  ok "a tie group larger than the cap is printed whole rather than cut inside"
+
+  # ...and the next round agrees there is nothing new, which is what says the
+  # first round really handed all three back rather than merely printing them.
+  plant_review "2026-09-10T11:00:00Z"
+  await_it >"$WORK/round2" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/round2" >&2; fail "round two did not end on the new review (got $rc)"; }
+  grep -qF "the first finding" "$WORK/round2" \
+    && { cat "$WORK/round2" >&2; fail "round two re-read what round one handed back"; }
+  ok "...and round two treats all three as already handed back"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap" >&2
   exit 2 ;;
 esac
