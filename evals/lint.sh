@@ -873,7 +873,12 @@ if not cap:
 pages = ("scripts/fleet/config.sh", "docs/CONFIGURATION.md")
 bad = []
 for path in pages:
-    prose = open(path).read()
+    # LOWER-CASED. The check read the raw text, and `config.sh` states the rule
+    # in capitals -- so it was satisfied only by an incidental second mention
+    # further down the same comment. Reword the sentence that actually publishes
+    # the rule and this passed; delete the aside and it failed with the rule
+    # still correct. Found by the independent review.
+    prose = open(path).read().lower()
     if "non-alphanumeric" not in prose:
         bad.append("%s does not say the slug replaces every non-alphanumeric "
                    "character" % path)
@@ -883,9 +888,14 @@ for path in pages:
     for stale in ("every `/` and `.` turned into", "`/`-and-`.`-to-`-`"):
         if stale in prose:
             bad.append("%s still describes the old `/`-and-`.` slug rule" % path)
-if cap.group(1) not in open("scripts/fleet/config.sh").read():
-    bad.append("scripts/fleet/config.sh does not name the %s-character slug cap "
-               "cost.sh applies" % cap.group(1))
+# BOTH pages, not just config.sh. The doc is the one a host project is SENT to,
+# and it published the rule without the cap -- so of the two pages this check
+# exists to keep honest, the less complete one was the less checked. Found by the
+# independent review.
+for path in pages:
+    if cap.group(1) not in open(path).read():
+        bad.append("%s does not name the %s-character slug cap cost.sh applies"
+                   % (path, cap.group(1)))
 if bad:
     sys.exit("the published slug rule has drifted from the one that runs:\n  "
              + "\n  ".join(bad))

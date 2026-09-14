@@ -120,6 +120,15 @@ JSONL
   # ...and a half-written last line, with no trailing newline, exactly as a live
   # agent's transcript looks while it is being appended to.
   printf '%s' '{"type":"assistant","message":{"id":"msg_d","usa' >>"$dir/session-one.jsonl"
+  # ...and the half of that which used to be FATAL: the first two bytes of an em
+  # dash. The decode happens in the read loop, OUTSIDE the guard around
+  # `json.loads`, so under a strict decode one truncated multi-byte character
+  # anywhere raised UnicodeDecodeError out of the module -- a traceback, exit 1,
+  # and no table at all, not even for the issues already summed. An agent killed
+  # mid-write is how a transcript ends up like this, and this repo writes em
+  # dashes by the hundred. The ASCII truncation above proved only the benign
+  # half of the promise. Found by the independent review.
+  printf '\xe2\x80' >>"$dir/session-one.jsonl"
 
   cat >"$dir/session-two.jsonl" <<'JSONL'
 {"type":"assistant","message":{"id":"msg_e","usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}}
@@ -146,7 +155,9 @@ case "${1:-}" in
   sums)
     make_fixture
     make_transcripts
-    out="$(cost 48 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
+    # `#48`, not `48`: every line this report prints spells an issue with the
+    # hash, so the form its own output teaches has to be a form it accepts.
+    out="$(cost '#48' 2>/dev/null)" || fail "cost.sh exited non-zero: $out"
     row="$(printf '%s\n' "$out" | awk '$1 == 48')"
     [ -n "$row" ] || fail "no row for #48 in:
 $out"
@@ -293,7 +304,36 @@ $out"
     set -- $row
     [ "$2" = 1 ] || fail "sessions: expected 1, got $2 -- one directory was counted once per path"
     [ "$4" = 4 ] || fail "output: expected 4, got $4 -- 8 means the same directory was summed twice"
-    echo "ok: a worktree path past the slug cap is found by its prefix, and counted once"
+    # ...and a DIFFERENT issue whose path shares the prefix. Two worktrees agree
+    # for 200 characters whenever the root they sit under is longer than that,
+    # and the prefix match then handed every directory back for every path: each
+    # row the sum of all of them, the total multiplied by the number of rows.
+    # A prefix matching more than one directory identifies none of them.
+    printf '%s\n' "$deep/another-issue-entirely" >"$AUTOFLEET_DIR/ran/72"
+    other="$AUTOFLEET_TRANSCRIPT_DIR/$(printf %s "$slug" | cut -c1-200)-9f8e7d"
+    mkdir -p "$other"
+    cat >"$other/session.jsonl" <<'JSONL'
+{"type":"assistant","message":{"id":"msg_other","usage":{"input_tokens":50,"output_tokens":60,"cache_read_input_tokens":70,"cache_creation_input_tokens":80}}}
+JSONL
+    out="$(cost 71 2>&1)"
+    rc=$?
+    [ "$rc" = 0 ] || fail "an ambiguous slug prefix exited $rc; cost must never fail a run"
+    grep -qi 'share the first 200' <<<"$out" \
+      || fail "it did not say the prefix matched more than one directory: $out"
+    set -- $(printf '%s\n' "$out" | awk '$1 == 71')
+    [ "${2:-}" = 0 ] \
+      || fail "sessions: expected 0 for an ambiguous prefix, got ${2:-<no row>}:
+$out"
+    [ "${4:-}" = 0 ] \
+      || fail "output: expected 0 for an ambiguous prefix, got ${4:-<no row>} -- it counted a directory it could not identify:
+$out"
+    # ...and it must not ALSO claim the worktree was reaped. The ambiguity line
+    # states the cause; the reaped line would state a different, false one over
+    # the top of it.
+    grep -q 'reaped' <<<"$out" \
+      && fail "it blamed a reaped worktree for a row the ambiguity had already explained:
+$out"
+    echo "ok: a path past the slug cap is found by its prefix, counted once, and refused when ambiguous"
     ;;
 
   filtered)

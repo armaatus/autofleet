@@ -53,10 +53,14 @@ USAGE
       exit 2 ;;
     -*) printf 'cost.sh: unknown option %s\n' "$1" >&2; exit 2 ;;
     *)
-      case "$1" in
+      # One leading `#` allowed: every line this report prints spells an issue as
+      # `#48`, so the form the output teaches was the form the parser refused.
+      # Found by the independent review.
+      n="${1#\#}"
+      case "$n" in
         ''|*[!0-9]*) printf 'cost.sh: not an issue number: %s\n' "$1" >&2; exit 2 ;;
       esac
-      issues+=("$1"); shift ;;
+      issues+=("$n"); shift ;;
   esac
 done
 
@@ -125,6 +129,13 @@ FIELDS = [
 # instead -- see directories_for().
 SLUG_MAX = 200
 
+# Worktree paths whose slug prefix matched more than one directory. They have a
+# stated reason for showing zeros, so they must not ALSO be told they have no
+# transcripts and were probably reaped -- that line states a CAUSE, and it would
+# be stating a false one over the top of the true one printed moments earlier.
+# The same trap round two of the review found on the subagent path.
+ambiguous = set()
+
 def note(line):
     # stderr, in BOTH shapes. An explanation on stdout is a line every --json
     # consumer has to strip, and the whole point of --json is that these numbers
@@ -153,16 +164,35 @@ def directories_for(path):
     if len(name) <= SLUG_MAX:
         return []
     # Over the cap the CLI keeps the first SLUG_MAX characters and appends "-"
-    # plus a hash of the path. The prefix is what identifies it here -- and it is
-    # already 200 characters of absolute path, so a false match would need two
-    # worktrees agreeing that far.
+    # plus a hash of the path, and the prefix is what identifies it here.
+    #
+    # EXACTLY ONE MATCH, OR NONE. The comment here used to argue that 200
+    # characters of absolute path made a collision implausible; it is not, and a
+    # comment asserting a false invariant is what stops the next reader looking.
+    # Two worktrees agree that far whenever the ROOT they sit under is itself
+    # longer than 200 characters -- `slug(path)[:200]` is then entirely inside
+    # the shared prefix, every directory matches every path, each row becomes the
+    # sum of all of them and the total is multiplied by the number of rows.
+    # Silent, nothing on stderr, no zero to notice.
+    #
+    # One path has one hash and therefore one directory, so more than one match
+    # cannot be identified and is refused rather than guessed. Said, because a
+    # worktree that has transcripts and reports none is the case the "reaped"
+    # line would otherwise explain wrongly. Found by the independent review.
     prefix = name[:SLUG_MAX] + "-"
     try:
         listing = sorted(os.listdir(root))
     except OSError:
         return []
-    return [os.path.join(root, n) for n in listing
-            if n.startswith(prefix) and os.path.isdir(os.path.join(root, n))]
+    matched = [os.path.join(root, n) for n in listing
+               if n.startswith(prefix) and os.path.isdir(os.path.join(root, n))]
+    if len(matched) > 1:
+        ambiguous.add(path)
+        note("%d transcript directories share the first %d characters of the"
+             " slug for %s, so none of them can be told apart; not counted"
+             % (len(matched), SLUG_MAX, path))
+        return []
+    return matched
 
 pairs = []
 seen_pairs = set()
@@ -232,7 +262,23 @@ def add_file(path, sums):
     seen = set()
     counted = False
     try:
-        handle = open(path, encoding="utf-8")
+        # `errors="replace"`, and it is the difference between this file keeping
+        # its promise and breaking it. The decode happens in `for raw in handle`
+        # below, OUTSIDE the `try` around `json.loads` -- so with a strict decode
+        # one invalid byte anywhere in any transcript raised UnicodeDecodeError
+        # out of here, out of measure(), out of the module: a traceback, exit 1,
+        # and NO TABLE AT ALL, not even for the issues already summed. The header
+        # of this file promises the opposite, and so does docs/CONFIGURATION.md.
+        #
+        # The trigger is ordinary. A transcript carries the agent prose, this
+        # repo is full of em dashes, and an em dash is three bytes -- so an agent
+        # killed mid-write (`stop.sh --now`, the time-box interrupt, a crashed
+        # worktree) leaves a partial multi-byte character at the tail. The
+        # ASCII-truncated line was handled and the multi-byte one was fatal.
+        # Replaced, the bad bytes become U+FFFD, `json.loads` rejects the line,
+        # and it lands in `bad_lines` where the comment already says it belongs.
+        # Found by the independent review.
+        handle = open(path, encoding="utf-8", errors="replace")
     except OSError:
         bad_files += 1
         return False
@@ -355,7 +401,8 @@ silent = []
 for issue in (order if usable else []):
     paths = by_issue[issue]
     sessions, found, sums = measure(paths)
-    if not found:
+    # ...unless something already said why this row is empty. See `ambiguous`.
+    if not found and not any(p in ambiguous for p in paths):
         silent.append(issue)
     rows.append({"issue": issue, "worktrees": paths, "sessions": sessions,
                  **{key: sums[key] for _, key in FIELDS}})

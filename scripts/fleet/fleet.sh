@@ -209,7 +209,6 @@ BLOCKED_LABEL="${AUTOFLEET_BLOCKED_LABEL:-blocked}"
 # issue_labels_in split it here.
 ANSWER_SEP="$(printf '\t')"
 
-mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 # The poll cache is emptied further down, and only when nobody is using it: see
 # the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
@@ -270,6 +269,14 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ]; then
   shift
   exec "$REPO_ROOT/scripts/fleet/cost.sh" "$@"
 fi
+
+# BELOW the cost dispatch, not above it. Up at the top this ran for `cost` too,
+# so a reporting command created three state directories under ~/.autofleet on a
+# machine that had never run the fleet -- and then reported that the fleet had
+# run nothing. "It reads transcripts off disk and opens no worktree" is how the
+# dispatch above describes itself. Nothing between here and there reads these
+# directories at source time. Found by the independent review.
+mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep

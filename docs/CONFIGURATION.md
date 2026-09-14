@@ -281,7 +281,10 @@ exists to show.
 
 **What ties a session to an issue** is the worktree path. The slug is the
 absolute working directory with every non-alphanumeric character turned into
-`-`, and `own()` records each issue's path under `$FLEET_DIR/ran/<issue>` —
+`-`, truncated at **200** characters with a hash of the path appended past that
+— a slug over the cap is matched on its prefix, and a prefix that matches more
+than one directory identifies none of them and is reported rather than guessed.
+`own()` records each issue's path under `$FLEET_DIR/ran/<issue>` —
 *appended*, so an issue that `retry` ran twice is measured across both
 worktrees, and deliberately *not* cleared when the worktree is released, or the
 report would empty itself exactly when a run finishes. One short file per issue
