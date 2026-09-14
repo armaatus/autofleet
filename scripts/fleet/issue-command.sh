@@ -105,9 +105,11 @@ if [ -z "$ref" ] && runner_available 2>/dev/null; then
   esac
 fi
 
-# Accept a bare number or any .../issues/<n>[...] URL.
-num="$(printf '%s' "$ref" | sed -nE 's#.*/issues/([0-9]+).*#\1#p; s#^([0-9]+)$#\1#p' | head -1)"
-[ -n "$num" ] || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
+# Accept a bare number or any .../issues/<n>[...] URL. lib.sh holds the parse,
+# because handoff.sh needs the same one and the copy that lived here carried a
+# BSD-sed defect that turned `/issues/42` into `4242` -- see fleet_issue_number.
+num="$(fleet_issue_number "$ref")" \
+  || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
 
 # Quoted heredoc, and the number substituted afterwards: this block is full of
 # backticks, and in an unquoted heredoc the shell runs every one of them -- the

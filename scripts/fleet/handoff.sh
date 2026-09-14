@@ -75,15 +75,25 @@ path_for() { printf '%s/handoff-%s.md' "$RUN_DIR" "$1"; }
 # not is a person standing in the worktree typing the bare form, and a worktree
 # holds one issue's note, so the glob answers them without a CLI call that can
 # hang. Ambiguity is refused rather than guessed at.
+#
+# THREE ANSWERS, none of them an `exit`. This runs inside `$(...)` at every
+# callsite, where `exit` ends the SUBSHELL and hands the caller a status it
+# reads as "could not resolve" -- so the bare print form answered an ambiguous
+# worktree with the refusal on stderr and exit 0, and `write` printed a second,
+# different message over the first. The rc is what the caller branches on:
+#
+#   0  the number is on stdout
+#   1  nothing to resolve: no argument, and no note in this worktree
+#   2  a reference that is not an issue, or more than one note here. Said, once,
+#      on stderr -- which is not captured by the substitution.
 resolve_issue() {
-  local ref="${1:-}" num
+  local ref="${1:-}" num found n=0 f
   if [ -n "$ref" ]; then
-    num="$(printf '%s' "$ref" | sed -nE 's#.*/issues/([0-9]+).*#\1#p; s#^([0-9]+)$#\1#p' | head -1)"
-    [ -n "$num" ] || { echo "handoff: could not resolve an issue from '$ref'" >&2; exit 2; }
+    num="$(fleet_issue_number "$ref")" \
+      || { echo "handoff: could not resolve an issue from '$ref'" >&2; return 2; }
     printf '%s' "$num"
     return 0
   fi
-  local found n=0 f
   for f in "$RUN_DIR"/handoff-*.md; do
     [ -e "$f" ] || continue
     n=$((n + 1)); found="$f"
@@ -93,7 +103,7 @@ resolve_issue() {
     # print form says nothing and exits 0, `write` says it needs a number.
     0) return 1 ;;
     1) found="$(basename "$found" .md)"; printf '%s' "${found#handoff-}" ;;
-    *) echo "handoff: this worktree holds $n notes; name the issue" >&2; exit 2 ;;
+    *) echo "handoff: this worktree holds $n notes; name the issue" >&2; return 2 ;;
   esac
 }
 
@@ -159,6 +169,21 @@ cmd_print() {
   cat "$target"
 }
 
+# The rc every dispatch below branches on. `set -e` is on, so the status has to
+# be caught rather than left to kill the script on the ordinary "no note here"
+# answer.
+resolved=""
+resolve_or_die() {
+  local rc=0
+  resolved="$(resolve_issue "${1:-}")" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    # Said already, by resolve_issue, in the words that fit the reason.
+    2) exit 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "${1:-}" in
   write)
     shift
@@ -176,23 +201,23 @@ case "${1:-}" in
     case "${1:-}" in
       */issues/[0-9]*) ref="$1"; shift ;;
     esac
-    num="$(resolve_issue "$ref")" || {
+    resolve_or_die "$ref" || {
       echo "handoff: this worktree holds no note yet, so name the issue --" >&2
       echo "  ./scripts/fleet/handoff.sh write <issue> [file|--stdin]" >&2
       exit 2; }
-    cmd_write "$num" "${1:-}"
+    cmd_write "$resolved" "${1:-}"
     ;;
   path)
     shift
-    num="$(resolve_issue "${1:-}")" || { echo "handoff: name the issue" >&2; exit 2; }
-    path_for "$num"
+    resolve_or_die "${1:-}" || { echo "handoff: name the issue" >&2; exit 2; }
+    path_for "$resolved"
     ;;
   -h|--help|help) usage ;;
   # The print form, which is also the no-argument form. Absent, it says nothing
   # and exits 0: no note is the ordinary state, and a reader that treated it as
   # an error would make every fresh worktree look broken.
   ''|*)
-    num="$(resolve_issue "${1:-}")" || exit 0
-    cmd_print "$num"
+    resolve_or_die "${1:-}" || exit 0
+    cmd_print "$resolved"
     ;;
 esac

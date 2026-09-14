@@ -201,6 +201,41 @@ fleet_handle_for_path() { fleet_field_for_path 2 1 "$1"; }
 # `path<TAB>state` -- match column 1, print column 2.
 fleet_state_for_path()  { fleet_field_for_path 1 2 "$1"; }
 
+# An issue number out of a bare number or any `.../issues/<n>[...]` URL. Empty
+# on stdout and rc 1 for anything that is neither, including the empty string,
+# so a caller with a fallback can take it and a caller without one can refuse.
+#
+# SHARED, because it was written twice and both copies had the same defect. The
+# `sed` form -- `s#.*/issues/([0-9]+).*#\1#p; s#^([0-9]+)$#\1#p` -- runs BOTH
+# substitutions over the same pattern space: the first rewrites the URL to the
+# number and prints it, and the second then matches that number and prints it
+# again. On GNU sed those are two lines and `head -1` hid it. On BSD sed, which
+# is what every macOS ships and therefore what the fleet runs on, the input was
+# fed by `printf '%s'` with no trailing newline, the last `p` does not add one,
+# and the two prints landed on ONE line: `/issues/42` resolved to `4242`.
+# issue-command.sh then looked up an issue that does not exist and handoff.sh
+# wrote a note under a filename nothing would ever read -- green in CI, wrong on
+# the machine.
+#
+# PARAMETER EXPANSION rather than a fixed `sed`, and that is the second half of
+# the lesson. The obvious fix is `t` to end the script after a substitution that
+# took; BSD sed reads the rest of a `;`-separated line as that `t`'s LABEL and
+# dies with "undefined label", so the portable spelling needs three `-e`s and a
+# reader who knows why. There is no regex engine in the version below and
+# nothing to be portable about.
+fleet_issue_number() {
+  local ref="${1:-}" num
+  [ -n "$ref" ] || return 1
+  case "$ref" in
+    # `##`, the greedy strip, so a path with more than one `/issues/` in it
+    # resolves the same way the `.*` it replaces did -- on the last.
+    */issues/*) num="${ref##*/issues/}"; num="${num%%[!0-9]*}" ;;
+    *)          num="$ref" ;;
+  esac
+  case "$num" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$num"
+}
+
 # The one contract function with no runner in it: the agent terminal in ONE
 # worktree, filtered out of the machine-wide listing the driver does provide.
 # Defined HERE, above the driver source, so a driver whose runtime can answer it
