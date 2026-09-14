@@ -1065,7 +1065,7 @@ echo "== the flow's own scripts"
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
               resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
-              review.sh; do
+              review.sh self-review.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -1151,7 +1151,12 @@ else
   # pointer, without which stage 2 is unreachable and half the brief is dead
   # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
   # names them and the brief the fleet actually sends never did.
-  for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
+  # `self-review.sh` rather than `record-review.sh` since armaatus/autofleet#51:
+  # step 3 is one command that runs both passes in processes that are not the
+  # agent's, and records the marker itself. `record-review.sh` is still the
+  # primitive and stage 2 still names it -- the rebase remedy re-records without
+  # re-reviewing -- so it is asserted there, in the list below.
+  for named in self-review.sh "/code-review" "mattpocock-skills:code-review" \
                 --after-pr researcher verifier "gh pr diff --stat"; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
@@ -1320,15 +1325,20 @@ def triple(text):
 # Each signature is the OPERATIVE form, chosen so that naming the rule in
 # passing does not match it:
 #
-#   record-review.sh    with its argument. Stage 2 names the script bare, in the
-#                       rebase remedy, and that is a pointer rather than the
-#                       instruction to record a review before pushing.
+#   self-review.sh      by name. Nothing else may say it: CLAUDE.md's "Finishing
+#                       a task" used to carry its own copy of the two slash
+#                       commands, which is how an agent ends up running them in
+#                       the context the move was supposed to get them out of
+#                       (armaatus/autofleet#51). Stage 2 names `record-review.sh`
+#                       bare in the rebase remedy, which is the primitive under
+#                       this one and a pointer rather than the instruction.
 #   at most three rounds  the phrasing IS the rule. Stage 1 says "three review
 #                       rounds" about the context budget, which is a different
 #                       claim and does not match.
 RULES = [
-    ("record a local review before pushing", "the brief, stage 1",
-     lambda t: "record-review.sh findings.md" in t),
+    ("run both self-review passes and record the result before pushing",
+     "the brief, stage 1",
+     lambda t: "self-review.sh" in t),
     ("arm `--auto --squash` the moment the PR exists", "the brief, stage 2",
      lambda t: "--auto --squash" in t),
     ("the three-round cap", "the brief, stage 2",
@@ -1384,7 +1394,7 @@ DOCS = {
     "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
     ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
     ".claude/agents/verifier.md":   ("map",   "read by the subagent, in the subagent's own context"),
-    "findings.md":                  ("written", "the file the local review writes for record-review.sh"),
+    "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is under .autofleet/run/"),
 }
 
 # `+`, not `*`. With `*` the prefix is optional, so the bare word `.md` in

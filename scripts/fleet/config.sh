@@ -95,6 +95,29 @@
 # .claude/agents/reviewer.md a budget rather than a hope. 80 is what
 # claude-review.yml grants.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
+# ---------------------------------------------------------------- the SELF-review
+#
+# The OTHER review: the two passes the author runs on its own diff before the
+# pull request exists (`scripts/fleet/self-review.sh`). Separate knobs from the
+# independent reviewer's above, because the two runs are shaped differently --
+# one reads a pull request through `gh` and submits a verdict, the other reads a
+# local range and prints findings -- and a project that wants a cheaper model for
+# its own diff than for the verdict on it has to be able to say so.
+#
+# The command DEFAULTS to the independent reviewer's, so a host that has set
+# nothing, and a host that has set only `AUTOFLEET_REVIEW_CMD`, both still work.
+: "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
+# How long ONE pass may run before it is killed. Lower than the independent
+# reviewer's 1800 because there are two of them and they are spent out of the
+# agent's AUTOFLEET_TIMEBOX (10800s), not out of the dispatcher's poll: two
+# wedged passes at 1800 would be an hour of a three-hour box with nothing to show.
+: "${AUTOFLEET_SELF_REVIEW_TIMEOUT:=1200}"
+# Each pass's turn budget, passed through as `--max-turns`. The same number
+# `claude-review.yml` and the independent reviewer get: both passes fan out into
+# sub-agents of their own, so the visible budget is what keeps "report what you
+# have while you still have turns" meaningful.
+: "${AUTOFLEET_SELF_REVIEW_MAX_TURNS:=80}"
+
 # How many attempts one head may get that produce NO VERDICT.
 #
 # A reviewer that runs and submits nothing is retried, because that is usually

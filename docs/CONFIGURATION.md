@@ -85,11 +85,15 @@ the foundation issue is the one to label.
 
 ### The review
 
-Two reviews gate a pull request, and only the second one is configurable here.
-The first is the local `/code-review` and `/mattpocock-skills:code-review` pass
-the author runs before pushing — `guard.py` refuses the push without it, and
-`merge_gate.py` refuses to merge a PR whose body does not name both. That is
-required in every mode.
+Two reviews gate a pull request, and both are configurable here.
+
+The first is the **self-review**: the `/code-review` and
+`/mattpocock-skills:code-review` passes the author runs on its own diff before
+pushing — `guard.py` refuses the push without it, and `merge_gate.py` refuses to
+merge a PR whose body does not name both. Required in every mode.
+[`scripts/fleet/self-review.sh`](../scripts/fleet/self-review.sh) runs both, in
+processes that are not the author's session, and calls `record-review.sh` with
+what they found.
 
 The second is the **independent** review: a verdict from a context that has not
 seen the conversation which produced the diff. `AUTOFLEET_REVIEW_MODE` says where
@@ -102,6 +106,34 @@ it runs.
 | `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
 | `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many attempts one head may get that end with **no verdict** — a reviewer that ran and submitted nothing, or one killed at the timeout. A run that never reached a reviewer (the fleet was stopped, `gh` would not answer, the command is not on `PATH`) does not spend one. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. **Must be a positive whole number: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included.** A cap that is silently absent is the failure the check exists to prevent, so it refuses rather than warns. |
 | `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
+
+#### The self-review's own knobs
+
+Separate from the independent reviewer's above, because the two runs are shaped
+differently — one reads a pull request through `gh` and submits a verdict, the
+other reads a local commit range and prints findings — and a project that wants a
+cheaper model for its own diff than for the verdict on it has to be able to say
+so.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_SELF_REVIEW_CMD` | `$AUTOFLEET_REVIEW_CMD` | What runs each pass, with `-p` and a fixed read-only tool allowlist. Defaults to the independent reviewer's command, so a host that has set nothing — and a host that has set only `AUTOFLEET_REVIEW_CMD` — still works. |
+| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent out of the agent's `AUTOFLEET_TIMEBOX`, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". |
+| `AUTOFLEET_SELF_REVIEW_MAX_TURNS` | `80` | Each pass's turn budget, passed as `--max-turns`. The same number the independent reviewer and `claude-review.yml` get: both passes fan out into sub-agents of their own. |
+
+> **A pass that produces nothing records nothing.** `self-review.sh` exits
+> non-zero, names the pass that was silent, and writes no marker — so the push
+> gate stays closed. Recording an empty marker would satisfy that gate and let a
+> pull request go out claiming two reviews that never ran, which is strictly
+> worse than a review that is merely absent. "Produced nothing" is
+> `merge_gate.py`'s own `MIN_REVIEW_BODY` bar, asked rather than paraphrased.
+
+> Like `AUTOFLEET_REVIEW_CMD`, this seam is advertised as model-agnostic and is
+> not: the flags are Claude Code's. That is
+> [#27](https://github.com/armaatus/autofleet/issues/27), open against
+> `review.sh`; `self-review.sh` is deliberately a second consumer of the same
+> shape rather than a third convention, so one fix covers both.
+
 
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
 submits it, from that workflow's own account. It needs a

@@ -105,9 +105,14 @@ case "${1:-}" in
 
     grep -q 'SPEC-BODY-MARKER' <<<"$out" \
       || fail "the spec is no longer printed, so the agent starts from a title: $out"
+    # `self-review.sh` rather than `record-review.sh` since
+    # armaatus/autofleet#51: step 3 is one command that runs both passes in
+    # processes that are not the agent's, and records the marker itself. The two
+    # slash commands are still named -- they are the words `merge_gate.py` greps
+    # the PR body for, and the agent has to know which set of findings is which.
     has "stage 1" "$out" \
       '/code-review high' '/mattpocock-skills:code-review' \
-      './scripts/fleet/record-review.sh' \
+      './scripts/fleet/self-review.sh' \
       './scripts/fleet/issue-command.sh --after-pr 42'
     # The two things the brief never said and the issue asks for. Without them
     # the fleet's own agents are the only ones that never hear that the subagents
@@ -139,9 +144,14 @@ case "${1:-}" in
 
     # "and nothing else": an agent running this already has the spec and steps
     # 1-3 in its context, and reprinting them is the duplication #49 is about.
+    # `self-review.sh` on the negative list for the same reason `record-review.sh
+    # findings.md` was: step 3 belongs to stage 1, and a second copy here is what
+    # an agent reads instead of the original. `record-review.sh` BARE stays out
+    # of this list -- stage 2's rebase remedy names it, because a rebase needs a
+    # marker for the new head and not a second pair of full passes.
     lacks "stage 2" "$out" \
       'SPEC-BODY-MARKER' '**1. Plan.**' '**3. Review it yourself' \
-      '/mattpocock-skills:tdd' 'record-review.sh findings.md'
+      '/mattpocock-skills:tdd' 'self-review.sh'
     echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
     ;;
   reading)

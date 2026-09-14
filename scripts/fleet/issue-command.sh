@@ -187,19 +187,16 @@ then fix the code -- `/mattpocock-skills:tdd` is that loop.
 __TEST_COMMAND__ green, with a test that would have
 failed before your change. Run it and read the output.
 
-**3. Review it yourself, before anything leaves this worktree.** Two passes,
-because they look for different things and this machine has the time:
+**3. Review it yourself, before anything leaves this worktree.** One command. It
+runs both passes outside this session and records the marker:
 
-    /code-review high                  # defects: correctness, efficiency, reuse
-    /mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
+    ./scripts/fleet/self-review.sh
 
-REVIEW.md is the policy. Fix what is real, re-run the tests, then:
-
-    ./scripts/fleet/record-review.sh findings.md
-
-Until that marker exists for the exact commit you are pushing, the guard hook
-refuses `git push` and `gh pr create` here. A PR from the fleet arrives already
-reviewed or it does not arrive.
+`/code-review high` finds defects, `/mattpocock-skills:code-review` finds
+conformance, REVIEW.md is the policy. Fix what is real, re-run the tests, run it
+again -- the marker is per-commit. Until it exists for the commit you are
+pushing, the guard hook refuses `git push` and `gh pr create` here. A PR from the
+fleet arrives already reviewed or it does not arrive.
 
 **Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
 marker exists, run:
