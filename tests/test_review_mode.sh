@@ -102,6 +102,15 @@
 #                                 moved since the round that handed it back is
 #                                 not handed back again. It is still open, so
 #                                 the output names review-status.sh.
+#   test_review_mode.sh await_own_reply
+#                                 ...but the agent's OWN reply is not the thread
+#                                 moving: that is the loop doing what it is told
+#                                 ("reply with the reason"), and counting it as
+#                                 news hands the finding back with the answer
+#                                 under it. Only meaningful in `github` mode --
+#                                 in `local` mode reviewer and author are one
+#                                 account and the wait shows the thread rather
+#                                 than guessing.
 #   test_review_mode.sh await_moved
 #                                 ...while a thread that HAS moved -- the agent
 #                                 replied and the reviewer answered -- is. This
@@ -411,12 +420,16 @@ XX
 
 # One review thread, replacing any already planted under the same id:
 #   plant_thread <id> <resolved 0|1> <first comment> <newest comment createdAt>
-#                [<newest comment body>]
+#                [<newest comment body> [<newest comment author>]]
 #
 # The fifth argument is what makes a thread MOVE. Without it the thread is one
 # comment and the timestamp is that comment's; with it the thread has gained a
 # reply, which is the shape of a reviewer answering an agent -- and the only
 # thing that separates "still open" from "something new to read".
+#
+# The sixth says WHO replied, defaulting to the reviewer. `armaatus` is the
+# fixture PR's own author, which is how a phase plants the agent replying to
+# itself.
 plant_thread() {
   GH_THREADS="$WORK/threads"; export GH_THREADS
   [ -s "$GH_THREADS" ] || printf '[]' >"$GH_THREADS"
@@ -424,13 +437,14 @@ plant_thread() {
 import json, sys
 path, tid, resolved, body, at = sys.argv[1:6]
 reply = sys.argv[6] if len(sys.argv) > 6 else ""
+who = sys.argv[7] if len(sys.argv) > 7 else "reviewer"
 threads = [t for t in json.load(open(path)) if t["id"] != tid]
 threads.append({
     "id": tid, "isResolved": resolved == "1", "isOutdated": False,
     "path": "scripts/fleet/await-review.sh", "line": 42,
     "comments": {"totalCount": 2 if reply else 1,
                  "nodes": [{"author": {"login": "reviewer"}, "body": body}]},
-    "latestComment": {"nodes": [{"author": {"login": "reviewer"},
+    "latestComment": {"nodes": [{"author": {"login": who},
                                  "body": reply or body, "createdAt": at}]}})
 json.dump(threads, open(path, "w"))
 XX
@@ -1825,7 +1839,42 @@ PY2
   ok "a thread whose newest comment is newer than the last round is handed back"
   ;;
 
+# ------------------------------------------------------------ await_own_reply
+  await_own_reply)
+  # The agent replying to a thread is not the thread MOVING. It is the loop this
+  # script prints doing what it says -- "reply on the thread with the reason" --
+  # and counting it as news hands the original finding straight back, with the
+  # agent's own answer under it. That is round two re-reading round one by
+  # another route, which is the whole defect this file is closing.
+  #
+  # `github` mode, because the distinction only exists there: in `local` mode the
+  # reviewer and the PR author are ONE account (merge_gate.review_mode), nothing
+  # in the payload can tell the two apart, and the wait prints the thread rather
+  # than guessing -- showing a finding twice beats hiding one.
+  make_fixture
+  printf 'AUTOFLEET_REVIEW_MODE=github\n' >"$WORK/repo/.autofleet/config"
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+  grep -qF "the open finding" "$WORK/round1" \
+    || fail "round one did not hand the thread back, so round two proves nothing"
+
+  plant_review "2026-09-10T11:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T11:00:01Z" \
+    "disagree -- the guard already covers the empty case" armaatus
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "the open finding" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "the agent's own reply counted as the thread moving"; }
+  ok "a thread whose newest comment is the agent's own reply has not moved"
+  grep -qF "review-status.sh" "$WORK/out" \
+    || fail "nothing pointed at the script that lists every open thread"
+  ok "...and it is still counted as open, with review-status.sh named"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply" >&2
   exit 2 ;;
 esac

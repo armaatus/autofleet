@@ -665,7 +665,12 @@ So the wait asks for *threads*, through the same
 `review-status.sh` use, and prints a thread when it is unresolved **and** its
 newest comment is newer than the one recorded on the last round. A thread the
 agent has already seen and nobody has touched is not repeated; a thread it
-replied to and the reviewer answered has *moved*, and is. Still-open threads it
+replied to and the reviewer answered has *moved*, and is. The agent's *own*
+reply does not count as movement — the loop tells it to reply with its reasoning
+before resolving, so without that test every thread it answered would come back
+with its own answer underneath, which is the same failure by another route. In
+`local` mode the reviewer and the author are one account, nothing can tell the
+two replies apart, and the thread is shown rather than guessed at. Still-open threads it
 withholds are counted, never truncated, and pointed at `review-status.sh`, which
 exists to print every one of them.
 

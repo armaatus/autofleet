@@ -85,6 +85,11 @@ if [ -r "$ROUNDS_FILE" ]; then
   # empty, which is exactly the "nothing seen yet" state.
   read -r seen_pr seen_round seen_head seen_stamp seen_comment_at \
     <"$ROUNDS_FILE" 2>/dev/null || true
+  # A dash is how record_round writes a field it does not have; see there for
+  # why an empty one cannot be written literally.
+  [ "${seen_head:-}" = "-" ] && seen_head=""
+  [ "${seen_stamp:-}" = "-" ] && seen_stamp=""
+  [ "${seen_comment_at:-}" = "-" ] && seen_comment_at=""
   [ "${seen_pr:-}" = "$pr" ] && round="${seen_round:-0}"
   if [ "${seen_pr:-}" != "$pr" ]; then
     seen_head=""; seen_stamp=""; seen_comment_at=""
@@ -114,8 +119,14 @@ record_round() {
   local stamp_head="" stamp_at="" stamp_comment=""
   { IFS= read -r stamp_head; IFS= read -r stamp_at
     IFS= read -r stamp_comment; } <"$stamp" 2>/dev/null || true
-  printf '%s %s %s %s %s\n' \
-    "$pr" "$round" "$stamp_head" "$stamp_at" "$stamp_comment" >"$ROUNDS_FILE"
+  # A MISSING FIELD IS A DASH, not an empty string, and that is the fifth
+  # field's doing. `read` splits on a RUN of whitespace, so `42 1 abc  <at>` --
+  # an absent `submittedAt` between two values that are present -- assigns the
+  # thread timestamp to `seen_stamp` and leaves `seen_comment_at` empty: the
+  # review dedupe silently reading the wrong clock. With four fields the empty
+  # one was always trailing and the collapse was harmless; with five it is not.
+  printf '%s %s %s %s %s\n' "$pr" "$round" "${stamp_head:--}" \
+    "${stamp_at:--}" "${stamp_comment:--}" >"$ROUNDS_FILE"
 }
 
 if [ "$round" -gt "$MAX_ROUNDS" ]; then
@@ -550,18 +561,33 @@ path, seen_at, cap, pr, stamp_path = sys.argv[1:6]
 sys.path.insert(0, ".github/scripts")
 # Safe by the time this runs: the block above already exited 2 if merge_gate.py
 # would not import, so reaching here means it does.
-from merge_gate import unresolved_threads
+from merge_gate import review_mode, unresolved_threads
 
-pull = json.load(open(path))["data"]["repository"]["pullRequest"]
+# Defensively, like the reviews block above: a null pullRequest here would
+# otherwise print a traceback into the MIDDLE of the instructions the agent is
+# being handed, which is worse than the missing section it replaces.
+try:
+    pull = json.load(open(path))["data"]["repository"]["pullRequest"] or {}
+except Exception:
+    pull = {}
 threads = unresolved_threads(pull)
 partial = bool(((pull.get("reviewThreads") or {}).get("pageInfo") or {})
                .get("hasNextPage"))
 status = "  ./scripts/fleet/review-status.sh %s" % pr
+pr_author = ((pull.get("author") or {}).get("login") or "").lower()
+# In `local` mode the reviewer and the PR author are ONE GitHub account
+# (merge_gate.review_mode), so nothing in this payload can tell an agent's reply
+# from a reviewer's and the author test below has to be off. Failing open there
+# costs a thread shown twice; failing closed would hide a live finding.
+local = review_mode() == "local"
+
+
+def last_comment(thread):
+    return ((thread.get("latestComment") or {}).get("nodes") or [{}])[0]
 
 
 def newest(thread):
-    node = ((thread.get("latestComment") or {}).get("nodes") or [{}])[0]
-    return node.get("createdAt") or ""
+    return last_comment(thread).get("createdAt") or ""
 
 
 def moved(thread):
@@ -569,7 +595,19 @@ def moved(thread):
     # A thread whose newest comment carries no timestamp is printed. There is
     # nothing to compare, and the only two ways to be wrong here are showing a
     # finding twice and hiding one; this picks the first every time.
-    return not at or at > seen_at
+    if not at:
+        return True
+    if at <= seen_at:
+        return False
+    # THE AGENT'S OWN REPLY IS NOT THE THREAD MOVING. The prose this script
+    # prints tells it to reply on the thread with its reasoning before resolving,
+    # so every thread it answers and leaves open has a comment newer than the
+    # stamp -- and without this test the next round hands the original finding
+    # straight back with the agent's own answer underneath it. That is round two
+    # re-reading round one, reached by a different route from the endpoint this
+    # whole change removed.
+    who = ((last_comment(thread).get("author") or {}).get("login") or "").lower()
+    return local or who != pr_author
 
 
 # Oldest first, and that is what makes the cap safe rather than a second silent
@@ -577,7 +615,8 @@ def moved(thread):
 # newer than the stamp written below and the next round prints it -- a bound,
 # not a loss. Cutting from the other end would bury the withheld ones forever.
 fresh = sorted((t for t in threads if moved(t)), key=newest)
-shown, withheld = fresh[:int(cap)], fresh[int(cap):]
+keep = int(cap)
+shown, withheld = fresh[:keep], fresh[keep:]
 
 print("--- unresolved review threads")
 for t in shown:
@@ -603,18 +642,25 @@ for t in shown:
         for line in (last.get("body") or "").splitlines():
             print("    " + line)
 
-if withheld:
-    print("...and %d more unresolved thread(s), not printed here rather than cut "
-          "mid-comment." % len(withheld))
-    print("They are the newest, and the next round prints them. All of them now:")
-    print(status)
-elif not shown and threads:
-    print("%d still open, none of them changed since the round this last handed "
-          "back." % len(threads))
-    print("They still block the merge. Where they are:")
-    print(status)
-elif not threads:
+if not threads:
     print("none.")
+else:
+    # Every open thread this round did NOT print, in the two ways it can happen.
+    # Both are counted whatever else was printed: a round that shows one moved
+    # thread and silently omits five open ones is the noise problem solved by
+    # creating a blindness problem, and those five still block the merge.
+    quiet = len(threads) - len(shown) - len(withheld)
+    if withheld:
+        print("...and %d more that moved, withheld rather than cut mid-comment. "
+              "They are the newest, so the next round prints them."
+              % len(withheld))
+    if quiet:
+        print("%d unresolved thread(s) not printed: nothing has changed on them "
+              "since the round this last handed back. They still block the merge."
+              % quiet)
+    if withheld or quiet:
+        print("Every open thread, with its id:")
+        print(status)
 if partial:
     print("(this PR has more review threads than one read returns, so that list "
           "is partial:)")
@@ -624,8 +670,20 @@ print()
 # The third line of the stamp: the newest thread comment this round handed back.
 # Never lower than what an earlier round recorded -- a round that printed
 # nothing must not reopen everything the round before it closed out.
+marks = [seen_at] + [newest(t) for t in shown]
+stamp_at = max(marks)
+if withheld:
+    # ...and never as high as the oldest thing WITHHELD, which is not the same
+    # statement. Every inline comment of one submitted review shares a
+    # `createdAt`, so the newest thread printed and the oldest withheld routinely
+    # carry the SAME timestamp -- the cap falls inside one instant rather than
+    # between two. Stamping it would suppress that withheld thread for good:
+    # `head -200`'s silent cut, moved one layer down and made permanent.
+    cutoff = min(newest(t) for t in withheld)
+    below = [m for m in marks if m < cutoff]
+    stamp_at = max(below) if below else seen_at
 with open(stamp_path, "a") as fh:
-    fh.write("%s\n" % max([seen_at] + [newest(t) for t in shown]))
+    fh.write("%s\n" % stamp_at)
 PY
       else
         echo "--- could not read this PR's review threads. They are what merge-gate"
