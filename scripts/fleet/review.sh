@@ -390,19 +390,13 @@ reviewer=$!
 # sentence a reader trusts when judging whether the trap is prompt.
 set +m
 
-# THE GROUP, not the pid. `kill -- -N` signals every process in group N, which is
-# what `set -m` above arranged for. The bare pid is tried as well, for the case
-# where job control was unavailable and no group was created -- signalling a
-# group that does not exist is an error, not a kill.
-signal_reviewer() {
-  kill "-$1" -- "-$reviewer" 2>/dev/null || kill "-$1" "$reviewer" 2>/dev/null
-}
-kill_reviewer() {
-  signal_reviewer TERM
-  # A short grace period, then insist -- the same shape as the deadline path.
-  sleep 2
-  signal_reviewer KILL
-}
+# THE GROUP, not the pid, and a grace period before the KILL --
+# `fleet_signal_group` and `fleet_kill_group` live in lib.sh: self-review.sh
+# needs the same pair for the same wrapper-seam reason, and the grace period
+# between the TERM and the KILL is the kind of number that drifts when it is
+# written twice (armaatus/autofleet#51). The reasoning is there, not here.
+signal_reviewer() { fleet_signal_group "$1" "$reviewer"; }
+kill_reviewer() { fleet_kill_group "$reviewer"; }
 # The one EXIT handler, now also taking the reviewer with it. Redefined rather
 # than a second `trap`, which would have discarded the marker cleanup above.
 on_exit() {

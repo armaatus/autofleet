@@ -28,14 +28,40 @@ mkdir -p .autofleet/run
 sha="$(git rev-parse HEAD)"
 target=".autofleet/run/reviewed-$sha"
 
+# AN EMPTY BODY IS REFUSED, and `--none` is the way to say "it ran, and found
+# nothing".
+#
+# Without this, the bare form -- which is what `await-review.sh`'s rebase remedy
+# and the DIRTY row in docs/WORKFLOW.md both print -- reads stdin, and an agent
+# running it from a tool call gets EOF immediately. The marker is then written
+# with nothing under its header, `guard.py` opens the push gate, and the pull
+# request goes out claiming a review that produced no text at all. That is the
+# same hole `self-review.sh` exits 5 to close, one file down, reachable by
+# typing the command the docs tell you to type. Found by the local /code-review
+# pass (armaatus/autofleet#51).
+#
+# `--none` is untouched: saying so explicitly is a person's call and is exactly
+# what this refusal asks for.
+body=""
 case "${1:-}" in
   --none)
     printf 'reviewed %s\nno findings\n' "$sha" >"$target" ;;
   --stdin|"")
-    { printf 'reviewed %s\n\n' "$sha"; cat; } >"$target" ;;
+    body="$(cat)" ;;
   *)
     [ -f "$1" ] || { echo "no such file: $1" >&2; exit 2; }
-    { printf 'reviewed %s\n\n' "$sha"; cat "$1"; } >"$target" ;;
+    body="$(cat "$1")" ;;
+esac
+case "${1:-}" in
+  --none) : ;;
+  *)
+    [ -n "${body//[[:space:]]/}" ] || {
+      echo "nothing to record: the findings are empty." >&2
+      echo "A marker with no findings under it opens the push gate for a review" >&2
+      echo "that produced no text. If a pass really ran and found nothing, say so:" >&2
+      echo "  ./scripts/fleet/record-review.sh --none" >&2
+      exit 2; }
+    { printf 'reviewed %s\n\n' "$sha"; printf '%s\n' "$body"; } >"$target" ;;
 esac
 
 echo "recorded: $target"

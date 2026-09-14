@@ -17,9 +17,26 @@
 #   test_self_review.sh silent   one pass produces nothing -> non-zero, the pass
 #                                is NAMED, and no marker is written. The row that
 #                                goes green if the gate ever becomes decorative.
-#   test_self_review.sh thin     ...and "nothing" is merge_gate.py's bar, not a
-#                                second paraphrase of it: a pass that prints two
-#                                characters is silent too.
+#   test_self_review.sh undeclared
+#                                ...and "nothing" is not a length test. #51
+#                                records the observed failure as exit 0 with 446
+#                                bytes of permission warnings, which any length
+#                                bar clears. A pass that prints text but never
+#                                writes its findings trailer is silent.
+#   test_self_review.sh noisy    ...and a pass that writes the trailer AND exits
+#                                non-zero is silent too. Dropping the exit status
+#                                is how a crash after enough output gets recorded
+#                                as a clean review.
+#   test_self_review.sh dirty    uncommitted work -> exit 2 and no pass started.
+#                                The marker is keyed on HEAD and HEAD is what is
+#                                pushed, so a dirty tree means the passes would
+#                                review something other than the diff that goes
+#                                out.
+#   test_self_review.sh empty    record-review.sh refuses a body with nothing in
+#                                it. The bare form is what the rebase remedy
+#                                prints, and from a tool call it reads EOF -- an
+#                                empty marker opens the push gate, which is the
+#                                hole exit 5 exists to close, one file down.
 #   test_self_review.sh timeout  a wedged pass is killed at
 #                                AUTOFLEET_SELF_REVIEW_TIMEOUT and reported as a
 #                                FAILURE, not as no findings -- and the kill
@@ -55,7 +72,13 @@ make_fixture() {
   cp "$REPO_ROOT"/.github/scripts/*.py "$WORK/repo/.github/scripts/"
   cp "$REPO_ROOT/REVIEW.md" "$WORK/repo/"
   git -C "$WORK/repo" init -q -b main
-  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  # The payload goes in the BASE commit, so the range under review is the one
+  # change on the branch -- and, more to the point, so the tree is CLEAN.
+  # self-review.sh refuses a dirty tree, and a fixture that left the scripts
+  # untracked exercised that refusal in every phase instead of the one written
+  # for it.
+  git -C "$WORK/repo" add -A
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q -m base
   git -C "$WORK/repo" checkout -q -b work
   printf 'a change to review\n' >"$WORK/repo/thing.txt"
   git -C "$WORK/repo" add thing.txt
@@ -74,6 +97,7 @@ make_fixture() {
   # answers according to which slash command it was handed.
   SELF_CALLS="$WORK/calls"; : >"$SELF_CALLS"; export SELF_CALLS
   SELF_ARGV="$WORK/argv";   : >"$SELF_ARGV";  export SELF_ARGV
+  SELF_TOOLS="$WORK/tools"; : >"$SELF_TOOLS"; export SELF_TOOLS
   SELF_CHILD="$WORK/child"; : >"$SELF_CHILD"; export SELF_CHILD
   cat >"$WORK/bin/fake-pass" <<'STUB'
 #!/usr/bin/env bash
@@ -82,20 +106,35 @@ prompt=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) prompt="${2:-}"; shift 2 ;;
-    --allowed-tools|--max-turns|--append-system-prompt) shift 2 ;;
+    # The allowlist is captured on its OWN, not left in the argv blob: an
+    # assertion that scans the whole command line for `Write` fails the day the
+    # word appears in the system prompt, which is a test failing for a reason
+    # that has nothing to do with what it is checking. Found by the local
+    # /mattpocock-skills:code-review pass.
+    --allowed-tools) printf '%s\n' "${2:-}" >>"$SELF_TOOLS"; shift 2 ;;
+    --max-turns|--append-system-prompt) shift 2 ;;
     *) shift ;;
   esac
 done
 printf '%s\n' "$prompt" >>"$SELF_CALLS"
 mode="$SELF_MODE"
 case "$prompt" in *mattpocock*) mode="${SELF_MODE2:-$SELF_MODE}" ;; esac
+emit() {
+  printf 'Two findings on this branch, each naming a file and a line.\n'
+  printf -- '- thing.txt:1 -- the first one, from %s\n' "$prompt"
+  printf '<!-- self-review-findings: 2 -->\n'
+}
 case "$mode" in
-  findings)
-    printf 'Two findings on this branch, written out at enough length to be worth\n'
-    printf 'reading, which is the bar merge_gate.py holds a review body to.\n'
-    printf -- '- thing.txt:1 -- the first one, from %s\n' "$prompt" ;;
+  findings) emit ;;
   silent) : ;;
-  thin)   printf 'ok\n' ;;
+  # #51's observed failure: exit 0, plenty of output, none of it a review. Any
+  # length bar clears this; only the trailer does not.
+  undeclared)
+    printf 'Permission allow rule (.claude/settings.json): Write(.claude/skills/**)\n'
+    printf 'is not matched by file permission checks -- only Edit(path) rules are.\n'
+    printf 'Permission allow rule (.claude/settings.json): Write(.claude/agents/**)\n' ;;
+  # A pass that wrote its trailer and then died -- out of turns, or a crash.
+  noisy)  emit; exit 1 ;;
   # A CHILD, not the stub itself. AUTOFLEET_SELF_REVIEW_CMD is advertised as a
   # wrapper seam, so the process doing the work is routinely a child of what
   # self-review.sh signals -- and a kill that reaps only the direct child leaves
@@ -138,10 +177,14 @@ case "${1:-}" in
   # with neither is an unbounded agent with every tool, which is most of what
   # moving it out of the session was supposed to buy back.
   grep -q -- '--max-turns' "$SELF_ARGV" || fail "a pass ran with no turn budget"
-  grep -q -- '--allowed-tools' "$SELF_ARGV" || fail "a pass ran with no tool allowlist"
-  # Read-only over the tree: these passes report, the author fixes.
-  grep -q -- 'Write' "$SELF_ARGV" && fail "the pass allowlist grants Write"
-  grep -q -- 'Edit' "$SELF_ARGV" && fail "the pass allowlist grants Edit"
+  [ -s "$SELF_TOOLS" ] || fail "a pass ran with no tool allowlist"
+  # Read-only over the tree: these passes report, the author fixes. And no
+  # `gh api`, which is the one grant with no ceiling -- the same reasoning
+  # review.sh spells out, and this runs in a fleet-owned worktree besides.
+  for granted in Write Edit NotebookEdit 'gh api'; do
+    grep -qF -- "$granted" "$SELF_TOOLS" \
+      && fail "the pass allowlist grants $granted"
+  done
   ok "each pass is given a turn budget and a read-only allowlist"
 
   # THE TWO WORDS merge_gate.py GREPS THE BODY FOR. What the agent pastes into
@@ -167,8 +210,8 @@ case "${1:-}" in
   out="$WORK/out"; err="$WORK/err"
   run_it >"$out" 2>"$err"; rc=$?
 
-  [ "$rc" != 0 ] || fail "a pass produced nothing and it exited 0 -- the marker would satisfy the push gate"
-  ok "a silent pass is a non-zero exit ($rc), not a clean review"
+  [ "$rc" = 5 ] || { cat "$err" >&2; fail "a silent pass exited $rc, not the documented 5"; }
+  ok "a silent pass is exit 5, not a clean review"
 
   [ -f "$MARKER" ] && fail "a marker was recorded for a run where one pass said nothing"
   ok "nothing is recorded, so guard.py still refuses the push"
@@ -184,16 +227,62 @@ case "${1:-}" in
   ok "the other pass still ran, so one invocation reports both outcomes"
   ;;
 
-# ---------------------------------------------------------------------- thin
-  thin)
+# ---------------------------------------------------------------- undeclared
+  undeclared)
   make_fixture
-  export SELF_MODE=thin
+  export SELF_MODE=undeclared
   err="$WORK/err"
   run_it >/dev/null 2>"$err"; rc=$?
 
-  [ "$rc" != 0 ] || fail "a two-character pass counted as findings"
-  [ -f "$MARKER" ] && fail "a marker was recorded for a pass that printed 'ok'"
-  ok "'produced nothing' is merge_gate.py's bar, not a second paraphrase of it"
+  # 446 bytes of permission warnings is what #51 measured, and it clears any
+  # length bar there is. The trailer is the only thing that separates a review
+  # from a page of noise.
+  [ "$rc" = 5 ] || { cat "$err" >&2; fail "a pass that printed warnings and no trailer exited $rc, not 5"; }
+  [ -f "$MARKER" ] && fail "a marker was recorded for a pass that never declared a verdict"
+  ok "output without a findings trailer is silence, however much of it there is"
+  ;;
+
+# --------------------------------------------------------------------- noisy
+  noisy)
+  make_fixture
+  export SELF_MODE=noisy
+  err="$WORK/err"
+  run_it >/dev/null 2>"$err"; rc=$?
+
+  [ "$rc" = 5 ] || { cat "$err" >&2; fail "a pass that wrote a trailer and exited 1 was accepted (rc $rc)"; }
+  [ -f "$MARKER" ] && fail "a marker was recorded for a pass that exited non-zero"
+  ok "the exit status counts too: a crash after enough output is not a review"
+  ;;
+
+# --------------------------------------------------------------------- dirty
+  dirty)
+  make_fixture
+  export SELF_MODE=findings
+  printf 'not committed\n' >"$WORK/repo/loose.txt"
+  err="$WORK/err"
+  run_it >/dev/null 2>"$err"; rc=$?
+
+  [ "$rc" = 2 ] || { cat "$err" >&2; fail "a dirty tree exited $rc, not the documented 2"; }
+  [ "$(n_calls)" = 0 ] || fail "a pass was started against a tree that is not what will be pushed"
+  [ -f "$MARKER" ] && fail "a marker was recorded for a commit that is not the whole change"
+  ok "uncommitted work is refused, not silently left out of the review"
+  ;;
+
+# --------------------------------------------------------------------- empty
+  empty)
+  make_fixture
+  out="$( cd "$WORK/repo" && ./scripts/fleet/record-review.sh --stdin </dev/null 2>&1 )"; rc=$?
+
+  [ "$rc" != 0 ] || fail "record-review.sh wrote a marker for an empty body; the push gate is now open on nothing"
+  [ -f "$MARKER" ] && fail "an empty marker exists"
+  grep -qF -- '--none' <<<"$out" || fail "the refusal does not name the way to say 'it ran and found nothing'"
+  ok "an empty body is refused, and --none is named as the honest way to say it"
+
+  # ...and `--none` still works, because saying so explicitly is a person's call.
+  ( cd "$WORK/repo" && ./scripts/fleet/record-review.sh --none >/dev/null 2>&1 ) \
+    || fail "--none no longer records"
+  [ -f "$MARKER" ] || fail "--none did not write the marker"
+  ok "--none is untouched"
   ;;
 
 # ------------------------------------------------------------------- timeout
@@ -254,5 +343,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|silent|thin|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|silent|undeclared|noisy|dirty|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac

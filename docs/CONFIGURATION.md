@@ -125,8 +125,18 @@ so.
 > non-zero, names the pass that was silent, and writes no marker — so the push
 > gate stays closed. Recording an empty marker would satisfy that gate and let a
 > pull request go out claiming two reviews that never ran, which is strictly
-> worse than a review that is merely absent. "Produced nothing" is
-> `merge_gate.py`'s own `MIN_REVIEW_BODY` bar, asked rather than paraphrased.
+> worse than a review that is merely absent.
+>
+> "Produced nothing" is **not a length test**. Each pass has to end with
+> `<!-- self-review-findings: N -->`, and the run counts only if the pass also
+> exited zero. #51 measured the failure this catches: exit 0 with 446 bytes of
+> output, all of it unrelated permission warnings — long enough to clear any
+> length bar, and not a review. The trailer also lets an honest `N: 0` through,
+> which a length bar could not.
+>
+> `self-review.sh` refuses a **dirty working tree** for the same reason: the
+> marker is keyed on `HEAD` and `HEAD` is what gets pushed, so uncommitted work
+> would be neither reviewed nor sent. Commit first.
 
 > Like `AUTOFLEET_REVIEW_CMD`, this seam is advertised as model-agnostic and is
 > not: the flags are Claude Code's. That is

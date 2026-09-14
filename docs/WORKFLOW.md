@@ -1079,7 +1079,7 @@ rather than passing the flag, for the reason in Stage 6.
 | ...and `status` lists the issue you want under "gave up on" | the time-box stopped it, and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
 | Worktree provisioned, agent idle, nothing in the composer | Orca drafts the issue prompt instead of sending it | `./scripts/fleet/agent-autostart.sh` — `setup.sh` starts the `--watch` form |
 | Every hook says "this worktree has no linked issue" | the `orca` CLI on `PATH` cannot find `Orca.app` | nothing — the hooks probe it and fall back. If it persists: `sudo chmod -h 755 /usr/local/bin/orca` |
-| `git push` refused, "nothing leaves one of those unreviewed" | the local review is not recorded for this commit | run both passes, then `./scripts/fleet/record-review.sh` |
+| `git push` refused, "nothing leaves one of those unreviewed" | the local review is not recorded for this commit | `./scripts/fleet/self-review.sh` — it runs both passes and records the marker |
 | `await-review.sh` times out | the review job never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | `gh run list`; check `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret |
 | `await-review.sh` exits 2, naming `merge_gate.py` | that file is what decides which reviews count, and it does not import | fix the syntax or the missing name; nothing in the loop can answer until it does |
 | `await-review.sh` exits 8, "GitHub says DIRTY" | something merged underneath the branch | rebase, re-run `record-review.sh`, `git push --force-with-lease` |

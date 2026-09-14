@@ -474,6 +474,36 @@ else
   fail "the reviewer's tool allowlist has drifted (above)"
 fi
 
+#    ...and the SELF-review's allowlist, which has a sharper edge than the
+#    independent reviewer's: self-review.sh runs INSIDE a fleet-owned worktree,
+#    where a pass that could edit files could edit `.claude/hooks/guard.py` on
+#    its way past -- the one thing guard.py refuses the agent itself. It reports;
+#    the author fixes. `gh api` is withheld for the same no-ceiling reason as
+#    above. armaatus/autofleet#51, found by the local
+#    /mattpocock-skills:code-review pass, which noted review.sh had this
+#    assertion and self-review.sh had none.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open("scripts/fleet/self-review.sh").read()
+block = re.search(r"^TOOLS=.*?(?=\n\n)", src, re.S | re.M)
+if not block:
+    sys.exit("scripts/fleet/self-review.sh no longer builds a `TOOLS=` allowlist, "
+             "so its two passes run with whatever the command defaults to")
+granted = block.group(0)
+for forbidden in ("Write", "Edit", "NotebookEdit", "Bash(gh api:*)"):
+    if forbidden in granted:
+        sys.exit(f"self-review.sh grants `{forbidden}`. The self-review passes report "
+                 "and the author fixes -- and this one runs in a fleet-owned worktree, "
+                 "where a pass that can write can rewrite the guard that is watching it")
+if "Skill" not in granted:
+    sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
+             "skills -- silently review with most of what they are for switched off")
+PYEOF
+  ok 'the self-review passes report only, and cannot reach `gh api`'
+else
+  fail "the self-review's tool allowlist has drifted (above)"
+fi
+
 #    Everything the payload POINTS AT must be in the payload. docs/CONFIGURATION.md
 #    was cited by eight shipped files -- including a markdown link in REVIEW.md --
 #    while shipping nowhere, so the link 404'd in every host repo. Hard rule 1.

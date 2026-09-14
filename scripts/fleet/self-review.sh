@@ -22,6 +22,25 @@
 # worktree runs `/code-review` directly and always could, and
 # `record-review.sh --stdin` is still there for the findings that come out of it.
 #
+# WHAT WAS TRIED, because armaatus/autofleet#51 asks for it in writing. The
+# issue records two spellings that produced NOTHING on this machine -- exit 0
+# with 446 bytes of output, all of it permission warnings about
+# `.claude/settings.json`:
+#
+#     claude -p "/code-review high" --allowed-tools "..." --max-turns 80
+#     claude -p "/code-review high" --max-turns 80
+#
+# The spelling below does produce a review, and three things are load-bearing in
+# it. STDOUT AND STDERR GO TO DIFFERENT FILES: the 446 bytes were on stderr, and
+# merging the two streams is what made a working run look like a silent one. THE
+# COMMIT RANGE IS STATED: a fleet worktree reaching step 3 has its work
+# committed and a clean tree, so "the current diff" is empty and the pass
+# reviews nothing -- and #51 also records a run that derived the diff from the
+# WORKING DIRECTORY and reviewed a different repository's last commit, which is
+# why this pins the repo with `cd "$REPO_ROOT"` before the spawn. AND THE PASS
+# IS MADE TO DECLARE ITSELF: it must end with a findings trailer, which is the
+# only thing here that can tell a review from a page of warnings.
+#
 # MODEL-AGNOSTIC IN EXACTLY THE WAY `review.sh` IS, which is to say: not yet.
 # The flags below -- `-p`, `--allowed-tools`, `--max-turns`,
 # `--append-system-prompt` -- are Claude Code's, and AUTOFLEET_SELF_REVIEW_CMD is
@@ -32,8 +51,8 @@
 #
 # Exit codes, so a caller can tell the cases apart:
 #   0  both passes produced findings, and the push marker is recorded
-#   2  could not work out what to review, or .github/scripts/merge_gate.py does
-#      not import, or record-review.sh refused the findings
+#   2  could not work out what to review, the tree is dirty, or
+#      record-review.sh refused the findings
 #   3  the fleet is stopped
 #   5  a pass ran and produced nothing -- named, and NOTHING recorded
 #   6  AUTOFLEET_SELF_REVIEW_CMD is not on PATH
@@ -54,6 +73,19 @@ cd "$REPO_ROOT"
 # gitignored -- but `stop.sh --now` promises the agents are FROZEN, and starting
 # two full-budget agents is the opposite of that.
 fleet_stopped && { echo "STOPPED: $FLEET_STOP exists; no pass was started." >&2; exit 3; }
+
+# A DIRTY TREE IS REFUSED RATHER THAN REVIEWED. The marker `record-review.sh`
+# writes is keyed on HEAD, and what `git push` sends is HEAD -- so uncommitted
+# work is neither reviewed nor pushed, and a pass told "the tree is clean" while
+# it is not has been lied to about the one thing it cannot check cheaply. Commit
+# first; that is also what makes the per-commit marker mean what it says.
+# Found by the local /code-review pass.
+dirty="$(git status --porcelain 2>/dev/null)"
+[ -z "$dirty" ] || {
+  echo "the working tree is not clean, so the passes would review a commit that" >&2
+  echo "is not what you are about to push. Commit first, then run this again:" >&2
+  printf '%s\n' "$dirty" | sed -n '1,10p' >&2
+  exit 2; }
 
 command -v "$AUTOFLEET_SELF_REVIEW_CMD" >/dev/null 2>&1 || {
   echo "AUTOFLEET_SELF_REVIEW_CMD is '$AUTOFLEET_SELF_REVIEW_CMD', which is not on PATH." >&2
@@ -85,27 +117,32 @@ mkdir -p .autofleet/run
 LOG_DIR=".autofleet/run/self-review"
 mkdir -p "$LOG_DIR"
 
-# THE BAR FOR "PRODUCED NOTHING" IS ASKED OF `merge_gate.py`, not restated here.
+# THE BAR FOR "PRODUCED NOTHING": a trailer the pass has to write, and a body
+# besides it.
 #
-# "Did a review actually happen, or is this a record with nothing in it" is the
-# question that file already answers for review bodies -- MIN_REVIEW_BODY, added
-# after PR #95 merged on a review whose entire body was the word "test". A second
-# paraphrase of it drifts, always in the permissive direction, and the permissive
-# direction here is a marker that satisfies the push gate for a pass that said
-# nothing. One definition, asked in both places.
-substantive() {
-  python3 - "$1" <<'PY'
-import sys
-sys.path.insert(0, ".github/scripts")
-try:
-    from merge_gate import is_substantive
-except Exception as exc:
-    # Not ImportError alone: merge_gate.py is a file agents in this repo edit,
-    # and a SyntaxError in it must not read as "this pass was silent".
-    print(f"could not load .github/scripts/merge_gate.py ({exc})", file=sys.stderr)
-    raise SystemExit(2)
-raise SystemExit(0 if is_substantive({"body": open(sys.argv[1]).read()}) else 1)
-PY
+# The first version of this asked `merge_gate.py` whether the output cleared
+# MIN_REVIEW_BODY, on the argument that "did a review actually happen" is a
+# question that file already answers. Both self-review passes said that is the
+# wrong bar here, in two directions. Too PERMISSIVE: forty characters of
+# anything clears it, and #51's own record of this failure is 446 bytes of
+# permission warnings -- a length test cannot tell a review from noise. Too
+# STRICT: a pass that honestly found nothing writes `No findings.`, which is
+# twelve characters, so the one clean diff in the backlog could never be pushed.
+#
+# A TRAILER separates the two, and it is the shape REVIEW.md already uses on the
+# independent review for exactly this reason: only a pass that ran to a verdict
+# writes one. The body check underneath it stops a pass answering with the
+# trailer alone.
+TRAILER='<!-- self-review-findings:'
+declared() {
+  grep -qF -- "$TRAILER" "$1" || return 1
+  # Non-blank once the trailer lines are taken out. `grep -c .` rather than a
+  # pipe into `grep -q`: `-q` exits on the first match, the producer dies of
+  # EPIPE, and with `pipefail` a check that HELD reports as failed -- on large
+  # input only, so it is green here and red in CI. CLAUDE.md carries the rule.
+  local rest
+  rest="$(grep -vF -- "$TRAILER" "$1")"
+  [ -n "${rest//[[:space:]]/}" ]
 }
 
 # A DEADLINE AND A PROCESS GROUP, the same shape as `review.sh` and for the same
@@ -120,12 +157,16 @@ PY
 # of which exist here. What IS shared is the reasoning, which is why this comment
 # points at it rather than restating it.
 run_pass() {
-  local slug="$1" label="$2" prompt="$3"
+  # The slash command IS the prompt -- one argument, not two. A third parameter
+  # that was always equal to the second is a seam with nothing behind it, and
+  # the next caller gets to pass them differently. Found by the local
+  # /mattpocock-skills:code-review pass.
+  local slug="$1" label="$2"
   local out="$LOG_DIR/$slug-${sha:0:8}.md" err="$LOG_DIR/$slug-${sha:0:8}.log"
 
   echo "==> $label  (${AUTOFLEET_SELF_REVIEW_TIMEOUT}s, ${AUTOFLEET_SELF_REVIEW_MAX_TURNS} turns, $AUTOFLEET_SELF_REVIEW_CMD)" >&2
   set -m
-  "$AUTOFLEET_SELF_REVIEW_CMD" -p "$prompt" \
+  "$AUTOFLEET_SELF_REVIEW_CMD" -p "$label" \
     --allowed-tools "$TOOLS" \
     --max-turns "$AUTOFLEET_SELF_REVIEW_MAX_TURNS" \
     --append-system-prompt "$SYSTEM" \
@@ -133,13 +174,10 @@ run_pass() {
   local child=$! waited=0
   set +m
 
-  # THE GROUP, then the bare pid for the case where job control was unavailable
-  # and no group was created -- signalling a group that does not exist is an
-  # error, not a kill.
-  signal_pass() {
-    kill "-$1" -- "-$child" 2>/dev/null || kill "-$1" "$child" 2>/dev/null
-  }
-  kill_pass() { signal_pass TERM; sleep 2; signal_pass KILL; }
+  # THE GROUP, then the bare pid, then a grace period before the KILL -- all of
+  # it in `fleet_kill_group`, which `review.sh` uses for the same wrapper-seam
+  # reason. lib.sh carries the reasoning.
+  kill_pass() { fleet_kill_group "$child"; }
   # An unexpected exit anywhere below must not leave a full-budget agent behind.
   trap 'kill_pass' EXIT
   trap 'kill_pass; exit 143' TERM INT
@@ -165,21 +203,28 @@ run_pass() {
   wait "$child"; local rc=$?
   trap - EXIT TERM INT
 
-  substantive "$out"; local bar=$?
-  case $bar in
+  # THE EXIT STATUS IS PART OF THE ANSWER, and leaving it out was the bug this
+  # whole script exists to prevent, reintroduced one level down: a pass that
+  # crashed, or ran out of `--max-turns`, having printed enough text to look like
+  # a review was recorded as one. Both conditions, or nothing is recorded.
+  # Found by the local /mattpocock-skills:code-review pass.
+  if [ "$rc" = 0 ] && declared "$out"; then
     # THE HEADING IS LOAD-BEARING. `merge_gate.py` reads the pull request body
     # for the literal words `/code-review` and `mattpocock-skills:code-review`,
     # and what the agent pastes into that body is what this prints. Label the
     # sets and the gate is satisfied by the paste; leave them unlabelled and the
     # agent has to remember to write them, which is the step that gets forgotten.
-    0) { printf '### %s\n\n' "$label"; cat "$out"; printf '\n\n'; } >>"$FINDINGS"
-       return 0 ;;
-    2) echo "Fix .github/scripts/merge_gate.py, then run this again." >&2; return 2 ;;
-  esac
-  echo "$label exited $rc and produced NO findings." >&2
+    { printf '### %s\n\n' "$label"; cat "$out"; printf '\n\n'; } >>"$FINDINGS"
+    return 0
+  fi
+  echo "$label exited $rc and left NO findings this can use." >&2
   echo "A pass that says nothing is a failure, not a clean review: nothing was" >&2
-  echo "recorded, so the push gate is still closed. Read $err, then run this" >&2
-  echo "again or run the pass by hand." >&2
+  echo "recorded, so the push gate is still closed. What it wrote is in" >&2
+  echo "  $out   (its findings)" >&2
+  echo "  $err   (why it stopped)" >&2
+  echo "Run this again, or run the pass by hand and record what it found with" >&2
+  echo "  ./scripts/fleet/record-review.sh findings.md" >&2
+  echo "  ./scripts/fleet/record-review.sh --none   # it ran, and found nothing" >&2
   return 5
 }
 
@@ -217,8 +262,14 @@ what you find, and you have no tools to do it with.
 
 Your FINAL MESSAGE is the entirety of what the caller receives -- nothing else
 you print is read. Put the findings there, in markdown, each naming the file and
-line. Say so plainly if there are none. A pass whose final message is empty is
-recorded as a FAILURE and the pull request does not go out."
+line, and END IT with this line, verbatim, with the count filled in:
+
+<!-- self-review-findings: N -->
+
+That line is what tells the caller a pass RAN. Without it the run is recorded as
+a FAILURE and the pull request does not go out -- so write it even when N is 0,
+and when it is 0 say in a sentence what you checked, so the author can tell a
+clean diff from a pass that gave up."
 
 # Both passes run even when the first one fails, because the caller is an agent
 # on a time-box: one invocation that names both outcomes beats two rounds of
@@ -226,36 +277,39 @@ recorded as a FAILURE and the pull request does not go out."
 # succeeded -- the findings are built up in a file that is only handed to
 # `record-review.sh` at the end.
 #
-# A STRING, not an array. macOS ships bash 3.2, where `${#arr[@]}` on an array
-# that was never appended to is an unbound variable under `set -u` -- so the
-# happy path works and the path that reports a failure dies with a different
-# error than the one it was written to report.
 FINDINGS=".autofleet/run/self-review-$sha.md"
 : >"$FINDINGS"
+# `failed` IS A STRING, NOT AN ARRAY. macOS ships bash 3.2, where `${#arr[@]}`
+# on an array that was never appended to is an unbound variable under `set -u`
+# -- so the happy path works and the path that REPORTS a failure dies with a
+# different error than the one it was written to report.
 failed=""
-rc_worst=0
+# The FIRST non-zero, which is not the same as the worst and is not claimed to
+# be: the exits are kinds, not severities, and 5 after a 7 is not milder. The
+# name said `worst` and the code kept the first. Found by the local
+# /mattpocock-skills:code-review pass.
+rc_first=0
 
 for pass in "code-review|/code-review high" "mattpocock|/mattpocock-skills:code-review"; do
   slug="${pass%%|*}"; label="${pass#*|}"
-  run_pass "$slug" "$label" "$label"; rc=$?
+  run_pass "$slug" "$label"; rc=$?
   case $rc in
     0) ;;
-    # A merge_gate.py that will not import is not a silent pass, and saying it
-    # twice at the bottom would name the wrong failure. Out here, immediately.
-    2) rm -f "$FINDINGS"; exit 2 ;;
+    # A stop is not a silent pass, and saying so at the bottom would name the
+    # wrong failure. Out here, immediately.
     3) rm -f "$FINDINGS"; exit 3 ;;
     *) failed="${failed:+$failed, }$label"
-       [ "$rc_worst" = 0 ] && rc_worst=$rc ;;
+       [ "$rc_first" = 0 ] && rc_first=$rc ;;
   esac
 done
 
 if [ -n "$failed" ]; then
   rm -f "$FINDINGS"
   echo >&2
-  echo "NOT RECORDED. These passes produced nothing: $failed" >&2
+  echo "NOT RECORDED. These passes left no findings this can use: $failed" >&2
   echo "The push gate is still closed, which is correct -- a pull request that" >&2
   echo "names two reviews must have had two." >&2
-  exit "$rc_worst"
+  exit "$rc_first"
 fi
 
 ./scripts/fleet/record-review.sh "$FINDINGS" >&2 || {

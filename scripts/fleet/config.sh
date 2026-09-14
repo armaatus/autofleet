@@ -106,7 +106,15 @@
 #
 # The command DEFAULTS to the independent reviewer's, so a host that has set
 # nothing, and a host that has set only `AUTOFLEET_REVIEW_CMD`, both still work.
-: "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
+#
+# THE FALLBACK IS RESOLVED AT THE BOTTOM OF THIS FILE, not here. `.autofleet/config`
+# is sourced further down so it can override these defaults -- so a host that
+# sets `AUTOFLEET_REVIEW_CMD=my-wrapper` in that file would have had the
+# self-review fall back to the `claude` this line saw, which is the one route
+# the documented fallback is actually for. Empty here; `:=` treats empty as
+# unset, so the resolution below fires for anything the environment and the host
+# config did not set. Found by the local /code-review pass.
+: "${AUTOFLEET_SELF_REVIEW_CMD:=}"
 # How long ONE pass may run before it is killed. Lower than the independent
 # reviewer's 1800 because there are two of them and they are spent out of the
 # agent's AUTOFLEET_TIMEBOX (10800s), not out of the dispatcher's poll: two
@@ -252,6 +260,10 @@ if [ -f "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}" ]; then
   . "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}"
 fi
 
+# The self-review's command, now that the host config has had its say. See the
+# note by the knob above for why this cannot be done where it is declared.
+: "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
+
 # ----------------------------------------------------- knobs that must be sane
 #
 # AFTER the host config, because that is the route that matters: a value only
@@ -275,13 +287,24 @@ fi
 # announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
 # the exact untrue line the 0 rejection exists to prevent. One spare zero and the
 # guard was the failure. Found by the independent review.
-case "$AUTOFLEET_REVIEW_MAX_TRIES" in
-  ''|*[!0-9]*)
-    echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
-         "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
-    exit 2 ;;
-esac
-[ "$AUTOFLEET_REVIEW_MAX_TRIES" -gt 0 ] || {
-  echo "AUTOFLEET_REVIEW_MAX_TRIES must be a positive whole number;" \
-       "got '$AUTOFLEET_REVIEW_MAX_TRIES'" >&2
-  exit 2; }
+#
+# A FUNCTION, because there are now three knobs with this shape and the digits-
+# then-numeric pair above is exactly the reasoning that does not survive being
+# retyped. `fleet_positive_knob <name> <value>`; it is defined here rather than
+# in lib.sh because lib.sh sources THIS file, so nothing it defines exists yet.
+fleet_positive_knob() {
+  case "$2" in
+    ''|*[!0-9]*)
+      echo "$1 must be a positive whole number; got '$2'" >&2
+      exit 2 ;;
+  esac
+  [ "$2" -gt 0 ] || { echo "$1 must be a positive whole number; got '$2'" >&2; exit 2; }
+}
+fleet_positive_knob AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES"
+# The self-review's two, for the same reason and with a sharper edge: the
+# timeout's only consumer is `[ "$waited" -ge "$AUTOFLEET_SELF_REVIEW_TIMEOUT" ]`
+# in self-review.sh, so a non-number makes `[` return 2, the test false, and the
+# deadline never fires -- a wedged pass then holds the worktree until the
+# three-hour time-box expires. Found by the local /code-review pass.
+fleet_positive_knob AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT"
+fleet_positive_knob AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS"
