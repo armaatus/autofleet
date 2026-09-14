@@ -277,17 +277,15 @@ placeholder -- fill it in. Then tell the board where the work is:
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
 Then write the handoff, which is what a session restarting in this worktree
-reads instead of working the last hour out again:
+reads instead of working the last hour out again -- the note on stdin:
 
-    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
-    ...
-    NOTE
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin
 
 The decisions you took and why, the files you touched, what each review round
 said and how you answered it, and what is still open. NOT the plan, which is in
-the PR body, and not the diff. 300 words; over that it refuses rather than
-truncating, and says so. `issue-command.sh` prints it back at the top of the
-next session here.
+the PR body, and not the diff. It is capped -- 300 words by default -- and over
+the cap it refuses and names the cap rather than truncating.
+`issue-command.sh` prints it back at the top of the next session here.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
