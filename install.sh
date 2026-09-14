@@ -139,6 +139,70 @@ seed_one() {
 
 echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
+# WHAT THE PAYLOAD WRITES AT RUNTIME, kept out of the host's history.
+#
+# FOUR THINGS, which is what this repo's own `.gitignore` names, and hard rule 1
+# is the reason the installer may not ship fewer:
+#
+#   .env, .env.tmp*      `scripts/fleet/env.sh` writes the first per worktree
+#                        and leaves the second behind if it is killed mid-write.
+#                        THE ONE THAT HOLDS SECRETS. `.claude/hooks/guard.py`
+#                        heads its secret list with "every one is gitignored",
+#                        and in a host that sentence is only true because of
+#                        this line. A project with ports and a setup hook that
+#                        appends a token to `.env` is the ordinary case.
+#   .autofleet/run/      `record-review.sh`'s `reviewed-<sha>` markers,
+#                        `agent-autostart.sh`'s pidfile, and -- since
+#                        armaatus/autofleet#55 -- `handoff.sh`'s note.
+#   /findings.md         what the local review passes write on the way to the
+#                        PR body.
+#
+# The installer never touched the host's `.gitignore` at all, and that was
+# survivable while everything the payload wrote was an empty marker. The note is
+# the first file with CONTENT in it, and untracked content in a repo an agent
+# drives is what `git add -A` sweeps into a commit -- which is why
+# `/findings.md` is in this repo's own `.gitignore`, and it got there by being
+# committed once. The first version of this block shipped two of the four and
+# left `.env` out, which is the one that matters most; found by the independent
+# review.
+#
+# APPENDED, never rewritten, and only when no line already covers it: a host's
+# `.gitignore` is the host's. Matching is on the exact lines the payload would
+# add, which is deliberately dumber than gitignore's own semantics -- a host
+# that ignores the directory some other way gets one redundant line, and a
+# regression here is a duplicate entry rather than a clobbered file. Found by
+# the independent review of #55.
+IGNORES=(".env" ".env.tmp*" ".autofleet/run/" "/findings.md")
+ensure_ignored() {
+  local gi="$TARGET/.gitignore" want missing=()
+  for want in "${IGNORES[@]}"; do
+    grep -qxF -- "$want" "$gi" 2>/dev/null || missing+=("$want")
+  done
+  [ "${#missing[@]}" -gt 0 ] || {
+    echo "   kept (yours): .gitignore already covers what the payload writes"
+    # ...and COUNTED as kept, the way copy_one and seed_one count theirs. Without
+    # it the summary undercounts by one on every re-run.
+    kept=$((kept + 1)); return 0; }
+  changed=$((changed + 1))
+  if $DRY; then
+    echo "   would add to .gitignore: ${missing[*]}"
+    return 0
+  fi
+  echo "   .gitignore += ${missing[*]}"
+  {
+    # A leading blank line only when the file exists and does not end in one,
+    # so a re-run does not stack them.
+    if [ -s "$gi" ] && [ -n "$(tail -c 1 "$gi" 2>/dev/null)" ]; then printf '\n'; fi
+    printf '# Written at runtime by the autofleet payload, never committed:\n'
+    printf '# the per-worktree .env, review markers, the autostart pidfile,\n'
+    printf '# the handoff note, and what the local review writes.\n'
+    printf '%s\n' "${missing[@]}"
+  } >>"$gi"
+}
+
+echo "==> what the payload writes at runtime"
+ensure_ignored
+
 echo "==> your answers (seeded once, never overwritten)"
 # Recorded BEFORE the loop, because after it the file exists either way and
 # nothing can tell a fresh seed from the host's own answers.

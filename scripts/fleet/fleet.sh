@@ -1219,14 +1219,72 @@ slug() {
     | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//' | cut -c1-48
 }
 
+# The note the last attempt on this issue left, if the worktree that holds it is
+# still standing.
+#
+# READ OUT OF $RAN_DIR, not $OWNED_DIR, and that is the whole of whether this
+# branch can fire at all. `launch` evaluates `agent_brief` BEFORE `own`, so
+# ownership at this moment is the PREVIOUS attempt's, and `disown_issue` has
+# usually already cleared it. $RAN_DIR is the record that OUTLIVES the worktree
+# -- `own` appends each path an issue has run in, and nothing clears it.
+#
+# It is still a NARROW case, and saying so is better than implying otherwise:
+# the queue excludes every issue with a live worktree, so the old worktree has
+# to be one the runner no longer lists while its directory is still on disk --
+# which is the state `remove_advice` exists for, a removal that got half way.
+# When the old worktree is still live the issue is never queued at all, and when
+# it is gone the note went with it. `cmd_retry` names the same note on the path
+# a person is certainly on. Both found by the local review, which showed this
+# branch could not carry the claim alone.
+#
+# THE LAST RECORDED PATH that still has a note, which is NOT quite "the newest
+# attempt" and the difference is worth naming: `own` appends a path only when it
+# is absent, so an issue that ran in A, then B, then A again leaves `A,B` and
+# this returns B while A is the newer attempt. It needs a REUSED worktree path
+# to happen at all, and both notes are that issue's, so the cost is reading the
+# older of two -- not worth an mtime sort and its own failure modes here. Said
+# rather than implied: the first comment promised "newest first", which the
+# record cannot give. Found by the independent review.
+#
+# A path whose directory is gone is skipped rather than reported: the note died
+# with that worktree, which is what it is for.
+#
+# ABSOLUTE, and printed rather than assumed, because the attempt that reads the
+# prompt below IS starting somewhere else: `.autofleet/run/` is per worktree, so
+# a relative path would name the new worktree's empty one. A path that is wrong
+# is worse than none -- the agent reads nothing, finds nothing, and has been
+# told there was something.
+handoff_note_for() {
+  local line note
+  [ -f "$RAN_DIR/$1" ] || return 0
+  # `tail -r` is BSD and `tac` is GNU; neither is on both. The loop keeps the
+  # last match instead of reversing the file, which needs neither.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ -d "$line" ] || continue
+    if [ -f "$(fleet_handoff_path "$line" "$1")" ]; then note="$line"; fi
+  done <"$RAN_DIR/$1"
+  [ -n "${note:-}" ] || return 0
+  fleet_handoff_path "$note" "$1"
+}
+
 agent_brief() {
+  # `${note:+...}` rather than a second heredoc: an issue with no note has to get
+  # BYTE-FOR-BYTE the prompt it got before armaatus/autofleet#55, and two
+  # heredocs is where the two drift apart.
+  local note; note="$(handoff_note_for "$1")"
   cat <<BRIEF
 Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $1\` first and follow
 everything it prints, including anything it points you at. You were started by
 the fleet dispatcher: work autonomously to a pull request that is waiting only on
 GitHub's auto-merge, and do not stop to ask for confirmation on anything this
 repo's working agreement already decides.
-
+${note:+
+An earlier attempt on this issue left a handoff note at
+  $note
+Read it before you start: it is what that attempt decided and why, and what it
+left open. It belongs to that worktree and is not in this one.
+}
 If \`$STOP_FILE\` appears at any point, stop: say where you got to and do nothing
 further. Nothing can leave this worktree while it exists.
 BRIEF
@@ -3336,7 +3394,7 @@ cmd_resume() {
 # decisions about an issue.
 cmd_retry() {
   [ "$#" -gt 0 ] || die "usage: fleet.sh retry ISSUE [ISSUE...]"
-  local n
+  local n note
   for n in "$@"; do
     case "$n" in ''|*[!0-9]*) die "not an issue number: $n" ;; esac
   done
@@ -3344,6 +3402,18 @@ cmd_retry() {
     if [ -e "$STATE_DIR/gaveup-$n" ]; then
       rm -f "$STATE_DIR/gaveup-$n"
       echo "#$n is startable again."
+      # ...and where the attempt that was stopped wrote down what it decided.
+      #
+      # SAID HERE because this is the command a person actually runs, and the
+      # one place in the retry path that is certain to be reached. When
+      # `agent_brief` can name the same note, and when it cannot, is argued at
+      # `handoff_note_for` and stated once there.
+      # `if`, not `[ -n ... ] && echo`: that AND-list is the last command in
+      # this branch, so with no note it makes `cmd_retry` itself return 1 --
+      # a command that did exactly what was asked reporting failure. Caught by
+      # the phase that asserts the no-note case.
+      note="$(handoff_note_for "$n")"
+      if [ -n "$note" ]; then echo "  its last attempt left a note at $note"; fi
     else
       echo "#$n was not one this dispatcher gave up on; nothing to clear."
     fi

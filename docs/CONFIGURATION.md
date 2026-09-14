@@ -220,6 +220,50 @@ what the second opinion is actually for. It does not protect against an author
 determined to forge one. If you need that, keep `github`, or give the reviewer
 its own account and log `gh` in as that.
 
+### The handoff note
+
+One session covers the plan, the implementation, both self-review passes, the
+push, the PR and up to three review rounds, inside one `AUTOFLEET_TIMEBOX` and
+one context window. When the dispatcher interrupts that worktree, or
+`./scripts/fleet/fleet.sh retry N` hands the issue back, the next attempt used
+to begin from the issue body alone and re-derive from the files every decision
+the first one made. `scripts/fleet/handoff.sh` is the note that carries those
+decisions across, and the opening brief asks for it in both halves — when the
+work is put down, and at the push and after every review round:
+
+```bash
+./scripts/fleet/handoff.sh write 42 --stdin <<'NOTE'
+...
+NOTE
+./scripts/fleet/handoff.sh          # print this worktree's note
+```
+
+It holds the decisions taken and why, the files touched, what each review round
+said and how it was answered, and what is still open — not the plan, which is in
+the PR body, and not the diff.
+
+Two things read it back. `issue-command.sh` prints it **between the issue's
+spec and the brief** in the next session **in that worktree** — which is the
+case it is for and the one that always works; the `resumed` test phase asserts
+that ordering, so a session gets the spec, then what the last attempt left, then
+its marching orders. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
+you hand the issue back, so a second worktree opened alongside a first one still
+standing can be pointed at it. The dispatcher's own opening prompt names it too,
+in a narrower state than either — `handoff_note_for` in `scripts/fleet/fleet.sh`
+is where that is argued, and `retry` is the line to read.
+
+**It lives at `.autofleet/run/handoff-<issue>.md`, and it dies with the
+worktree.** That directory is gitignored and per worktree: the note survives a
+session restart *inside* the worktree, which is the case it exists for, and it
+goes when the worktree is reaped. It is not durable storage and nothing backs it
+up. That is deliberate rather than unfinished — a note that outlived its
+worktree would be read by an attempt working from a different tree, telling it
+which files were touched in a tree it cannot see.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_HANDOFF_MAX_WORDS` | `300` | How long the note may be. Over it the script **refuses and changes nothing** rather than truncating: a note cut off at the sentence that said what is still open reads exactly like one where nothing was. Unbounded, the note grows into a second spec the next attempt reads in full before its first edit, which is the cost it exists to remove. `0` turns the cap off. **Must be a whole number**: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it — a non-number would otherwise make the comparison error out, the cap never fire, and the guard be absent with nothing on screen saying so. |
+
 ### What the fleet keeps
 
 Every store under `$FLEET_DIR` only ever grew until these two knobs arrived, and

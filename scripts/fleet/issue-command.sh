@@ -105,9 +105,11 @@ if [ -z "$ref" ] && runner_available 2>/dev/null; then
   esac
 fi
 
-# Accept a bare number or any .../issues/<n>[...] URL.
-num="$(printf '%s' "$ref" | sed -nE 's#.*/issues/([0-9]+).*#\1#p; s#^([0-9]+)$#\1#p' | head -1)"
-[ -n "$num" ] || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
+# Accept a bare number or any .../issues/<n>[...] URL. lib.sh holds the parse,
+# because handoff.sh needs the same one and the copy that lived here carried a
+# BSD-sed defect that turned `/issues/42` into `4242` -- see fleet_issue_number.
+num="$(fleet_issue_number "$ref")" \
+  || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
 
 # Quoted heredoc, and the number substituted afterwards: this block is full of
 # backticks, and in an unquoted heredoc the shell runs every one of them -- the
@@ -136,6 +138,37 @@ Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
 
 {{.body}}
 '
+fi
+
+# THE NOTE THE LAST ATTEMPT LEFT, if there is one, between the spec and the
+# brief. This is the "read at the start of a resumed session" half of
+# armaatus/autofleet#55: a session restarted in this worktree -- because the
+# time-box interrupted the one before it, or because the process died -- starts
+# from the issue body alone otherwise, and re-derives from the files every
+# decision the first attempt already made.
+#
+# PRINTED HERE rather than named in the brief, and the difference is the whole
+# of why it costs nothing. The brief is one text with a word budget
+# evals/lint.sh holds at 400, and stage 1 is at 394 of it; a sentence telling
+# every agent about a file that exists for one in twenty of them would be paid
+# for by all of them, in the prompt prefix of every request. An agent that HAS
+# one gets the note itself, and an agent that does not gets exactly what it got
+# before.
+#
+# Stage 1 only. An agent running `--after-pr` has the note in context already --
+# it is the thing that resumed it -- and reprinting it is the duplication the
+# two-stage split exists to stop.
+handoff="$(fleet_handoff_path "$REPO_ROOT" "$num")"
+if ! $after_pr && [ -f "$handoff" ]; then
+  # Before the `---` the brief opens with, so tests/test_brief.sh and
+  # evals/lint.sh go on measuring the brief rather than the brief plus whatever
+  # the last attempt wrote.
+  printf '\n## What the last attempt on this issue left\n\n'
+  printf 'It was interrupted, or it restarted. This is what it decided and why,\n'
+  printf 'and what is still open -- read it instead of working that out again.\n'
+  printf 'Keep it current: `./scripts/fleet/handoff.sh write %s`\n\n' "$num"
+  cat "$handoff"
+  printf '\n'
 fi
 
 # ONE brief, cut in two. `@@AFTER-PR@@` is the cut, `awk` prints the half that is
@@ -187,8 +220,8 @@ then fix the code -- `/mattpocock-skills:tdd` is that loop.
 __TEST_COMMAND__ green, with a test that would have
 failed before your change. Run it and read the output.
 
-**3. Review it yourself, before anything leaves this worktree.** Two passes,
-because they look for different things and this machine has the time:
+**3. Review it yourself, before anything leaves this worktree.** Two passes;
+they look for different things:
 
     /code-review high                  # defects: correctness, efficiency, reuse
     /mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
@@ -209,16 +242,17 @@ marker exists, run:
 It is what the body must carry, how the merge is queued, and the review loop.
 Skip it and the PR sits green forever, or merges over a review.
 
-**Two subagents in `.claude/agents/` keep reading out of this context.**
-`researcher` answers "where is this handled" with the answer, not the files it
-read; `verifier` gives an independent build-and-test verdict before the PR.
+**Two subagents keep reading out of this context** (`.claude/agents/`):
+`researcher` answers "where is this handled" with the answer, not the files;
+`verifier` gives an independent build-and-test verdict before the PR.
 
-**This context has to last** the plan, the build and three review rounds in one
-time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` over a
-range rather than a whole file, `researcher` before a wide search.
+**This context has to last** plan, build and three review rounds in one
+time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
+whole file, `researcher` before a wide search.
 
-At any point, if `~/.autofleet/STOP` exists, put the work down: say where you
-got to and do nothing further. Nothing can go out while it exists.
+Interrupted, or `~/.autofleet/STOP` exists? Put the work down, and write where
+you got to first: `./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'`.
+The next attempt here reads it. Nothing can go out while STOP exists.
 
 @@AFTER-PR@@
 
@@ -242,6 +276,21 @@ the PR cannot merge. The closing line is the one the PR template leaves as a
 placeholder -- fill it in. Then tell the board where the work is:
 
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
+
+Then write the handoff, which is what a session restarting in this worktree
+reads instead of working the last hour out again:
+
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
+
+The heredoc marker is shown because the bare form reads an empty stdin when it
+is run as one command, and an empty note is refused -- correctly, since it would
+otherwise destroy the round before it. The closing `NOTE` goes at column 0.
+
+The decisions you took and why, the files you touched, what each review round
+said and how you answered it, and what is still open. NOT the plan, which is in
+the PR body, and not the diff. It is capped, and over the cap it refuses and
+names the cap rather than truncating. `issue-command.sh` prints it back at the
+top of the next session here.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
@@ -289,6 +338,11 @@ re-runs `merge-gate` when a thread is resolved -- `pull_request_review_thread`
 is a webhook event, not a workflow trigger -- so the gate stays red on a thread
 you already closed, and auto-merge never fires. That script resolves the
 threads and, once the last one is shut, asks the gate again.
+
+Update the handoff after every round, so what a round said and how you answered
+it survives an interruption between this round and the next:
+
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
 
 IF YOU CHANGED ANYTHING, PUSH IT and go back to `await-review.sh`. The push
 re-runs the reviewer, and the review of what you actually sent is the next
