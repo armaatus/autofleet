@@ -177,8 +177,27 @@ case "${1:-}" in
   rm -f "$WORK/tree2/CLAUDE.md"
   cp "$REPO_ROOT/CLAUDE.md" "$WORK/tree2/CLAUDE.md"
   was="$(wc -l <"$WORK/tree2/CLAUDE.md" | tr -d ' ')"
-  awk -v n=$((limit + 1 - was)) 'BEGIN { for (i = 0; i < n; i++) print "<!-- a line -->" }' \
+  # EXACTLY the limit first. The limit is the LAST ALLOWED value on every row,
+  # and until the local review that was true of four rows and false of two --
+  # 400 words failed as "over the ceiling of 400" while a 350-word note passed,
+  # so raising a row to the figure a check had just printed left a red build.
+  # Held by inspection across six comparison sites, it is one `-lt` away from
+  # being false again, and the seventh row added a year from now has nobody
+  # reading it. So the boundary is driven rather than read.
+  # EMPTY lines. Padding with text adds WORDS, and CLAUDE.md is inside the
+  # `reading` row as well -- so a filler with three words on it drove that row
+  # over instead and this assertion failed on a ceiling it is not about.
+  awk -v n=$((limit - was)) 'BEGIN { for (i = 0; i < n; i++) print "" }' \
     >>"$WORK/tree2/CLAUDE.md"
+  out="$(lint_in "$WORK/tree2")"; rc=$?
+  [ "$rc" = 0 ] \
+    || { echo "$out" >&2; fail "CLAUDE.md at exactly its ceiling of $limit failed the lint; the limit is the last ALLOWED value, not the first refused one"; }
+  grep -qF -- "lines of CLAUDE.md" <<<"$out" \
+    || { echo "$out" >&2; fail "the lint went green without measuring CLAUDE.md at all"; }
+  ok "a row's limit is the last value it allows, driven at the boundary"
+
+  # ...and one line past it.
+  echo "" >>"$WORK/tree2/CLAUDE.md"
   out="$(lint_in "$WORK/tree2")"; rc=$?
   [ "$rc" = 0 ] && { echo "$out" >&2; fail "CLAUDE.md one line over its ceiling did not fail the lint"; }
   says_all_four "the CLAUDE.md ceiling's failure" "$out" \
@@ -215,12 +234,22 @@ case "${1:-}" in
   measured="$(sed -n 's/^ok: one clean round is \([0-9][0-9]*\) lines.*/\1/p' <<<"$green")"
   case "$measured" in ''|*[!0-9]*) echo "$green" >&2; fail "the round phase did not print what it measured, so this row cannot check the failure" ;; esac
 
+  # The same boundary on the other side of the table: exactly what it measures
+  # passes, one less fails. The green half is what proves the phase's comparison
+  # is inclusive; the red half is what proves it reads the table at all rather
+  # than comparing against a constant of its own.
   set_row "$WORK/tree3" round \
-    "round|1|armaatus/autofleet#53|lines one clean round prints|tests/test_await_review.sh quiet"
+    "round|$measured|armaatus/autofleet#53|lines one clean round prints|tests/test_await_review.sh quiet"
   out="$( (cd "$WORK/tree3" && bash tests/test_await_review.sh quiet) 2>&1 )"; rc=$?
-  [ "$rc" = 0 ] && { echo "$out" >&2; fail "the round phase passed against a ceiling of 1, so it is not reading the table"; }
-  says_all_four "the round phase's failure" "$out" "lines one clean round prints" 1 "$measured"
-  ok "...and a phase-measured row lowered under what it measures turns that phase red"
+  [ "$rc" = 0 ] \
+    || { echo "$out" >&2; fail "the round phase failed against a ceiling of exactly what it measures ($measured); the limit is the last ALLOWED value"; }
+
+  set_row "$WORK/tree3" round \
+    "round|$((measured - 1))|armaatus/autofleet#53|lines one clean round prints|tests/test_await_review.sh quiet"
+  out="$( (cd "$WORK/tree3" && bash tests/test_await_review.sh quiet) 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] && { echo "$out" >&2; fail "the round phase passed against a ceiling of $((measured - 1)), so it is not reading the table"; }
+  says_all_four "the round phase's failure" "$out" "lines one clean round prints" "$((measured - 1))" "$measured"
+  ok "...and a phase-measured row holds the same boundary, read out of the table"
   ;;
 # ------------------------------------------------------------- wellformed
   wellformed)
