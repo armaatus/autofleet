@@ -395,12 +395,11 @@ set +m
 # needs the same pair for the same wrapper-seam reason, and the grace period
 # between the TERM and the KILL is the kind of number that drifts when it is
 # written twice (armaatus/autofleet#51). The reasoning is there, not here.
-signal_reviewer() { fleet_signal_group "$1" "$reviewer"; }
 kill_reviewer() { fleet_kill_group "$reviewer"; }
 # The one EXIT handler, now also taking the reviewer with it. Redefined rather
 # than a second `trap`, which would have discarded the marker cleanup above.
 on_exit() {
-  signal_reviewer TERM
+  fleet_signal_group TERM "$reviewer"
   rm -f "${AUTOFLEET_REVIEW_MARKER:-}"
 }
 # Refunded, like the stop path below and for the same reason: a reviewer killed

@@ -303,7 +303,8 @@ No review will fix a merge conflict, and a conflicted branch cannot merge at
 all. Rebase it:
   git fetch origin && git rebase origin/${base_ref:-main}
 resolve the conflicts, re-run the build and the tests, then run
-./scripts/fleet/record-review.sh for the new head -- the marker is per-commit and
+./scripts/fleet/record-review.sh .autofleet/run/self-review.md for the new head -- the marker is
+per-commit and
 a rebase changes every sha, so the guard refuses the push without a fresh one.
 Then push the rewritten branch:
   git push --force-with-lease
@@ -328,7 +329,8 @@ CI is failing on this PR, on two consecutive checks: $broken
 
 No review will fix a red build. Reproduce it locally:
   ctest --test-dir build --output-on-failure
-then fix it, re-run the local reviews, ./scripts/fleet/record-review.sh for the
+then fix it, re-run the local reviews, ./scripts/fleet/record-review.sh
+.autofleet/run/self-review.md for the
 new commit, push, and come back here.
 
 A failure here is yours until you have shown otherwise. This used to name

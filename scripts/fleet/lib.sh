@@ -146,6 +146,28 @@ fleet_ports() {
 # its cap, that nothing owned and neither reap could ever see. Found by the
 # independent review, which also noted `main` did not have this shape: the
 # capture prefix arrived when the callsite moved into the driver.
+fleet_run_with_deadline() {
+  local seconds="$1" out="$2"; shift 2
+  if [ -n "${FLEET_RUN_STDERR:-}" ]; then
+    "$@" >"$out" 2>"$FLEET_RUN_STDERR" &
+  elif [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
+    "$@" >"$out" 2>&1 &
+  else
+    "$@" >"$out" 2>/dev/null &
+  fi
+  local child=$! ticks=0 limit=$((seconds * 20))
+  while kill -0 "$child" 2>/dev/null; do
+    if [ "$ticks" -ge "$limit" ]; then
+      kill "$child" 2>/dev/null
+      wait "$child" 2>/dev/null
+      return 124
+    fi
+    sleep 0.05
+    ticks=$((ticks + 1))
+  done
+  wait "$child"
+}
+
 # SIGNAL A SPAWNED AGENT AND EVERYTHING IT STARTED, not just the process this
 # shell forked.
 #
@@ -173,28 +195,6 @@ fleet_kill_group() {
   fleet_signal_group TERM "$1"
   sleep 2
   fleet_signal_group KILL "$1"
-}
-
-fleet_run_with_deadline() {
-  local seconds="$1" out="$2"; shift 2
-  if [ -n "${FLEET_RUN_STDERR:-}" ]; then
-    "$@" >"$out" 2>"$FLEET_RUN_STDERR" &
-  elif [ "${FLEET_RUN_CAPTURE_STDERR:-0}" = 1 ]; then
-    "$@" >"$out" 2>&1 &
-  else
-    "$@" >"$out" 2>/dev/null &
-  fi
-  local child=$! ticks=0 limit=$((seconds * 20))
-  while kill -0 "$child" 2>/dev/null; do
-    if [ "$ticks" -ge "$limit" ]; then
-      kill "$child" 2>/dev/null
-      wait "$child" 2>/dev/null
-      return 124
-    fi
-    sleep 0.05
-    ticks=$((ticks + 1))
-  done
-  wait "$child"
 }
 
 # One row out of a `path`-keyed TSV, by path: the $2 column of the first line

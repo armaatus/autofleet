@@ -479,7 +479,14 @@ fi
 #    where a pass that could edit files could edit `.claude/hooks/guard.py` on
 #    its way past -- the one thing guard.py refuses the agent itself. It reports;
 #    the author fixes. `gh api` is withheld for the same no-ceiling reason as
-#    above. armaatus/autofleet#51, found by the local
+#    above.
+#
+#    WHAT THIS COVERS, stated because the check's own message overclaimed it:
+#    the DIRECT grant, and nothing more. `Task` and `Agent` are on the list --
+#    both passes are skills that fan out -- so whether a subagent inherits this
+#    ceiling is a property of the runner, not of this line. `review.sh` has the
+#    same shape and the same gap. Read this as "the pass itself was not handed a
+#    pen", which is the part a diff to this repo can change. armaatus/autofleet#51, found by the local
 #    /mattpocock-skills:code-review pass, which noted review.sh had this
 #    assertion and self-review.sh had none.
 if python3 - <<'PYEOF'; then
@@ -492,9 +499,10 @@ if not block:
 granted = block.group(0)
 for forbidden in ("Write", "Edit", "NotebookEdit", "Bash(gh api:*)"):
     if forbidden in granted:
-        sys.exit(f"self-review.sh grants `{forbidden}`. The self-review passes report "
-                 "and the author fixes -- and this one runs in a fleet-owned worktree, "
-                 "where a pass that can write can rewrite the guard that is watching it")
+        sys.exit(f"self-review.sh grants `{forbidden}` directly. The self-review "
+                 "passes report and the author fixes -- and this one runs in a "
+                 "fleet-owned worktree, where a pass that can write can rewrite the "
+                 "guard that is watching it")
 if "Skill" not in granted:
     sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
              "skills -- silently review with most of what they are for switched off")
@@ -1424,7 +1432,8 @@ DOCS = {
     "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
     ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
     ".claude/agents/verifier.md":   ("map",   "read by the subagent, in the subagent's own context"),
-    "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is under .autofleet/run/"),
+    "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is the one below"),
+    ".autofleet/run/self-review.md": ("written", "where self-review.sh leaves what the two passes found -- gitignored, and the file the rebase remedy re-records"),
 }
 
 # `+`, not `*`. With `*` the prefix is optional, so the bare word `.md` in

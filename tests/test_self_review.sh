@@ -139,7 +139,10 @@ case "$mode" in
   # wrapper seam, so the process doing the work is routinely a child of what
   # self-review.sh signals -- and a kill that reaps only the direct child leaves
   # a full-budget agent running with nothing left to enforce a deadline.
-  hang)   sleep 3607 & printf '%s\n' "$!" >>"$SELF_CHILD"; wait ;;
+  # 3613, not 3607: test_review_mode.sh's orphan phases `pgrep` MACHINE-WIDE for
+  # their own `sleep 3607`, and tests/run.sh already carries a note about that
+  # exact collision misattributing a failure. A duration of its own.
+  hang)   sleep 3613 & printf '%s\n' "$!" >>"$SELF_CHILD"; wait ;;
 esac
 exit 0
 STUB
@@ -258,14 +261,42 @@ case "${1:-}" in
   dirty)
   make_fixture
   export SELF_MODE=findings
-  printf 'not committed\n' >"$WORK/repo/loose.txt"
   err="$WORK/err"
-  run_it >/dev/null 2>"$err"; rc=$?
 
-  [ "$rc" = 2 ] || { cat "$err" >&2; fail "a dirty tree exited $rc, not the documented 2"; }
+  # AN UNTRACKED FILE IS NOT A REFUSAL. `.gitignore` is not in install.sh's
+  # PAYLOAD and `env.sh` makes `.autofleet/run/` in every worktree, so counting
+  # untracked files means a host repo exits 2 on its first run, forever, on a
+  # directory this script created. It works here and nowhere else -- hard rule 1.
+  printf 'not committed\n' >"$WORK/repo/loose.txt"
+  run_it >/dev/null 2>"$err"; rc=$?
+  [ "$rc" = 0 ] || { cat "$err" >&2; fail "an untracked file refused the whole run (rc $rc)"; }
+  grep -qF -- 'loose.txt' "$err" || fail "the untracked file was not even mentioned"
+  ok "an untracked file is a warning, not a refusal -- a host repo has one by construction"
+
+  # A MODIFIED TRACKED FILE IS. That work is not in HEAD, and HEAD is what the
+  # marker covers and what gets pushed.
+  rm -f "$MARKER"; : >"$SELF_CALLS"
+  printf 'edited, not committed\n' >>"$WORK/repo/thing.txt"
+  run_it >/dev/null 2>"$err"; rc=$?
+  [ "$rc" = 2 ] || { cat "$err" >&2; fail "a modified tracked file exited $rc, not the documented 2"; }
   [ "$(n_calls)" = 0 ] || fail "a pass was started against a tree that is not what will be pushed"
   [ -f "$MARKER" ] && fail "a marker was recorded for a commit that is not the whole change"
-  ok "uncommitted work is refused, not silently left out of the review"
+  ok "uncommitted changes to tracked files are refused, not silently left out"
+  ;;
+
+# --------------------------------------------------------------------- norange
+  norange)
+  make_fixture
+  export SELF_MODE=findings
+  err="$WORK/err"
+  # On the base itself: both passes would honestly review an empty diff, declare
+  # zero findings, and the marker would open the push gate on a review of
+  # nothing -- which is the class of failure this whole script is about.
+  ( cd "$WORK/repo" && git checkout -q main )
+  run_it >/dev/null 2>"$err"; rc=$?
+  [ "$rc" = 2 ] || { cat "$err" >&2; fail "an empty range exited $rc, not the documented 2"; }
+  [ "$(n_calls)" = 0 ] || fail "a pass was started against an empty range"
+  ok "a branch with nothing on it is refused before a pass is started"
   ;;
 
 # --------------------------------------------------------------------- empty
@@ -343,5 +374,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|silent|undeclared|noisy|dirty|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|silent|undeclared|noisy|dirty|norange|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac

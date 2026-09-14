@@ -80,12 +80,26 @@ fleet_stopped && { echo "STOPPED: $FLEET_STOP exists; no pass was started." >&2;
 # it is not has been lied to about the one thing it cannot check cheaply. Commit
 # first; that is also what makes the per-commit marker mean what it says.
 # Found by the local /code-review pass.
-dirty="$(git status --porcelain 2>/dev/null)"
+#
+# `-uno`: TRACKED changes only. The first version counted untracked files, and
+# that is a hard rule 1 bug -- `.gitignore` is NOT in install.sh's PAYLOAD, and
+# `env.sh` creates `.autofleet/run/` in every worktree, so in a host repo the
+# very directory this script writes into is untracked and the first run exits 2
+# forever. It works here, where `.gitignore` names it, and nowhere else. An
+# untracked file cannot be in the pushed commit either, so it is worth a WARNING
+# and not a refusal. Found by the local /code-review pass.
+dirty="$(git status --porcelain -uno 2>/dev/null)"
 [ -z "$dirty" ] || {
-  echo "the working tree is not clean, so the passes would review a commit that" >&2
-  echo "is not what you are about to push. Commit first, then run this again:" >&2
+  echo "the working tree has uncommitted changes, so the passes would review a" >&2
+  echo "commit that is not what you are about to push. Commit first, then run" >&2
+  echo "this again:" >&2
   printf '%s\n' "$dirty" | sed -n '1,10p' >&2
   exit 2; }
+untracked="$(git ls-files --others --exclude-standard 2>/dev/null | sed -n '1,10p')"
+[ -z "$untracked" ] || {
+  echo "note: these files are untracked, so they are in neither the review nor" >&2
+  echo "the push. If they belong to this change, commit them first:" >&2
+  printf '%s\n' "$untracked" >&2; }
 
 command -v "$AUTOFLEET_SELF_REVIEW_CMD" >/dev/null 2>&1 || {
   echo "AUTOFLEET_SELF_REVIEW_CMD is '$AUTOFLEET_SELF_REVIEW_CMD', which is not on PATH." >&2
@@ -111,6 +125,18 @@ merge_base="$(git merge-base HEAD "$base" 2>/dev/null)" || merge_base=""
   echo "could not work out what this branch changed: no merge base with '${base:-origin/HEAD}'." >&2
   echo "Pass one: ./scripts/fleet/self-review.sh <base-ref>" >&2
   exit 2; }
+
+# ...AND THE RANGE HAS TO CONTAIN SOMETHING. Run on `main`, or on a branch with
+# nothing on it, both passes honestly review an empty diff, write
+# `<!-- self-review-findings: 0 -->`, and the marker is recorded -- the push gate
+# opened on a review of nothing, which is the class of failure this whole script
+# is about. Found by the local /mattpocock-skills:code-review pass.
+if git diff --quiet "$merge_base" HEAD; then
+  echo "there is nothing on this branch to review: HEAD is unchanged from" >&2
+  echo "${merge_base:0:8}. Commit the work first, or pass the base you meant:" >&2
+  echo "  ./scripts/fleet/self-review.sh <base-ref>" >&2
+  exit 2
+fi
 
 sha="$(git rev-parse HEAD)"
 mkdir -p .autofleet/run
@@ -249,9 +275,31 @@ TOOLS="$TOOLS,Bash(gh issue view:*)"
 # The range is in the SYSTEM prompt rather than appended to the slash command,
 # because a slash command's arguments are whatever follows it on the line and
 # these two passes do not share an argument grammar. Said once, it reaches both.
+# WHICH ISSUE the diff claims to close. The second pass's spec axis is "does this
+# implement what was asked", and it was being handed `Bash(gh issue view:*)` with
+# no target -- a tool and nothing to point it at. The fleet names its branches
+# `<owner>/<n>-<slug>`, so the number is in front of us; a branch that is not
+# shaped that way simply gets no line, which is what the pass had before.
+# Found by the local /mattpocock-skills:code-review pass.
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+issue_n="$(printf '%s\n' "${branch##*/}" | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p')"
+issue_line=""
+[ -n "$issue_n" ] \
+  && issue_line="The diff claims to close issue #$issue_n; \`gh issue view $issue_n\` is its Scope and
+Acceptance, and whether the diff matches them is part of what you are judging.
+"
+
 SYSTEM="You are one of two mandatory self-review passes the autofleet fleet runs
 before a pull request is opened. The policy is REVIEW.md at the repository root;
 read it.
+
+$issue_line
+THERE IS NO USER. You were started headless by a script, your stdin is closed,
+and a question you ask is a question nobody will answer -- a pass that stops to
+ask emits no findings, the run is recorded as a failure, and running it again
+produces the same stop. If something you would normally ask about is missing,
+proceed on your best reading of what is here and say in your findings what you
+had to assume.
 
 The change under review is every commit on this branch since $merge_base --
 \`git diff $merge_base...HEAD\` is its whole extent, and the working tree is
@@ -277,7 +325,12 @@ clean diff from a pass that gave up."
 # succeeded -- the findings are built up in a file that is only handed to
 # `record-review.sh` at the end.
 #
-FINDINGS=".autofleet/run/self-review-$sha.md"
+# A STABLE PATH, not one keyed on the sha. A rebase moves the head, and the
+# remedy every caller prints is "re-record for the new head" -- which needs a
+# file it can name without knowing what the old sha was. The per-pass transcripts
+# under `$LOG_DIR` keep the sha; this one is "what the last self-review in this
+# worktree found". Found by the local /code-review pass.
+FINDINGS=".autofleet/run/self-review.md"
 : >"$FINDINGS"
 # `failed` IS A STRING, NOT AN ARRAY. macOS ships bash 3.2, where `${#arr[@]}`
 # on an array that was never appended to is an unbound variable under `set -u`
@@ -312,6 +365,9 @@ if [ -n "$failed" ]; then
   exit "$rc_first"
 fi
 
+echo "==> findings: $FINDINGS" >&2
+echo "    after a rebase, re-record them for the new head with" >&2
+echo "      ./scripts/fleet/record-review.sh $FINDINGS" >&2
 ./scripts/fleet/record-review.sh "$FINDINGS" >&2 || {
   echo "record-review.sh refused the findings; the push gate is still closed." >&2
   exit 2; }
