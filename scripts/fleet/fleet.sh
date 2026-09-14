@@ -170,6 +170,21 @@ ISSUE_REFS="$REPO_ROOT/.github/scripts"
 # the independent review, which proposed exactly this.
 POLL_CACHE="$STATE_DIR/poll-cache"
 forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
+
+# THE POLL CACHE IS THE POLL'S, and this is the line that says so rather than
+# leaving it to the call graph. `cmd_run` sets it once per pass; every other
+# entry point leaves it false and `live_worktrees` then reads the runner
+# directly, writing nothing.
+#
+# #35's acceptance -- "fleet.sh status leaves $STATE_DIR byte-identical" -- held
+# until now because no helper `cmd_status` happened to call wrote to the cache.
+# `cmd_status` calls `in_flight` for its `next up` table, and `in_flight` reads
+# the worktree list, so caching that list made `status` a writer. The damage is
+# not the write: it is that a `status` in the watch loop docs/WORKFLOW.md
+# prescribes would hand the dispatcher beside it a list read at another moment,
+# and a stale list is a duplicate worktree or a missed foundation hold.
+# armaatus/autofleet#30.
+IN_POLL=false
 LOG="$STATE_DIR/fleet.log"
 PIDFILE="$STATE_DIR/fleet.pid"
 
@@ -629,10 +644,70 @@ count_parked_owned() {
 # here by the independent review. The selector prose had to go -- it named a
 # runner's flag in the file hard rule 2 says may not know one. This half names
 # no runtime and was collateral.)
+#
+# ...and ONE READ PER POLL, cached in $POLL_CACHE like `poll_issue` below it.
+# Three callers take this list inside one pass -- the launch gate's own count,
+# `foundation_in_flight` and `count_startable` -- and `in_flight` takes one more
+# per issue a list-mode run is still waiting on. Three subprocesses for one
+# answer is the pattern `count_startable` exists to avoid, run against the runner
+# instead of against `gh`. armaatus/autofleet#30.
+#
+# Cached HERE rather than in the driver: a driver that caches is a driver every
+# other driver has to remember to cache in, and $POLL_CACHE is the dispatcher's
+# state, not the runner's.
+#
+# The invalidation is the part that has to be right, and it is one function.
+# The list changes when this dispatcher LAUNCHES a worktree and when it REMOVES
+# one; both go through `forget_worktree_answers`, so the two per-poll answers
+# derived from this list cannot drift onto two different invalidation points.
+#
+# A FAILED read is NOT cached, which is also what keeps `foundation_in_flight`'s
+# "could not read the worktree list" branch reachable. The first read of a pass
+# is the run loop's, and that one skips the whole pass on failure -- but `launch`
+# drops the cache mid-pass, so the next read really is `foundation_in_flight`'s
+# own, and it is the single place that failure is handled after a launch.
 live_worktrees() {
-  local list
+  local cached="$POLL_CACHE/worktrees" list
+  # `-e`, not `-s`: no worktrees at all is an ANSWER and caches as an empty file.
+  # Outside a poll neither half runs, and this is a plain read of the runner --
+  # see $IN_POLL. ONE gate rather than a second uncached reader beside this one:
+  # `cmd_status` reaches this function twice, once for its own listing and once
+  # through `in_flight`, so a reader it could be pointed at would still leave the
+  # other callsite writing.
+  $IN_POLL && [ -e "$cached" ] && { cat "$cached"; return 0; }
   list="$(runner_worktree_list)" || return 1
-  printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }'
+  list="$(printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }')"
+  if $IN_POLL; then
+    mkdir -p "$POLL_CACHE" 2>/dev/null
+    print_listing "$list" >"$cached" 2>/dev/null || true
+  fi
+  print_listing "$list"
+}
+
+# A listing back exactly as it was read: one trailing newline per record, and
+# NOTHING AT ALL when there are none. The cache round-trips through `$(...)`,
+# which eats the trailing newline, and the two obvious ways to put it back are
+# both wrong -- `printf '%s'` leaves the last record without one, so
+# `while read num path` drops it, and `printf '%s\n'` on an empty list prints a
+# blank line, which the same loop reads as a worktree with no number and
+# `cmd_status` prints as an empty row.
+print_listing() { [ -n "$1" ] && printf '%s\n' "$1"; return 0; }
+
+# Everything derived from the worktree list, dropped together. `launch` and
+# `remove_worktree` are the two places this dispatcher changes that list, and
+# both call this rather than naming cache files themselves:
+# `foundation_in_flight`'s answer is read OFF this list, so a change that drops
+# one and not the other leaves a per-poll answer describing a world that is gone.
+# Two caches with two invalidation points is the failure armaatus/autofleet#30
+# says not to create, and `launch`'s drop already has its own test phase.
+#
+# $POLL_CACHE is guarded because armaatus/rommsync-nx exercises `remove_worktree`
+# by extracting it with `sed` and sourcing it alone -- see the note there -- so
+# everything the file around it defines arrives empty, and an empty $POLL_CACHE
+# would make this `rm -f /worktrees /foundation`.
+forget_worktree_answers() {
+  [ -n "${POLL_CACHE:-}" ] || return 0
+  rm -f "$POLL_CACHE/worktrees" "$POLL_CACHE/foundation"
 }
 
 # Prints the count, or fails. A caller that cannot tell how many are running
@@ -867,12 +942,11 @@ foundation_hold_say() { hold_say_into "$FOUNDATION_HOLD_SAID" "$@"; }
 # is what `launch` invalidates it for. An earlier version of this claimed no new
 # API call while making one per iteration.
 #
-# It is still a SECOND read of the worktree list in a pass -- `live_count` has
-# one and `count_startable` takes a third -- so the "one answer per poll"
-# convention this follows within itself is not yet followed across the three.
-# Caching `live_worktrees` itself is the fix and it belongs to all three callers
-# rather than to this one; armaatus/autofleet#30 has it. Named here rather than left as a comment
-# that quietly overstates. Found by the independent review.
+# The worktree list underneath it is cached too, in the same pass and dropped at
+# the same two points -- see `live_worktrees`. It used to be a second read of a
+# list `count_startable` took a third of, which is the convention this function
+# follows within itself and did not follow across the three.
+# armaatus/autofleet#30, found by the independent review of #28.
 #
 # ...and it SAYS SO ONCE, not once per poll, which is a different question from
 # the cache: a three-hour foundation issue against a 60-second poll is 180
@@ -899,6 +973,10 @@ foundation_in_flight() {
     return 0
   fi
 
+  # STILL REACHABLE, and now the only place this failure is handled in a pass:
+  # the first read is the run loop's, which skips the whole pass rather than
+  # guessing, but `launch` drops the cache mid-pass and the next read is this
+  # one. A failed read is never cached -- see `live_worktrees`.
   if ! list="$(live_worktrees)"; then
     foundation_hold "$cached" "list-unreadable" \
       "could not read this repository's worktree list, so whether a foundation" \
@@ -1091,11 +1169,16 @@ BRIEF
 }
 
 launch() {
-  # The worktree list is about to change, and `foundation_in_flight` caches its
-  # answer per poll. Dropping it here is what makes the check on the NEXT
+  # The worktree list is about to change, and everything derived from it is
+  # cached per poll. Dropping it here is what makes the check on the NEXT
   # iteration see the worktree this launch is about to create -- which is the
-  # half of the rule that stops anything starting behind a foundation issue.
-  rm -f "$POLL_CACHE/foundation"
+  # half of the rule that stops anything starting behind a foundation issue --
+  # and what makes the launch loop's own re-read below see it too.
+  #
+  # Before the drop, not after: a `launch` that fails changes nothing, and the
+  # only cost of dropping early is one extra read of a list that did not move.
+  # Getting that backwards costs a worktree the rule exists to prevent.
+  forget_worktree_answers
   local num="$1" title="$2"
   local name; name="$(slug "$num-$title")"
 
@@ -1941,7 +2024,16 @@ remove_worktree() {
   out="$(mktemp)"
   runner_worktree_remove "$path" "$deadline" >"$out" 2>&1
   rc=$?
-  if [ "$rc" = 0 ]; then rm -f "$out"; finish_removal "$path" "$watcher" "$projects"; return 0; fi
+  if [ "$rc" = 0 ]; then
+    rm -f "$out"
+    # The other half of `launch`'s drop: this worktree is no longer in the list,
+    # so the pass's cached copy -- and `foundation_in_flight`'s answer read off
+    # it -- describes a world that no longer exists. Only on rc 0: a refusal and
+    # a runner that never answered both leave the worktree standing.
+    forget_worktree_answers
+    finish_removal "$path" "$watcher" "$projects"
+    return 0
+  fi
   if [ "$rc" = 2 ]; then
     rm -f "$out"
     # No "in ${deadline}s": rc 2 is also a runner that could not be reached at
@@ -3299,7 +3391,9 @@ while that one is up."
 
     forget_poll_answers
     # ...here, once per pass, and nowhere else: see the note beside the
-    # definition.
+    # definition. The same line opens the cache for writing -- from here to the
+    # bottom of the pass this process is the poll, which is what $IN_POLL means.
+    IN_POLL=true
     #
     # The order below is load-bearing in three places. reap_merged first,
     # because a worktree whose PR merged is its business and reap_abandoned only
@@ -3363,11 +3457,12 @@ while that one is up."
       # dispatcher started, and it holds again on the iteration after this pass
       # launches one, because by then that worktree is in the list too.
       #
-      # Cheap despite that. The whole answer is cached per poll, and `launch`
-      # drops the cache -- so a pass costs one `live_worktrees` plus one more per
-      # worktree it opens, not one per iteration. An earlier version of this
-      # comment described the cost before that cache existed and claimed only the
-      # label lookups were cached; found by the local review.
+      # Cheap despite that. The whole answer is cached per poll, and so is the
+      # worktree list it is read off, and `launch` drops both -- so a pass costs
+      # one `runner_worktree_list` plus one more per worktree it opens, not one
+      # per iteration. An earlier version of this comment described the cost
+      # before that cache existed and claimed only the label lookups were cached;
+      # found by the local review.
       if foundation_in_flight; then break; fi
 
       local picked="" title="" labels=""
