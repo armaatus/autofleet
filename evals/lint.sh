@@ -521,9 +521,15 @@ for forbidden in ("Write", "Edit", "NotebookEdit"):
                  "one runs in a fleet-owned worktree, where a pass that can write "
                  "can rewrite .claude/agents/reviewer.md, the brief the "
                  "independent reviewer runs on")
-if "--disallowed-tools" not in src:
+# ON THE SPAWN, not anywhere in the file. `"--disallowed-tools" in src` was true
+# of the COMMENT that explains it, so the assertion survived the flag being
+# dropped from the command line -- hard rule 3, in the check written to prevent
+# exactly that. Anchored on the flag followed by the variable, on a line that is
+# not a comment. Found by the local /code-review pass.
+if not re.search(r'^\s*--disallowed-tools "\$DENIED"', src, re.M):
     sys.exit("scripts/fleet/self-review.sh builds a DENIED list and never passes "
-             "it with `--disallowed-tools`, so it refuses nothing")
+             "it to the command as `--disallowed-tools \"$DENIED\"`, so it "
+             "refuses nothing")
 if "Skill" not in granted:
     sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
              "skills -- silently review with most of what they are for switched off")

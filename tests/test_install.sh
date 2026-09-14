@@ -44,6 +44,23 @@ make_host() {
   printf 'node_modules/\n*.log' >"$WORK/host/.gitignore"
   git -C "$WORK/host" add -A
   git -C "$WORK/host" -c user.email=t@t -c user.name=t commit -qm base
+
+  # `claude` STUBBED ON PATH. install.sh's plugin step runs
+  # `claude plugin marketplace add` and `claude plugin install --scope project`,
+  # and with the real binary on PATH -- which is every machine the fleet runs on
+  # -- a test of the .gitignore append reached the network and mutated the
+  # developer's global plugin state, or hung offline. A suite that changes the
+  # machine it is measuring is worse than no suite. Found by the local
+  # /code-review pass.
+  mkdir -p "$WORK/bin"
+  cat >"$WORK/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CLAUDE_CALLS"
+exit 0
+STUB
+  chmod +x "$WORK/bin/claude"
+  CLAUDE_CALLS="$WORK/claude-calls"; : >"$CLAUDE_CALLS"; export CLAUDE_CALLS
+  PATH="$WORK/bin:$PATH"; export PATH
 }
 
 install_it() { (cd "$WORK/host" && "$REPO_ROOT/install.sh" "$@" . 2>&1); }
@@ -73,6 +90,13 @@ case "${1:-}" in
   head -1 "$WORK/host/.gitignore" | grep -qxF 'node_modules/' \
     || fail "the host's .gitignore was rewritten rather than appended to"
   ok "appended, never rewritten"
+
+  # ...and nothing reached the real `claude`. If the stub is ever bypassed this
+  # phase is touching the machine's plugin state, which is what the stub exists
+  # to prevent -- so assert the calls landed on the stub rather than nowhere.
+  grep -q . "$CLAUDE_CALLS" \
+    || fail "install.sh never called claude, so the plugin step is not being stubbed here at all"
+  ok "the plugin step went to the stub, not to the network"
   ;;
 
   idempotent)

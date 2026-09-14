@@ -455,8 +455,13 @@ fi
 now="$(git rev-parse HEAD)"
 [ "$now" = "$sha" ] || {
   echo "HEAD moved while the passes ran: they read ${sha:0:8}, HEAD is now" >&2
-  echo "${now:0:8}. Recording would mark a commit nothing has reviewed. The" >&2
-  echo "findings are in $DRAFT; run this again on the commit you mean to push." >&2
+  echo "${now:0:8}. Recording would mark a commit nothing has reviewed." >&2
+  # NOT `$DRAFT`: the next run truncates it on entry, so naming it here sent the
+  # reader to a file the prescribed remedy wipes. The per-pass files are keyed on
+  # the sha that was read and nothing rewrites them. Found by the local
+  # /code-review pass.
+  echo "Each pass's findings are under $LOG_DIR, keyed by the sha they read." >&2
+  echo "Run this again on the commit you mean to push." >&2
   exit 2; }
 
 mv "$DRAFT" "$FINDINGS"
