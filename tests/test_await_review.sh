@@ -301,9 +301,9 @@ case "${1:-}" in
   grep -q 'answer-review.sh' <<<"$out" \
     || { echo "$out" >&2; fail "the round never reached a review, so its length proves nothing"; }
   lines="$(wc -l <<<"$out" | tr -d ' ')"
-  limit="$(ceiling round)"
+  limit="$(ceiling round)" || exit 1
   [ "$lines" -le "$limit" ] \
-    || { echo "$out" >&2; fail "one clean round prints $lines lines, over the ceiling of $limit. Raise the \`round\` row in evals/lint.sh's ceilings table, deliberately, or say it in fewer"; }
+    || { echo "$out" >&2; fail "$(ceiling_over round "$lines")"; }
   ok "one clean round is $lines lines, ceiling $limit"
   ;;
   *)

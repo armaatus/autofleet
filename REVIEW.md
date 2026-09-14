@@ -3,11 +3,10 @@
 What `/code-review` looks for on this repo, what counts as **Important** rather
 than a **Nit**, and what it should not report at all.
 
-CLAUDE.md makes `/code-review` on your own branch a required step before opening
-a PR, with the findings in the PR body. This file is what makes those findings
-comparable between agents and between PRs: without it, three worktrees produce
-three different reviews of three different things, and a human cannot tell a
-serious finding from a preference.
+CLAUDE.md requires `/code-review` on your own branch before a PR, findings in
+the body. This file makes those findings comparable between agents and between
+PRs: without it, three worktrees produce three different reviews of three
+different things, and a human cannot tell a serious finding from a preference.
 
 Read this before reviewing. If you are the author, read it before you finish --
 a finding you can predict is one you can avoid.

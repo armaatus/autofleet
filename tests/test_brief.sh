@@ -83,7 +83,7 @@ STUB
 # Raising it on the branch alone is not raising it: `agent-config.yml` re-runs
 # MAIN's lint against the branch, so a number that moved here and not on main is
 # a red check, not a raised budget. #55 is where that was learned.
-BRIEF_WORD_BUDGET="$(ceiling brief)"
+BRIEF_WORD_BUDGET="$(ceiling brief)" || exit 1
 
 run_it() { (cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"); }
 
@@ -132,8 +132,8 @@ case "${1:-}" in
       '--auto --squash' 'Closes #' './scripts/fleet/board.sh'
 
     words="$(brief_only <<<"$out" | wc -w | tr -d ' ')"
-    [ "$words" -lt "$BRIEF_WORD_BUDGET" ] \
-      || fail "the opening brief is $words words, spec excluded, over the ceiling of $BRIEF_WORD_BUDGET. Raise the \`brief\` row in evals/lint.sh's ceilings table, deliberately, or move something into --after-pr"
+    [ "$words" -le "$BRIEF_WORD_BUDGET" ] \
+      || fail "$(ceiling_over brief "$words"), or move something into --after-pr"
     echo "ok: stage 1 is the spec, steps 1-3 and a pointer, in $words words"
     ;;
   stage2)
@@ -208,9 +208,9 @@ case "${1:-}" in
     # The limit AND the membership out of the same row. evals/lint.sh is the
     # vendored copy, so a host project gets the ceiling even though tests/ is
     # not vendored, and this phase measures it on what the script prints.
-    READING_CEILING="$(ceiling reading)"
-    [ "$total" -lt "$READING_CEILING" ] \
-      || fail "a fleet agent is told to read $total words before its first edit, over the ceiling of $READING_CEILING. Raise the \`reading\` row in evals/lint.sh's ceilings table, deliberately, or spend fewer"
+    READING_CEILING="$(ceiling reading)" || exit 1
+    [ "$total" -le "$READING_CEILING" ] \
+      || fail "$(ceiling_over reading "$total")"
     echo "ok: a fleet agent reads $total words before its first edit, ceiling $READING_CEILING"
     ;;
   *)

@@ -923,9 +923,9 @@ EOF
   # are registered (the row below). The slack is what a phase that DECLINES costs
   # -- its label and its own reason -- which is the one thing allowed to push a
   # green run past two, and the skip row further down spends it deliberately.
-  bar="$(ceiling testrun)"
+  bar="$(ceiling testrun)" || exit 1
   [ "$green" -le "$bar" ] \
-    || fail "a green run printed $green lines, over the ceiling of $bar. Raise the \`testrun\` row in evals/lint.sh's ceilings table, deliberately, or print less: $(cat "$WORK/out")"
+    || fail "$(ceiling_over testrun "$green"): $(cat "$WORK/out")"
   ok "a green run is at most $bar lines, and printed $green"
 
   grep -q "3 passed." "$WORK/out" \
@@ -1013,7 +1013,7 @@ EOF
   # above could not see it.
   skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
   [ "$skipped_lines" -le "$bar" ] \
-    || fail "a green run of two passes and one skip printed $skipped_lines lines, over the ceiling of $bar: $(cat "$WORK/out")"
+    || fail "$(ceiling_over testrun "$skipped_lines") -- two passes and one skip: $(cat "$WORK/out")"
   grep -q "ok   " "$WORK/out" \
     && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
   grep -q "== " "$WORK/out" \

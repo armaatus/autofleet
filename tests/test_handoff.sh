@@ -579,9 +579,9 @@ case "${1:-}" in
       || fail "stage 1 printed no handoff note for a worktree that has one, so this phase is measuring nothing: $out"
     words="$(wc -w <<<"$span" | tr -d ' ')"
 
-    limit="$(ceiling handoff)"
+    limit="$(ceiling handoff)" || exit 1
     [ "$words" -le "$limit" ] \
-      || fail "the handoff note stage 1 prints is $words words, over the ceiling of $limit. Raise the \`handoff\` row in evals/lint.sh's ceilings table, deliberately, or cut the framing around the note"
+      || fail "$(ceiling_over handoff "$words"), or cut the framing around the note"
     echo "ok: a resumed session is handed $words words of note before the brief, ceiling $limit"
     ;;
 

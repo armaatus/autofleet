@@ -43,6 +43,7 @@ trap cleanup EXIT
 # file. That is the one mistake this fixture must not be able to make.
 mk_tree() {
   local dst="$1" entry base
+  rm -rf "$dst"
   mkdir -p "$dst"
   for entry in "$REPO_ROOT"/* "$REPO_ROOT"/.[!.]*; do
     [ -e "$entry" ] || continue
@@ -70,9 +71,14 @@ lint_in() { (cd "$1" && ./evals/lint.sh 2>&1); }
 # The fixture has to be GREEN before it is broken, or a row below proves nothing:
 # a lint that was already failing for an unrelated reason fails again afterwards
 # and every assertion here passes on the wrong failure.
+# ...and what it measured while it was green is kept, because a row below needs
+# the BASELINE figure to predict what the broken tree will report. Read off the
+# lint's own line rather than recomputed here: a second implementation of the
+# sum is the drift this whole table exists to stop.
+GREEN_OUT=""
 assert_green() {
-  local out; out="$(lint_in "$1")"; local rc=$?
-  [ "$rc" = 0 ] || { echo "$out" >&2; fail "the fixture tree is not green before it is broken (rc=$rc), so nothing below is measuring what it claims"; }
+  GREEN_OUT="$(lint_in "$1")"; local rc=$?
+  [ "$rc" = 0 ] || { echo "$GREEN_OUT" >&2; fail "the fixture tree is not green before it is broken (rc=$rc), so nothing below is measuring what it claims"; }
 }
 
 # The four things armaatus/autofleet#56's acceptance asks every ceiling failure
@@ -82,10 +88,15 @@ says_all_four() {
   local what="$1" out="$2" measured="$3" limit="$4" figure="$5"
   grep -qF -- "$measured" <<<"$out" \
     || { echo "$out" >&2; fail "$what does not say WHAT was measured (looked for '$measured')"; }
-  grep -qF -- "$limit" <<<"$out" \
-    || { echo "$out" >&2; fail "$what does not name the limit ($limit)"; }
-  grep -qF -- "$figure" <<<"$out" \
-    || { echo "$out" >&2; fail "$what does not say what the figure actually was ($figure)"; }
+  # The figure and the limit TOGETHER, as one phrase. Grepped apart, the
+  # `reading` row passed on a message that had dropped its total: the figure
+  # also appears in the per-document breakdown the same line prints, so the
+  # assertion was satisfied by a number that was not the one being judged.
+  # Found by the local /code-review pass.
+  grep -qF -- "$figure, over the ceiling of $limit" <<<"$out" \
+    || { echo "$out" >&2; fail "$what does not put the figure ($figure) and the limit ($limit) in one clause, so neither is anchored to the other"; }
+  grep -qE -- "set by armaatus/[a-z-]+#[0-9]+" <<<"$out" \
+    || { echo "$out" >&2; fail "$what does not cite the issue that set the limit"; }
   grep -qF -- "ceilings table at the top of evals/lint.sh" <<<"$out" \
     || { echo "$out" >&2; fail "$what does not say where the limit is changed, so the remedy is a hunt"; }
 }
@@ -119,15 +130,29 @@ case "${1:-}" in
   # whole issue is about -- REVIEW.md is 1,300-odd words and every one of them
   # arrived as a useful paragraph -- so it is the row driven with real text
   # rather than with a synthetic file.
-  limit="$(ceiling reading)"
+  limit="$(ceiling reading)" || exit 1
+  # The total the green run reported, so the figure this expects afterwards is
+  # the lint's own arithmetic plus the words this phase added -- not a second
+  # copy of the sum.
+  before="$(sed -n 's/^ *\([0-9][0-9]*\) words before the first edit.*/\1/p' <<<"$GREEN_OUT")"
+  case "$before" in ''|*[!0-9]*) echo "$GREEN_OUT" >&2; fail "the green run did not report a word total, so this phase cannot predict what the broken one should say" ;; esac
+  # Exactly one word past the ceiling, derived from what the green run reported.
+  # A fixed 200 works only while the headroom is small: the page this phase
+  # backs tells agents to pay for a raise by tightening something else, and the
+  # first cleanup that frees more than the padding would leave the lint green
+  # and this phase red, blaming the ceiling for a documentation tidy-up. The
+  # `claude-md` row below already derived its padding. Found by the local
+  # /code-review pass.
+  pad=$((limit + 1 - before))
+  [ "$pad" -gt 0 ] \
+    || fail "the fixture tree already reads $before words against a ceiling of $limit, so there is nothing to drive over"
   rm -f "$WORK/tree/REVIEW.md"
   cp "$REPO_ROOT/REVIEW.md" "$WORK/tree/REVIEW.md"
-  before="$(wc -w <"$WORK/tree/REVIEW.md" | tr -d ' ')"
-  awk -v n=200 'BEGIN { for (i = 0; i < n; i++) printf "word " }' >>"$WORK/tree/REVIEW.md"
+  awk -v n="$pad" 'BEGIN { for (i = 0; i < n; i++) printf "word " }' >>"$WORK/tree/REVIEW.md"
   out="$(lint_in "$WORK/tree")"; rc=$?
-  [ "$rc" = 0 ] && { echo "$out" >&2; fail "200 words added to a required document did not fail the lint; the reading ceiling is not holding"; }
+  [ "$rc" = 0 ] && { echo "$out" >&2; fail "$pad words added to a required document did not fail the lint; the reading ceiling is not holding"; }
   says_all_four "the reading ceiling's failure" "$out" \
-    "before its first edit" "$limit" "$((before + 200))"
+    "before its first edit" "$limit" "$((limit + 1))"
   ok "a required document grown past the reading ceiling fails the lint, and the failure says all four things"
 
   # ...and the row is the thing that decides it: raise the ceiling in the table
@@ -147,8 +172,8 @@ case "${1:-}" in
 
   # A second row, measured a different way, so the phase is not asserting one
   # check twice: `claude-md` counts LINES of a file the session reads whole.
-  rm -rf "$WORK/tree2"; mk_tree "$WORK/tree2"
-  limit="$(ceiling claude-md)"
+  mk_tree "$WORK/tree2"
+  limit="$(ceiling claude-md)" || exit 1
   rm -f "$WORK/tree2/CLAUDE.md"
   cp "$REPO_ROOT/CLAUDE.md" "$WORK/tree2/CLAUDE.md"
   was="$(wc -l <"$WORK/tree2/CLAUDE.md" | tr -d ' ')"
@@ -159,6 +184,43 @@ case "${1:-}" in
   says_all_four "the CLAUDE.md ceiling's failure" "$out" \
     "lines of CLAUDE.md" "$limit" "$((limit + 1))"
   ok "...and a second row, measured in lines rather than words, fails the same way"
+
+  # ...and the same contract on the OTHER side of the table. Three rows are
+  # measured by a phase that runs a script, and no fixture can drive those over
+  # their ceiling without first making the real thing longer -- so what is
+  # asserted is the message those phases would print, which they all build with
+  # `ceiling_over` and nothing else. Without this the four-part rule held for
+  # half the table. Found by the local /code-review pass.
+  for row in handoff testrun round; do
+    msg="$(ceiling_over "$row" 9999)" \
+      || fail "ceiling_over could not build a failure for the \`$row\` row"
+    says_all_four "the \`$row\` row's failure" "$msg" \
+      "$(ceiling_what "$row")" "$(ceiling "$row")" 9999
+  done
+  ok "...and the rows measured by a test phase say all four things too"
+
+  # ...and one of those phases driven over FOR REAL, which is the half the
+  # message assertion above cannot reach: a table whose `round` row is 1 must
+  # turn the phase that reads it red. Without this, the three test-measured rows
+  # are enforced only by inspection -- the check could be comparing against a
+  # constant of its own and every row above would still pass. `round` because it
+  # is the cheapest of the three to run.
+  mk_tree "$WORK/tree3"
+  # What it measures, from the phase itself rather than from a figure written
+  # here: a number in this file goes stale the next time await-review.sh prints
+  # one more line, which is the whole reason the table carries limits and never
+  # measurements.
+  green="$( (cd "$WORK/tree3" && bash tests/test_await_review.sh quiet) 2>&1 )" \
+    || { echo "$green" >&2; fail "the round phase is not green in the fixture tree, so lowering its row proves nothing"; }
+  measured="$(sed -n 's/^ok: one clean round is \([0-9][0-9]*\) lines.*/\1/p' <<<"$green")"
+  case "$measured" in ''|*[!0-9]*) echo "$green" >&2; fail "the round phase did not print what it measured, so this row cannot check the failure" ;; esac
+
+  set_row "$WORK/tree3" round \
+    "round|1|armaatus/autofleet#53|lines one clean round prints|tests/test_await_review.sh quiet"
+  out="$( (cd "$WORK/tree3" && bash tests/test_await_review.sh quiet) 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] && { echo "$out" >&2; fail "the round phase passed against a ceiling of 1, so it is not reading the table"; }
+  says_all_four "the round phase's failure" "$out" "lines one clean round prints" 1 "$measured"
+  ok "...and a phase-measured row lowered under what it measures turns that phase red"
   ;;
 # ------------------------------------------------------------- wellformed
   wellformed)

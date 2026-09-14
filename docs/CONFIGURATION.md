@@ -462,10 +462,10 @@ So every one of those limits is a row in the **ceilings table at the top of
 | Field | What |
 |---|---|
 | name | the key `ceiling <name>` is called with |
-| limit | the number, and the only copy of it |
+| limit | the number, and the only copy of it. The **last allowed** value, on every row |
 | issue | the issue that set it. Every row cites one |
 | what is measured | the membership, so a limit and its contents cannot drift apart |
-| what measures it | `evals/lint.sh`, or a `tests/test_<suite>.sh <phase>` |
+| what measures it | a `; `-separated list of `evals/lint.sh` and `tests/test_<suite>.sh <phase>` entries — **every** place that reads the number, not just the first |
 
 The rows are `claude-md` and `reading` and `brief` — the text an agent reads
 before its first edit — `handoff`, the note a resumed session is handed ahead of
