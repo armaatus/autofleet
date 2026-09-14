@@ -186,6 +186,18 @@ forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
 # and a stale list is a duplicate worktree or a missed foundation hold.
 # armaatus/autofleet#30.
 IN_POLL=false
+# ...read through a test, never as a bare `$IN_POLL`. Bash runs a simple command
+# that expands to no words with status 0, so an EMPTY $IN_POLL would read as
+# true and turn the caching on -- fail-open, in the one function whose every
+# comment is about failing closed. Nothing in this tree can reach that (the
+# assignment above is at source time), but `forget_worktree_answers` carries a
+# `${POLL_CACHE:-}` guard for the armaatus/rommsync-nx extraction that may bring
+# functions without the top-level assignments, and this is the other half of
+# exactly that case. Found by the independent review.
+#
+# Named for the gate rather than for the flag because `tests/test_fleet.sh` has
+# a helper called `in_poll`, and every phase sources this file inside it.
+poll_cache_open() { [ "${IN_POLL:-false}" = true ]; }
 LOG="$STATE_DIR/fleet.log"
 PIDFILE="$STATE_DIR/fleet.pid"
 
@@ -676,7 +688,7 @@ live_worktrees() {
   # `cmd_status` reaches this function twice, once for its own listing and once
   # through `in_flight`, so a reader it could be pointed at would still leave the
   # other callsite writing.
-  if $IN_POLL && [ -e "$cached" ]; then
+  if poll_cache_open && [ -e "$cached" ]; then
     # `|| return 1`, and NOT a fall-through to a fresh read: a `cat` that died
     # part-way has already printed half a listing, and reading the runner again
     # behind it would hand the caller that half twice. Non-zero is the answer
@@ -694,7 +706,7 @@ live_worktrees() {
   # empty listing with success: three free slots, and the empty answer cached
   # for the rest of the pass.
   list="$(printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }')" || return 1
-  if $IN_POLL; then
+  if poll_cache_open; then
     mkdir -p "$POLL_CACHE" 2>/dev/null
     # Whole or not at all. A half-written file is one `[ -e ]` says is an answer
     # and every later caller in the pass trusts -- and a short listing reads as a
