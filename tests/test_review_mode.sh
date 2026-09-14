@@ -111,6 +111,13 @@
 #                                 in `local` mode reviewer and author are one
 #                                 account and the wait shows the thread rather
 #                                 than guessing.
+#   test_review_mode.sh await_own_reply_local
+#                                 ...and the other half of that, which is the
+#                                 half this repo runs: in `local` mode the two
+#                                 accounts are one, so the same reply is handed
+#                                 back rather than guessed at. Without this row,
+#                                 deleting the `local` disjunct leaves every
+#                                 other await phase green.
 #   test_review_mode.sh await_moved
 #                                 ...while a thread that HAS moved -- the agent
 #                                 replied and the reviewer answered -- is. This
@@ -1874,7 +1881,34 @@ PY2
   ok "...and it is still counted as open, with review-status.sh named"
   ;;
 
+# ------------------------------------------------------ await_own_reply_local
+  await_own_reply_local)
+  # The other half of `await_own_reply`, and the half this repo itself runs. In
+  # `local` mode the reviewer and the PR author are ONE GitHub account
+  # (merge_gate.review_mode), so an author-authored newest comment is as likely
+  # to be the reviewer answering as the agent replying -- and the wait prints it
+  # rather than guessing, because hiding a live finding is the worse of the two
+  # mistakes. Without this row, deleting `local or` from `moved()` leaves every
+  # other await phase green: they all plant `reviewer` as the replier, so the
+  # author test is never the thing that decides.
+  make_fixture
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+
+  plant_review "2026-09-10T11:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T11:00:01Z" \
+    "and here is the answer, from the account that is also the author" armaatus
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "from the account that is also the author" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "local mode suppressed a comment it cannot attribute"; }
+  ok "in local mode an author-authored reply is handed back, not guessed at"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local" >&2
   exit 2 ;;
 esac

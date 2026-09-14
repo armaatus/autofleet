@@ -593,9 +593,16 @@ def newest(thread):
 def moved(thread):
     at = newest(thread)
     # A thread whose newest comment carries no timestamp is printed. There is
-    # nothing to compare, and the only two ways to be wrong here are showing a
-    # finding twice and hiding one; this picks the first every time.
+    # nothing to compare, and between showing a finding twice and hiding one
+    # this picks the first.
     if not at:
+        return True
+    # ...and so is every thread on a round with nothing to dedupe against: a
+    # recycled worktree, a lost review-rounds file, or simply the first round.
+    # The author test below would otherwise suppress a thread on FIRST sighting
+    # -- hiding a finding this script has never handed back, which is not
+    # deduplication by any reading.
+    if not seen_at:
         return True
     if at <= seen_at:
         return False
@@ -615,7 +622,13 @@ def moved(thread):
 # newer than the stamp written below and the next round prints it -- a bound,
 # not a loss. Cutting from the other end would bury the withheld ones forever.
 fresh = sorted((t for t in threads if moved(t)), key=newest)
-keep = int(cap)
+try:
+    keep = int(cap)
+except ValueError:
+    # Same reasoning as the guarded load above: a mistyped
+    # AWAIT_REVIEW_MAX_THREADS must not put a traceback in the middle of the
+    # instructions the agent is being handed.
+    keep = 20
 shown, withheld = fresh[:keep], fresh[keep:]
 
 print("--- unresolved review threads")
@@ -655,7 +668,14 @@ else:
               "They are the newest, so the next round prints them."
               % len(withheld))
     if quiet:
-        print("%d unresolved thread(s) not printed: nothing has changed on them "
+        # "nothing NEW to read", not "nothing has changed": a thread suppressed
+        # by the author test above did change -- the agent answered it -- and
+        # one whose newest comment is the agent's can be hiding a reviewer
+        # comment behind it, because only the newest is fetched. Rare (the round
+        # that carried the reviewer's comment would have printed it), bounded by
+        # the line below, and not worth a wider query -- but the sentence must
+        # not claim more than the test does.
+        print("%d unresolved thread(s) not printed: nothing new to read on them "
               "since the round this last handed back. They still block the merge."
               % quiet)
     if withheld or quiet:
