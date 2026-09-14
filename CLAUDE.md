@@ -149,10 +149,10 @@ than the permission does.
    and on a machine where one of those skips, read the reason before believing
    the green.
 2. **Both self-review passes — `/code-review` AND
-   `/mattpocock-skills:code-review` — are required, not optional**, and both sets
-   of findings go in the PR body: `merge_gate.py` refuses a body that does not
-   name both, and [REVIEW.md](REVIEW.md) is the policy they follow. Step 3 of the
-   brief runs them out of this context; do not run them here instead.
+   `/mattpocock-skills:code-review` — are required**, and both sets of findings
+   go in the PR body: `merge_gate.py` refuses a body that does not name both, and
+   [REVIEW.md](REVIEW.md) is the policy. Step 3 of the brief runs them; do not
+   run them here.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
 4. **The rest of the loop is one command**, fetched when it applies:
    `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must

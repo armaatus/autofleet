@@ -95,7 +95,13 @@ dirty="$(git status --porcelain -uno 2>/dev/null)"
   echo "this again:" >&2
   printf '%s\n' "$dirty" | sed -n '1,10p' >&2
   exit 2; }
-untracked="$(git ls-files --others --exclude-standard 2>/dev/null | sed -n '1,10p')"
+# `.autofleet/` DROPPED FROM THE LIST. `.gitignore` is not in install.sh's
+# PAYLOAD, so in a host repo the untracked files this would name are the markers
+# and transcripts this script just wrote -- telling the agent to commit them is
+# worse than saying nothing. Same hard rule 1 reasoning that made the refusal
+# above `-uno`. Found by the local /code-review pass.
+untracked="$(git ls-files --others --exclude-standard 2>/dev/null \
+             | grep -v '^\.autofleet/' | sed -n '1,10p')"
 [ -z "$untracked" ] || {
   echo "note: these files are untracked, so they are in neither the review nor" >&2
   echo "the push. If they belong to this change, commit them first:" >&2
@@ -139,36 +145,39 @@ if git diff --quiet "$merge_base" HEAD; then
 fi
 
 sha="$(git rev-parse HEAD)"
-mkdir -p .autofleet/run
+# One `mkdir -p`, not two: this path is under `.autofleet/run`, so making the
+# parent separately was making it twice.
 LOG_DIR=".autofleet/run/self-review"
 mkdir -p "$LOG_DIR"
 
-# THE BAR FOR "PRODUCED NOTHING": a trailer the pass has to write, and a body
-# besides it.
+# THE BAR FOR "PRODUCED NOTHING": the pass exited zero, and its STDOUT is not
+# blank. Measured, after two wrong answers.
 #
-# The first version of this asked `merge_gate.py` whether the output cleared
-# MIN_REVIEW_BODY, on the argument that "did a review actually happen" is a
-# question that file already answers. Both self-review passes said that is the
-# wrong bar here, in two directions. Too PERMISSIVE: forty characters of
-# anything clears it, and #51's own record of this failure is 446 bytes of
-# permission warnings -- a length test cannot tell a review from noise. Too
-# STRICT: a pass that honestly found nothing writes `No findings.`, which is
-# twelve characters, so the one clean diff in the backlog could never be pushed.
+# #51 records the failure as "exit 0 with 446 bytes of output, all of it
+# permission warnings" -- so the first version asked `merge_gate.py` whether the
+# output cleared MIN_REVIEW_BODY, and the second required the pass to end with a
+# `<!-- self-review-findings: N -->` trailer the way REVIEW.md makes the
+# independent reviewer do. Both were wrong, and the second was wrong in the
+# expensive direction: over three rounds on this branch `/code-review` emitted
+# that trailer ZERO times out of three. It is a harness skill with an output
+# contract of its own, and no system prompt here overrides it. The gate it
+# cannot pass is a gate that never opens -- the push blocked on a pass that had
+# just produced 1,880 bytes of correct findings.
 #
-# A TRAILER separates the two, and it is the shape REVIEW.md already uses on the
-# independent review for exactly this reason: only a pass that ran to a verdict
-# writes one. The body check underneath it stops a pass answering with the
-# trailer alone.
-TRAILER='<!-- self-review-findings:'
-declared() {
-  grep -qF -- "$TRAILER" "$1" || return 1
-  # Non-blank once the trailer lines are taken out. `grep -c .` rather than a
-  # pipe into `grep -q`: `-q` exits on the first match, the producer dies of
-  # EPIPE, and with `pipefail` a check that HELD reports as failed -- on large
-  # input only, so it is green here and red in CI. CLAUDE.md carries the rule.
-  local rest
-  rest="$(grep -vF -- "$TRAILER" "$1")"
-  [ -n "${rest//[[:space:]]/}" ]
+# WHAT ACTUALLY FIXES #51'S OBSERVATION IS THE STREAM SPLIT, two functions down:
+# the 446 bytes are on STDERR. Merge the streams, as `review.sh` does, and noise
+# is indistinguishable from a verdict; keep them apart and stdout carries the
+# pass's final message and nothing else. So a non-blank stdout IS the verdict,
+# and the exit status says whether the pass got to the end of it.
+#
+# The trailer is still ASKED for in SYSTEM below, because a self-describing count
+# is worth having in the PR body -- it is just not a gate. If a future runner
+# makes it reliable, tightening this is a two-line change and the reason it was
+# loosened is here.
+not_blank() {
+  local body
+  body="$(cat "$1")"
+  [ -n "${body//[[:space:]]/}" ]
 }
 
 # A DEADLINE AND A PROCESS GROUP, the same shape as `review.sh` and for the same
@@ -234,13 +243,13 @@ run_pass() {
   # crashed, or ran out of `--max-turns`, having printed enough text to look like
   # a review was recorded as one. Both conditions, or nothing is recorded.
   # Found by the local /mattpocock-skills:code-review pass.
-  if [ "$rc" = 0 ] && declared "$out"; then
+  if [ "$rc" = 0 ] && not_blank "$out"; then
     # THE HEADING IS LOAD-BEARING. `merge_gate.py` reads the pull request body
     # for the literal words `/code-review` and `mattpocock-skills:code-review`,
     # and what the agent pastes into that body is what this prints. Label the
     # sets and the gate is satisfied by the paste; leave them unlabelled and the
     # agent has to remember to write them, which is the step that gets forgotten.
-    { printf '### %s\n\n' "$label"; cat "$out"; printf '\n\n'; } >>"$FINDINGS"
+    { printf '### %s\n\n' "$label"; cat "$out"; printf '\n\n'; } >>"$DRAFT"
     return 0
   fi
   echo "$label exited $rc and left NO findings this can use." >&2
@@ -330,8 +339,16 @@ clean diff from a pass that gave up."
 # file it can name without knowing what the old sha was. The per-pass transcripts
 # under `$LOG_DIR` keep the sha; this one is "what the last self-review in this
 # worktree found". Found by the local /code-review pass.
+#
+# ...WHICH MEANS A FAILING RUN MAY NOT DESTROY IT. The first version truncated it
+# on entry and deleted it on every failure path, so a second run that fell over
+# at pass 1 wiped the findings the rebase remedy -- printed by this very script,
+# by await-review.sh, by the brief and by docs/WORKFLOW.md -- tells the agent to
+# re-record. Built up beside it and moved into place only on success. Found by
+# the local /mattpocock-skills:code-review pass.
 FINDINGS=".autofleet/run/self-review.md"
-: >"$FINDINGS"
+DRAFT="$FINDINGS.partial"
+: >"$DRAFT"
 # `failed` IS A STRING, NOT AN ARRAY. macOS ships bash 3.2, where `${#arr[@]}`
 # on an array that was never appended to is an unbound variable under `set -u`
 # -- so the happy path works and the path that REPORTS a failure dies with a
@@ -350,14 +367,14 @@ for pass in "code-review|/code-review high" "mattpocock|/mattpocock-skills:code-
     0) ;;
     # A stop is not a silent pass, and saying so at the bottom would name the
     # wrong failure. Out here, immediately.
-    3) rm -f "$FINDINGS"; exit 3 ;;
+    3) rm -f "$DRAFT"; exit 3 ;;
     *) failed="${failed:+$failed, }$label"
        [ "$rc_first" = 0 ] && rc_first=$rc ;;
   esac
 done
 
 if [ -n "$failed" ]; then
-  rm -f "$FINDINGS"
+  rm -f "$DRAFT"
   echo >&2
   echo "NOT RECORDED. These passes left no findings this can use: $failed" >&2
   echo "The push gate is still closed, which is correct -- a pull request that" >&2
@@ -365,6 +382,7 @@ if [ -n "$failed" ]; then
   exit "$rc_first"
 fi
 
+mv "$DRAFT" "$FINDINGS"
 echo "==> findings: $FINDINGS" >&2
 echo "    after a rebase, re-record them for the new head with" >&2
 echo "      ./scripts/fleet/record-review.sh $FINDINGS" >&2

@@ -241,10 +241,17 @@ if problems:
 if merge_state in ("DIRTY", "BEHIND"):
     print(f"PR #{pr} is not ready, and GitHub says {merge_state}:")
     if merge_state == "DIRTY":
-        print("  the branch conflicts with its base. Rebase, re-run "
-              "record-review.sh for the")
-        print("  new head -- the marker is per-commit -- and push with "
-              "--force-with-lease.")
+        # The FILE, not the bare form. `record-review.sh` with no argument
+        # reads stdin, and from a tool call that is EOF -- which since
+        # armaatus/autofleet#51 is a refusal rather than an empty marker, so the
+        # remedy this used to print could not succeed. `self-review.sh` leaves
+        # its findings at that path. Found by the local
+        # /mattpocock-skills:code-review pass, which noted this was the one copy
+        # of the remedy that the same change had missed.
+        print("  the branch conflicts with its base. Rebase, re-record the")
+        print("  review for the new head -- the marker is per-commit:")
+        print("    ./scripts/fleet/record-review.sh .autofleet/run/self-review.md")
+        print("  and push with --force-with-lease.")
     else:
         print("  the branch is behind its base and the base requires being up to "
               "date. Update it.")

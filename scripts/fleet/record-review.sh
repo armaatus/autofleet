@@ -41,29 +41,33 @@ target=".autofleet/run/reviewed-$sha"
 #
 # `--none` is untouched: saying so explicitly is a person's call and is exactly
 # what this refusal asks for.
-body=""
+# ONE `case`, not two over the same value. The emptiness check lives in the arms
+# that can be empty; `--none` is the arm that is allowed to be, because saying
+# "it ran and found nothing" explicitly is a person's call and is exactly what
+# the refusal below asks for.
+refuse_empty() {
+  [ -n "${1//[[:space:]]/}" ] && return 0
+  echo "nothing to record: the findings are empty." >&2
+  echo "A marker with no findings under it opens the push gate for a review" >&2
+  echo "that produced no text. What you probably want, after a rebase:" >&2
+  echo "  ./scripts/fleet/record-review.sh .autofleet/run/self-review.md" >&2
+  echo "which is where ./scripts/fleet/self-review.sh leaves them. If a pass" >&2
+  echo "really ran and found nothing, say that instead:" >&2
+  echo "  ./scripts/fleet/record-review.sh --none" >&2
+  exit 2
+}
+write_marker() {
+  refuse_empty "$1"
+  { printf 'reviewed %s\n\n' "$sha"; printf '%s\n' "$1"; } >"$target"
+}
 case "${1:-}" in
   --none)
     printf 'reviewed %s\nno findings\n' "$sha" >"$target" ;;
   --stdin|"")
-    body="$(cat)" ;;
+    write_marker "$(cat)" ;;
   *)
     [ -f "$1" ] || { echo "no such file: $1" >&2; exit 2; }
-    body="$(cat "$1")" ;;
-esac
-case "${1:-}" in
-  --none) : ;;
-  *)
-    [ -n "${body//[[:space:]]/}" ] || {
-      echo "nothing to record: the findings are empty." >&2
-      echo "A marker with no findings under it opens the push gate for a review" >&2
-      echo "that produced no text. What you probably want, after a rebase:" >&2
-      echo "  ./scripts/fleet/record-review.sh .autofleet/run/self-review.md" >&2
-      echo "which is where ./scripts/fleet/self-review.sh leaves them. If a pass" >&2
-      echo "really ran and found nothing, say that instead:" >&2
-      echo "  ./scripts/fleet/record-review.sh --none" >&2
-      exit 2; }
-    { printf 'reviewed %s\n\n' "$sha"; printf '%s\n' "$body"; } >"$target" ;;
+    write_marker "$(cat "$1")" ;;
 esac
 
 echo "recorded: $target"

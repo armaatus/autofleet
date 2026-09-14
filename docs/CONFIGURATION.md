@@ -127,12 +127,18 @@ so.
 > pull request go out claiming two reviews that never ran, which is strictly
 > worse than a review that is merely absent.
 >
-> "Produced nothing" is **not a length test**. Each pass has to end with
-> `<!-- self-review-findings: N -->`, and the run counts only if the pass also
-> exited zero. #51 measured the failure this catches: exit 0 with 446 bytes of
-> output, all of it unrelated permission warnings — long enough to clear any
-> length bar, and not a review. The trailer also lets an honest `N: 0` through,
-> which a length bar could not.
+> A pass counts when it **exited zero** and its **stdout is not blank** — and
+> the load-bearing word is *stdout*. #51 measured the failure this catches: exit
+> 0 with 446 bytes of output, all of it unrelated permission warnings. Those
+> warnings are on stderr. `self-review.sh` writes the two streams to different
+> files, so stdout carries the pass's final message and nothing else; merge them,
+> as `review.sh` does, and noise is indistinguishable from a verdict.
+>
+> The passes are *asked* to end with `<!-- self-review-findings: N -->`, and the
+> count is worth having in the PR body, but it is **not** a gate: measured over
+> three rounds, `/code-review` emitted it zero times out of three. It is a
+> harness skill with an output contract of its own, and a gate it cannot pass is
+> a gate that never opens.
 >
 > `self-review.sh` refuses a **dirty working tree** for the same reason: the
 > marker is keyed on `HEAD` and `HEAD` is what gets pushed, so uncommitted work

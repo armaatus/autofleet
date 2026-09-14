@@ -192,11 +192,13 @@ runs both passes outside this session and records the marker:
 
     ./scripts/fleet/self-review.sh
 
-`/code-review high` finds defects, `/mattpocock-skills:code-review` finds
-conformance, REVIEW.md is the policy. Fix what is real, re-run the tests, run it
-again -- the marker is per-commit. Until it exists for the commit you are
-pushing, the guard hook refuses `git push` and `gh pr create` here. A PR from the
-fleet arrives already reviewed or it does not arrive.
+**It runs for ~20 minutes -- longer than one tool call. Start it in the
+background.** `/code-review high` finds defects,
+`/mattpocock-skills:code-review` finds conformance, REVIEW.md is the policy. Fix
+what is real, re-run the tests, run it again -- the marker is per-commit. Until
+it exists for the commit you are pushing, the guard hook refuses `git push` and
+`gh pr create`. A PR from the fleet arrives already reviewed or it does not
+arrive.
 
 **Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
 marker exists, run:
@@ -325,8 +327,8 @@ Three of those reasons are NOT waiting for a review, and it says so in the outpu
   it prints, then run `review-status.sh` again. Waiting for another review here
   costs 45 minutes and changes nothing.
 - **`GitHub says DIRTY`** is a conflict with the base. Rebase, re-run
-  `record-review.sh .autofleet/run/self-review.md` for the new head, and `git push
-  --force-with-lease` -- the
+  `record-review.sh .autofleet/run/self-review.md` for the new head, and
+  `git push --force-with-lease` -- the
   same three things `await-review.sh` exit 8 prints, for the same reason.
 - **`GitHub says BEHIND`** means the base moved and the branch has to catch up.
   Rebase and push.

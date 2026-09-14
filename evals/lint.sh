@@ -1237,7 +1237,14 @@ else
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
-  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
+  # Raised from 400 by armaatus/autofleet#51, deliberately and once. Step 3 went
+  # from four lines an agent runs in-session to one command it starts -- which is
+  # a net saving of thousands of tokens, and costs a few words here, because the
+  # command RUNS FOR TWENTY MINUTES and the brief has to say so. An agent that
+  # does not know that blocks a tool call on it, the call is killed at its own
+  # ceiling, and no marker is written: the one operational fact about step 3 that
+  # cannot be discovered by reading the script afterwards.
+  BRIEF_WORD_BUDGET=410   # 400 set by armaatus/autofleet#49; raised by #51
   # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
   # word it is and the host's command is never substituted in -- because this
   # check is vendored and `agent-config.yml` runs it on every PR in every repo

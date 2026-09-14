@@ -17,12 +17,12 @@
 #   test_self_review.sh silent   one pass produces nothing -> non-zero, the pass
 #                                is NAMED, and no marker is written. The row that
 #                                goes green if the gate ever becomes decorative.
-#   test_self_review.sh undeclared
-#                                ...and "nothing" is not a length test. #51
-#                                records the observed failure as exit 0 with 446
-#                                bytes of permission warnings, which any length
-#                                bar clears. A pass that prints text but never
-#                                writes its findings trailer is silent.
+#   test_self_review.sh noise    ...and #51's ACTUAL observed failure: exit 0
+#                                with 446 bytes of output, all of it permission
+#                                warnings. Those warnings are on STDERR, and
+#                                keeping the streams apart is the whole of why
+#                                this can tell them from a verdict. Merge them
+#                                and the run is recorded as a clean review.
 #   test_self_review.sh noisy    ...and a pass that writes the trailer AND exits
 #                                non-zero is silent too. Dropping the exit status
 #                                is how a crash after enough output gets recorded
@@ -37,6 +37,17 @@
 #                                prints, and from a tool call it reads EOF -- an
 #                                empty marker opens the push gate, which is the
 #                                hole exit 5 exists to close, one file down.
+#   test_self_review.sh keeps    a failing run does not destroy the findings a
+#                                previous one left. Every rebase remedy in the
+#                                payload says "re-record
+#                                .autofleet/run/self-review.md", so a run that
+#                                falls over at pass 1 must not wipe it.
+#   test_self_review.sh midstop  the stop file appears WHILE a pass runs -> the
+#                                pass is killed and the run exits 3. `stopped`
+#                                only covers the check at the top.
+#   test_self_review.sh worst    pass 1 times out and pass 2 is silent -> the
+#                                exit is 7, the first non-zero, and both passes
+#                                are named.
 #   test_self_review.sh timeout  a wedged pass is killed at
 #                                AUTOFLEET_SELF_REVIEW_TIMEOUT and reported as a
 #                                FAILURE, not as no findings -- and the kill
@@ -127,12 +138,12 @@ emit() {
 case "$mode" in
   findings) emit ;;
   silent) : ;;
-  # #51's observed failure: exit 0, plenty of output, none of it a review. Any
-  # length bar clears this; only the trailer does not.
-  undeclared)
-    printf 'Permission allow rule (.claude/settings.json): Write(.claude/skills/**)\n'
-    printf 'is not matched by file permission checks -- only Edit(path) rules are.\n'
-    printf 'Permission allow rule (.claude/settings.json): Write(.claude/agents/**)\n' ;;
+  # #51's observed failure, reproduced exactly: exit 0, 446-ish bytes, all of it
+  # on STDERR. The pass said nothing; only the stream split can tell.
+  noise)
+    printf 'Permission allow rule (.claude/settings.json): Write(.claude/skills/**)\n' >&2
+    printf 'is not matched by file permission checks -- only Edit(path) rules are.\n' >&2
+    printf 'Permission allow rule (.claude/settings.json): Write(.claude/agents/**)\n' >&2 ;;
   # A pass that wrote its trailer and then died -- out of turns, or a crash.
   noisy)  emit; exit 1 ;;
   # A CHILD, not the stub itself. AUTOFLEET_SELF_REVIEW_CMD is advertised as a
@@ -230,19 +241,19 @@ case "${1:-}" in
   ok "the other pass still ran, so one invocation reports both outcomes"
   ;;
 
-# ---------------------------------------------------------------- undeclared
-  undeclared)
+# --------------------------------------------------------------------- noise
+  noise)
   make_fixture
-  export SELF_MODE=undeclared
+  export SELF_MODE=noise
   err="$WORK/err"
   run_it >/dev/null 2>"$err"; rc=$?
 
-  # 446 bytes of permission warnings is what #51 measured, and it clears any
-  # length bar there is. The trailer is the only thing that separates a review
-  # from a page of noise.
-  [ "$rc" = 5 ] || { cat "$err" >&2; fail "a pass that printed warnings and no trailer exited $rc, not 5"; }
-  [ -f "$MARKER" ] && fail "a marker was recorded for a pass that never declared a verdict"
-  ok "output without a findings trailer is silence, however much of it there is"
+  # This is the run #51 measured: the command exits 0 and writes 446 bytes, and
+  # a wrapper that merges the streams records it as a review. Here stdout is
+  # empty, because the warnings are where they actually go.
+  [ "$rc" = 5 ] || { cat "$err" >&2; fail "a pass whose only output was warnings on stderr exited $rc, not 5"; }
+  [ -f "$MARKER" ] && fail "permission warnings were recorded as a review"
+  ok "stderr is not findings: #51's observed failure is a failure here"
   ;;
 
 # --------------------------------------------------------------------- noisy
@@ -297,6 +308,64 @@ case "${1:-}" in
   [ "$rc" = 2 ] || { cat "$err" >&2; fail "an empty range exited $rc, not the documented 2"; }
   [ "$(n_calls)" = 0 ] || fail "a pass was started against an empty range"
   ok "a branch with nothing on it is refused before a pass is started"
+  ;;
+
+# --------------------------------------------------------------------- keeps
+  keeps)
+  make_fixture
+  export SELF_MODE=findings
+  run_it >/dev/null 2>&1 || fail "the first run did not record"
+  kept="$WORK/repo/.autofleet/run/self-review.md"
+  [ -s "$kept" ] || fail "the first run left no findings file"
+  before="$(cat "$kept")"
+
+  # A second run that falls over at pass 1. Every rebase remedy in the payload
+  # tells the agent to re-record THIS file, so wiping it strands them.
+  export SELF_MODE=silent
+  run_it >/dev/null 2>&1 && fail "a silent pass exited 0"
+  [ -s "$kept" ] || fail "a failing run destroyed the findings every rebase remedy names"
+  [ "$(cat "$kept")" = "$before" ] || fail "a failing run overwrote the findings"
+  ok "a failing run leaves the previous findings where the remedies say they are"
+  ;;
+
+# ------------------------------------------------------------------- midstop
+  midstop)
+  make_fixture
+  export SELF_MODE=hang
+  export AUTOFLEET_SELF_REVIEW_TIMEOUT=60
+  err="$WORK/err"
+  # The stop arrives AFTER the pass has started. `stop.sh --now` promises the
+  # agents are frozen, and a script that reads the stop once at the top keeps a
+  # full-budget agent running for the rest of its deadline.
+  ( sleep 3; : >"$AUTOFLEET_DIR/STOP" ) &
+  run_it >/dev/null 2>"$err"; rc=$?
+  wait
+
+  [ "$rc" = 3 ] || { cat "$err" >&2; fail "a stop during a pass exited $rc, not 3"; }
+  [ -f "$MARKER" ] && fail "a marker was recorded for a run a stop interrupted"
+  orphan="$(head -1 "$SELF_CHILD" 2>/dev/null || true)"
+  [ -n "$orphan" ] || fail "the stub never recorded the child it started"
+  sleep 1
+  kill -0 "$orphan" 2>/dev/null \
+    && { kill -9 "$orphan" 2>/dev/null; fail "the stop left the pass running"; }
+  ok "a stop mid-pass kills the pass and exits 3"
+  ;;
+
+# --------------------------------------------------------------------- worst
+  worst)
+  make_fixture
+  # Pass 1 wedges, pass 2 says nothing. The documented contract is the FIRST
+  # non-zero, and both passes are named -- the variable used to be called
+  # `rc_worst` and never held the worst of anything.
+  export SELF_MODE=hang SELF_MODE2=silent
+  export AUTOFLEET_SELF_REVIEW_TIMEOUT=2
+  err="$WORK/err"
+  run_it >/dev/null 2>"$err"; rc=$?
+
+  [ "$rc" = 7 ] || { cat "$err" >&2; fail "a timeout then a silence exited $rc, not the first non-zero 7"; }
+  grep -qF -- '/code-review high' "$err" || fail "the timed-out pass is not named"
+  grep -qF -- 'mattpocock-skills:code-review' "$err" || fail "the silent pass is not named"
+  ok "the first non-zero is the exit, and both failing passes are named"
   ;;
 
 # --------------------------------------------------------------------- empty
@@ -374,5 +443,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|silent|undeclared|noisy|dirty|norange|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|silent|noise|noisy|dirty|norange|keeps|midstop|worst|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac

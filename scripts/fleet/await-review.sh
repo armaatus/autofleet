@@ -302,10 +302,11 @@ GitHub says DIRTY: this PR conflicts with its base.
 No review will fix a merge conflict, and a conflicted branch cannot merge at
 all. Rebase it:
   git fetch origin && git rebase origin/${base_ref:-main}
-resolve the conflicts, re-run the build and the tests, then run
-./scripts/fleet/record-review.sh .autofleet/run/self-review.md for the new head -- the marker is
-per-commit and
-a rebase changes every sha, so the guard refuses the push without a fresh one.
+resolve the conflicts, re-run the build and the tests, then record the review
+for the new head:
+  ./scripts/fleet/record-review.sh .autofleet/run/self-review.md
+The marker is per-commit and a rebase changes every sha, so the guard refuses
+the push without a fresh one.
 Then push the rewritten branch:
   git push --force-with-lease
 and come back here.
@@ -329,9 +330,9 @@ CI is failing on this PR, on two consecutive checks: $broken
 
 No review will fix a red build. Reproduce it locally:
   ctest --test-dir build --output-on-failure
-then fix it, re-run the local reviews, ./scripts/fleet/record-review.sh
-.autofleet/run/self-review.md for the
-new commit, push, and come back here.
+then fix it, re-run the local reviews, record them for the new commit:
+  ./scripts/fleet/record-review.sh .autofleet/run/self-review.md
+then push, and come back here.
 
 A failure here is yours until you have shown otherwise. This used to name
 harness.partial as a known race to be re-run rather than investigated; #155 found
