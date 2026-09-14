@@ -2355,8 +2355,20 @@ rm -rf "$sparse_tmp"
 # used to carry their own copy of that query, and so their own copy of the bug.
 if [ -x .github/scripts/pr_payload.sh ]; then
   bash -n .github/scripts/pr_payload.sh || fail ".github/scripts/pr_payload.sh does not parse"
-  for reader in .github/workflows/merge-gate.yml scripts/fleet/review-status.sh; do
-    grep -q 'pr_payload.sh' "$reader" \
+  # THREE readers, not two. await-review.sh joined them when it stopped asking
+  # `pulls/<n>/comments` for the findings it hands back (#53) -- and it is the
+  # one most able to drift, because it wants a field the other two do not read.
+  # Unlisted, it could grow its own `reviewThreads(first:100)` tomorrow and this
+  # would stay green, which is #114 exactly.
+  for reader in .github/workflows/merge-gate.yml scripts/fleet/review-status.sh \
+                scripts/fleet/await-review.sh; do
+    # Comment lines excluded HERE TOO, and that is the point. Every one of these
+    # files also NAMES pr_payload.sh in a comment explaining why it does not
+    # write its own query -- so a grep of the whole file is satisfied by the
+    # explanation and stays green when the call it describes is deleted. The
+    # call itself is `pr_payload.sh` in the workflow and `fleet_pr_payload` in
+    # the two scripts, which reach it through lib.sh.
+    grep -vE '^[[:space:]]*#' "$reader" | qgrep -E 'fleet_pr_payload|pr_payload\.sh' \
       || fail "$reader does not read the PR through .github/scripts/pr_payload.sh, so it is paging threads on its own again"
     # Comment lines excluded: both files EXPLAIN what `reviewThreads(first:100)`
     # got wrong, and a bare grep flags its own explanation.
@@ -2374,7 +2386,7 @@ if [ -x .github/scripts/pr_payload.sh ]; then
   done
   ok "a base without the gate's own scripts is told, not crashed into"
 
-  ok "the gate and review-status read one paginated payload"
+  ok "the gate, review-status and the wait read one paginated payload"
 else
   fail ".github/scripts/pr_payload.sh is missing or not executable"
 fi

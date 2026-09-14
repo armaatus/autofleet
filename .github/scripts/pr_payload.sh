@@ -3,7 +3,8 @@
 #
 #   .github/scripts/pr_payload.sh <owner> <name> <pr> >pr.json
 #
-# Shared by `.github/workflows/merge-gate.yml` and `scripts/fleet/review-status.sh`
+# Shared by `.github/workflows/merge-gate.yml`, `scripts/fleet/review-status.sh`
+# and `scripts/fleet/await-review.sh`
 # for the reason merge_gate.py's own helpers are shared: the two used to carry
 # the same GraphQL query twice, and the copies drifted (#114). They also carried
 # the same bug -- `reviewThreads(first:100)` is the FIRST hundred, so a PR past
@@ -16,6 +17,15 @@
 #
 # `reviews(last:50)` needs no paging: it takes the LATEST fifty, which is what
 # the gate reads. Only the thread list is truncated from the wrong end.
+#
+# A thread carries its FIRST comment and, under the `latestComment` alias, its
+# newest. The first is the finding, which is what merge_gate.py and
+# review-status.sh print. The newest is how `await-review.sh` tells a thread that
+# has MOVED since the round it last handed back -- a reviewer answering a reply
+# -- from one that is merely still open, and its `createdAt` is the only
+# timestamp on a thread anywhere in this payload. An alias rather than widening
+# `comments(first:1)` to `last:N`: the gate reads `nodes[0]` as the first comment
+# and on a thread longer than N it would silently stop being that.
 #
 # `comments` is the PR's own conversation, not its review threads, and it is
 # here for one thing: the author's answer to a review that reported findings
@@ -46,7 +56,9 @@ query($owner:String!,$name:String!,$pr:Int!,$after:String){
       reviewThreads(first:100, after:$after){
         pageInfo{ hasNextPage endCursor }
         nodes{ id isResolved isOutdated path line
-               comments(first:1){ nodes{ author{login} body } } }
+               comments(first:1){ totalCount nodes{ author{login} body } }
+               latestComment: comments(last:1){
+                 nodes{ author{login} body createdAt } } }
       }
     }
   }
