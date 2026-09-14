@@ -43,6 +43,15 @@
 #                                an empty diff and declare zero findings, and the
 #                                marker would open the push gate on a review of
 #                                nothing.
+#   test_self_review.sh stale    the findings carry the sha they were produced
+#                                on, and record-review.sh says so when that is
+#                                not the current head. Every rebase remedy in the
+#                                payload prints "re-record
+#                                .autofleet/run/self-review.md", and that file
+#                                deliberately survives a FAILED run -- so
+#                                "pass on A, commit B, a pass times out, follow
+#                                the remedy" stamped a marker for B holding A's
+#                                findings.
 #   test_self_review.sh empty    record-review.sh refuses a body with nothing in
 #                                it. The bare form is what the rebase remedy
 #                                prints, and from a tool call it reads EOF -- an
@@ -420,6 +429,36 @@ case "${1:-}" in
   ok "the first non-zero is the exit, and both failing passes are named"
   ;;
 
+# --------------------------------------------------------------------- stale
+  stale)
+  make_fixture
+  export SELF_MODE=findings
+  run_it >/dev/null 2>&1 || fail "the first run did not record"
+  kept="$WORK/repo/.autofleet/run/self-review.md"
+  grep -qF -- "<!-- self-review-head: $SHA -->" "$kept" \
+    || fail "the findings do not say which commit they were produced on"
+  ok "the findings carry the sha the passes read"
+
+  # Commit something new, then follow the remedy the payload prints everywhere.
+  ( cd "$WORK/repo" && printf 'later\n' >>thing.txt \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -q -m later )
+  new_sha="$(git -C "$WORK/repo" rev-parse HEAD)"
+  out="$( cd "$WORK/repo" && ./scripts/fleet/record-review.sh .autofleet/run/self-review.md 2>&1 )"; rc=$?
+
+  [ "$rc" = 0 ] || fail "the rebase remedy stopped working (rc $rc): $out"
+  grep -qF -- "${SHA:0:8}" <<<"$out" \
+    || fail "re-recording findings from another commit said nothing about it: $out"
+  grep -qF -- 'self-review.sh' <<<"$out" \
+    || fail "the note does not say how to review the commit actually being pushed"
+  ok "re-recording findings from another commit is allowed, and never silent"
+
+  # ...and the ordinary case says nothing, or the note is noise nobody reads.
+  quiet="$( cd "$WORK/repo" && ./scripts/fleet/record-review.sh --none 2>&1 )"
+  grep -qF -- 'self-review-head' <<<"$quiet" && fail "--none warns about a sha it has no body for"
+  ok "a body that names no sha is recorded without a note"
+  [ -f "$WORK/repo/.autofleet/run/reviewed-$new_sha" ] || fail "no marker for the new head"
+  ;;
+
 # --------------------------------------------------------------------- empty
   empty)
   make_fixture
@@ -495,5 +534,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|stale|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac

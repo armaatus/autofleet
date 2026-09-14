@@ -334,13 +334,15 @@ fi
 #
 # A FUNCTION, because there are now four knobs with this shape and the digits-
 # then-numeric pair above is exactly the reasoning that does not survive being
-# retyped. `fleet_positive_knob <name> <value>`; it is defined here rather than
-# in lib.sh because lib.sh sources THIS file, so nothing it defines exists yet.
+# retyped. `fleet_require_positive_knob <name> <value>` -- `require`, because it
+# does not return false: every call site is bare, and a predicate-shaped name on
+# a function that exits the process is read wrong exactly once. Found by the
+# independent review. It is defined here rather than in lib.sh because lib.sh sources THIS file, so nothing it defines exists yet.
 #
 # NOT every knob below: AUTOFLEET_HANDOFF_MAX_WORDS accepts 0, which means "no
 # cap", so it keeps its own `case`. A helper that refuses a legal value is the
 # same class of bug as one that accepts an illegal one.
-fleet_positive_knob() {
+fleet_require_positive_knob() {
   case "$2" in
     ''|*[!0-9]*)
       echo "$1 must be a positive whole number; got '$2'" >&2
@@ -348,14 +350,14 @@ fleet_positive_knob() {
   esac
   [ "$2" -gt 0 ] || { echo "$1 must be a positive whole number; got '$2'" >&2; exit 2; }
 }
-fleet_positive_knob AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES"
+fleet_require_positive_knob AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES"
 # The self-review's two, for the same reason and with a sharper edge: the
 # timeout's only consumer is `[ "$waited" -ge "$AUTOFLEET_SELF_REVIEW_TIMEOUT" ]`
 # in self-review.sh, so a non-number makes `[` return 2, the test false, and the
 # deadline never fires -- a wedged pass then holds the worktree until the
 # three-hour time-box expires. Found by the local /code-review pass.
-fleet_positive_knob AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT"
-fleet_positive_knob AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS"
+fleet_require_positive_knob AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT"
+fleet_require_positive_knob AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS"
 
 # The same shape of failure as the one above, one step earlier: `[ "$words" -le
 # "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
@@ -382,4 +384,4 @@ esac
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error
 # anybody sees, so the cap silently does not exist.
-fleet_positive_knob AUTOFLEET_REVIEW_MAX_ROUNDS "$AUTOFLEET_REVIEW_MAX_ROUNDS"
+fleet_require_positive_knob AUTOFLEET_REVIEW_MAX_ROUNDS "$AUTOFLEET_REVIEW_MAX_ROUNDS"

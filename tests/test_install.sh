@@ -7,11 +7,12 @@
 # in it. `scripts/fleet/` writes into `.autofleet/run/` (the push markers, the
 # autostart log, and since armaatus/autofleet#51 the self-review findings and
 # three transcripts per run), `env.sh` generates `.env`, and a review run by hand
-# writes `/findings.md`. autofleet's own `.gitignore` names all three, which is
+# writes `/findings.md`, and `env.sh` writes `.env` and `.env.tmp*`. autofleet's
+# own `.gitignore` names every one of them, which is
 # exactly why nothing here ever noticed: in a host repo the first `git add -A`
 # from a fleet agent sweeps a review marker, or a secret, into a commit.
 #
-#   test_install.sh ignores    the three lines are appended to a host's existing
+#   test_install.sh ignores    the four lines are appended to a host's existing
 #                              .gitignore, its own contents are untouched, and a
 #                              file with no trailing newline does not have the
 #                              first line welded onto its last pattern.
@@ -67,7 +68,13 @@ install_it() { (cd "$WORK/host" && "$REPO_ROOT/install.sh" "$@" . 2>&1); }
 
 has_line() { grep -qxF -- "$1" "$WORK/host/.gitignore"; }
 
-WANT=(".autofleet/run/" ".env" "/findings.md")
+# ALL FOUR, and `.env.tmp*` most of all: it has the sharpest reason --
+# `env.sh` writes the temporary file and renames it, so a `git add -A`
+# racing a worktree's setup commits the half-written secret -- and it was
+# the one line no phase covered, in the suite added because this is the one
+# thing in the payload that edits a file the host owns. Found by the
+# independent review.
+WANT=(".autofleet/run/" ".env" ".env.tmp*" "/findings.md")
 
 case "${1:-}" in
 
@@ -78,7 +85,7 @@ case "${1:-}" in
   for line in "${WANT[@]}"; do
     has_line "$line" || fail "install.sh did not add '$line' to the host's .gitignore"
   done
-  ok "the three lines the payload needs are in the host's .gitignore"
+  ok "every line the payload needs is in the host's .gitignore"
 
   # The host's own list survives, and the last pattern is still its own pattern.
   has_line 'node_modules/' || fail "the host's own .gitignore entry was lost"

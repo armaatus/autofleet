@@ -108,13 +108,16 @@ dirty="$(git status --porcelain -uno 2>/dev/null)"
 # and transcripts this script just wrote -- telling the agent to commit them is
 # worse than saying nothing. Same hard rule 1 reasoning that made the refusal
 # above `-uno`. Found by the local /code-review pass.
-# `.env` TOO, and for a harder reason than tidiness: `env.sh` generates it per
+# `.env` AND `.env.tmp*` TOO -- anchored, not a prefix: a bare `^\.env` also
+# silences `.env.example` and `.envrc`, which a host repo does track and would
+# want named here. For a harder reason than tidiness: `env.sh` generates it per
 # worktree and hard rule 5 says no secrets in the tree, so a line telling the
 # agent to commit it is the one suggestion this script must never make.
 # install.sh now appends both to a host's `.gitignore`, which makes this belt
 # and braces -- but a repo installed before that still has neither.
 untracked="$(git ls-files --others --exclude-standard 2>/dev/null \
-             | grep -v -e '^\.autofleet/' -e '^\.env' | sed -n '1,10p')"
+             | grep -v -e '^\.autofleet/' -e '^\.env$' -e '^\.env\.' \
+             | sed -n '1,10p')"
 [ -z "$untracked" ] || {
   echo "note: these files are untracked, so they are in neither the review nor" >&2
   echo "the push. If they belong to this change, commit them first:" >&2
@@ -449,9 +452,22 @@ done
 if [ -n "$failed" ]; then
   rm -f "$DRAFT"
   echo >&2
-  echo "NOT RECORDED. These passes left no findings this can use: $failed" >&2
+  # A TIMEOUT IS NOT "NO FINDINGS", and #51's Acceptance says so in as many
+  # words. `$failed` named both kinds under one sentence; the exit code already
+  # tells them apart, so the summary says which it was. Found by the independent
+  # review.
+  case "$rc_first" in
+    7) echo "NOT RECORDED. A pass was KILLED at its deadline: $failed" >&2 ;;
+    *) echo "NOT RECORDED. These passes left no findings this can use: $failed" >&2 ;;
+  esac
   echo "The push gate is still closed, which is correct -- a pull request that" >&2
   echo "names two reviews must have had two." >&2
+  # ...and the half that SUCCEEDED is on disk, unnamed until now. On the likeliest
+  # failure -- one pass timing out at 1200s -- the agent was re-running a
+  # twenty-minute pass whose findings were already written. Found by the
+  # independent review.
+  echo "Any pass that did finish left its findings under $LOG_DIR," >&2
+  echo "keyed by the sha it read; only the failing one is re-run for free." >&2
   exit "$rc_first"
 fi
 
@@ -474,6 +490,14 @@ now="$(git rev-parse HEAD)"
   echo "Run this again on the commit you mean to push." >&2
   exit 2; }
 
+# THE SHA GOES IN THE FILE. Without it the re-record remedy every caller prints
+# -- `record-review.sh .autofleet/run/self-review.md` -- is a way AROUND the
+# HEAD-moved refusal five lines above: a run that fails after an earlier one
+# succeeded leaves the OLD findings here, and re-recording them stamps a marker
+# for a commit nothing has reviewed. The rebase case still works, because a
+# rebase is the same findings on a new sha and `record-review.sh` says so out
+# loud rather than refusing. Found by the independent review.
+printf '<!-- self-review-head: %s -->\n' "$sha" >>"$DRAFT"
 mv "$DRAFT" "$FINDINGS"
 echo "==> findings: $FINDINGS" >&2
 echo "    after a rebase, re-record them for the new head with" >&2

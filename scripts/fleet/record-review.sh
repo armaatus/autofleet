@@ -70,8 +70,39 @@ refuse_empty() {
   echo "  ./scripts/fleet/record-review.sh --none" >&2
   exit 2
 }
+# THE BODY MAY NAME THE COMMIT IT DESCRIBES, and if it does, it has to be this
+# one -- or the marker is a review of something else.
+#
+# `self-review.sh` stamps `<!-- self-review-head: <sha> -->` into the findings it
+# writes, and every rebase remedy in the payload prints
+# `record-review.sh .autofleet/run/self-review.md`. That file is deliberately
+# kept across a FAILED run, so the sequence "pass on A, commit B, a pass times
+# out, follow the printed remedy" stamped `reviewed-B` holding A's findings: the
+# push gate open on a commit nothing read, reached by typing the command the
+# docs tell you to type. That is the hole `self-review.sh` refuses to make
+# itself, walked around from outside. Found by the independent review.
+#
+# A REBASE IS THE CASE THIS MUST NOT BREAK: same findings, new sha, and the
+# remedy is correct. So it warns and records rather than refusing -- `--force`
+# is not needed for the thing the docs tell you to do, and the warning is what
+# a reader of the PR body has to reconcile. What it refuses is nothing; what it
+# makes impossible is doing it SILENTLY.
+warn_if_stale() {
+  local named
+  named="$(printf '%s\n' "$1" | sed -n 's/.*<!-- self-review-head: \([0-9a-f]\{7,40\}\) -->.*/\1/p' | tail -1)"
+  [ -n "$named" ] || return 0
+  case "$sha" in
+    "$named"*) return 0 ;;
+  esac
+  echo "NOTE: these findings say they were produced on ${named:0:8}, and HEAD is" >&2
+  echo "${sha:0:8}. That is right after a rebase -- same review, new sha -- and" >&2
+  echo "WRONG if a later self-review failed and left the earlier one here. If you" >&2
+  echo "have not read the findings against this commit, run the passes again:" >&2
+  echo "  ./scripts/fleet/self-review.sh" >&2
+}
 write_marker() {
   refuse_empty "$1"
+  warn_if_stale "$1"
   { printf 'reviewed %s\n\n' "$sha"; printf '%s\n' "$1"; } >"$target"
 }
 case "${1:-}" in
