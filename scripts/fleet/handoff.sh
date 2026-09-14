@@ -122,7 +122,12 @@ refuse_if_over_cap() {
   # half is false is the shape issue-command.sh already carries a comment about
   # having been bitten by; a guard that exits the script on the ordinary path is
   # not a guard.
-  if [ "$cap" = 0 ]; then return 0; fi
+  # `-eq`, not `= 0`. `00` is all digits, so config.sh accepts it, and it is not
+  # the literal `0` -- a string compare reads it as a cap of "00", every note is
+  # over it, and the off switch becomes "refuse everything". config.sh carries
+  # the same story about AUTOFLEET_REVIEW_MAX_TRIES, where one spare zero made
+  # the guard the failure.
+  if [ "$cap" -eq 0 ]; then return 0; fi
   words="$(wc -w <"$candidate" | tr -d ' ')"
   if [ "$words" -le "$cap" ]; then return 0; fi
   echo "handoff: that note is $words words and the cap is $cap." >&2

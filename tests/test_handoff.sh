@@ -178,6 +178,13 @@ case "${1:-}" in
     printf '%s\n' "$over" | in_repo env AUTOFLEET_HANDOFF_MAX_WORDS=0 \
       ./scripts/fleet/handoff.sh write 42 --stdin >/dev/null 2>&1 \
       || fail "AUTOFLEET_HANDOFF_MAX_WORDS=0 still refused, so the off switch is decorative"
+    # ...and `00`, which config.sh accepts because it is all digits and which a
+    # string compare against the literal `0` reads as a cap of "00" -- every
+    # note over it, the off switch inverted into "refuse everything". One spare
+    # zero is what made AUTOFLEET_REVIEW_MAX_TRIES' guard the failure.
+    printf '%s\n' "$over" | in_repo env AUTOFLEET_HANDOFF_MAX_WORDS=00 \
+      ./scripts/fleet/handoff.sh write 42 --stdin >/dev/null 2>&1 \
+      || fail "AUTOFLEET_HANDOFF_MAX_WORDS=00 refused, so the off switch reads as a cap of nothing"
     echo "ok: over the cap it refuses, names the cap, and changes nothing"
     ;;
 
