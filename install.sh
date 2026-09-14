@@ -180,6 +180,11 @@ ignore_line() {
 echo "==> .gitignore (appended, never rewritten)"
 ignore_line ".autofleet/run/"
 ignore_line ".env"
+# `.env.tmp*` as well, and not as tidiness: `env.sh` writes the temporary file
+# first and renames it, so a `git add -A` racing a worktree's setup commits the
+# half-written secret rather than the finished one. autofleet's own .gitignore
+# has carried both lines since the generator existed. Hard rule 5.
+ignore_line ".env.tmp*"
 # ...and the file a review run BY HAND writes. autofleet's own `.gitignore` has
 # carried `/findings.md` since #54 swept one into a commit; a host repo had the
 # same agents, the same instruction and none of the protection.

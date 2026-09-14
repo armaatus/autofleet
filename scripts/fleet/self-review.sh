@@ -37,9 +37,16 @@
 # committed and a clean tree, so "the current diff" is empty and the pass
 # reviews nothing -- and #51 also records a run that derived the diff from the
 # WORKING DIRECTORY and reviewed a different repository's last commit, which is
-# why this pins the repo with `cd "$REPO_ROOT"` before the spawn. AND THE PASS
-# IS MADE TO DECLARE ITSELF: it must end with a findings trailer, which is the
-# only thing here that can tell a review from a page of warnings.
+# why this pins the repo with `cd "$REPO_ROOT"` before the spawn.
+#
+# A FOURTH THING WAS TRIED AND RETIRED: requiring each pass to end with a
+# `<!-- self-review-findings: N -->` trailer, on the theory that only a pass which
+# reached a verdict writes one. Measured over three rounds on this branch,
+# `/code-review` wrote it zero times out of three -- it is a harness skill with an
+# output contract of its own -- so the gate blocked a push on a pass that had just
+# produced 1,880 bytes of correct findings. The bar is what `not_blank` below
+# does, and the reasoning is there. The trailer is still asked for, and a pass
+# that omits it is recorded with a line saying the count is missing.
 #
 # MODEL-AGNOSTIC IN EXACTLY THE WAY `review.sh` IS, which is to say: not yet.
 # The flags below -- `-p`, `--allowed-tools`, `--max-turns`,
@@ -51,8 +58,9 @@
 #
 # Exit codes, so a caller can tell the cases apart:
 #   0  both passes produced findings, and the push marker is recorded
-#   2  could not work out what to review, the tree is dirty, or
-#      record-review.sh refused the findings
+#   2  could not work out what to review, the tree is dirty, the branch has
+#      nothing on it, HEAD moved while the passes ran, or record-review.sh
+#      refused the findings
 #   3  the fleet is stopped
 #   5  a pass ran and produced nothing -- named, and NOTHING recorded
 #   6  AUTOFLEET_SELF_REVIEW_CMD is not on PATH

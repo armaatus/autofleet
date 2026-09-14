@@ -56,7 +56,7 @@
 #   test_self_review.sh midstop  the stop file appears WHILE a pass runs -> the
 #                                pass is killed and the run exits 3. `stopped`
 #                                only covers the check at the top.
-#   test_self_review.sh worst    pass 1 times out and pass 2 is silent -> the
+#   test_self_review.sh first    pass 1 times out and pass 2 is silent -> the
 #                                exit is 7, the first non-zero, and both passes
 #                                are named.
 #   test_self_review.sh timeout  a wedged pass is killed at
@@ -403,8 +403,8 @@ case "${1:-}" in
   ok "a stop mid-pass kills the pass and exits 3"
   ;;
 
-# --------------------------------------------------------------------- worst
-  worst)
+# --------------------------------------------------------------------- first
+  first)
   make_fixture
   # Pass 1 wedges, pass 2 says nothing. The documented contract is the FIRST
   # non-zero, and both passes are named -- the variable used to be called
@@ -495,5 +495,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|worst|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac
