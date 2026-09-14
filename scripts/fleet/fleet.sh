@@ -700,7 +700,11 @@ live_worktrees() {
     # and every later caller in the pass trusts -- and a short listing reads as a
     # free slot, which is the duplicate worktree this function's header opens
     # with. The `rm` is a no-op when the `mv` worked.
-    print_listing "$list" >"$cached.new" 2>/dev/null \
+    # `2>/dev/null` BEFORE the redirection it is there for: bash applies them
+    # left to right, so with it second a $STATE_DIR that will not take the file
+    # still printed bash's own diagnostic to the real stderr -- once a poll,
+    # into $LOG. Found by the independent review.
+    print_listing "$list" 2>/dev/null >"$cached.new" \
       && mv -f "$cached.new" "$cached" 2>/dev/null
     rm -f "$cached.new"
   fi
@@ -714,7 +718,17 @@ live_worktrees() {
 # `while read num path` drops it, and `printf '%s\n'` on an empty list prints a
 # blank line, which the same loop reads as a worktree with no number and
 # `cmd_status` prints as an empty row.
-print_listing() { [ -n "$1" ] && printf '%s\n' "$1"; return 0; }
+#
+# `|| return 0` FIRST and no `return 0` at the end, so `printf`'s own status is
+# what comes back. `[ -n "$1" ] && printf ...; return 0` swallowed it, and the
+# caller above is `&& mv` -- so a `printf` that wrote half the listing and then
+# died (ENOSPC or EIO on $STATE_DIR, its stderr already swallowed) had that half
+# installed as the pass's answer. A SHORT listing is worse than an empty one: it
+# is what `in_flight` reads, so an issue whose worktree fell off the end of the
+# file reads as free, which is the duplicate worktree this file keeps coming
+# back to. It also made `live_worktrees`' fresh path -- whose last command this
+# is -- unable to report a failure at all. Found by the independent review.
+print_listing() { [ -n "$1" ] || return 0; printf '%s\n' "$1"; }
 
 # Everything derived from the worktree list, dropped together. `launch` and
 # `remove_worktree` are the two places this dispatcher changes that list, and
@@ -724,12 +738,17 @@ print_listing() { [ -n "$1" ] && printf '%s\n' "$1"; return 0; }
 # Two caches with two invalidation points is the failure armaatus/autofleet#30
 # says not to create, and `launch`'s drop already has its own test phase.
 #
-# $POLL_CACHE is guarded HERE and nowhere else because `remove_worktree` is the
-# one function armaatus/rommsync-nx exercises by extracting it with `sed` and
-# sourcing it alone -- see the note there -- so everything the file around it
-# defines arrives empty, and an empty $POLL_CACHE would make this
-# `rm -f /worktrees /foundation`. `live_worktrees` is not extracted and reads it
-# bare; if that ever changes, this is the shape to copy.
+# $POLL_CACHE is guarded HERE and nowhere else, and the guard is insurance rather
+# than a case anyone has demonstrated. armaatus/rommsync-nx exercises
+# `remove_worktree` by extracting it with `sed` -- which is why the deadline
+# there is a local and not one of the tunables at the top of this file -- and
+# that extraction is not in this tree to read. If it brings the functions a
+# caller needs but not the top-level assignments, an empty $POLL_CACHE makes
+# this `rm -f /worktrees /foundation`; if it brings neither, the call is a
+# command-not-found and the guard never runs. One `[ -n ]` covers the first and
+# costs nothing in the second, which is the whole argument for it.
+# `live_worktrees` is not extracted and reads $POLL_CACHE bare. Raised by the
+# independent review, which could not read the extraction either.
 forget_worktree_answers() {
   [ -n "${POLL_CACHE:-}" ] || return 0
   rm -f "$POLL_CACHE/worktrees" "$POLL_CACHE/foundation"

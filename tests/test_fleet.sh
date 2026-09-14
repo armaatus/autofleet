@@ -873,6 +873,17 @@ print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))
 # it would model a pass with the caching switched off.
 in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; IN_POLL=true; for fn in "$@"; do "$fn"; done); }
 
+# ...and the same pass with the calls written as a SCRIPT rather than as bare
+# names. `in_poll` cannot carry these: they take arguments (`launch 44 "..."`,
+# `remove_worktree "$WORK/wt"`), shadow a command, and read $POLL_CACHE by name.
+# One helper rather than a copy of the preamble in each phase -- what a pass is
+# should have one definition in this file, and it nearly got a second. Found by
+# the independent review.
+#
+# `forget_poll_answers` is inside it, unlike `in_poll`, where the phases pass it
+# as the first function name.
+in_pass() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; IN_POLL=true; forget_poll_answers; eval "$1"); }
+
 # The fixture repo under git, because "which fixes are not live in the running
 # dispatcher" is answered in commits and cannot be faked with a hash alone.
 make_repo_git() {
@@ -2318,14 +2329,11 @@ JSON
     make_fixture ok
     worktree_on_issue 4
     issue_labels "ready,docs"
-    # A pass, spelled out rather than run through `in_poll`: these take
-    # arguments, and the point is the sequence a real pass makes.
-    ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    in_pass '
       live_worktrees
       foundation_in_flight
       count_startable
-      in_flight 4 ) >/dev/null 2>&1
+      in_flight 4' >/dev/null 2>&1
     n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
     [ "${n:-0}" = 1 ] \
       || fail "one pass read the worktree list $n times; four callers share one answer"
@@ -2343,15 +2351,14 @@ JSON
     make_fixture ok
     worktree_on_issue 4
     issue_labels "ready,docs"
-    ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    in_pass '
       live_worktrees
       foundation_in_flight
       count_startable
       launch 44 "a second issue"
       # What the launch loop does next, and what the next iteration asks.
       live_worktrees
-      foundation_in_flight ) >/dev/null 2>&1
+      foundation_in_flight' >/dev/null 2>&1
     grep -q "^worktree create" "$ORCA_CALLS" \
       || fail "the launch never happened, so what follows asserts nothing: $(cat "$ORCA_CALLS")"
     n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
@@ -2371,11 +2378,10 @@ JSON
     # leave behind.
     make_fixture ok
     make_worktree
-    ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    in_pass '
       live_worktrees
       remove_worktree "$WORK/wt"
-      live_worktrees ) >/dev/null 2>&1
+      live_worktrees' >/dev/null 2>&1
     [ -d "$WORK/wt" ] \
       && fail "the removal did not happen, so what follows asserts nothing"
     n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
@@ -2399,17 +2405,24 @@ JSON
     # wrong reason on any machine that runs the suite as one.
     make_fixture ok
     worktree_on_issue 4
-    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    out="$(in_pass '
       live_worktrees >/dev/null || { echo "seed=failed"; exit 0; }
       rm -f "$POLL_CACHE/worktrees"; mkdir -p "$POLL_CACHE/worktrees"
-      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]" ) 2>/dev/null )"
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
     grep -q "seed=failed" <<<"$out" \
       && fail "the first read cached nothing, so what follows asserts nothing: $out"
     grep -q "rc=" <<<"$out" \
       || fail "the phase never reached the second read: $out"
-    grep -q "rc=0 answer=\[\]" <<<"$out" \
-      && fail "an unreadable cache answered 'no worktrees are running', with success: $out"
+    # `rc=1`, not just "not rc=0 and empty". An implementation that fell THROUGH
+    # from an unreadable entry to a fresh runner read passes the weaker form
+    # while doing the thing `live_worktrees` explicitly rejects -- a `cat` that
+    # died part-way has already printed half a listing, and the fresh read would
+    # hand the caller that half twice. Found by the independent review.
+    grep -q "rc=1" <<<"$out" \
+      || fail "an unreadable cache did not answer 'could not read it': $out"
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "the unreadable cache was answered by re-reading the runner ($n reads), not by failing"
     echo "ok: a cache entry that will not read is a failure, not an empty fleet"
     ;;
 
@@ -2428,16 +2441,79 @@ JSON
     # with it and prove nothing about this line.
     make_fixture ok
     worktree_on_issue 4
-    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    out="$(in_pass '
       awk() { return 127; }
-      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]" ) 2>/dev/null )"
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
     grep -q "rc=" <<<"$out" || fail "the phase never reached the read: $out"
     grep -q "rc=0" <<<"$out" \
       && fail "a reshape that failed answered 'no worktrees are running', with success: $out"
     [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
       && fail "a reshape that failed cached its empty answer for the rest of the pass"
     echo "ok: a reshape that fails is a failure, not an empty fleet"
+    ;;
+
+  poll_list_short_write)
+    # ...and a WRITE that fails part-way. The `mv` closes the interruption half
+    # of the atomicity -- a dispatcher killed mid-write leaves the `.new` behind
+    # and the answer untouched -- and left the write-ERROR half open: a `printf`
+    # that put down half the listing and then died (ENOSPC or EIO on $STATE_DIR,
+    # its stderr already swallowed) still returned 0 through `print_listing`, the
+    # `&&` fired, and `mv` installed the half as the pass's answer.
+    #
+    # A SHORT listing is worse than an empty one. `in_flight` reads this same
+    # list, so an issue whose worktree fell off the end of the file reads as
+    # free, and the pass opens a second worktree for work that is already
+    # running. Found by the independent review.
+    #
+    # The shadow is keyed on the FORMAT, because `live_worktrees` calls `printf`
+    # twice and only one of them is this: `%s` reshapes the driver's lines and
+    # must go through, `%s\n` is `print_listing` and is the one being broken.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$(in_pass '
+      printf() {
+        if [ "$1" = "%s\n" ]; then command printf "%s" "trunc"; return 1; fi
+        command printf "$@"
+      }
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
+    grep -q "rc=" <<<"$out" || fail "the phase never reached the read: $out"
+    grep -q "rc=0" <<<"$out" \
+      && fail "a write that died part-way was reported as success: $out"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
+      && fail "half a listing was installed as the pass's answer, and in_flight reads it as a free slot"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees.new" ] \
+      && fail "the half-written temporary was left behind for the next pass to find"
+    echo "ok: a write that dies part-way installs nothing and says so"
+    ;;
+
+  poll_list_once_in_run)
+    # Acceptance 1 is about a POLL, and the phases above count over a sequence
+    # they spell out themselves -- right about the mechanism, but not a floor
+    # under the pass. A read added inside `reap_merged`, `review_open_prs` or
+    # `notice_stalled` satisfies every one of them and still breaks the
+    # acceptance. This one counts over `cmd_run`'s own body. Found by the
+    # independent review.
+    #
+    # One pass and then out, because the issue it is given is already closed:
+    # `wanted` empties, nothing is startable, and the run ends on its own. Same
+    # shape as `poll_empties_cache`, which needs a bounded real dispatcher for
+    # the same reason -- and `--max-prs 1` bounds the failure path, where a
+    # launch would otherwise keep it polling.
+    make_fixture ok
+    make_repo_git
+    add_origin
+    worktree_on_issue 4
+    issue_state CLOSED; issue_labels "ready"
+    ( in_fleet cmd_run --max-prs 1 148 >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    wait_for_log "fleet up" \
+      || fail "the dispatcher never started: $(cat "$WORK/run.log" 2>/dev/null)"
+    run_ended "$HELD_PID" >/dev/null 2>&1
+    HELD_PID=""
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "one pass of cmd_run read the worktree list $n times: $(cat "$WORK/run.log")"
+    echo "ok: one pass of the real poll body reads the worktree list once"
     ;;
 
   foundation_sees_launch)
@@ -2460,11 +2536,10 @@ JSON
     # loop's own break is exactly what hides this.
     make_fixture ok
     issue_labels "ready,foundation"
-    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
-      IN_POLL=true; forget_poll_answers
+    out="$(in_pass '
       foundation_in_flight; echo "before=$?"
       launch 44 "the foundation one"
-      foundation_in_flight; echo "after=$?" ) 2>&1 )"
+      foundation_in_flight; echo "after=$?"' 2>&1)"
     grep -q "before=1" <<<"$out" \
       || fail "it held with nothing in flight, so what follows asserts nothing: $out"
     grep -q "after=0" <<<"$out" \
