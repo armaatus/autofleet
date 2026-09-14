@@ -442,6 +442,18 @@ case "${1:-}" in
   grep -qF -- '/code-review high' "$err" || fail "the timed-out pass is not named"
   grep -qF -- 'mattpocock-skills:code-review' "$err" || fail "the silent pass is not named"
   ok "the first non-zero is the exit, and both failing passes are named"
+
+  # ...UNDER THE RIGHT SENTENCE. #51's Acceptance: "A timeout kills the pass and
+  # is reported as a failure, not as no findings." Asserting only that both
+  # names appear passed happily while the killed pass was announced as having
+  # left no findings. Found by the local /code-review pass.
+  grep -qE 'KILLED at the deadline: .*/code-review high' "$err" \
+    || { cat "$err" >&2; fail "the killed pass is not reported as killed"; }
+  grep -qE 'no findings this can use: .*mattpocock-skills:code-review' "$err" \
+    || { cat "$err" >&2; fail "the silent pass is not reported as silent"; }
+  grep -qE 'no findings this can use: .*/code-review high' "$err" \
+    && fail "the KILLED pass is reported as having left no findings"
+  ok "each kind is named under the sentence that is true of it"
   ;;
 
 # --------------------------------------------------------------------- stale

@@ -431,6 +431,10 @@ DRAFT="$FINDINGS.partial"
 # -- so the happy path works and the path that REPORTS a failure dies with a
 # different error than the one it was written to report.
 failed=""
+# ...and the two kinds, separately, so the summary can name each under the
+# sentence that is true of it.
+killed=""
+silent=""
 # The FIRST non-zero, which is not the same as the worst and is not claimed to
 # be: the exits are kinds, not severities, and 5 after a 7 is not milder. The
 # name said `worst` and the code kept the first. Found by the local
@@ -445,7 +449,16 @@ for pass in "code-review|/code-review high" "mattpocock|/mattpocock-skills:code-
     # A stop is not a silent pass, and saying so at the bottom would name the
     # wrong failure. Out here, immediately.
     3) rm -f "$DRAFT"; exit 3 ;;
-    *) failed="${failed:+$failed, }$label"
+    # SORTED BY KIND, not just collected. A timeout and a silence are different
+    # failures and #51's Acceptance says the timeout must never be reported as
+    # "no findings" -- so the summary needs to know which pass was which, not
+    # only which kind came first. Found by the local /code-review pass, on the
+    # commit that split the sentence but still printed one list under it.
+    7) killed="${killed:+$killed, }$label"
+       failed="${failed:+$failed, }$label"
+       [ "$rc_first" = 0 ] && rc_first=$rc ;;
+    *) silent="${silent:+$silent, }$label"
+       failed="${failed:+$failed, }$label"
        [ "$rc_first" = 0 ] && rc_first=$rc ;;
   esac
 done
@@ -454,13 +467,14 @@ if [ -n "$failed" ]; then
   rm -f "$DRAFT"
   echo >&2
   # A TIMEOUT IS NOT "NO FINDINGS", and #51's Acceptance says so in as many
-  # words. `$failed` named both kinds under one sentence; the exit code already
-  # tells them apart, so the summary says which it was. Found by the independent
-  # review.
-  case "$rc_first" in
-    7) echo "NOT RECORDED. A pass was KILLED at its deadline: $failed" >&2 ;;
-    *) echo "NOT RECORDED. These passes left no findings this can use: $failed" >&2 ;;
-  esac
+  # words. The first version of this chose ONE sentence from `rc_first` and
+  # printed the whole list under it, so a silence followed by a timeout
+  # announced the KILLED pass as having left no findings -- the exact sentence
+  # the case was added to prevent. Each kind is named under its own line, and
+  # neither is printed empty.
+  echo "NOT RECORDED." >&2
+  [ -z "$killed" ] || echo "  KILLED at the deadline: $killed" >&2
+  [ -z "$silent" ] || echo "  ran and left no findings this can use: $silent" >&2
   echo "The push gate is still closed, which is correct -- a pull request that" >&2
   echo "names two reviews must have had two." >&2
   # ...and the half that SUCCEEDED is on disk, unnamed until now. On the likeliest
