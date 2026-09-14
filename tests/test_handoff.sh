@@ -25,6 +25,11 @@
 #   test_handoff.sh relaunch  ...and the dispatcher's opening prompt names it,
 #                             by absolute path, for the attempt that starts in a
 #                             worktree that is not this one.
+#   test_handoff.sh refs      a .../issues/<n> URL resolves to <n>, and an
+#                             ambiguous worktree is refused rather than guessed
+#                             at. Both are how the number reaches the note's
+#                             filename, and a wrong one writes a note nothing
+#                             ever reads.
 #   test_handoff.sh brief     the post-PR half of the brief is what tells an
 #                             agent to write one. Nobody writes a note no
 #                             document asks for.
@@ -90,14 +95,14 @@ brief()   { in_repo env GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"; }
 # tests/test_fleet.sh's `in_fleet`.
 in_fleet() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@"); }
 
-# What `owned_path` reads. Written directly rather than through `own`, which
-# also cards the board and appends to the run list -- neither of which
-# agent_brief consults, and both of which would need a runner here.
+# What `owned_path` reads -- $FLEET_OWNED, which lib.sh puts at
+# `$AUTOFLEET_DIR/worktrees`. Written directly rather than through `own`, which
+# also cards the board and appends to the run list: neither is anything
+# agent_brief consults, and both would need a runner here.
 own_worktree() {
   local num="$1" path="$2"
-  in_fleet bash -c ':' >/dev/null 2>&1 || true
-  mkdir -p "$AUTOFLEET_DIR/owned"
-  printf '%s' "$path" >"$AUTOFLEET_DIR/owned/$num"
+  mkdir -p "$AUTOFLEET_DIR/worktrees"
+  printf '%s' "$path" >"$AUTOFLEET_DIR/worktrees/$num"
 }
 
 case "${1:-}" in
@@ -236,6 +241,38 @@ case "${1:-}" in
     echo "ok: a relaunched issue's opening prompt names the note by absolute path"
     ;;
 
+  refs)
+    make_fixture
+    # A URL, which is what a person pastes. On BSD sed -- the one every macOS
+    # ships -- the two-expression form both scripts used printed the number
+    # TWICE with no separator between them, because the input carried no
+    # trailing newline and `p` does not add one to the last line: `/issues/999`
+    # resolved to 999999, and the note was written under an issue that does not
+    # exist. GNU sed prints it as two lines and `head -1` hid it, so it was
+    # green in CI and wrong on the machine the fleet runs on.
+    printf 'from a url\n' | handoff write https://github.com/armaatus/autofleet/issues/42 --stdin >/dev/null 2>&1 \
+      || fail "handoff.sh would not take an issue URL"
+    [ -f "$WORK/repo/$NOTE" ] \
+      || fail "an issue URL resolved to something other than 42: $(ls "$WORK/repo/.autofleet/run")"
+    # ...and issue-command.sh, which is where the same two lines came from.
+    out="$(brief https://github.com/armaatus/autofleet/issues/42 2>&1)" \
+      || fail "issue-command.sh would not take an issue URL: $out"
+    grep -qF -- 'from a url' <<<"$out" \
+      || fail "issue-command.sh resolved the URL to a different issue, so it printed no note: $out"
+
+    # Two notes and no argument is not something to guess at: the glob exists
+    # for the worktree that holds exactly one.
+    printf 'another\n' | handoff write 43 --stdin >/dev/null 2>&1 \
+      || fail "could not record the second note"
+    out="$(handoff 2>&1)" \
+      && fail "the print form picked one of two notes rather than refusing: $out"
+    grep -qF -- 'name the issue' <<<"$out" \
+      || fail "the refusal does not say what to do about it: $out"
+    out="$(printf 'x\n' | handoff write --stdin 2>&1)" \
+      && fail "write picked one of two notes rather than refusing: $out"
+    echo "ok: an issue URL resolves to its number, and an ambiguous worktree is refused"
+    ;;
+
   brief)
     make_fixture
     out="$(brief --after-pr 42 2>&1)" || fail "--after-pr exited non-zero: $out"
@@ -250,5 +287,5 @@ case "${1:-}" in
     echo "ok: the post-PR half is what asks for the note"
     ;;
   *)
-    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|brief}" >&2; exit 2 ;;
+    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|refs|brief}" >&2; exit 2 ;;
 esac

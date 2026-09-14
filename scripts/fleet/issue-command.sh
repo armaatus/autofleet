@@ -138,6 +138,37 @@ Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
 '
 fi
 
+# THE NOTE THE LAST ATTEMPT LEFT, if there is one, between the spec and the
+# brief. This is the "read at the start of a resumed session" half of
+# armaatus/autofleet#55: a session restarted in this worktree -- because the
+# time-box interrupted the one before it, or because the process died -- starts
+# from the issue body alone otherwise, and re-derives from the files every
+# decision the first attempt already made.
+#
+# PRINTED HERE rather than named in the brief, and the difference is the whole
+# of why it costs nothing. The brief is one text with a word budget
+# evals/lint.sh holds at 400, and stage 1 is at 394 of it; a sentence telling
+# every agent about a file that exists for one in twenty of them would be paid
+# for by all of them, in the prompt prefix of every request. An agent that HAS
+# one gets the note itself, and an agent that does not gets exactly what it got
+# before.
+#
+# Stage 1 only. An agent running `--after-pr` has the note in context already --
+# it is the thing that resumed it -- and reprinting it is the duplication the
+# two-stage split exists to stop.
+handoff="$REPO_ROOT/.autofleet/run/handoff-$num.md"
+if ! $after_pr && [ -f "$handoff" ]; then
+  # Before the `---` the brief opens with, so tests/test_brief.sh and
+  # evals/lint.sh go on measuring the brief rather than the brief plus whatever
+  # the last attempt wrote.
+  printf '\n## What the last attempt on this issue left\n\n'
+  printf 'It was interrupted, or it restarted. This is what it decided and why,\n'
+  printf 'and what is still open -- read it instead of working that out again.\n'
+  printf 'Keep it current: `./scripts/fleet/handoff.sh write %s`\n\n' "$num"
+  cat "$handoff"
+  printf '\n'
+fi
+
 # ONE brief, cut in two. `@@AFTER-PR@@` is the cut, `awk` prints the half that is
 # due, and the `sed` substitutes the placeholders for both halves at once so they
 # cannot come to mean different things in the part that arrives an hour later.
@@ -243,6 +274,19 @@ placeholder -- fill it in. Then tell the board where the work is:
 
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
+Then write the handoff, which is what a session restarting in this worktree
+reads instead of working the last hour out again:
+
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
+    ...
+    NOTE
+
+The decisions you took and why, the files you touched, what each review round
+said and how you answered it, and what is still open. NOT the plan, which is in
+the PR body, and not the diff. 300 words; over that it refuses rather than
+truncating, and says so. `issue-command.sh` prints it back at the top of the
+next session here.
+
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
 `merge-gate` refuses those paths on purpose: a PR that could rewrite the rules
@@ -289,6 +333,10 @@ re-runs `merge-gate` when a thread is resolved -- `pull_request_review_thread`
 is a webhook event, not a workflow trigger -- so the gate stays red on a thread
 you already closed, and auto-merge never fires. That script resolves the
 threads and, once the last one is shut, asks the gate again.
+
+Update the handoff after every round -- `./scripts/fleet/handoff.sh write
+__ISSUE__ --stdin` -- so what a round said and how you answered it survives an
+interruption between this round and the next.
 
 IF YOU CHANGED ANYTHING, PUSH IT and go back to `await-review.sh`. The push
 re-runs the reviewer, and the review of what you actually sent is the next

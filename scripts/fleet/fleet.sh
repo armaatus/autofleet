@@ -1219,14 +1219,45 @@ slug() {
     | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//' | cut -c1-48
 }
 
+# The note the last attempt on this issue left, if the worktree that holds it is
+# still standing -- `enforce_timebox` keeps one that carries uncommitted work or
+# commits that are not on main, which is exactly the attempt worth reading.
+#
+# ABSOLUTE, and printed rather than assumed, because the attempt that reads the
+# prompt below may be starting somewhere else: `.autofleet/run/` is per worktree,
+# so a relative path would name the new worktree's empty one. A path that is
+# wrong is worse than none -- the agent reads nothing, finds nothing, and has
+# been told there was something.
+#
+# Nothing to say when the worktree is gone, which is the ordinary case and is
+# what makes the note's lifetime honest: it dies with its worktree, and
+# docs/CONFIGURATION.md says so rather than implying otherwise.
+handoff_note_for() {
+  local path note
+  path="$(owned_path "$1")"
+  [ -n "$path" ] || return 0
+  note="$path/.autofleet/run/handoff-$1.md"
+  [ -f "$note" ] || return 0
+  printf '%s' "$note"
+}
+
 agent_brief() {
+  # `${note:+...}` rather than a second heredoc: an issue with no note has to get
+  # BYTE-FOR-BYTE the prompt it got before armaatus/autofleet#55, and two
+  # heredocs is where the two drift apart.
+  local note; note="$(handoff_note_for "$1")"
   cat <<BRIEF
 Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $1\` first and follow
 everything it prints, including anything it points you at. You were started by
 the fleet dispatcher: work autonomously to a pull request that is waiting only on
 GitHub's auto-merge, and do not stop to ask for confirmation on anything this
 repo's working agreement already decides.
-
+${note:+
+An earlier attempt on this issue left a handoff note at
+  $note
+Read it before you start: it is what that attempt decided and why, and what it
+left open. It belongs to that worktree and is not in this one.
+}
 If \`$STOP_FILE\` appears at any point, stop: say where you got to and do nothing
 further. Nothing can leave this worktree while it exists.
 BRIEF

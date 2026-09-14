@@ -1065,7 +1065,7 @@ echo "== the flow's own scripts"
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
               resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
-              review.sh; do
+              review.sh handoff.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -1164,7 +1164,7 @@ else
   # the only thing holding the split in a host installation. Found by the
   # independent review.
   for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh \
-                board.sh "--auto --squash" "Closes #"; do
+                board.sh "--auto --squash" "Closes #" handoff.sh; do
     grep -qF -- "$named" <<<"$stage1" \
       && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
   done
@@ -1177,8 +1177,13 @@ else
 
   # Stage 2: every script of the loop, the closing line merge-gate demands, and
   # the three paths no agent can merge itself.
+  # `handoff.sh` is stage 2's for a reason worth naming: the note is what an
+  # interrupted attempt leaves the next, and stage 1 is at 394 of its 400 words.
+  # Naming the script in stage 1 would charge every agent for an instruction
+  # that does not apply until the PR exists -- and the resumed session is given
+  # the note itself, printed by issue-command.sh, not a pointer to it.
   for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
-                answer-review.sh "--auto --squash" "Closes #" \
+                answer-review.sh handoff.sh "--auto --squash" "Closes #" \
                 ".github/workflows/" ".github/scripts/" ".claude/"; do
     grep -qF -- "$named" <<<"$stage2" \
       || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
