@@ -108,15 +108,16 @@ dirty="$(git status --porcelain -uno 2>/dev/null)"
 # and transcripts this script just wrote -- telling the agent to commit them is
 # worse than saying nothing. Same hard rule 1 reasoning that made the refusal
 # above `-uno`. Found by the local /code-review pass.
-# `.env` AND `.env.tmp*` TOO -- anchored, not a prefix: a bare `^\.env` also
-# silences `.env.example` and `.envrc`, which a host repo does track and would
-# want named here. For a harder reason than tidiness: `env.sh` generates it per
+# `.env` AND `.env.tmp*` TOO -- matched exactly, not by prefix. A bare `^\.env`
+# also silences `.env.example` and `.envrc`, and so does `^\.env\.`, which is the
+# overshoot the first anchoring attempt made: both are files a host repo tracks
+# and would want named here. Only the two the fleet GENERATES are dropped. For a harder reason than tidiness: `env.sh` generates it per
 # worktree and hard rule 5 says no secrets in the tree, so a line telling the
 # agent to commit it is the one suggestion this script must never make.
 # install.sh now appends both to a host's `.gitignore`, which makes this belt
 # and braces -- but a repo installed before that still has neither.
 untracked="$(git ls-files --others --exclude-standard 2>/dev/null \
-             | grep -v -e '^\.autofleet/' -e '^\.env$' -e '^\.env\.' \
+             | grep -v -e '^\.autofleet/' -e '^\.env$' -e '^\.env\.tmp' \
              | sed -n '1,10p')"
 [ -z "$untracked" ] || {
   echo "note: these files are untracked, so they are in neither the review nor" >&2

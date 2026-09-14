@@ -340,9 +340,24 @@ case "${1:-}" in
   # untracked files means a host repo exits 2 on its first run, forever, on a
   # directory this script created. It works here and nowhere else -- hard rule 1.
   printf 'not committed\n' >"$WORK/repo/loose.txt"
+  # ...and two the FLEET generates, which must not be named: telling an agent to
+  # commit `.env` is the one suggestion this script may never make (hard rule 5).
+  printf 'SECRET=x\n' >"$WORK/repo/.env"
+  printf 'SECRET=x\n' >"$WORK/repo/.env.tmp.1234"
+  # ...next to two a HOST tracks, which must still be named. The first anchoring
+  # of this filter used `^\.env\.`, which swallowed these -- the exact collateral
+  # the anchoring was added to avoid. Found by the local /code-review pass.
+  printf 'SECRET=\n' >"$WORK/repo/.env.example"
+  printf 'use flake\n' >"$WORK/repo/.envrc"
   run_it >/dev/null 2>"$err"; rc=$?
   [ "$rc" = 0 ] || { cat "$err" >&2; fail "an untracked file refused the whole run (rc $rc)"; }
   grep -qF -- 'loose.txt' "$err" || fail "the untracked file was not even mentioned"
+  for named in .env.example .envrc; do
+    grep -qF -- "$named" "$err" || fail "$named is a file a host tracks, and the notice hid it"
+  done
+  grep -qE '(^|[^.a-z])\.env(\.tmp[^ ]*)?$' "$err" \
+    && fail "the notice told the agent to commit a generated .env -- hard rule 5"
+  ok "the notice names what a host tracks and never the secrets the fleet generates"
   ok "an untracked file is a warning, not a refusal -- a host repo has one by construction"
 
   # A MODIFIED TRACKED FILE IS. That work is not in HEAD, and HEAD is what the
