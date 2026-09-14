@@ -3,7 +3,7 @@
 # arrives in TWO stages out of the one file.
 #
 #   test_brief.sh stage1  the bare form -> the spec, steps 1-3, and a pointer at
-#                         stage 2. Under BRIEF_WORD_BUDGET words with the spec
+#                         stage 2. Under the `brief` ceiling with the spec
 #                         excluded, and
 #                         carrying NONE of the post-PR contract: the whole point
 #                         is that an agent does not pay for 1,272 words of review
@@ -20,7 +20,8 @@
 #                         that page is 10,036 words of a loop the brief had just
 #                         given it. evals/lint.sh asserts the same ceiling from
 #                         the heredoc; this phase asserts it on what the script
-#                         actually prints.
+#                         actually prints. One number, in that file's ceilings
+#                         table, read here through tests/ceiling.sh.
 #
 # The union of the two -- every instruction landing in exactly one stage -- is
 # asserted by evals/lint.sh, which reads the heredocs rather than running the
@@ -30,6 +31,9 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The `brief` and `reading` rows of evals/lint.sh's ceilings table.
+. "$REPO_ROOT/tests/ceiling.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -71,12 +75,15 @@ STUB
   export AUTOFLEET_TEST_COMMAND="the full test suite"
 }
 
-# Set by #49, and held in evals/lint.sh too -- that one is the vendored copy, so
-# a host project gets the ceiling even though tests/ is not vendored. Raising it
-# here alone is not raising it: `agent-config.yml` re-runs MAIN's lint against
-# the branch, so a number that moved on the branch and not on main is a red
-# check, not a raised budget. #55 is where that was learned.
-BRIEF_WORD_BUDGET=400
+# Set by #49 and, since armaatus/autofleet#56, stated once: the `brief` row of
+# evals/lint.sh's ceilings table. That file is the vendored copy, so a host
+# project gets the ceiling even though tests/ is not vendored, and this phase
+# measures the same row on what the script PRINTS rather than on the heredoc.
+#
+# Raising it on the branch alone is not raising it: `agent-config.yml` re-runs
+# MAIN's lint against the branch, so a number that moved here and not on main is
+# a red check, not a raised budget. #55 is where that was learned.
+BRIEF_WORD_BUDGET="$(ceiling brief)" || exit 1
 
 run_it() { (cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"); }
 
@@ -130,8 +137,8 @@ case "${1:-}" in
       '--auto --squash' 'Closes #' './scripts/fleet/board.sh'
 
     words="$(brief_only <<<"$out" | wc -w | tr -d ' ')"
-    [ "$words" -lt "$BRIEF_WORD_BUDGET" ] \
-      || fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET"
+    [ "$words" -le "$BRIEF_WORD_BUDGET" ] \
+      || fail "$(ceiling_over brief "$words"), or move something into --after-pr"
     echo "ok: stage 1 is the spec, steps 1-3 and a pointer, in $words words"
     ;;
   stage2)
@@ -179,9 +186,10 @@ case "${1:-}" in
     # restated here. Hardcoded, this phase kept summing two files when a third
     # required document was added there -- green under an unchanged ceiling,
     # while the header above claims to measure "every document it is told to
-    # read". armaatus/autofleet#56 folds the NUMBER into one table; the
-    # MEMBERSHIP is this, and it has to travel with it. Found by the independent
-    # review.
+    # read". armaatus/autofleet#56 folded the NUMBER into the ceilings table at
+    # the top of that same file, and the `reading` row names this set as what it
+    # measures: the two halves live in one file and neither can move alone.
+    # Found by the independent review.
     COUNTED="$(sed -n 's/^ *"\([A-Za-z0-9_./-]*\)": *("count".*/\1/p' \
                "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
     [ -n "${COUNTED// /}" ] \
@@ -218,12 +226,12 @@ case "${1:-}" in
     total=$((total + n))
     echo "  the brief: $n"
 
-    # Held in evals/lint.sh too, which is the vendored copy, so a host project
-    # gets the ceiling even though tests/ is not vendored. Raise it there and
-    # here together, deliberately.
-    READING_CEILING=3500
-    [ "$total" -lt "$READING_CEILING" ] \
-      || fail "a fleet agent is told to read $total words before its first edit; the ceiling is $READING_CEILING"
+    # The limit AND the membership out of the same row. evals/lint.sh is the
+    # vendored copy, so a host project gets the ceiling even though tests/ is
+    # not vendored, and this phase measures it on what the script prints.
+    READING_CEILING="$(ceiling reading)" || exit 1
+    [ "$total" -le "$READING_CEILING" ] \
+      || fail "$(ceiling_over reading "$total")"
     echo "ok: a fleet agent reads $total words before its first edit, ceiling $READING_CEILING"
     ;;
   *)

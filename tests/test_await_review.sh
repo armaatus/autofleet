@@ -36,6 +36,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The `round` row of evals/lint.sh's ceilings table, read rather than restated.
+. "$REPO_ROOT/tests/ceiling.sh"
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok: $*"; }
 
@@ -272,6 +275,37 @@ case "${1:-}" in
     && { echo "$out" >&2; fail "a MISSING review-important was read as zero -- this is the failure that fails open"; }
   ok "no severity trailer means not said, not none"
   ;;
+# ---------------------------------------------------------------------- quiet
+  quiet)
+  # What one clean round COSTS the agent that reads it.
+  #
+  # This script's output lands in the context that has to survive three rounds,
+  # and every sentence in it was added because something failed once -- which is
+  # exactly the shape armaatus/autofleet#56 is about: prose grows back one useful
+  # paragraph at a time and nothing objects at any single step. So the round has
+  # a ceiling, and it is the `round` row of evals/lint.sh's ceilings table.
+  #
+  # Measured on the WORST clean round this fixture can produce: a nit-only review
+  # with an open inline thread, which is the branch that prints the long remedy
+  # AND the thread list. The stubbed review body is two lines, so what this
+  # number tracks over time is the script's own prose and not a reviewer's.
+  #
+  # A ceiling on lines rather than words: this is output an agent skims for the
+  # next command, and the cost of it is screen, not vocabulary.
+  make_fixture "$NIT_ONLY" open
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  # The fixture has to be load-bearing, or this measures a round that never
+  # reached the review -- which is a short output and a green row, the same trap
+  # the `threads` phase above records.
+  grep -q 'answer-review.sh' <<<"$out" \
+    || { echo "$out" >&2; fail "the round never reached a review, so its length proves nothing"; }
+  lines="$(wc -l <<<"$out" | tr -d ' ')"
+  limit="$(ceiling round)" || exit 1
+  [ "$lines" -le "$limit" ] \
+    || { echo "$out" >&2; fail "$(ceiling_over round "$lines")"; }
+  ok "one clean round is $lines lines, ceiling $limit"
+  ;;
   *)
-  echo "usage: $0 {nitonly|threads|tworeviewers|knob|important|untrailered}" >&2; exit 2 ;;
+  echo "usage: $0 {nitonly|threads|tworeviewers|knob|important|untrailered|quiet}" >&2; exit 2 ;;
 esac

@@ -229,7 +229,7 @@ print(len([r for r in json.load(open(sys.argv[1]))
     # before threads existed here is unaffected. A review record may carry its
     # own `submitted_at`; without one it gets the fixed date the suite has
     # always used.
-    python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" "${GH_THREADS:-}" <<'PY'
+    python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" "${GH_THREADS:-}" "${GH_COMMENTS:-}" <<'PY'
 import json, sys
 records = json.load(open(sys.argv[1]))
 nodes = [{"state": "COMMENTED",
@@ -237,12 +237,16 @@ nodes = [{"state": "COMMENTED",
           "commit": {"oid": r["commit_id"]}, "author": {"login": r["user"]},
           "body": r["body"], "comments": {"totalCount": 0}} for r in records]
 threads = json.load(open(sys.argv[3])) if sys.argv[3] else []
+# The PR's own conversation. Empty by default, so every phase written before
+# armaatus/autofleet#65 is unaffected; a delta round reads it for the answer
+# comment that says what was done about the last round's findings.
+comments = json.load(open(sys.argv[4])) if len(sys.argv) > 4 and sys.argv[4] else []
 print(json.dumps({"data": {"repository": {"pullRequest": {
     "headRefOid": sys.argv[2],
     "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
     "author": {"login": "armaatus"},
     "reviews": {"nodes": nodes},
-    "comments": {"nodes": []},
+    "comments": {"nodes": comments},
     "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                       "nodes": threads}}}}}))
 PY
@@ -284,6 +288,7 @@ OSTUB
   GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
   GH_REVIEWS="$WORK/reviews"; printf '[]' >"$GH_REVIEWS"
   GH_THREADS=""; export GH_THREADS
+  GH_COMMENTS=""; export GH_COMMENTS
   GH_PRLIST="$WORK/prlist"
   printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
   export GH_CALLS GH_HEAD GH_REVIEWS GH_PRLIST
@@ -306,13 +311,33 @@ stub_reviewer() {
   REVIEWER_CALLS="$WORK/reviewer-calls"
   [ -e "$REVIEWER_CALLS" ] || : >"$REVIEWER_CALLS"
   export REVIEWER_CALLS
+  # ...and the PROMPT it was handed. `review.sh` calls it as `-p "$prompt"`, so
+  # `\$2` -- escaped, because this heredoc is unquoted and an unescaped `$2`
+  # would be the TEST's second argument at write time -- is the whole brief plus
+  # the "This run" block. Without this, what the reviewer is asked to read was
+  # the one part of this script nothing could assert. armaatus/autofleet#65.
+  PROMPT_FILE="$WORK/reviewer-prompt"
+  : >"$PROMPT_FILE"
+  export PROMPT_FILE
+  # ...and the WHOLE argv. The prompt is not the only thing that decides what
+  # the reviewer can read: `--add-dir` is what puts the carried-forward context
+  # inside its workspace, and a review that names a file it cannot open proceeds
+  # on the range alone and prints `scope: delta` either way. Found by the
+  # independent review.
+  ARGV_FILE="$WORK/reviewer-argv"
+  : >"$ARGV_FILE"
+  export ARGV_FILE
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
 printf 'ran\n' >>"$REVIEWER_CALLS"
+printf '%s' "\$2" >"$PROMPT_FILE"
+printf '%s\n' "\$@" >"$ARGV_FILE"
 case "$1" in
-  marked|unmarked)
+  marked|unmarked|json|text)
     trailer=""
-    [ "$1" = marked ] && trailer="<!-- independent-review: local \$(cat "$GH_HEAD") -->"
+    case "$1" in
+      marked|json|text) trailer="<!-- independent-review: local \$(cat "$GH_HEAD") -->" ;;
+    esac
     python3 - "$GH_REVIEWS" "\$(cat "$GH_HEAD")" "\$trailer" <<'PY'
 import json, sys
 path, oid, trailer = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -323,6 +348,15 @@ records.append({"commit_id": oid, "user": "armaatus",
                         "<!-- review-findings: 0 -->\n" + trailer})
 json.dump(records, open(path, "w"))
 PY
+    # WHAT IT PRINTS ON STDOUT, which is what \`finish_log\` in review.sh parses.
+    # \`json\` is a reviewer that honours \`--output-format json\`; \`text\` is
+    # the wrapper that does not, and whose output must still reach a readable
+    # log with no cost row invented for it. THE BACKTICKS ARE ESCAPED -- see the
+    # note at the bottom of this heredoc, which is about exactly this.
+    case "$1" in
+      json) printf '%s\n' '{"result":"Review submitted to PR #42 -- COMMENTED. 3 findings.","total_cost_usd":0.42,"usage":{"input_tokens":1000,"output_tokens":200},"duration_ms":1234,"num_turns":7}' ;;
+      text) printf 'Review submitted to PR #42 -- COMMENTED. 3 findings.\n' ;;
+    esac
     ;;
   silent) : ;;
   # A child, not the stub itself. AUTOFLEET_REVIEW_CMD is advertised as a
@@ -365,7 +399,16 @@ n_reviews() { python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))
 # How many times a reviewer was actually started. `n_reviews` cannot answer that
 # -- a reviewer can run and submit nothing -- and "was one started at all" is the
 # question the queue phase is really asking.
-n_started() { grep -c . "$REVIEWER_CALLS" 2>/dev/null || echo 0; }
+# The `|| echo 0` this used to carry ran IN ADDITION to grep's own output, not
+# instead of it: `grep -c` on an empty file prints `0` and exits 1, so the
+# function answered "0\n0" and every numeric comparison against it died with
+# "integer expression expected" -- a `[` that returns 2, so the test is FALSE
+# and the assertion passes for the wrong reason. The string comparisons already
+# in this file were unaffected, which is why it stood.
+n_started() {
+  local n; n="$(grep -c . "$REVIEWER_CALLS" 2>/dev/null)"
+  printf '%s\n' "${n:-0}"
+}
 # How many times the DISPATCHER started review.sh -- which is what the re-spawn
 # bug is about, and is not the same as how many times a reviewer ran.
 #
@@ -412,6 +455,56 @@ await() {
 }
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
+
+# ------------------------------------------------ the delta-scope helpers (#65)
+#
+# What a round-N review needs that round one does not: a history with more than
+# one commit in it, an `origin` holding `refs/pull/42/head` so `review.sh`'s
+# fetch resolves, and a review record on the head that was reviewed LAST.
+#
+# The origin is a real bare repository rather than a stub, because the thing
+# under test is a `git fetch` and a `git merge-base --is-ancestor`, and both are
+# git answering about objects it has. A stubbed `git` would assert the shape of
+# the command and not the fact it depends on.
+make_origin() {
+  git init -q --bare "$WORK/origin.git"
+  git -C "$WORK/repo" remote add origin "$WORK/origin.git"
+  git -C "$WORK/repo" push -q origin "HEAD:refs/pull/42/head"
+}
+
+# One more commit, published as the PR's head. `$1` names the file it touches,
+# so the delta has something in it -- an empty commit makes `git diff a..b`
+# empty, which is the one shape that cannot tell a range apart from no range.
+advance_head() {
+  printf '%s\n' "$2" >"$WORK/repo/$1"
+  git -C "$WORK/repo" add "$1"
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q -m "touch $1"
+  PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+  printf '%s' "$PR_HEAD" >"$GH_HEAD"
+  git -C "$WORK/repo" push -q --force origin "HEAD:refs/pull/42/head"
+}
+
+# A round that has already happened: a counting review on `$1`, declaring `$2`
+# findings. Its author IS the PR's, so this also exercises the `local`-mode
+# marker rule -- the same rule `merge_gate.independent_reviews` applies, asked
+# about a head that is not the current one.
+plant_round() {
+  python3 - "$GH_REVIEWS" "$1" "$2" "${3:-2026-09-10T09:00:00Z}" <<'XX'
+import json, sys
+path, oid, n, when = sys.argv[1:5]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "armaatus", "submitted_at": when,
+                "body": "PREVIOUS ROUND FINDING: scripts/fleet/fleet.sh:12 is "
+                        "wrong and review.sh:3 names a file that is not there.\n"
+                        f"<!-- review-findings: {n} -->\n"
+                        f"<!-- independent-review: local {oid} -->"})
+json.dump(records, open(path, "w"))
+XX
+}
+
+# What the reviewer was actually asked to read.
+prompt_has() { grep -qF "$1" "$PROMPT_FILE"; }
+
 
 # ---------------------------------------------------------------- await-review
 #
@@ -1257,10 +1350,40 @@ PY2
   printf '#!/bin/sh\nsleep "$@"\n' >"$WORK/bin/review.sh"; chmod +x "$WORK/bin/review.sh"
   "$WORK/bin/review.sh" 30 & keeper=$!
   printf '%s %s\n' "$keeper" "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/98"
+  # A DELTA ROUND'S CONTEXT FILE goes with its log, and an orphan goes on its
+  # own. Neither is a `.log`, so the sweep's glob cannot see them: unswept, the
+  # reviews directory trades one kind of growth for another, which is the thing
+  # armaatus/autofleet#70 measured and #65 must not undo.
+  : >"$AUTOFLEET_DIR/reviews/pr-42-aaaaaaaa.context.md"
+  : >"$AUTOFLEET_DIR/reviews/pr-97-77777777.context.md"
   AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
   [ -e "$AUTOFLEET_DIR/reviews/pr-98-99999999.log" ] \
     || fail "a transcript was swept while a reviewer for that PR was still writing to it"
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-aaaaaaaa.context.md" ] \
+    && fail "a context file outlived the transcript it belongs to"
+  ok "...and a delta round's context file is swept with its own transcript"
+  [ -e "$AUTOFLEET_DIR/reviews/pr-97-77777777.context.md" ] \
+    && fail "a context file with no transcript beside it was never swept at all"
+  ok "...and one orphaned by a reviewer that never wrote a log goes too"
+
+  # THE FETCHED PR REFS. `review.sh` drops its own in an EXIT trap that a
+  # SIGTERM taken before the reviewer is spawned, a SIGKILL, or an OOM all skip
+  # -- and a ref left behind pins every object that pull request ever had
+  # against `git gc`, forever. Nothing else in the fleet looks at them. 42 is
+  # open and must be spared, because a reviewer running right now resolves its
+  # range against that very ref; 96 is not open and must go. Found by the local
+  # review of armaatus/autofleet#65.
+  git -C "$WORK/repo" update-ref "refs/autofleet/review/42" "$PR_HEAD"
+  git -C "$WORK/repo" update-ref "refs/autofleet/review/96" "$PR_HEAD"
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  git -C "$WORK/repo" rev-parse --verify -q "refs/autofleet/review/42" >/dev/null \
+    || fail "the sweep took an OPEN pull request's fetched ref, so a running delta review's range stops resolving"
+  ok "an open PR's fetched review ref is left alone"
+  git -C "$WORK/repo" rev-parse --verify -q "refs/autofleet/review/96" >/dev/null \
+    && fail "a closed PR's fetched ref survived, so its objects are pinned against git gc forever"
+  ok "...while one belonging to a PR that is gone is dropped"
   kill "$keeper" 2>/dev/null; wait "$keeper" 2>/dev/null
   rm -f "$AUTOFLEET_DIR/reviewing/98"
   ok "a transcript is not swept under its own running reviewer"
@@ -1911,6 +2034,18 @@ PY2
   grep -qF "$GH_REVIEWS" "$WORK/bin/fake-reviewer" \
     || fail "the stub no longer has the review path baked in; the heredoc stopped expanding"
   ok "...while the paths the heredoc is unquoted for still expand"
+
+  # The same two halves for what armaatus/autofleet#65 added, which is the block
+  # that reproduced this bug a second time: four backticks in a comment about
+  # `finish_log`, and four `command not found` lines on stderr.
+  grep -qF 'finish_log' "$WORK/bin/fake-reviewer" \
+    || fail "the cost-row prose was consumed as a command substitution"
+  ok "...and the same holds for the prose about the JSON output mode"
+  grep -qF "$PROMPT_FILE" "$WORK/bin/fake-reviewer" \
+    || fail "the stub cannot record the prompt; \$PROMPT_FILE did not expand"
+  grep -qF "$ARGV_FILE" "$WORK/bin/fake-reviewer" \
+    || fail "the stub cannot record the argv; \$ARGV_FILE did not expand"
+  ok "...and the prompt- and argv-capture paths are baked in, so both are assertable"
   ;;
 
 # -------------------------------------------------------------- await_threads
@@ -2102,7 +2237,402 @@ PY2
   ok "...and round two treats all three as already handed back"
   ;;
 
+
+# --------------------------------------------------------------- scope_full
+  scope_full)
+  # ROUND ONE IS ALWAYS FULL, even with the knob turned on: there is no earlier
+  # reviewed head to take a range from. The failure this guards is a range
+  # against nothing -- `git diff ..HEAD` -- which resolves and is not the diff
+  # anybody meant.
+  make_fixture; stub_reviewer marked; make_origin
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round one did not submit (got $rc)"; }
+  grep -q "scope: full" "$WORK/out" || { cat "$WORK/out" >&2; fail "round one did not say it read the whole branch"; }
+  ok "round one is a full review and says so"
+  prompt_has "gh pr diff 42" || fail "round one was not pointed at the whole diff"
+  ok "...and is pointed at the whole diff"
+  prompt_has "Previously reviewed at:" && fail "round one was handed a range anyway"
+  ok "...and at no range, because there is no earlier head to range from"
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.context.md" ] \
+    && fail "round one wrote a carried-forward context with nothing to carry"
+  ok "...and wrote no context file"
+  ;;
+
+# -------------------------------------------------------------- scope_delta
+  scope_delta)
+  # THE WHOLE POINT. Round two reads the delta since round one's head, and is
+  # handed what round one found and how it was answered. Before this, round
+  # thirteen of PR #32 read 2,633 changed lines and a 65 KB body to judge 39
+  # lines in 2 files.
+  make_fixture; stub_reviewer marked; make_origin
+  first="$PR_HEAD"
+  plant_round "$first" 2
+  # An answer comment on that head, which is how `answer-review.sh` records what
+  # was done about the findings.
+  GH_COMMENTS="$WORK/comments"
+  python3 - "$GH_COMMENTS" "$first" <<'XX'
+import json, sys
+json.dump([{"author": {"login": "armaatus"}, "createdAt": "2026-09-10T09:30:00Z",
+            "body": f"<!-- review-answered {sys.argv[2]} -->\nFixed both: the line "
+                    "number was stale and the file has been renamed."}],
+          open(sys.argv[1], "w"))
+XX
+  export GH_COMMENTS
+  advance_head second.txt hello
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not submit (got $rc)"; }
+  grep -q "scope: delta" "$WORK/out" || { cat "$WORK/out" >&2; fail "round two did not scope to the delta"; }
+  ok "round two scopes to the delta and says so"
+  prompt_has "git diff $first..$PR_HEAD" \
+    || { cat "$PROMPT_FILE" >&2; fail "the reviewer was not given the range"; }
+  ok "...and the range is <last reviewed head>..<head>"
+  # The three clauses. A range alone is a strictly weaker review: a round-five
+  # commit can break something round one approved and not appear in the delta.
+  prompt_has "The surroundings of every change" || fail "clause 2 (the surroundings) is missing"
+  prompt_has "roughly under 500 lines" \
+    || fail "clause 2 is not size-aware, so a delta round reads more than the full diff it replaces"
+  # THE CLAUSES NAME THE COMMIT. `Read` and `Grep` resolve against this
+  # checkout, which is the repository root on the base branch -- the head under
+  # review is not checked out anywhere, it is a fetched object. A clause saying
+  # `Read <path>` hands the reviewer the BASE's copy with the delta's additions
+  # absent and the hunk line numbers on unrelated code; a clause saying `Grep`
+  # searches the base, so a caller this PR added is invisible and one it deleted
+  # still appears -- inverting the case clause 3 exists for. Found by the
+  # independent review.
+  prompt_has "git show $PR_HEAD:" \
+    || { cat "$PROMPT_FILE" >&2; fail "clause 2 reads the working tree, not the head under review"; }
+  prompt_has "git grep -n <name> $PR_HEAD" \
+    || { cat "$PROMPT_FILE" >&2; fail "clause 3 greps the working tree, not the head under review"; }
+  ok "...and both name the head under review, not this checkout"
+  grep -q 'Bash(git grep' "$ARGV_FILE" \
+    || { cat "$ARGV_FILE" >&2; fail "clause 3 asks for git grep and the reviewer is not granted it"; }
+  ok "...and the reviewer is granted the one tool those clauses need"
+  prompt_has "whose CONTRACT the" || fail "clause 3 (the callers) is missing"
+  ok "...and carries the two clauses that keep a narrower read from being a weaker one"
+
+  ctx="$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.context.md"
+  [ -s "$ctx" ] || fail "no carried-forward context file at $ctx"
+  prompt_has "$ctx" || fail "the prompt does not name the context file"
+  ok "...and the prompt names a FILE, not third-party text spliced into itself"
+  # ...and the reviewer can actually open it. `$LOG_DIR` is outside the
+  # repository root the reviewer runs from, and `--allowed-tools Read` grants
+  # the tool, not the workspace: a headless `claude -p` denies a read outside
+  # its directories rather than asking. Without the grant every delta round
+  # named a path it could not open and said `scope: delta` regardless. Found by
+  # the independent review.
+  grep -qxF -- "--add-dir" "$ARGV_FILE"     || { cat "$ARGV_FILE" >&2; fail "the reviewer was not granted the directory the context file is in"; }
+  grep -qxF -- "$AUTOFLEET_DIR/reviews" "$ARGV_FILE"     || { cat "$ARGV_FILE" >&2; fail "--add-dir does not name the log directory"; }
+  ok "...and the reviewer is granted the directory that file is in"
+  grep -q "It declared 2 findings" "$ctx" || { cat "$ctx" >&2; fail "the previous round's count was not carried"; }
+  grep -q "PREVIOUS ROUND FINDING" "$ctx" || { cat "$ctx" >&2; fail "the previous round's findings were not carried"; }
+  ok "...and the file carries what the last round found, by its declared count"
+  grep -q "the line number was stale" "$ctx" || { cat "$ctx" >&2; fail "the answer was not carried"; }
+  ok "...and how it was answered"
+  # THE OLD TRAILERS COME OFF. `plant_round` writes a body ending in
+  # `<!-- review-findings: N -->` and `<!-- independent-review: local <sha> -->`;
+  # carried through verbatim, in front of a reviewer whose own last two lines
+  # must be exactly those, an echoed stale sha makes `merge_gate` ignore the
+  # review and the PR blocks on one that was submitted. The count survives as a
+  # NUMBER, which is the honest form of it. Found by the independent review.
+  grep -q "independent-review: local" "$ctx" \
+    && { cat "$ctx" >&2; fail "the previous round's head marker was carried into the file the reviewer reads"; }
+  grep -q "review-findings:" "$ctx" \
+    && { cat "$ctx" >&2; fail "the previous round's findings trailer was carried verbatim"; }
+  ok "...with the previous round's trailers stripped, so none can be echoed back"
+  grep -q "touch second.txt" "$ctx" || { cat "$ctx" >&2; fail "the commits between the heads were not carried"; }
+  ok "...and the commits that stood between the two heads"
+  ;;
+
+# ------------------------------------------------------------- scope_orphan
+  scope_orphan)
+  # A FORCE-PUSH ORPHANS THE LAST REVIEWED HEAD. `git diff <orphan>..<head>`
+  # still resolves -- it just describes a range nobody worked in -- so the
+  # ancestry test is the only thing between a delta review and a fiction.
+  make_fixture; stub_reviewer marked; make_origin
+  orphan="$(git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit-tree \
+              "$(git -C "$WORK/repo" rev-parse HEAD^{tree})" -m orphan)"
+  plant_round "$orphan" 3
+  advance_head second.txt hello
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the orphan case did not submit (got $rc)"; }
+  grep -q "scope: full" "$WORK/out" || { cat "$WORK/out" >&2; fail "a review on an orphaned head was used as the range"; }
+  ok "a reviewed head that is no longer an ancestor falls back to full"
+  prompt_has "$orphan" && fail "the orphaned sha reached the reviewer anyway"
+  ok "...and the orphaned sha never reaches the reviewer"
+  ;;
+
+# ---------------------------------------------------------------- scope_kth
+  scope_kth)
+  # EVERY Kth ROUND IS FULL, so no pull request is judged by an unbroken chain
+  # of deltas. With AUTOFLEET_REVIEW_FULL_EVERY=2 the second round is the one.
+  make_fixture; stub_reviewer silent; make_origin
+  first="$PR_HEAD"
+  plant_round "$first" 1
+  advance_head a.txt one
+  plant_round "$PR_HEAD" 1 "2026-09-10T09:10:00Z"
+  advance_head b.txt two
+  export AUTOFLEET_REVIEW_SCOPE=delta AUTOFLEET_REVIEW_FULL_EVERY=2
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 5 ] || { cat "$WORK/out" >&2; fail "the silent stub did not exit 5 (got $rc)"; }
+  grep -q "scope: full" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "two rounds of review did not trip FULL_EVERY=2"; }
+  ok "the Kth round reverts to a full review"
+  # ...and the SAME ROUND COUNT with a wider K is a delta, which is what says K
+  # decided. ONE variable changes between the two runs: the stub submits
+  # nothing, so the head does not move and the derived count is 2 both times.
+  # The earlier version of this row advanced the head AND widened K together,
+  # so it established neither. Found by the independent review.
+  export AUTOFLEET_REVIEW_FULL_EVERY=4
+  run_it 42 >"$WORK/out2" 2>&1
+  grep -q "scope: delta" "$WORK/out2" \
+    || { cat "$WORK/out2" >&2; fail "the same round count with FULL_EVERY=4 was not a delta"; }
+  ok "...and the same round count with a wider K is a delta, so K is what decided"
+  ;;
+
+# ----------------------------------------------------------------- cost_row
+  cost_row)
+  # PER-ROUND COST, which was not recoverable from anything on disk: the log
+  # held the reviewer's final message and nothing else -- no tokens, no cost, no
+  # turns -- so the issue about cost could not measure its own before and after.
+  make_fixture; stub_reviewer json
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the json reviewer did not submit (got $rc)"; }
+  log="$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log"
+  grep -q "3 findings" "$log" || { cat "$log" >&2; fail "the reviewer's own words did not survive"; }
+  grep -q "total_cost_usd" "$log" && { cat "$log" >&2; fail "the raw JSON was left in the log a person reads"; }
+  ok "the log keeps the reviewer's words and not the envelope"
+  tsv="$AUTOFLEET_DIR/reviews/cost.tsv"
+  [ -s "$tsv" ] || fail "no cost row at $tsv"
+  grep -q "0.42" "$tsv" || { cat "$tsv" >&2; fail "the cost did not reach the row"; }
+  grep -q "1000" "$tsv" || { cat "$tsv" >&2; fail "the input tokens did not reach the row"; }
+  ok "...and one row per round carries the tokens, the cost and the turns"
+  [ -e "$log.raw" ] && fail "the raw stdout was left behind"
+  ok "...and the scratch streams are cleaned up"
+
+  # AND IT DEGRADES. AUTOFLEET_REVIEW_CMD is a documented wrapper seam and a
+  # wrapper need not honour --output-format; output that does not parse must
+  # still reach a readable log, with no cost row invented for it.
+  rows_before="$(grep -c . "$tsv")"
+  stub_reviewer text
+  advance_head_simple() {
+    git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next
+    PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+    printf '%s' "$PR_HEAD" >"$GH_HEAD"
+  }
+  advance_head_simple
+  run_it 42 >"$WORK/out2" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out2" >&2; fail "the text reviewer did not submit (got $rc)"; }
+  log2="$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log"
+  grep -q "3 findings" "$log2" || { cat "$log2" >&2; fail "a non-JSON reviewer lost its log"; }
+  ok "a reviewer that does not speak JSON still leaves a readable log"
+  [ "$(grep -c . "$tsv")" = "$rows_before" ] \
+    || { cat "$tsv" >&2; fail "a cost row was invented for output that carried no cost"; }
+  ok "...and no cost row is invented for it"
+  ;;
+
+
+# ------------------------------------------------------------ scope_noplaceholder
+  scope_noplaceholder)
+  # THE PLACEHOLDER `$log` IS WRITTEN BEFORE THE FETCH, so a run that never
+  # reaches a reviewer must take it back. Left, it is a transcript by
+  # `prune_review_logs`'s reckoning -- one line saying a reviewer is running,
+  # naming two stream files that were never created. The `stopped` path is the
+  # one that reaches it deterministically: `review.sh` writes the placeholder,
+  # then finds the stop file on its next look. Found by the independent review.
+  make_fixture; stub_reviewer marked
+  # Not on PATH, so the run exits 6 after the log path is decided.
+  export AUTOFLEET_REVIEW_CMD=no-such-reviewer-anywhere
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 6 ] || { cat "$WORK/out" >&2; fail "a missing reviewer command did not exit 6 (got $rc)"; }
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log" ] \
+    && fail "a run that never started a reviewer left a placeholder transcript behind"
+  ok "a run that never reaches a reviewer leaves no placeholder transcript"
+  # ...while a run that DID start one keeps its log, which is the half that
+  # matters: the placeholder exists so `$log` is there for the whole run.
+  stub_reviewer text
+  run_it 42 >"$WORK/out2" 2>&1
+  [ -s "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log" ] \
+    || fail "the cleanup took a real transcript"
+  ok "...while a run that started one keeps its transcript"
+  ;;
+
+# -------------------------------------------------------------- scope_nofetch
+  scope_nofetch)
+  # THE FETCH IS WHAT MAKES A RANGE RESOLVE, and it is one network round trip
+  # against a repository this machine does not always reach. It must cost the
+  # delta and not the review: a round that cannot fetch reads the whole branch,
+  # like every round did before this existed, and says so.
+  #
+  # No `make_origin`, so `git fetch origin` has no remote to reach -- which is
+  # the same failure as a network that is down, arriving faster.
+  make_fixture; stub_reviewer marked
+  first="$PR_HEAD"
+  plant_round "$first" 2
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next
+  PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+  printf '%s' "$PR_HEAD" >"$GH_HEAD"
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "a failed fetch cost the review, not just the delta (got $rc)"; }
+  ok "a round whose fetch fails still submits"
+  grep -q "scope: full" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "it handed out a range it had not fetched the objects for"; }
+  ok "...and falls back to a full review"
+  prompt_has "Previously reviewed at:" \
+    && { cat "$PROMPT_FILE" >&2; fail "the reviewer was given a range anyway"; }
+  ok "...and the reviewer is told to read the whole diff, as it always was"
+  ;;
+
+# -------------------------------------------------------------- scope_ctxcap
+  scope_ctxcap)
+  # THE CAP ON THE CARRIED-FORWARD FILE. The whole complaint this answers is a
+  # prompt that grows with the rounds; an uncapped context file is that growth
+  # wearing a different hat, and the previous round's body is written by an
+  # agent with no length budget of its own.
+  make_fixture; stub_reviewer marked; make_origin
+  first="$PR_HEAD"
+  python3 - "$GH_REVIEWS" "$first" <<'XX'
+import json, sys
+path, oid = sys.argv[1], sys.argv[2]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "armaatus",
+                "submitted_at": "2026-09-10T09:00:00Z",
+                "body": "PADDING " * 4000 + "\n<!-- review-findings: 1 -->\n"
+                        f"<!-- independent-review: local {oid} -->"})
+json.dump(records, open(path, "w"))
+XX
+  advance_head second.txt hello
+  export AUTOFLEET_REVIEW_SCOPE=delta AUTOFLEET_REVIEW_CONTEXT_MAX=2048
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the run did not submit (got $rc)"; }
+  ctx="$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.context.md"
+  [ -s "$ctx" ] || fail "no context file at $ctx"
+  size="$(wc -c <"$ctx" | tr -d ' ')"
+  # The whole-file cap plus the truncation note it appends, and nothing like the
+  # 32 KB body it was handed.
+  [ "$size" -lt 2400 ] \
+    || { fail "the context file is ${size} bytes against a 2048-byte cap"; }
+  ok "a review body far over the cap produces a context file inside it (${size}B)"
+  grep -q "truncated at AUTOFLEET_REVIEW_CONTEXT_MAX" "$ctx" \
+    || { fail "it was cut without saying so, so a reviewer cannot tell a short round from a clipped one"; }
+  ok "...and says it was cut, rather than looking like a short round"
+  # The MECHANICAL sections survive the clip: the per-section share is what
+  # stops one enormous body pushing the commits out of the file entirely.
+  grep -q "touch second.txt" "$ctx" \
+    || { cat "$ctx" >&2; fail "the commits were pushed out of the file by the padded body"; }
+  ok "...while the commits between the heads still survive it"
+
+  # `0` IS "CARRY NOTHING", not "carry a truncation notice". The prompt tells
+  # the reviewer the file holds what the last round found; at 0 the file held
+  # one line saying it had been cut. Found by the independent review.
+  advance_head third.txt again
+  export AUTOFLEET_REVIEW_CONTEXT_MAX=0
+  run_it 42 >"$WORK/out0" 2>&1
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.context.md" ] \
+    && fail "a cap of 0 still wrote a context file"
+  ok "a cap of 0 writes no context file at all"
+  prompt_has "Carried forward:" \
+    && { cat "$PROMPT_FILE" >&2; fail "the prompt still told the reviewer to read a file that does not exist"; }
+  ok "...and the prompt does not name one"
+  prompt_has "Previously reviewed at:" \
+    || { cat "$PROMPT_FILE" >&2; fail "the range went with it; 0 caps the context, not the scope"; }
+  ok "...while the range is still handed over, because 0 caps the context and not the scope"
+  ;;
+
+# ------------------------------------------------------------ scope_ctxbroken
+  scope_ctxbroken)
+  # A CONTEXT BUILD THAT CANNOT RUN must not report `delta`. The python that
+  # writes the findings, the answer and the threads imports from `merge_gate.py`
+  # -- a file agents in this repository edit, which is why `counting_review`
+  # wraps its own import in a `try`. This block is `>"$ctx" 2>/dev/null` in a
+  # script with no `-e`, so a raise left the file holding the header and the
+  # commit list, printed `scope: delta`, and said nothing: a narrower read that
+  # really was a weaker read. Found by the independent review.
+  make_fixture; stub_reviewer marked; make_origin
+  first="$PR_HEAD"
+  plant_round "$first" 2
+  advance_head second.txt hello
+  # The one failure mode the comment above names, reproduced the way it happens:
+  # merge_gate.py does not import.
+  printf 'def broken(:
+' >>"$WORK/repo/.github/scripts/merge_gate.py"
+  export AUTOFLEET_REVIEW_SCOPE=delta
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  # Exit 2 is also acceptable here -- `counting_review` refuses a gate it cannot
+  # load, which is the older and stronger guard. What must NOT happen is a run
+  # that reports `delta` while carrying nothing.
+  grep -q "scope: delta" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "it reported a delta review whose carried context could not be built"; }
+  ok "a context build that cannot run does not report a delta review (exit $rc)"
+  ;;
+
+# ------------------------------------------------------------- status_rounds
+  status_rounds)
+  # TWO THINGS #91 left. The count it keeps is invisible -- `fleet.sh status` is
+  # the first screen anybody looks at and a PR quietly on its fourth round does
+  # not appear on it -- and the count itself undercounts, by its own comment:
+  # three kinds of review it cannot see, each a real review a real PR had.
+  make_fixture; stub_reviewer marked; make_origin
+  export AUTOFLEET_REVIEW_MAX_ROUNDS=4
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '4\n' >"$AUTOFLEET_DIR/reviewing/42.rounds"
+  printf '2\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  grep -q "PR #42: 4/4 rounds" <<<"$out" \
+    || fail "fleet.sh status does not show the round count: $out"
+  grep -q "AT THE CAP" <<<"$out" || fail "status does not say PR #42 is held: $out"
+  ok "fleet.sh status shows each PR's round count and names the cap"
+  grep -q "PR #43: 2/4 rounds" <<<"$out" \
+    || fail "status showed only the capped PR: $out"
+  grep -q "#43.*AT THE CAP" <<<"$out" \
+    && fail "a PR below the cap was reported as held: $out"
+  ok "...and a PR below it is shown without the hold"
+  # `.rounds` is a RECORD, not a lock. Counted as a reviewer it would read as a
+  # slot taken for as long as the PR is open -- the exact miscount `.done`,
+  # `.tries` and `.said` each caused in turn.
+  grep -q "0 in flight" <<<"$out" \
+    || fail "the round record was counted as a reviewer in flight: $out"
+  ok "...while counting as a record and not as a reviewer in flight"
+
+  # THE UNDERCOUNT. `.rounds` says 1; the pull request carries counting reviews
+  # on three distinct heads, none of which this fleet's increment saw. The round
+  # recorded after this run must be 4, not 2.
+  rm -f "$AUTOFLEET_DIR/reviewing"/*
+  export AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42"
+  printf '1\n' >"$AUTOFLEET_REVIEW_MARKER.rounds"
+  first="$PR_HEAD"
+  plant_round "$first" 1
+  advance_head a.txt one
+  plant_round "$PR_HEAD" 1 "2026-09-10T09:10:00Z"
+  advance_head b.txt two
+  plant_round "$PR_HEAD" 1 "2026-09-10T09:20:00Z"
+  advance_head c.txt three
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the run did not submit (got $rc)"; }
+  got="$(cat "$AUTOFLEET_REVIEW_MARKER.rounds")"
+  [ "$got" = 4 ] \
+    || fail "the round count is $got: the three reviews this fleet did not submit are still invisible to the cap"
+  ok "a round count below what the PR actually carries is corrected upward"
+  grep -q "round 4" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the reviewer was told the wrong round"; }
+  ok "...and the reviewer is told the corrected round, which its late-round rule keys on"
+
+  # ...and NEVER downward. A force-push that orphans every earlier review drops
+  # the derived count to zero; a cap that went backwards there would reopen the
+  # loop it had just closed.
+  printf '9\n' >"$AUTOFLEET_REVIEW_MARKER.rounds"
+  advance_head d.txt four
+  run_it 42 >"$WORK/out2" 2>&1
+  got="$(cat "$AUTOFLEET_REVIEW_MARKER.rounds")"
+  [ "$got" = 10 ] \
+    || fail "the count went to $got, so a PR gets rounds it has already spent"
+  ok "...and never downward, whatever the pull request has lost"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_noplaceholder|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row" >&2
   exit 2 ;;
 esac

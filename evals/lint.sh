@@ -34,21 +34,257 @@ ok()   { echo "  ok: $*"; }
 # `grep` without `-q` reads its whole input, so there is nothing to break.
 qgrep() { grep "$@" >/dev/null; }
 
+# ---------------------------------------------------------------- the ceilings
+# What a fleet agent is allowed to be given, in one table.
+#
+# Every limit this repo holds on the size of something an agent READS is a row
+# here: the number, the issue that set it, what is measured, and what measures
+# it. Prose grows back one useful paragraph at a time -- the opening brief
+# reached 1,521 words that way and nothing objected at any single step -- so the
+# only thing that holds a limit is a check that fails when it is crossed and a
+# way to raise it deliberately (armaatus/autofleet#56).
+#
+# RAISING A ROW IS ALLOWED AND IS THE POINT. It is one line in a diff, reviewed
+# like any other change, rather than a paragraph nobody notices. A lint that
+# cannot be raised is one that gets deleted the first time it is inconvenient.
+# What is not allowed is raising it quietly: the diff names the row that moved,
+# and the PR body says what was bought with it.
+#
+# EVERY ROW CITES AN ISSUE, so a ceiling with no reason cannot be added and none
+# of these reads as an arbitrary number a year from now. `claude-md` is the one
+# row whose cap predates the tracker; it cites the issue that made it a row.
+#
+# THE ROW CARRIES WHAT IS MEASURED, not only the limit. Those two drifted apart
+# once already: tests/test_brief.sh hardcoded the set of documents it summed
+# while this file derived the same set from the reading table, so a third
+# required document could be added here and silently left out of the total --
+# green under an unchanged ceiling (armaatus/autofleet#54). One row, both halves.
+#
+# THE TABLE CARRIES THE LIMIT AND NEVER THE MEASUREMENT. A measured figure
+# written into a comment is stale by the next commit; three consecutive rounds
+# of armaatus/autofleet#105's review caught one. Every check below PRINTS what
+# it measured. The table says only what it may be.
+#
+# NOT EVERY ROW IS MEASURED HERE, because a ceiling has to be measured from what
+# the agent RECEIVES and not from what a file contains. Three of these bound the
+# OUTPUT of a script, so a test phase that runs the script is the only honest
+# place to measure them. tests/ is not vendored: a host installation gets the
+# three rows this file measures, autofleet gets all six, and the `== the
+# ceilings` check below is what holds the other three to a phase that exists,
+# runs, and reads its limit from this table rather than restating it.
+#
+# A CEILING BOUNDS THE TEXT AND NOTHING ELSE. The rest of what a run costs --
+# tool output, files read twice, review rounds -- is what
+# `./scripts/fleet/fleet.sh cost` measures (armaatus/autofleet#48), and REVIEW.md
+# asks a fleet PR body to carry that figure. The two halves belong together: the
+# table stops the prompt growing, the cost report says whether anything actually
+# got cheaper.
+#
+# A quoted heredoc, so an apostrophe in a description costs nothing. Fields:
+#
+#   name | limit | the issue that set it | what is measured | what measures it
+#
+# THE LIMIT IS THE LAST ALLOWED VALUE, on every row. It was not: two rows
+# compared with `<` and four with `<=`, so a brief of exactly 400 words failed
+# with "400, over the ceiling of 400" while a note of exactly 350 passed -- and
+# anyone raising a row to the figure a check had just printed got a red build on
+# two rows and a green one on the other four. Found by the local /code-review
+# pass.
+#
+# The last field is a LIST, `; `-separated. A row measured from the source AND
+# from the output names both: `brief` and `reading` are counted here off the
+# heredoc, which is fast and vendored, and counted again by a phase that RUNS
+# the script, which is the measurement the acceptance actually asks for. Naming
+# only the first left the second deletable with the table still green.
+CEILINGS="$(cat <<'CEILINGS'
+claude-md|200|armaatus/autofleet#56|lines of CLAUDE.md, which every session reads in full|evals/lint.sh
+brief|400|armaatus/autofleet#49|words of the opening brief's stage 1, the issue spec and any handoff note excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
+reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, plus every "count" row of the reading table below|evals/lint.sh; tests/test_brief.sh reading
+handoff|350|armaatus/autofleet#55|words of the handoff note stage 1 prints ahead of the brief: the framing, plus a note at the AUTOFLEET_HANDOFF_MAX_WORDS default autofleet ships|tests/test_handoff.sh ceiling
+testrun|5|armaatus/autofleet#52|lines a fully green ./tests/run.sh prints|tests/test_runner_bound.sh quiet
+round|45|armaatus/autofleet#53|lines of one WHOLE clean round of ./scripts/fleet/await-review.sh, the review it hands back included, not the trailing prose alone|tests/test_await_review.sh quiet
+CEILINGS
+)"
+
+# The ONE reader of the table, here and -- through tests/ceiling.sh, which
+# extracts the same rows -- in the phases that measure the other three rows.
+#
+# A name with no row is FATAL rather than empty: `[ "$n" -lt "" ]` is a bash
+# error, and a ceiling check whose limit came back empty is a check that stopped
+# checking, which is hard rule 3.
+ceiling_field() {
+  local value
+  value="$(awk -F'|' -v n="$1" -v f="$2" '$1 == n { print $f; found = 1 } END { exit !found }' <<<"$CEILINGS")" \
+    || { echo "evals/lint.sh: no ceiling named '$1' in the ceilings table above" >&2; exit 2; }
+  printf '%s\n' "$value"
+}
+ceiling()       { ceiling_field "$1" 2; }
+ceiling_issue() { ceiling_field "$1" 3; }
+ceiling_what()  { ceiling_field "$1" 4; }
+
+# ...and `|| exit 2` at every call site that reads one, because the `exit 2`
+# above runs inside the COMMAND SUBSTITUTION and kills only that subshell. Read
+# straight into a comparison, a mistyped row leaves the right-hand side empty;
+# bash calls that "integer expression expected", `[` returns 2, the `if` reads 2
+# as false, and the ceiling passes everything forever. That is hard rule
+# 3 arriving through a shell quirk, so the name is also checked the other way --
+# `== the ceilings` reads every literal call site in this file and in the suites
+# and fails on one that names no row.
+
+# Every ceiling fails the same way, because the acceptance of
+# armaatus/autofleet#56 is a message that names four things: what was measured,
+# the limit, the figure, and where the limit is changed. Written once so a row
+# added later cannot get three of them.
+over_ceiling() {
+  fail "$(ceiling_what "$1"): $2, over the ceiling of $(ceiling "$1") set by $(ceiling_issue "$1"). Raise the \`$1\` row in the ceilings table at the top of evals/lint.sh, deliberately, or spend fewer"
+}
+under_ceiling() {
+  ok "$(ceiling_what "$1"): $2, ceiling $(ceiling "$1")"
+}
+
 # CLAUDE.md is read in full at the start of every session, so its size is a real
 # cost paid on every task in every worktree. The cap is a smell test, not a
 # formatting rule: past it, the file has stopped being what a new joiner needs on
-# day one and started being documentation, which belongs in docs/.
-CLAUDE_MD_MAX_LINES=200
+# day one and started being documentation, which belongs in docs/. The number
+# lives in the ceilings table above, with the other five.
+echo "== the ceilings"
+# The table itself, before anything reads it.
+#
+# Hard rule 3 in its own shape: a ceilings table is worth exactly as much as the
+# checks behind its rows, so a row nobody measures is a limit that silently
+# stopped limiting. This asserts the wiring -- every row cites an issue, names
+# what it measures, and names something that measures it, and that something
+# reads its number from HERE rather than restating it.
+#
+# The `tests/` half runs in autofleet only: tests/ is not vendored, so in a host
+# installation those rows are three numbers with no local enforcement, which is
+# the same trade `== every test phase actually runs` already makes.
+if CEILINGS="$CEILINGS" python3 - <<'PYEOF'; then
+import glob, os, re, sys
+
+rows = [l for l in os.environ["CEILINGS"].splitlines() if l.strip()]
+bad = []
+if not rows:
+    sys.exit("the ceilings table is empty, so every `ceiling` lookup below fails "
+             "the run with a lookup error rather than a measurement")
+
+# The sentinel the rest of this file uses for "which repository is this": a file
+# of autofleet's own suite is present exactly when this is autofleet.
+IN_AUTOFLEET = os.path.exists("tests/test_runner_bound.sh")
+
+# The command-substitution spelling, which is the one every call site uses. A
+# bare-word scan matches this file's own prose ("the ceiling is", "that ceiling
+# fails") and invents forty row names out of it. (Written as a regex rather than
+# as an example, so this comment is not itself a call site.)
+CALL = re.compile(r"\$\(ceiling(?:_issue|_what)? ([a-z][a-z0-9-]*)\)")
+
+def read(path):
+    try:
+        return open(path).read()
+    except OSError as exc:
+        bad.append(f"{path} cannot be read ({exc.strerror}), so a ceiling row "
+                   "points at something that cannot be asserting anything")
+        return ""
+
+# The registry, so a row cannot name a phase that never runs. Parsed off
+# `suite:phase phase ...`, the one format tests/run.sh dispatches on.
+registry = {}
+if IN_AUTOFLEET:
+    for m in re.finditer(r'^"([a-z_]+):([^"]*)"$', read("tests/run.sh"), re.M):
+        registry[m.group(1)] = m.group(2).split()
+
+seen = set()
+for row in rows:
+    parts = row.split("|")
+    if len(parts) != 5:
+        bad.append(f"the ceilings row `{row}` has {len(parts)} fields, not 5 "
+                   "(name|limit|issue|what is measured|what measures it)")
+        continue
+    name, limit, issue, what, where = (p.strip() for p in parts)
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+        bad.append(f"the ceilings row name `{name}` is not a plain lower-case "
+                   "word; it is the key `ceiling <name>` is called with")
+        continue
+    if name in seen:
+        bad.append(f"the ceilings table has two `{name}` rows; the second is "
+                   "unreachable, so raising it raises nothing")
+        continue
+    seen.add(name)
+    if not re.fullmatch(r"[1-9][0-9]*", limit):
+        bad.append(f"the `{name}` ceiling is `{limit}`, which is not a whole "
+                   "number above zero")
+    # Every row cites an issue. A ceiling with no reason reads as an arbitrary
+    # number a year from now, and nobody can tell whether raising it gives back
+    # something that was deliberately bought.
+    if not re.fullmatch(r"armaatus/(autofleet|rommsync-nx)#[0-9]+", issue):
+        bad.append(f"the `{name}` ceiling cites `{issue}`, which is not an issue "
+                   "(`armaatus/autofleet#N`). Every row says why its number is "
+                   "what it is")
+    if not what:
+        bad.append(f"the `{name}` ceiling does not say WHAT it measures. The row "
+                   "carries the membership as well as the number, or the two "
+                   "drift apart the way armaatus/autofleet#54 found them")
+    # ...and something measures it, reading the number from this table.
+    for measurer in [w.strip() for w in where.split(";")]:
+        if measurer == "evals/lint.sh":
+            if name not in CALL.findall(read("evals/lint.sh")):
+                bad.append(f"the `{name}` ceiling says evals/lint.sh measures it, "
+                           f"but nothing here calls `$(ceiling {name})`")
+            continue
+        m = re.fullmatch(r"tests/test_([a-z_]+)\.sh ([a-z0-9_]+)", measurer)
+        if not m:
+            bad.append(f"the `{name}` ceiling says `{measurer}` measures it, which "
+                       "is neither evals/lint.sh nor a `tests/test_<suite>.sh "
+                       "<phase>`")
+            continue
+        if not IN_AUTOFLEET:
+            continue
+        suite, phase = m.group(1), m.group(2)
+        if phase not in registry.get(suite, []):
+            bad.append(f"the `{name}` ceiling is measured by {measurer}, which is "
+                       f"not in tests/run.sh's registry for `{suite}` -- so it "
+                       "never runs")
+        # A CALL, not a mention. `ceiling {name}` as a substring is satisfied
+        # by `over_ceiling {name}`, by a comment, by anything -- so the row
+        # could read as wired while nothing anywhere read its number. Found by
+        # the local /mattpocock-skills:code-review standards pass.
+        if name not in CALL.findall(read(f"tests/test_{suite}.sh")):
+            bad.append(f"tests/test_{suite}.sh does not call `$(ceiling {name})`, "
+                       "so it is measuring against a number of its own and the "
+                       "table's is no longer the one in force")
+
+# ...and the other direction: every literal `$(ceiling <name>)` in the payload
+# and in the suites names a row that EXISTS. A typo there resolves to nothing,
+# and an empty limit is a comparison bash reports as an error and `if` reads as
+# false -- a ceiling that passes everything, silently, forever.
+callers = ["evals/lint.sh"]
+if IN_AUTOFLEET:
+    callers += sorted(glob.glob("tests/test_*.sh"))
+for caller in callers:
+    for name in sorted(set(CALL.findall(read(caller)))):
+        if name not in seen:
+            bad.append(f"{caller} asks for a `{name}` ceiling, which is not a row "
+                       "in the table -- so it is measuring against an empty limit")
+
+if bad:
+    sys.exit("\n  ".join(bad))
+print(f"        {len(rows)} rows, each citing an issue and measured somewhere")
+PYEOF
+  ok "every ceiling cites the issue that set it and is measured against this table"
+else
+  fail "the ceilings table is not well-formed, or a row is not enforced (above)"
+fi
 
 echo "== CLAUDE.md"
 if [ ! -f CLAUDE.md ]; then
   fail "CLAUDE.md is missing; it is the file every session reads first"
 else
   lines="$(wc -l <CLAUDE.md | tr -d ' ')"
-  if [ "$lines" -gt "$CLAUDE_MD_MAX_LINES" ]; then
-    fail "CLAUDE.md is $lines lines (cap $CLAUDE_MD_MAX_LINES). Move detail into docs/ and link it."
+  claude_md_lines="$(ceiling claude-md)" || exit 2
+  if [ "$lines" -gt "$claude_md_lines" ]; then
+    over_ceiling claude-md "$lines"
   else
-    ok "CLAUDE.md is $lines lines"
+    under_ceiling claude-md "$lines"
   fi
 fi
 
@@ -1409,24 +1645,12 @@ else
   [ "$fails" = "$brief_fails_before" ] \
     && ok "stage 2 still names the whole review loop and the paths a person has to merge"
 
-  # The budget, in the vendored check and not only in autofleet's own suite: a
-  # host project gets the brief and the reason it was split, so it should get
-  # the thing that stops it growing back. armaatus/autofleet#56 folds this row
-  # into a ceilings table and will want it measured from what the agent
-  # RECEIVES; until then the
-  # placeholders are substituted with their defaults here, so the figure is the
-  # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
-  # measures the real output and holds the same number.
-  # The budget did NOT move for armaatus/autofleet#55, and the attempt to move
-  # it is worth recording. #55's other half is the attempt the time-box
-  # interrupts, and the only place an agent can be told to leave a note before a
-  # PR exists is stage 1 -- stage 2 is fetched after the push. The first
-  # spelling added a paragraph and raised this to 425; `agent-config.yml` re-runs
-  # MAIN's copy of this file against the branch and refused, which is the check
-  # doing exactly what it is for. The sentence was paid for out of stage 1
-  # instead: the STOP paragraph absorbed it (both are the work being put down),
-  # and three sentences elsewhere were tightened without losing a rule. 386.
-  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
+  # The `brief` row, in the vendored check and not only in autofleet's own
+  # suite: a host project gets the brief and the reason it was split, so it
+  # should get the thing that stops it growing back. tests/test_brief.sh stage1
+  # measures the same row on what the script actually PRINTS, and reads the
+  # number out of the same table.
+  #
   # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
   # word it is and the host's command is never substituted in -- because this
   # check is vendored and `agent-config.yml` runs it on every PR in every repo
@@ -1435,21 +1659,30 @@ else
   # puts a clean installation over the ceiling on its first PR, on a text it did
   # not write, with a failure that tells it to edit a vendored file the next
   # `install.sh` overwrites. That is hard rule 1, and it is what rounds 1 and 2
-  # of the review were both circling: the answer was not a better reader for
+  # of that review were both circling: the answer was not a better reader for
   # `.autofleet/config`, it was not reading it at all.
   #
-  # So the ceiling is on the words AUTOFLEET ships -- 386 at the time of writing,
-  # and the figure moves with the brief -- and a host's test command costs it
-  # nothing. A number written here as a standing fact goes stale the next time
-  # the brief is edited, which is what happened to the 391 this replaces. tests/test_brief.sh measures the RENDERED brief against the
-  # same number with the command pinned to the four-word default, which is the
-  # closest thing to what an agent here receives.
+  # The budget did NOT move for armaatus/autofleet#55, and the attempt to move
+  # it is worth recording. #55's other half is the attempt the time-box
+  # interrupts, and the only place an agent can be told to leave a note before a
+  # PR exists is stage 1 -- stage 2 is fetched after the push. The first
+  # spelling added a paragraph and raised this to 425; `agent-config.yml` re-runs
+  # MAIN's copy of this file against the branch and refused, which is the check
+  # doing exactly what it is for. The sentence was paid for out of stage 1
+  # instead: the STOP paragraph absorbed it (both are the work being put down),
+  # and three sentences elsewhere were tightened without losing a rule.
+  #
+  # No figure is written here. One was, twice -- `391`, then `386` -- and each
+  # went stale at the next commit to the brief; three rounds of
+  # armaatus/autofleet#105's review caught it. The line below prints what it
+  # measured, which is the only copy that cannot rot.
   rendered="${stage1//__ISSUE__/49}"
   words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
-  if [ "$words" -lt "$BRIEF_WORD_BUDGET" ]; then
-    ok "the opening brief is $words words, spec excluded"
+  brief_budget="$(ceiling brief)" || exit 2
+  if [ "$words" -le "$brief_budget" ]; then
+    under_ceiling brief "$words"
   else
-    fail "the opening brief is $words words, spec excluded; the budget is $BRIEF_WORD_BUDGET (armaatus/autofleet#49). Raise it here, deliberately, or move something into --after-pr"
+    over_ceiling brief "$words"
   fi
 fi
 
@@ -1483,7 +1716,12 @@ echo "== the rule of one home"
 # that keeps that true is further down: a page whose agent-instruction sections
 # are pointers has no copy-pasteable fence for a step of the loop.
 if [ -n "$stage1" ] && [ -n "$stage2" ]; then
-  if stage1="$stage1" stage2="$stage2" rendered="$rendered" python3 - <<'PYEOF'; then
+  reading_ceiling="$(ceiling reading)" || exit 2
+  reading_what="$(ceiling_what reading)" || exit 2
+  reading_issue="$(ceiling_issue reading)" || exit 2
+  if stage1="$stage1" stage2="$stage2" rendered="$rendered" \
+     reading_ceiling="$reading_ceiling" reading_what="$reading_what" \
+     reading_issue="$reading_issue" python3 - <<'PYEOF'; then
 import os, re, sys
 
 def read(path):
@@ -1670,8 +1908,10 @@ if "REVIEW.md" in s1 and "/code-review" in s1 \
     bad.append("the brief names REVIEW.md before it names /code-review, so it is "
                "read in the preamble rather than at the step it is the policy for")
 
-# WORD_CEILING is the acceptance of armaatus/autofleet#54: CLAUDE.md, the OPENING
-# brief, and anything either names as required reading, before the first edit.
+# The reading ceiling is the acceptance of armaatus/autofleet#54: CLAUDE.md, the
+# OPENING brief, and anything either names as required reading, before the first
+# edit. Its number is the `reading` row of the ceilings table at the top of this
+# file.
 #
 # STAGE 2 IS DELIBERATELY OUTSIDE THE SUM, and this is the only place that says
 # so. "Before its first edit" is the measurement, and stage 2 is fetched after
@@ -1683,7 +1923,7 @@ if "REVIEW.md" in s1 and "/code-review" in s1 \
 # one.
 #
 # `rendered` is stage 1 with the issue number substituted and __TEST_COMMAND__
-# left standing as the one word it is -- the same figure the budget check above
+# left standing as the one word it is -- the same figure the `brief` row above
 # measures, and for the same reason: this check is vendored, and a host
 # project's nine-word test command must not spend autofleet's margin in a repo
 # that did not write the text.
@@ -1693,21 +1933,32 @@ if "REVIEW.md" in s1 and "/code-review" in s1 \
 # script is not autofleet's to put on it. What remains -- the brief, REVIEW.md,
 # and anything the brief names -- is text autofleet ships, which is exactly what
 # a vendored ceiling may bound.
-WORD_CEILING = 3500
+#
+# The limit itself is the `reading` row of the ceilings table at the top of this
+# file, passed in rather than restated: one number, one home, and the same one
+# tests/test_brief.sh reads when it measures this row on what the script prints.
+CEILING = int(os.environ["reading_ceiling"])
 if not IN_AUTOFLEET:
     required.discard("CLAUDE.md")
 parts = [(p, len(read(p).split())) for p in sorted(required)]
 parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
 total = sum(n for _, n in parts)
-if total >= WORD_CEILING:
-    bad.append(f"a fleet agent is told to read {total} words before its first edit "
-               f"(ceiling {WORD_CEILING}): "
+if total > CEILING:
+    # The four things armaatus/autofleet#56 asks every ceiling failure to name:
+    # what was measured, the limit, the figure, and where the limit is changed.
+    # Spelled here rather than through `over_ceiling` because this check is
+    # python inside the shell, and the breakdown per document is the part that
+    # says WHICH text grew.
+    bad.append(f"{os.environ['reading_what']}: {total}, over the ceiling of "
+               f"{CEILING} set by {os.environ['reading_issue']}. Raise the "
+               "`reading` row in the ceilings table at the top of evals/lint.sh, "
+               "deliberately, or spend fewer: "
                + ", ".join(f"{p} {n}" for p, n in parts))
 
 if bad:
     sys.exit("\n  ".join(bad))
 whose = "" if IN_AUTOFLEET else " (this repo's own CLAUDE.md is not counted: autofleet did not write it)"
-print(f"        {total} words before the first edit, ceiling {WORD_CEILING}{whose}")
+print(f"        {total} words before the first edit, ceiling {CEILING}{whose}")
 PYEOF
     ok "each enforced rule is stated once, in the file that is its home"
   else

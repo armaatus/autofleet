@@ -1354,18 +1354,33 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                review.sh on exit 0 only. The opposite population from
 #                `.tries`, which is why it is a separate file and not a second
 #                column: a review that submits findings clears `.tries` and
-#                increments this.
+#                advances this. ADVANCES, not increments -- `review.sh` derives
+#                the count from the pull request as well as incrementing and
+#                keeps the larger, so a PR whose earlier rounds this fleet never
+#                saw jumps straight to the number it really has (#65).
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
 #
-# Only the first is a lock, and the three records must never be counted as one.
+# Only the first is a lock, and the four records must never be counted as one.
 # `is_review_record` is the predicate; use it rather than respelling the suffix
 # list. `cmd_status` respelled it as a `find ! -name` and counted all three as
 # reviewers in flight, permanently, on the screen its own comment calls the
 # first anybody looks at. Found by the independent review, which noted the
 # comment two lines above already stated the rule this broke.
 is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; esac; return 1; }
+
+# A TRANSCRIPT IS MORE THAN ONE FILE since armaatus/autofleet#65. A delta round
+# also leaves `pr-<n>-<head>.context.md` -- the carried-forward context it handed
+# the reviewer -- and a reviewer killed outside its own trap leaves `.log.raw`
+# and `.log.err`. All of them go WITH the log rather than by globs of their own,
+# so the set cannot fall out of step: anything that outlives its log is a store
+# that grows for as long as the fleet runs, which is the growth
+# AUTOFLEET_KEEP_REVIEWS exists to stop. Beside `is_review_record` and not
+# inside `prune_review_logs`, which is where it was: a helper defined mid-body
+# leaks to global scope anyway and is invisible to anyone reading the file-level
+# helpers. Found by `/mattpocock-skills:code-review`.
+rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1472,8 +1487,42 @@ stop_reviewers() {
 # and both stopped being true when the confirmation call and the two-valued `$2`
 # arrived. Found by the independent review -- the same class of stale claim this
 # branch had already fixed once.
+# The fetched PR refs of pull requests that are no longer open.
+#
+# `review.sh` fetches `refs/pull/<n>/head` into `refs/autofleet/review/<n>` so a
+# delta round's range resolves, and drops it in its EXIT trap -- which does not
+# run on a SIGTERM taken before the reviewer is spawned (the TERM trap is
+# installed after it), nor on a SIGKILL from `stop.sh --now`, nor on an OOM. A
+# ref left behind pins every object that pull request ever had, `git gc` can
+# never collect them, and nothing else in the fleet looks at these at all. This
+# is the only place that sees both the refs and the open list.
+#
+# ITS OWN FUNCTION, called past `prune_review_logs`'s `AUTOFLEET_KEEP_REVIEWS`
+# gate rather than from inside it. That knob is documented as "keep every piece
+# of review state", and a GC pin on a closed PR's objects is not review state --
+# a project that sets 0 to keep its transcripts has not asked to keep those.
+# Both found by the independent review.
+#
+# OPEN PRs ARE SPARED whatever their state, because a ref belonging to a
+# reviewer running right now is the one thing this must not take: the range it
+# was fetched for is resolved against it for the whole run. `$2` is the same
+# "could the caller answer" signal the record sweep reads, so a listing nobody
+# could answer for prunes nothing.
+prune_review_refs() {
+  local open_prs="$1" ref num
+  [ "${2:-no}" = yes ] || return 0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    num="${ref##*/}"
+    case " $open_prs " in *" $num "*) continue ;; esac
+    git update-ref -d "$ref" 2>/dev/null || true
+  done <<EOF
+$(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
+EOF
+}
+
 prune_review_logs() {
-  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
+  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
   # `$2` is whether the caller COULD ANSWER, and it is separate from the list
   # because an empty list has two meanings and they are opposite instructions.
@@ -1566,10 +1615,12 @@ prune_review_logs() {
   for f in "$dir"/pr-*.log; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
-    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` holds its
-    # transcript open with `>"$log"` for the whole run -- up to
-    # AUTOFLEET_REVIEW_TIMEOUT, thirty minutes -- while the grace is one pass, a
-    # minute. A PR that auto-merges two minutes into its own review would have
+    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` writes `$log` as
+    # a placeholder before it spawns and rewrites it at the end -- the file the
+    # reviewer actually streams into is `$log.raw`/`$log.err`, since
+    # armaatus/autofleet#65 split them so the JSON envelope could be parsed --
+    # and all three stand for the whole run, up to AUTOFLEET_REVIEW_TIMEOUT,
+    # thirty minutes, while the grace is one pass, a minute. A PR that auto-merges two minutes into its own review would have
     # had that review's output unlinked under the agent still writing it, and
     # the sweep would have SAID it swept it. `rotate_fleet_log` was given this
     # guard for the sibling file; this sweep was not. Found by `/code-review`.
@@ -1602,7 +1653,7 @@ prune_review_logs() {
       *" $num "*) ;;                # eligible since a previous pass: sweep it
       *) continue ;;                # first pass seeing it closed: keep them all
     esac
-    rm -f "$f" && removed=$((removed + 1))
+    rm_transcript "$f" && removed=$((removed + 1))
   done
   # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
   # is the order they were written.
@@ -1615,7 +1666,7 @@ prune_review_logs() {
       [ -n "$f" ] || continue
       kept=$((kept + 1))
       [ "$kept" -le "$AUTOFLEET_KEEP_REVIEWS" ] && continue
-      rm -f "$f" && removed=$((removed + 1))
+      rm_transcript "$f" && removed=$((removed + 1))
     done <<EOF
 $(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null)
 EOF
@@ -1627,11 +1678,36 @@ EOF
     num="$(basename "$f")"; num="${num#.closed-}"
     ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
   done
+  # ...and a context file with no log beside it, which is the one way the
+  # pairing above can be escaped: a reviewer killed between writing its context
+  # and starting leaves a context whose log was never written. `review.sh`
+  # creates the log as a placeholder before it spawns precisely so that a LIVE
+  # reviewer is never this case -- deleting a running review's context out from
+  # under it is the failure this loop would otherwise be.
+  # `.raw` and `.err` are in the list for the same reason one step further on:
+  # `finish_log` folds them into the log and deletes them, but an exit that
+  # skips the trap -- SIGKILL, the OOM killer -- leaves them, and no glob in
+  # this function matched either. Found by `/code-review`.
+  for f in "$dir"/pr-*.context.md "$dir"/pr-*.log.raw "$dir"/pr-*.log.err; do
+    [ -e "$f" ] || continue
+    case "$f" in
+      *.context.md) base="${f%.context.md}.log" ;;
+      *)            base="${f%.raw}"; base="${base%.err}" ;;
+    esac
+    [ -e "$base" ] || { rm -f "$f"; orphans=$((orphans + 1)); }
+  done
   # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
   # first question about a missing transcript is whether this took it. The
   # comment sat two blocks above the line it describes, which is the same drift
   # as a stale one. Found by the independent review.
   [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
+  # COUNTED SEPARATELY, because they are not transcripts. Three files belong to
+  # one round -- the log, its context and its two raw streams -- so folding the
+  # strays into the number above made one orphaned round read as three swept
+  # transcripts, on the one line a person reads to find out whether this took
+  # the file they are looking for.
+  [ "$orphans" -gt 0 ] && say "...and $orphans stray file(s) whose transcript is gone"
+
   return 0
 }
 
@@ -1879,6 +1955,8 @@ print(len(json.load(sys.stdin)))
   # `yes` only when the parse produced something we can trust: `gh` succeeding
   # is not enough, because the parse below it can fail silently.
   prune_review_logs "$open_prs" "$prs_answered"
+  # Past the keep-reviews gate on purpose -- see the function's own comment.
+  prune_review_refs "$open_prs" "$prs_answered"
 
   # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
   # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
@@ -3154,6 +3232,37 @@ cmd_status() {
       n=$((n + 1))
     done
     echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
+    # How many rounds each open pull request has spent, on the first screen
+    # anybody looks at. A PR quietly on its eleventh round is the failure
+    # armaatus/autofleet#65 is about, and before this nothing anywhere counted
+    # them -- not the log, not this screen, not `cost`.
+    # A GLOB, not `is_review_record`, and deliberately: the predicate answers
+    # "is this any record", and this wants ONE kind of record and its number.
+    # The rule the comment above states is about counting records as reviewers,
+    # which is what a `find ! -name` got wrong; naming one suffix to read one
+    # file is not that.
+    local r rn rpr found=0
+    for r in "$REVIEWING_DIR"/*.rounds; do
+      [ -e "$r" ] || continue
+      rn="$(cat "$r" 2>/dev/null)"
+      case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
+      rpr="$(basename "$r")"; rpr="${rpr%.rounds}"
+      if [ "$rn" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
+        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds -- AT THE CAP, a person decides"
+      else
+        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds"
+      fi
+      found=1
+    done
+    # ...AND WHAT THE LIST IS, because it is local state and not a query. These
+    # records are swept when the dispatcher next sees the PR fall off the open
+    # list, so on a machine where nothing is polling -- which is exactly when a
+    # person runs this -- a merged PR can still print "AT THE CAP, a person
+    # decides" on the first screen anybody reads. Filtering would cost the
+    # `gh pr list` this screen deliberately does not spend, so the line says
+    # what it is instead. Found by the independent review.
+    [ "${found:-0}" = 1 ] \
+      && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
