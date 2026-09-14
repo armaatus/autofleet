@@ -49,6 +49,7 @@ seam, [README.md](README.md) for what this is.
 ./tests/run.sh                      # the whole suite
 ./tests/run.sh fleet                # one suite
 ./tests/run.sh fleet card_says      # one phase of one suite
+./tests/run.sh --verbose            # ...and a line per phase while it runs
 AUTOFLEET_TEST_NO_SKIP=1 ./tests/run.sh   # everything, and a phase that
                                     # declines to judge is a failure
 ./evals/lint.sh                     # is the agent config still well-formed

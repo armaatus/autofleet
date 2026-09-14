@@ -32,9 +32,12 @@ jobs:
       - name: the payload parses
         run: |
           set -euo pipefail
+          # .autofleet/*.sh with them: it is this repo's own seam answer and
+          # the template install.sh seeds into a host, and nothing parsed it.
+          # Found by the standards review of #85.
           for script in scripts/fleet/*.sh scripts/fleet/runner/*.sh \
                         .claude/hooks/*.sh .github/scripts/*.sh \
-                        evals/*.sh tests/*.sh install.sh; do
+                        evals/*.sh tests/*.sh .autofleet/*.sh install.sh; do
             bash -n "$script" || { echo "::error file=$script::does not parse"; exit 1; }
           done
 
@@ -47,11 +50,16 @@ jobs:
       # env.sh writes the .env the reap phase reads back. On a runner there is
       # no worktree to provision, but the derivation is a pure function of the
       # path and this is the same call setup.sh makes.
+      # --verbose, because a log is not a context window. The suite is quiet by
+      # default (#52, reasoned over the VERBOSE block in tests/run.sh); here the
+      # per-phase lines cost nothing and a human opening a failed run wants to
+      # see which phases got there before it. EVERY suite run in this file has
+      # to carry the flag -- tests/test_runner_bound.sh quiet counts them.
       - name: the suite
         run: |
           set -euo pipefail
           ./scripts/fleet/env.sh
-          ./tests/run.sh
+          ./tests/run.sh --verbose
 
   install:
     # The installer is the only thing a new user runs, and the way it breaks is

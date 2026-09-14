@@ -4,6 +4,8 @@
 #   ./tests/run.sh                 # everything
 #   ./tests/run.sh fleet           # one suite
 #   ./tests/run.sh fleet card_says # one phase of one suite
+#   ./tests/run.sh --verbose       # ...and one line per phase while it runs
+#   AUTOFLEET_TEST_VERBOSE=1       # ...the same, where a flag cannot be threaded
 #
 # The suites are shell, and several of them dispatch on a PHASE argument: one
 # process per case, so a case that wedges cannot take the rest of the file with
@@ -33,7 +35,7 @@ SUITES=(
 "handoff:write print cap absent resumed relaunch empty refs retry ships brief"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes skips hostlint guards interrupt orphans"
+"runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
 "await_review:nitonly threads tworeviewers knob important untrailered"
@@ -51,8 +53,76 @@ suite_command() {
   esac
 }
 
-want_suite="${1:-}"
-want_phase="${2:-}"
+# QUIET by default: a failing phase's whole captured output, a skip and its
+# reason, and the summary. Nothing per phase that passed, and no per-suite
+# header.
+#
+# The reader of this runner is usually an agent, and its context has to survive
+# an implementation plus three review rounds. One row per phase and one per
+# suite carried exactly what the summary line carries, the brief makes the suite
+# run at least three times per issue, and the bill grew with every phase added
+# to SUITES above -- so the useless part landed four or five times over and got
+# bigger each time (#52). A dot per phase is no better: a line of dots is still
+# a line, saying the same thing again.
+#
+# NO COUNT, deliberately. This paragraph carried one and it was wrong twice --
+# wrong arithmetic, and stale against a registry that had grown since -- which
+# is the defect class three review rounds of this change spent themselves on. It
+# is also not what the argument rests on: "one line per phase, and it grows" is
+# the whole of it.
+#
+# --verbose is today's output, unchanged, for a human debugging a wedged phase.
+# AUTOFLEET_TEST_VERBOSE=1 says it where the flag cannot be threaded through: a
+# CI matrix, a wrapper, a `make test` somebody else owns. ANY non-empty value is
+# on, so `AUTOFLEET_TEST_VERBOSE=0` is verbose and not quiet -- the same reading
+# `may_skip` gives AUTOFLEET_TEST_NO_SKIP, because two variables in one runner
+# disagreeing about what "set" means is worse than either answer. A matrix that
+# spells off as 0 wants the empty string.
+#
+# What quiet costs, said rather than discovered: a run killed from OUTSIDE this
+# runner -- a job cap, an agent's tool timeout -- now prints NOTHING, where
+# before it printed every phase that had finished. The runner's own bound
+# already reports the phase it killed (PHASE_TIMEOUT below), so this is only the
+# case where something else does the killing, and --verbose is the answer to it.
+VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
+
+# The arguments, parsed rather than read off $1 and $2, because a flag has to be
+# accepted WHEREVER it appears: `./tests/run.sh fleet card_says --verbose` is
+# where somebody actually types it, and positionally that is a phase named
+# --verbose and a run that matches nothing.
+#
+# An unknown flag is REFUSED, and that is the whole reason this is a parser and
+# not a `case` on $1. The way this change breaks CI is a typo -- `--verbsoe` in
+# the workflow, read as a suite name, nothing matched, and a quiet exit nobody
+# reads twice. Exit 2 is what a mistyped suite name has always got.
+# Both refusals end in the same usage clause, so it is spelled once. Found by
+# the independent review. The `quiet` phase asserts the clause and the stream,
+# because one function is now the single point where losing either would go
+# unnoticed.
+refuse() { echo "$1; usage: $0 [--verbose] [suite [phase]]" >&2; exit 2; }
+want_suite=""; want_phase=""; positional=0
+for arg in "$@"; do
+  case "$arg" in
+    --verbose) VERBOSE=1 ;;
+    -*) refuse "unknown option '$arg'" ;;
+    *)
+      positional=$((positional + 1))
+      case "$positional" in
+        1) want_suite="$arg" ;;
+        2) want_phase="$arg" ;;
+        *) refuse "too many arguments at '$arg'" ;;
+      esac ;;
+  esac
+done
+
+# Per-phase chatter, and the only thing --verbose brings back. Named for the
+# CONDITION and not for the printing: `say` is what fleet.sh calls its
+# unconditional narrator, and a reader who carries that meaning here reads every
+# call site as a line that always prints. A function rather than an `if` at each
+# site so there is one place that decides. The format string is a literal at
+# every call, which is what makes passing it through `printf` safe.
+say_verbose() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
+
 pass=0; fail=0; failed=""
 # A phase that could not judge anything is not a phase that judged and found
 # nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
@@ -343,7 +413,9 @@ run_one() {
     show_output "$out"
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
-    printf '  ok   %s\n' "$label"
+    # The one line quiet drops. Everything else in this cascade is a failure, a
+    # skip, or the reason for one, and quiet must never mean quieter about those.
+    say_verbose '  ok   %s\n' "$label"
   elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
@@ -408,7 +480,7 @@ for entry in "${SUITES[@]}"; do
   suite="${entry%%:*}"
   phases="${entry#*:}"
   [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
-  echo "== $suite"
+  say_verbose '== %s\n' "$suite"
   # shellcheck disable=SC2046 -- suite_command is a deliberate word list
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }

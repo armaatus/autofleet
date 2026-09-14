@@ -89,6 +89,13 @@
 #                                 fork the watchdog itself needs. The guard
 #                                 against running out of processes cannot be the
 #                                 thing consuming them.
+#   test_runner_bound.sh quiet    a green run is a summary and nothing else
+#                                 (#52; the reasoning is over the VERBOSE block
+#                                 in tests/run.sh). The rows are about what quiet
+#                                 must NOT take with it: a failing phase's whole
+#                                 captured output, a skip's reason, the summary,
+#                                 and the per-phase lines themselves the moment
+#                                 anything asks for them.
 #
 # It drives a COPY of the real tests/run.sh rather than restating its logic, so
 # there is no second implementation of the bound to drift from the shipped one.
@@ -112,8 +119,29 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # extends this file next, would re-break it and say so only under the strict
 # form nobody runs locally. A helper makes forgetting impossible rather than
 # noticed. Found by the independent review.
+# AUTOFLEET_TEST_VERBOSE rides along for the same reason and with the same
+# hazard: it is read from the environment, so a human debugging this suite with
+# `AUTOFLEET_TEST_VERBOSE=1 ./tests/run.sh runner_bound` would otherwise reach
+# the copy and turn every "nothing per phase" row red on a harness artefact.
+#
+# Only the calls that come THROUGH HERE, which is less than the NO_SKIP
+# paragraph above promises for its own variable. Most invocations in this file
+# drive the copy directly, because they need their own bound or their own
+# backgrounding, and those are fine only because they do not assert that
+# something is ABSENT from the output: a row added to one of them that greps for
+# a MISSING `ok` or `==` line has to clear the variable on its own line, or it
+# goes red on a harness artefact rather than on a defect. The rows that do clear
+# it say so on their own line.
+#
+# No count here, deliberately -- not of the invocations and not of the rows that
+# clear. Three drafts of this comment stated one, and each was wrong by the time
+# it was read; the third was invalidated by a row the same commit added, in the
+# paragraph declaring itself immune. A comment claiming a guarantee the code
+# does not give is itself the guard that stops guarding. All three found by the
+# independent review.
 run_copy() {
-  AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_TIMEOUT=10 \
+  AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_VERBOSE="${COPY_VERBOSE-}" \
+    AUTOFLEET_TEST_TIMEOUT=10 \
     "$WORK/tests/run.sh" "$@" >"$WORK/out" 2>&1
 }
 ok()   { echo "  ok: $*"; }
@@ -343,7 +371,11 @@ case "${1:-}" in
 # ----------------------------------------------------------------- passes
   passes)
   make_runner quick
-  AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" quick >"$WORK/out" 2>&1
+  # `--verbose`, because the ok line this phase reads is verbose-only since #52:
+  # a green run says `1 passed.` and nothing per phase. The row below is about
+  # the marker race, not about the default, and `quiet` owns the default.
+  AUTOFLEET_TEST_VERBOSE="" AUTOFLEET_TEST_TIMEOUT=3 \
+    "$WORK/tests/run.sh" --verbose quick >"$WORK/out" 2>&1
   rc=$?
 
   [ "$rc" = 0 ] || fail "a phase that finished in time failed: $(cat "$WORK/out")"
@@ -870,7 +902,370 @@ EOF
   ok "a cancelled watchdog takes its sleep with it, leaving nothing behind"
   ;;
 
+# ------------------------------------------------------------------ quiet
+  quiet)
+  # A green run is a summary and nothing else. Why that is worth a phase is
+  # written once, over the VERBOSE block in tests/run.sh; what is asserted here
+  # is the half a rationale cannot hold -- that quiet took the `ok` rows and
+  # NOTHING else with them.
+  make_runner quick quick2 quick3
+  run_copy
+  rc=$?
+  [ "$rc" = 0 ] || fail "a green run did not pass: $(cat "$WORK/out")"
+  green="$(wc -l <"$WORK/out" | tr -d " ")"
+  # FIVE because that is #52's acceptance bar, not because five is the shape:
+  # a green run is two lines, a blank and the summary, and stays two however
+  # many suites are registered (the row below). The slack is what a phase that
+  # DECLINES costs -- its label and its own reason -- which is the one thing
+  # allowed to push a green run past two, and the skip row further down spends
+  # it deliberately.
+  [ "$green" -le 5 ] \
+    || fail "a green run printed $green lines: $(cat "$WORK/out")"
+  ok "a green run is at most five lines"
+
+  grep -q "3 passed." "$WORK/out" \
+    || fail "the green run printed no summary at all: $(cat "$WORK/out")"
+  ok "...and the summary, which is the whole of what the ok lines said"
+
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "the per-phase lines are still printed: $(cat "$WORK/out")"
+  grep -q "== quick" "$WORK/out" \
+    && fail "the per-suite headers are still printed: $(cat "$WORK/out")"
+  ok "...with nothing per phase and nothing per suite"
+
+  # The cost was never a fixed number of lines, it is that they GROW: every
+  # phase this repo adds is another line in every run in every worktree. A
+  # budget that scales with the registry is not a budget, so the assertion is
+  # that the green run is the same size against twice the suites. (No count
+  # here, and none over the VERBOSE block in tests/run.sh either: the one that
+  # used to be there was wrong twice. Found by the independent review.)
+  make_runner quick quick2 quick3 quick4 quick5 quick6
+  run_copy
+  [ "$?" = 0 ] || fail "a green run of six suites did not pass: $(cat "$WORK/out")"
+  grew="$(wc -l <"$WORK/out" | tr -d " ")"
+  # The count of what RAN as well as the count of lines. Comparing 2 against 2
+  # is also what a make_runner that quietly registered a subset would produce,
+  # and this row would call that "did not grow". Found by /code-review.
+  grep -q "6 passed." "$WORK/out" \
+    || fail "six suites did not run, so the line count proves nothing: $(cat "$WORK/out")"
+  [ "$grew" = "$green" ] \
+    || fail "twice the suites printed $grew lines against $green: $(cat "$WORK/out")"
+  ok "...and does not grow when the registry does"
+
+  # Quiet must never mean quieter about FAILURES. The captured output of a
+  # failing phase is the only part of this runner an agent actually reads, and
+  # the failure path is untouched: the whole file, indented, under a FAIL naming
+  # the phase, with the summary naming it again.
+  make_runner quick failer quick3
+  run_copy
+  rc=$?
+  [ "$rc" = 1 ] \
+    || fail "a failing phase did not fail the run (rc=$rc): $(cat "$WORK/out")"
+  grep -q "FAIL failer" "$WORK/out" \
+    || fail "the failing phase was not named: $(cat "$WORK/out")"
+  grep -q "this is a real failure" "$WORK/out" \
+    || fail "the failing phase's own output was dropped: $(cat "$WORK/out")"
+  grep -q "failed: failer" "$WORK/out" \
+    || fail "the summary did not name the failure: $(cat "$WORK/out")"
+  ok "a failing phase still prints its whole output, and is named twice"
+
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "a run with a failure printed the passing phases too: $(cat "$WORK/out")"
+  ok "...while the phases that passed stay quiet"
+
+  # Nor quieter about a phase that judged NOTHING. A silent skip is
+  # indistinguishable from a phase that quietly opted out of running months ago,
+  # which is the reading run.sh's own SKIPPABLE comment exists to prevent.
+  # `quick` beside it, because on a registry of NOTHING BUT skips there is no
+  # `ok` line to suppress and the assertions below are green whatever the runner
+  # does -- and the shipped shape is a skip among 155 passing phases, not a run
+  # that is all skip. Found by the independent review.
+  #
+  # What that buys, honestly: these rows are the ONLY ones shaped like the run
+  # this repo actually performs, and they are regression ballast rather than the
+  # last line of defence. No mutation reaches them first -- the runner has no
+  # skip-specific verbosity path, so anything that puts the per-phase lines back
+  # reds the five-line row at the top of this phase before it gets here. Said
+  # because the previous draft of this comment claimed they closed a gap they
+  # could not even see. Found by /code-review.
+  make_runner skipper quick quick2
+  run_copy
+  [ "$?" = 0 ] || fail "a skip failed the run: $(cat "$WORK/out")"
+  grep -q "skip skipper" "$WORK/out" \
+    || fail "the skip went silent under the quiet default: $(cat "$WORK/out")"
+  grep -q "SKIP: nothing here to judge" "$WORK/out" \
+    || fail "the skip was reported without its reason: $(cat "$WORK/out")"
+  ok "a phase that declined to judge still says so, and why"
+
+  # ...and the bound survives it. This is the only tension in #52's acceptance:
+  # a green run is at most five lines AND a skip prints the phase's whole reason,
+  # and the shipped suite has a skippable phase (`teardown/reap`, on a machine
+  # with no docker). The reason wins where they disagree -- a silent skip is the
+  # failure the SKIPPABLE registry exists to prevent -- so what is asserted is
+  # that a skip costs its OWN output and nothing else: still no `ok` row, still
+  # no header, and the label plus one line of reason fits the bar. Found by the
+  # spec review, which noticed the shipped suite can carry a skip and the row
+  # above could not see it.
+  skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
+  [ "$skipped_lines" -le 5 ] \
+    || fail "a green run of two passes and one skip printed $skipped_lines lines: $(cat "$WORK/out")"
+  grep -q "ok   " "$WORK/out" \
+    && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
+  grep -q "== " "$WORK/out" \
+    && fail "a run with a skip printed the suite headers: $(cat "$WORK/out")"
+  ok "...and a skip costs its own reason and nothing else"
+
+  # --verbose, whose purpose is over the VERBOSE block in tests/run.sh.
+  make_runner quick quick2 quick3
+  run_copy --verbose
+  [ "$?" = 0 ] || fail "--verbose failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    || fail "--verbose did not restore the per-phase lines: $(cat "$WORK/out")"
+  grep -q "== quick" "$WORK/out" \
+    || fail "--verbose did not restore the suite headers: $(cat "$WORK/out")"
+  ok "--verbose restores the per-phase lines"
+
+  # ...and the environment does the same, for the cases tests/run.sh lists over
+  # the VERBOSE block.
+  COPY_VERBOSE=1 run_copy
+  [ "$?" = 0 ] || fail "AUTOFLEET_TEST_VERBOSE=1 failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    || fail "AUTOFLEET_TEST_VERBOSE=1 did not restore the per-phase lines: $(cat "$WORK/out")"
+  ok "...and AUTOFLEET_TEST_VERBOSE=1 does it without a flag"
+
+  # UNSET, which is the only state `./tests/run.sh` is ever actually run in, and
+  # the one no row here reached: `run_copy` puts the variable in the child
+  # environment on EVERY call, assigned from COPY_VERBOSE with a default, so
+  # inside the copy it is always set-and-empty. `COPY_VERBOSE="" run_copy` is
+  # byte-identical to the plain call and pins nothing.
+  #
+  # The mutation that survived: `${AUTOFLEET_TEST_VERBOSE-1}` in place of
+  # `${AUTOFLEET_TEST_VERBOSE:-}` -- a default that applies on UNSET only, so
+  # set-and-empty stays quiet and unset turns verbose. Every row in this phase
+  # stayed green under it while a developer's `./tests/run.sh` went back to
+  # printing a line per phase, which is #52's own acceptance criterion gone. Not
+  # the bare `-` form: with an empty word after the dash that is identical to
+  # `:-` in every state and changes nothing, which is a swap the next reader
+  # would try and then conclude this row asserts nothing. Found by the
+  # independent review, twice: once for the gap and once for the wrong name.
+  # `env -u` is the same answer this file already gives for COPY_NO_SKIP in the
+  # `skips` phase, and for the same reason. Found by the independent review.
+  env -u AUTOFLEET_TEST_VERBOSE -u AUTOFLEET_TEST_NO_SKIP AUTOFLEET_TEST_TIMEOUT=10 \
+    "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  [ "$?" = 0 ] || fail "the shipped invocation failed: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "an UNSET AUTOFLEET_TEST_VERBOSE was read as verbose: $(cat "$WORK/out")"
+  grep -q "3 passed." "$WORK/out" \
+    || fail "the shipped invocation printed no summary: $(cat "$WORK/out")"
+  ok "...and the state the shipped command runs in -- the variable unset -- is quiet"
+
+  # The clearing in run_copy itself. Without it, `AUTOFLEET_TEST_VERBOSE=1
+  # ./tests/run.sh runner_bound` -- one person debugging this very suite --
+  # reaches every runner copy below and turns each "nothing per phase" row red
+  # on a harness artefact. That is the failure the COPY_NO_SKIP helper exists to
+  # remove, and this is its row: drop the clearing and the whole suite stays
+  # green until somebody sets the variable. Found by /code-review.
+  ( export AUTOFLEET_TEST_VERBOSE=1
+    run_copy )
+  [ "$?" = 0 ] || fail "an outer AUTOFLEET_TEST_VERBOSE failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quick" "$WORK/out" \
+    && fail "an outer AUTOFLEET_TEST_VERBOSE reached the runner copy: $(cat "$WORK/out")"
+  ok "...and an outer one does not reach the copy these rows drive"
+
+  # One phase of one suite still works, and still prints its result -- which,
+  # quiet, is the summary. That is the invocation CLAUDE.md tells an agent to
+  # reach for when a phase goes red, so it is the one that must not need a flag.
+  make_runner quickd.one
+  run_copy quickd one
+  [ "$?" = 0 ] || fail "one phase of one suite did not pass: $(cat "$WORK/out")"
+  grep -q "1 passed." "$WORK/out" \
+    || fail "one phase of one suite printed no result: $(cat "$WORK/out")"
+  ok "one phase of one suite still runs, and still says so"
+
+  # The flag is read wherever it appears, because `./tests/run.sh fleet card_says
+  # --verbose` is where somebody types it. Parsing it as `${1:-}`/`${2:-}` and
+  # nothing else makes that a suite named --verbose and a run that says nothing.
+  run_copy quickd one --verbose
+  [ "$?" = 0 ] || fail "--verbose after the names failed the run: $(cat "$WORK/out")"
+  grep -q "ok   quickd/one" "$WORK/out" \
+    || fail "--verbose after the names was not read as a flag: $(cat "$WORK/out")"
+  ok "...and --verbose is read wherever it sits in the arguments"
+
+  # A MISTYPED flag is refused. This is the way the change breaks CI: `--verbsoe`
+  # in the workflow, read as a suite name, nothing matched, and a quiet green run
+  # nobody looks at twice. Exit 2 with the word in it, the same answer a mistyped
+  # suite name has always got.
+  run_copy --verbsoe
+  rc=$?
+  [ "$rc" = 2 ] || fail "a mistyped flag was accepted (rc=$rc): $(cat "$WORK/out")"
+  grep -q -- "--verbsoe" "$WORK/out" \
+    || fail "the refusal did not name the argument it refused: $(cat "$WORK/out")"
+  # ...and says what the arguments ARE. Both refusals share one `refuse()` in
+  # the runner, so a single edit that drops the usage clause takes both of them
+  # with it, and rc=2 plus the offending token stays green through that. Found
+  # by /code-review, which mutated exactly that and watched this phase pass.
+  grep -q "usage: " "$WORK/out" \
+    || fail "the refusal did not say what the arguments are: $(cat "$WORK/out")"
+  ok "a mistyped flag is refused rather than read as a quiet run"
+
+  # ...on STDERR, which run_copy cannot see because it folds the two streams.
+  # A refusal on stdout is a refusal that a caller piping the run into a log
+  # reads as output of the suite -- and `refuse()` is one line, so the `>&2` is
+  # one deletion away from being gone for both of them.
+  env -u AUTOFLEET_TEST_VERBOSE -u AUTOFLEET_TEST_NO_SKIP \
+    "$WORK/tests/run.sh" --verbsoe >"$WORK/out" 2>"$WORK/err"
+  [ "$?" = 2 ] || fail "the split-stream refusal did not exit 2"
+  [ -s "$WORK/err" ] || fail "the refusal said nothing on stderr"
+  [ -s "$WORK/out" ] && fail "the refusal went to stdout: $(cat "$WORK/out")"
+  ok "...on stderr, where a refusal belongs"
+
+  # ...and so is a third name. The runner has only ever had two positions, and
+  # silently ignoring the rest is how `./tests/run.sh fleet card_says --verbose`
+  # would have been read before the flag existed: as a run of one phase that
+  # said nothing about the argument it dropped. Found by the spec review, which
+  # noticed the refusal arrived with no row on it.
+  run_copy quickd one three
+  rc=$?
+  [ "$rc" = 2 ] || fail "a third argument was ignored (rc=$rc): $(cat "$WORK/out")"
+  grep -q "three" "$WORK/out" \
+    || fail "the refusal did not name the argument it refused: $(cat "$WORK/out")"
+  ok "...and a third positional argument is refused rather than dropped"
+
+  # CI reads logs, not a context window: a human opening a failed run wants to
+  # see which phases got there before it. The workflow asks for them, and this is
+  # the row that notices if it stops -- the whole point of quiet is that nothing
+  # else in this repo will.
+  #
+  # EVERY INVOCATION, and comments do not count -- both halves asserted rather
+  # than approximated, because the first two drafts of this row got each of them
+  # wrong in the cheap-looking way.
+  #
+  # Asking whether the FILE mentions the flag anywhere passes on the strength of
+  # this row's counterpart comment in ci.yml. Asking whether ANY invocation
+  # carries it passes while a second job runs the suite quietly -- and ci.yml is
+  # owed exactly such a job, the strict AUTOFLEET_TEST_NO_SKIP one tests/run.sh
+  # names as #80. Both found by /code-review.
+  #
+  # Then: `grep -v "^[[:space:]]*#"` drops a line only when `#` is its first
+  # non-space character, so `./tests/run.sh   # --verbose would be nice` survives
+  # the filter AND matches the flag -- in the comment. And `grep -c` counts
+  # LINES, so `./tests/run.sh --verbose && ./tests/run.sh` is one loud line with
+  # a quiet run inside it. Both found by the independent review, which pointed at
+  # evals/lint.sh's `strip_comment` and said this was that function's first draft
+  # again; it is borrowed here rather than re-derived.
+  #
+  # A VALUE is required of the variable: `AUTOFLEET_TEST_VERBOSE= ./tests/run.sh`
+  # is a quiet run that mentions it. `="1"` counts, because a pattern rejecting
+  # every quote reds a CI file that is correct -- the expensive direction.
+  #
+  # What it cannot see, in the false-RED direction, which is the one this row is
+  # willing to be wrong in: a step- or job-level `env:` block (the normal YAML
+  # way to set one), and a backslash line continuation between the variable and
+  # the invocation. Both mean the same thing -- the flag has to be ON the
+  # invocation. That is a real constraint on how ci.yml may spell it rather than
+  # an oversight, and it is written into #80 where the person who writes that
+  # line will read it.
+  #
+  # And two in the false-GREEN direction, worth naming rather than implying this
+  # row is safe there. A job that reaches the suite INDIRECTLY -- `make test`, a
+  # composite action, a wrapper script -- is invisible to anything grepping
+  # ci.yml. So is a DIRECT one spelled from another working directory:
+  # `cd tests && ./run.sh`, or the GitHub-native `working-directory: tests` with
+  # `run: ./run.sh`, neither of which contains the path this matches on. In both
+  # cases the honest job satisfies the `ci_runs > 0` floor on the quiet one's
+  # behalf. Reading YAML with grep is the limit being accepted here; a second
+  # route into the suite needs its own row. All found by /code-review.
+  #
+  # NOTE FOR WHOEVER EDITS THE BLOCK BELOW: it is a heredoc inside `$( )`, and
+  # bash 3.2 -- the bash macOS ships -- tracks quotes across the whole command
+  # substitution, heredoc body included. So a lone apostrophe anywhere in there,
+  # in prose as readily as in code, is a SYNTAX ERROR on a mac and parses fine
+  # on the bash 5 in CI. Reword around it -- "the first draft" carries what the
+  # possessive would have. It cost a round of this review to find, by running
+  # it; nothing asserts it, because asserting it needs a bash 3.2 and the
+  # `bash -n` step in CI is bash 5.
+  ci="$REPO_ROOT/.github/workflows/ci.yml"
+  ci_report="$(python3 - "$ci" <<'CIPY'
+import re, sys
+
+def strip_comment(line):
+    """The line with a trailing shell comment removed, quotes respected.
+
+    Lifted from evals/lint.sh, where the docstring explains why cutting at the
+    first `#` anywhere is wrong. Here the quoting matters less and the trailing
+    comment matters more, but one spelling of this in the repo is worth more
+    than two that drift.
+    """
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+# The env prefix stays with its own invocation, which is the whole reason the
+# line is split: `AUTOFLEET_TEST_VERBOSE=1 ./tests/run.sh && ./tests/run.sh`
+# must read as one loud run and one quiet one, not as a loud line.
+LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
+# NOT `frag.count("./tests/run.sh")`. A second job spelled `bash tests/run.sh`,
+# `sh tests/run.sh` or `"$GITHUB_WORKSPACE/tests/run.sh"` runs the suite just as
+# quietly and was not counted at ALL -- which is the exact scenario the comment
+# above claims this now catches, passing because the other job supplied the
+# count. Found by /code-review.
+# WHAT COUNTS AS AN INVOCATION. Two halves, and both of them were got wrong by
+# describing them in prose instead of stating them:
+#
+#   the optional path prefix -- any run of characters ending in a slash that
+#   holds no whitespace and none of `;&|`, so it may hold a command
+#   substitution, a brace expansion, a quote or an equals sign. Earlier drafts
+#   described it and were wrong: the spelling "$GITHUB_WORKSPACE/tests/run.sh"
+#   is real and the first missed it, and excluding parentheses made
+#   `$(pwd)/tests/run.sh` count ZERO.
+#
+#   what may precede the whole match -- a LOOKBEHIND rather than a list of
+#   allowed characters, because every list written here was short. The last one
+#   omitted the backtick, so `tests/run.sh` inside backticks scored zero: a
+#   missed invocation raises neither counter, so the row stays green with a
+#   quiet run in the file, which is the false green it exists to prevent. The
+#   question is not "what may sit before a path" -- it is "is this the tail of a
+#   LONGER WORD", so the class is the one a word is made of. `/` is deliberately
+#   NOT in it: every legitimate prefix ends in one. Found by /code-review, in
+#   four consecutive rounds, which is why neither half is described by counting
+#   anything any more.
+#
+# It still cannot swallow mytests/run.sh: the character before is a letter. The
+# cost is a false RED on prose that merely names the path inside a string, which
+# is the direction this row is willing to be wrong in.
+RUN = re.compile(r"(?<![A-Za-z0-9_.\-])(?:[^\s;&|]*/)?tests/run\.sh\b")
+runs = quiet = 0
+for line in open(sys.argv[1]):
+    for frag in re.split(r"&&|\|\||;", strip_comment(line)):
+        n = len(RUN.findall(frag))
+        if not n:
+            continue
+        runs += n
+        # Two invocations in one fragment with no separator between them is a
+        # shape this cannot judge, so it is counted quiet: a false red that
+        # names the line beats a green that assumed.
+        if n > 1 or not LOUD.search(frag):
+            quiet += n
+print(runs, quiet)
+CIPY
+)"
+  ci_runs="${ci_report%% *}"; ci_quiet="${ci_report##* }"
+  [ "${ci_runs:-0}" -gt 0 ] \
+    || fail "ci.yml no longer runs the suite; this row asserts nothing"
+  [ "${ci_quiet:-1}" = 0 ] \
+    || fail "$ci_quiet of ci.yml's $ci_runs suite invocations are quiet, so a failed run no longer says which phases ran"
+  ok "every run of the suite in CI still asks for the per-phase lines"
+  ;;
+
   *)
-  echo "usage: $0 bounds|passes|skips|hostlint|guards|interrupt|orphans" >&2
+  echo "usage: $0 bounds|passes|skips|hostlint|guards|interrupt|orphans|quiet" >&2
   exit 2 ;;
 esac
