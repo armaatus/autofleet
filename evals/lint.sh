@@ -1240,7 +1240,7 @@ else
   # Raised from 400 by armaatus/autofleet#51, deliberately and once. Step 3 went
   # from four lines an agent runs in-session to one command it starts -- which is
   # a net saving of thousands of tokens, and costs a few words here, because the
-  # command RUNS FOR TWENTY MINUTES and the brief has to say so. An agent that
+  # command runs FAR LONGER THAN ONE TOOL CALL and the brief has to say so. An agent that
   # does not know that blocks a tool call on it, the call is killed at its own
   # ceiling, and no marker is written: the one operational fact about step 3 that
   # cannot be discovered by reading the script afterwards.

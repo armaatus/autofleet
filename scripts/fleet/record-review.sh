@@ -39,12 +39,13 @@ target=".autofleet/run/reviewed-$sha"
 # typing the command the docs tell you to type. Found by the local /code-review
 # pass (armaatus/autofleet#51).
 #
-# `--none` is untouched: saying so explicitly is a person's call and is exactly
-# what this refusal asks for.
 # ONE `case`, not two over the same value. The emptiness check lives in the arms
 # that can be empty; `--none` is the arm that is allowed to be, because saying
 # "it ran and found nothing" explicitly is a person's call and is exactly what
 # the refusal below asks for.
+# The same four lines as `not_blank` in self-review.sh, deliberately: this script
+# does not source lib.sh, because it is the one a person runs by hand in a
+# checkout where nothing else is set up. The 75 seconds is what must not drift.
 refuse_empty() {
 # `case`, NOT `[ -n "${body//[[:space:]]/}" ]`. That expansion builds a whole new
 # string one character at a time, and bash 3.2 -- which is what macOS ships --

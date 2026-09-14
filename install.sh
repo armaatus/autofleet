@@ -146,6 +146,35 @@ had_config=false; [ -e "$TARGET/.autofleet/config" ] && had_config=true
 had_settings=false; [ -e "$TARGET/.claude/settings.json" ] && had_settings=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 
+# ...AND THE HOST'S `.gitignore` LEARNS ABOUT THE SCRATCH SPACE.
+#
+# `.gitignore` is not in PAYLOAD and must not be: it is the host's own file, and
+# a project's ignore list is not autofleet's to overwrite. But the payload WRITES
+# into `.autofleet/run/` -- the push markers, the autostart log, and since
+# armaatus/autofleet#51 the self-review's findings and per-pass transcripts,
+# three files per run -- and the fleet's own agents are told to `git add -A`. In
+# this repository `.gitignore` names the directory, which is why nothing here
+# ever noticed; in a host repo the first `git add -A` sweeps a review marker into
+# a commit, which is the failure /findings.md is already in .gitignore for.
+#
+# APPENDED, never rewritten, and only when the line is not already there, so
+# re-running the installer is still a no-op on a repo that has it. `.env` too:
+# `scripts/fleet/env.sh` generates it per worktree and hard rule 5 says no
+# secrets in the tree. Found by both local review passes.
+ignore_line() {
+  local gi="$TARGET/.gitignore"
+  grep -qxF -- "$1" "$gi" 2>/dev/null && return 0
+  if $DRY; then echo "   would add to .gitignore: $1"; return 0; fi
+  # A trailing newline first if the file lacks one, or the append lands on the
+  # end of somebody else's pattern and silently changes what it matches.
+  [ -s "$gi" ] && [ -n "$(tail -c 1 "$gi")" ] && printf '\n' >>"$gi"
+  printf '%s\n' "$1" >>"$gi"
+  echo "   added to .gitignore: $1"
+}
+echo "==> .gitignore (appended, never rewritten)"
+ignore_line ".autofleet/run/"
+ignore_line ".env"
+
 # The seed is autofleet's own config, and autofleet runs itself on
 # `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that
 # has to be exercised daily). Copying that verbatim would hand every host repo

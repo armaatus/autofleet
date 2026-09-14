@@ -38,6 +38,11 @@
 #                                pushed, so a dirty tree means the passes would
 #                                review something other than the diff that goes
 #                                out.
+#   test_self_review.sh norange  a branch with nothing on it -> exit 2 before a
+#                                pass starts. Both passes would honestly review
+#                                an empty diff and declare zero findings, and the
+#                                marker would open the push gate on a review of
+#                                nothing.
 #   test_self_review.sh empty    record-review.sh refuses a body with nothing in
 #                                it. The bare form is what the rebase remedy
 #                                prints, and from a tool call it reads EOF -- an

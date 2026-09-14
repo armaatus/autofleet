@@ -76,8 +76,8 @@ STUB
 # one of the two things checking it believes in.
 #
 # Raised to 410 by #51: step 3 became one command instead of four in-session
-# lines, and what it costs here is the sentence saying that command runs for
-# twenty minutes. An agent that does not know blocks a tool call on it and
+# lines, and what it costs here is the sentence saying that command runs far
+# longer than one tool call. An agent that does not know blocks a tool call on it and
 # gets killed at its own ceiling with no marker written.
 BRIEF_WORD_BUDGET=410
 

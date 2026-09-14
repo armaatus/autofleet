@@ -192,8 +192,7 @@ runs both passes outside this session and records the marker:
 
     ./scripts/fleet/self-review.sh
 
-**It can run 40 minutes -- longer than one tool call. Start it in the
-background.** `/code-review high` finds defects,
+**It runs far longer than one tool call: start it in the background.** `/code-review high` finds defects,
 `/mattpocock-skills:code-review` finds conformance, REVIEW.md is the policy. Fix
 what is real, re-run the tests, run it again -- the marker is per-commit. Until
 it exists for the commit you are pushing, the guard hook refuses `git push` and

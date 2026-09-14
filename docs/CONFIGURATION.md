@@ -107,50 +107,6 @@ it runs.
 | `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many attempts one head may get that end with **no verdict** — a reviewer that ran and submitted nothing, or one killed at the timeout. A run that never reached a reviewer (the fleet was stopped, `gh` would not answer, the command is not on `PATH`) does not spend one. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. **Must be a positive whole number: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included.** A cap that is silently absent is the failure the check exists to prevent, so it refuses rather than warns. |
 | `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
 
-#### The self-review's own knobs
-
-Separate from the independent reviewer's above, because the two runs are shaped
-differently — one reads a pull request through `gh` and submits a verdict, the
-other reads a local commit range and prints findings — and a project that wants a
-cheaper model for its own diff than for the verdict on it has to be able to say
-so.
-
-| Knob | Default | Notes |
-|---|---|---|
-| `AUTOFLEET_SELF_REVIEW_CMD` | `$AUTOFLEET_REVIEW_CMD` | What runs each pass, with `-p` and a fixed read-only tool allowlist. Defaults to the independent reviewer's command, so a host that has set nothing — and a host that has set only `AUTOFLEET_REVIEW_CMD` — still works. |
-| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent out of the agent's `AUTOFLEET_TIMEBOX`, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". **Must be a positive whole number**, for the reason the `MAX_TRIES` row gives: a non-number makes `[ N -ge X ]` return 2, the deadline test false, and a wedged pass then holds the worktree until the time-box expires. A bad value is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included. |
-| `AUTOFLEET_SELF_REVIEW_MAX_TURNS` | `80` | Each pass's turn budget, passed as `--max-turns`. The same number the independent reviewer and `claude-review.yml` get: both passes fan out into sub-agents of their own. Validated the same way as the timeout above. |
-
-> **A pass that produces nothing records nothing.** `self-review.sh` exits
-> non-zero, names the pass that was silent, and writes no marker — so the push
-> gate stays closed. Recording an empty marker would satisfy that gate and let a
-> pull request go out claiming two reviews that never ran, which is strictly
-> worse than a review that is merely absent.
->
-> A pass counts when it **exited zero** and its **stdout is not blank** — and
-> the load-bearing word is *stdout*. #51 measured the failure this catches: exit
-> 0 with 446 bytes of output, all of it unrelated permission warnings. Those
-> warnings are on stderr. `self-review.sh` writes the two streams to different
-> files, so stdout carries the pass's final message and nothing else; merge them,
-> as `review.sh` does, and noise is indistinguishable from a verdict.
->
-> The passes are *asked* to end with `<!-- self-review-findings: N -->`, and the
-> count is worth having in the PR body, but it is **not** a gate: measured over
-> three rounds, `/code-review` emitted it zero times out of three. It is a
-> harness skill with an output contract of its own, and a gate it cannot pass is
-> a gate that never opens.
->
-> `self-review.sh` refuses a **dirty working tree** for the same reason: the
-> marker is keyed on `HEAD` and `HEAD` is what gets pushed, so uncommitted work
-> would be neither reviewed nor sent. Commit first.
-
-> Like `AUTOFLEET_REVIEW_CMD`, this seam is advertised as model-agnostic and is
-> not: the flags are Claude Code's. That is
-> [#27](https://github.com/armaatus/autofleet/issues/27), open against
-> `review.sh`; `self-review.sh` is deliberately a second consumer of the same
-> shape rather than a third convention, so one fix covers both.
-
-
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
 submits it, from that workflow's own account. It needs a
 `CLAUDE_CODE_OAUTH_TOKEN` secret on the repository; mint one with
@@ -244,6 +200,49 @@ The honest summary: `local` protects against an author's blind spots, which is
 what the second opinion is actually for. It does not protect against an author
 determined to forge one. If you need that, keep `github`, or give the reviewer
 its own account and log `gh` in as that.
+
+#### The self-review's own knobs
+
+Separate from the independent reviewer's above, because the two runs are shaped
+differently — one reads a pull request through `gh` and submits a verdict, the
+other reads a local commit range and prints findings — and a project that wants a
+cheaper model for its own diff than for the verdict on it has to be able to say
+so.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_SELF_REVIEW_CMD` | `$AUTOFLEET_REVIEW_CMD` | What runs each pass, with `-p` and a fixed read-only tool allowlist. Defaults to the independent reviewer's command, so a host that has set nothing — and a host that has set only `AUTOFLEET_REVIEW_CMD` — still works. |
+| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent out of the agent's `AUTOFLEET_TIMEBOX`, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". **Must be a positive whole number**, for the reason the `MAX_TRIES` row gives: a non-number makes `[ N -ge X ]` return 2, the deadline test false, and a wedged pass then holds the worktree until the time-box expires. A bad value is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included. |
+| `AUTOFLEET_SELF_REVIEW_MAX_TURNS` | `80` | Each pass's turn budget, passed as `--max-turns`. The same number the independent reviewer and `claude-review.yml` get: both passes fan out into sub-agents of their own. Validated the same way as the timeout above. |
+
+> **A pass that produces nothing records nothing.** `self-review.sh` exits
+> non-zero, names the pass that was silent, and writes no marker — so the push
+> gate stays closed. Recording an empty marker would satisfy that gate and let a
+> pull request go out claiming two reviews that never ran, which is strictly
+> worse than a review that is merely absent.
+>
+> A pass counts when it **exited zero** and its **stdout is not blank** — and
+> the load-bearing word is *stdout*. #51 measured the failure this catches: exit
+> 0 with 446 bytes of output, all of it unrelated permission warnings. Those
+> warnings are on stderr. `self-review.sh` writes the two streams to different
+> files, so stdout carries the pass's final message and nothing else; merge them,
+> as `review.sh` does, and noise is indistinguishable from a verdict.
+>
+> The passes are *asked* to end with `<!-- self-review-findings: N -->`, and the
+> count is worth having in the PR body, but it is **not** a gate: measured over
+> three rounds, `/code-review` emitted it zero times out of three. It is a
+> harness skill with an output contract of its own, and a gate it cannot pass is
+> a gate that never opens.
+>
+> `self-review.sh` refuses a **dirty working tree** for the same reason: the
+> marker is keyed on `HEAD` and `HEAD` is what gets pushed, so uncommitted work
+> would be neither reviewed nor sent. Commit first.
+
+> Like `AUTOFLEET_REVIEW_CMD`, this seam is advertised as model-agnostic and is
+> not: the flags are Claude Code's. That is
+> [#27](https://github.com/armaatus/autofleet/issues/27), open against
+> `review.sh`; `self-review.sh` is deliberately a second consumer of the same
+> shape rather than a third convention, so one fix covers both.
 
 ### What the fleet keeps
 
