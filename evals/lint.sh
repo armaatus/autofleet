@@ -1152,7 +1152,7 @@ else
   # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
   # names them and the brief the fleet actually sends never did.
   for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
-                --after-pr researcher verifier "gh pr diff --stat"; do
+                --after-pr researcher verifier "gh pr diff --stat" handoff.sh; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
   done
@@ -1164,7 +1164,7 @@ else
   # the only thing holding the split in a host installation. Found by the
   # independent review.
   for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh \
-                board.sh "--auto --squash" "Closes #" handoff.sh; do
+                board.sh "--auto --squash" "Closes #"; do
     grep -qF -- "$named" <<<"$stage1" \
       && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
   done
@@ -1177,11 +1177,12 @@ else
 
   # Stage 2: every script of the loop, the closing line merge-gate demands, and
   # the three paths no agent can merge itself.
-  # `handoff.sh` is stage 2's for a reason worth naming: the note is what an
-  # interrupted attempt leaves the next, and stage 1 is at 394 of its 400 words.
-  # Naming the script in stage 1 would charge every agent for an instruction
-  # that does not apply until the PR exists -- and the resumed session is given
-  # the note itself, printed by issue-command.sh, not a pointer to it.
+  # `handoff.sh` is in BOTH stages, and that is the one instruction here which
+  # deliberately is. Stage 1 asks for the note when the work is put down --
+  # armaatus/autofleet#55's other half, the attempt the time-box interrupts --
+  # and stage 2 asks for it at the push and after every round. An instruction
+  # that arrives only after the PR exists cannot serve a case that happens
+  # before one does; the independent review of #55 is where that was measured.
   for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
                 answer-review.sh handoff.sh "--auto --squash" "Closes #" \
                 ".github/workflows/" ".github/scripts/" ".claude/"; do
@@ -1199,7 +1200,17 @@ else
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
-  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
+  # 400 when armaatus/autofleet#49 split the brief; 425 since #55, RAISED
+  # DELIBERATELY and here is the argument. #55's Goal has two halves, and the
+  # second is an attempt the time-box interrupts writing nothing down. The only
+  # place an agent can be told to leave a note before a PR exists is stage 1 --
+  # stage 2 is fetched after the push, and an instruction that arrives after the
+  # moment it applies is an instruction nobody follows. It is ONE sentence
+  # attached to the paragraph that already says what to do when the work is put
+  # down, because that is the paragraph the case belongs to; 25 words in every
+  # agent's prompt prefix against a whole attempt re-derived from the files is
+  # the trade, and it is the trade this issue exists to make.
+  BRIEF_WORD_BUDGET=425
   # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
   # word it is and the host's command is never substituted in -- because this
   # check is vendored and `agent-config.yml` runs it on every PR in every repo

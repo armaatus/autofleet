@@ -217,6 +217,51 @@ case "${1:-}" in
     printf '%s\n' "$over" | in_repo env AUTOFLEET_HANDOFF_MAX_WORDS=00 \
       ./scripts/fleet/handoff.sh write 42 --stdin >/dev/null 2>&1 \
       || fail "AUTOFLEET_HANDOFF_MAX_WORDS=00 refused, so the off switch reads as a cap of nothing"
+    # THE GUARD ON THE KNOB, which is a separate thing from the cap it guards.
+    # config.sh's own comment names hard rule 3 for it: a non-number makes
+    # `[ "$words" -le "$cap" ]` return 2, so the test is false,
+    # `refuse_if_over_cap` returns early, and a note of any length is accepted
+    # with nothing on screen saying the cap is gone. The knob one block above it
+    # has had exactly this assertion since the independent review asked for it
+    # (tests/test_review_mode.sh); this one shipped with the reasoning and no
+    # check, which is the same finding one knob later. Found by the independent
+    # review of #55.
+    #
+    # BOTH ROUTES. The host config is sourced LAST so it can override the
+    # defaults, so a check that only ever saw the environment would pass while a
+    # project writing `AUTOFLEET_HANDOFF_MAX_WORDS=lots` into the file this knob
+    # is documented in reached the cap unchecked.
+    # NOT the empty string through the environment: the default is `:=`, which
+    # substitutes on unset OR NULL, so empty there means "unset" and 300 is the
+    # right answer. Through the config file it is a plain assignment read after
+    # the default, where it IS a value, and the `''` arm of the case refuses it.
+    for bad in abc 3x -1; do
+      cfg_out="$( (cd "$WORK/repo" \
+        && AUTOFLEET_HANDOFF_MAX_WORDS="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "AUTOFLEET_HANDOFF_MAX_WORDS='$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a whole number" <<<"$cfg_out" \
+        || fail "AUTOFLEET_HANDOFF_MAX_WORDS='$bad' failed without saying why: $cfg_out"
+    done
+    # $AUTOFLEET_CONFIG, the way tests/test_review_mode.sh drives the same route:
+    # config.sh reads `${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}`, and
+    # $REPO_ROOT belongs to the script that SOURCES it, so a bare `. config.sh`
+    # looks for `/.autofleet/config` and finds nothing -- a phase that wrote the
+    # file into the fixture and passed would have asserted nothing at all.
+    hostcfg="$WORK/hostcfg"
+    for bad in lots ""; do
+      printf 'AUTOFLEET_HANDOFF_MAX_WORDS=%s\n' "$bad" >"$hostcfg"
+      cfg_out="$( (cd "$WORK/repo" \
+        && env -u AUTOFLEET_HANDOFF_MAX_WORDS AUTOFLEET_CONFIG="$hostcfg" \
+             bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "a config file setting the cap to '$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a whole number" <<<"$cfg_out" \
+        || fail "a config file setting the cap to '$bad' failed without saying why: $cfg_out"
+    done
+
     echo "ok: over the cap it refuses, names the cap, and changes nothing"
     ;;
 
@@ -229,8 +274,10 @@ case "${1:-}" in
     out="$(brief 42 2>&1)" || fail "issue-command.sh exited non-zero with no note: $out"
     grep -q 'SPEC-BODY-MARKER' <<<"$out" \
       || fail "the spec stopped being printed when there is no note: $out"
-    grep -qiF -- 'handoff' <<<"$out" \
-      && fail "the opening brief talks about a handoff that does not exist: $out"
+    # The brief still ASKS for a note -- that instruction is stage 1's -- but it
+    # must not announce one that was never written.
+    grep -qF -- 'What the last attempt on this issue left' <<<"$out" \
+      && fail "the opening brief announces a note that does not exist: $out"
 
     ran_in 42 "$WORK/repo"
     out="$(in_fleet agent_brief 42 2>&1)" \
@@ -364,6 +411,17 @@ case "${1:-}" in
     grep -qF -- 'from a file under docs/issues' "$WORK/repo/$NOTE" \
       || fail "the file was not read; #42's note holds $(cat "$WORK/repo/$NOTE")"
 
+    # ...and with the issue LEFT OFF, that same path is still the source. It
+    # became the ref, resolved to issue 7, and the command then sat on stdin
+    # with the file unopened -- the same class as the case above, from the other
+    # side. A URL is what carries a scheme; this does not.
+    rm -f "$WORK/repo/.autofleet/run/handoff-43.md"
+    printf 'still the file\n' >"$WORK/repo/docs/issues/7-notes.md"
+    handoff write docs/issues/7-notes.md >/dev/null 2>&1 \
+      || fail "with the issue left off, a source path under docs/issues was not read as a file"
+    grep -qF -- 'still the file' "$WORK/repo/$NOTE" \
+      || fail "the path was read as the issue again; #42's note holds $(cat "$WORK/repo/$NOTE")"
+
     # ...and a relative source is the caller's, not the repo root's. The usage
     # advertises `write 42 note.md` unqualified, and from a subdirectory that
     # looked for it beside the repo root and said there was no such file.
@@ -406,12 +464,23 @@ case "${1:-}" in
     grep -qF -- './scripts/fleet/handoff.sh write 42' <<<"$out" \
       || fail "the post-PR half never tells an agent to write the note: $out"
 
-    # Stage 1 must not carry it. It is 394 of its 400 words already, and the
-    # instruction does not apply until the PR exists.
+    # BOTH stages ask for it, and that is the one instruction here which
+    # deliberately is in both. #55's other half is the attempt the time-box
+    # INTERRUPTS -- which happens before a PR exists, so an instruction that
+    # arrives only with `--after-pr` cannot serve it. The independent review is
+    # where that was measured: `gaveup-<n>` is written on the "no PR" path
+    # alone, so both dispatcher-side readers could only ever fire for an issue
+    # that had never been asked for a note.
     out="$(brief 42 2>&1)" || fail "issue-command.sh exited non-zero: $out"
-    grep -qF -- 'handoff.sh write' <<<"$out" \
-      && fail "stage 1 carries an instruction that belongs to --after-pr"
-    echo "ok: the post-PR half is what asks for the note"
+    grep -qF -- './scripts/fleet/handoff.sh write 42' <<<"$out" \
+      || fail "stage 1 never tells an interrupted agent to write the note: $out"
+    grep -qiF -- 'nterrupted' <<<"$out" \
+      || fail "stage 1 names the script but not the case it is for: $out"
+
+    # ...and stage 1 still carries none of the post-PR contract around it.
+    grep -qF -- 'after every round' <<<"$out" \
+      && fail "stage 1 carries the after-every-round instruction, which is stage 2's"
+    echo "ok: stage 1 asks for the note when the work is put down, stage 2 at the push"
     ;;
   *)
     echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|brief}" >&2; exit 2 ;;

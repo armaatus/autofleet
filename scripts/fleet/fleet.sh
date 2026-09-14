@@ -3338,15 +3338,9 @@ cmd_retry() {
       # ...and where the attempt that was stopped wrote down what it decided.
       #
       # SAID HERE because this is the command a person actually runs, and the
-      # one place in the retry path that is certain to be reached. `agent_brief`
-      # names the same note, but only in the narrow state where the old
-      # worktree's directory outlives the runner's listing of it -- if that
-      # worktree is still live the issue is never queued, and if it is gone the
-      # note went with it. A retry that opens a second worktree alongside a
-      # first one still standing is the case worth pointing at, and this is
-      # where the person deciding to open it is looking. Found by the local
-      # review, which showed the dispatcher branch could not carry the claim on
-      # its own.
+      # one place in the retry path that is certain to be reached. When
+      # `agent_brief` can name the same note, and when it cannot, is argued at
+      # `handoff_note_for` and stated once there.
       # `if`, not `[ -n ... ] && echo`: that AND-list is the last command in
       # this branch, so with no note it makes `cmd_retry` itself return 1 --
       # a command that did exactly what was asked reporting failure. Caught by

@@ -71,11 +71,6 @@ USAGE
   exit 2
 }
 
-# lib.sh spells the path, because issue-command.sh and fleet.sh need the same
-# one and three hand-written copies of `.autofleet/run/handoff-<n>.md` is three
-# places to get it wrong. Found by the local /mattpocock-skills:code-review pass.
-path_for() { fleet_handoff_path "$REPO_ROOT" "$1"; }
-
 # The issue number, from the argument if there is one.
 #
 # It does NOT repeat issue-command.sh's three-way read of the runner, and that
@@ -174,7 +169,7 @@ refuse_if_over_cap() {
 
 cmd_write() {
   local num="$1" src="${2:-}" target tmp
-  target="$(path_for "$num")"
+  target="$(fleet_handoff_path "$REPO_ROOT" "$num")"
   mkdir -p "$RUN_DIR"
   # A temp file in the same directory, so the cap is measured on exactly the
   # bytes that would land and the landing itself is one `mv`. A reader that
@@ -214,7 +209,7 @@ cmd_write() {
 }
 
 cmd_print() {
-  local target; target="$(path_for "$1")"
+  local target; target="$(fleet_handoff_path "$REPO_ROOT" "$1")"
   [ -f "$target" ] || return 0
   cat "$target"
 }
@@ -254,14 +249,18 @@ case "${1:-}" in
       ''|*[!0-9]*) ;;
       *) ref="$1"; shift ;;
     esac
-    # ...and only while the issue is still unknown. Unguarded, this second case
-    # ran against the SOURCE argument once the first had consumed the number:
-    # `handoff.sh write 42 docs/issues/7-notes.md` wrote an empty note under
-    # issue 7, left 42's stale, and exited 0. Found by the local /code-review
-    # pass, which reproduced it.
+    # ...and only while the issue is still unknown, and only for something that
+    # is actually a URL. Unguarded, this second case ran against the SOURCE
+    # argument once the first had consumed the number: `handoff.sh write 42
+    # docs/issues/7-notes.md` wrote an empty note under issue 7, left 42's
+    # stale, and exited 0. Guarding on `$ref` alone still read the same path as
+    # the ISSUE when the number was left off, so the file was never opened and
+    # the command sat on stdin. `://` is what tells a URL from a path, and a
+    # path is what this argument is for. Both found by review -- the first by
+    # the local /code-review pass, the second by the independent one.
     if [ -z "$ref" ]; then
       case "${1:-}" in
-        */issues/[0-9]*) ref="$1"; shift ;;
+        *://*/issues/[0-9]*) ref="$1"; shift ;;
       esac
     fi
     try_resolve "$ref" || {

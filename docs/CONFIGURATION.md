@@ -205,7 +205,8 @@ one context window. When the dispatcher interrupts that worktree, or
 `./scripts/fleet/fleet.sh retry N` hands the issue back, the next attempt used
 to begin from the issue body alone and re-derive from the files every decision
 the first one made. `scripts/fleet/handoff.sh` is the note that carries those
-decisions across:
+decisions across, and the opening brief asks for it in both halves — when the
+work is put down, and at the push and after every review round:
 
 ```bash
 ./scripts/fleet/handoff.sh write 42 --stdin <<'NOTE'
@@ -221,10 +222,10 @@ the PR body, and not the diff.
 Two things read it back. `issue-command.sh` prints it at the top of the next
 session **in that worktree**, which is the case it is for and the one that
 always works. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
-you hand the issue back, so a second worktree opened alongside a first one that
-is still standing can be pointed at it — the dispatcher's own opening prompt
-names it too, but only in the narrow state where the old worktree's directory
-outlives the runner's listing of it, so `retry` is the line to read.
+you hand the issue back, so a second worktree opened alongside a first one still
+standing can be pointed at it. The dispatcher's own opening prompt names it too,
+in a narrower state than either — `handoff_note_for` in `scripts/fleet/fleet.sh`
+is where that is argued, and `retry` is the line to read.
 
 **It lives at `.autofleet/run/handoff-<issue>.md`, and it dies with the
 worktree.** That directory is gitignored and per worktree: the note survives a

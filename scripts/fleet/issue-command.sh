@@ -253,6 +253,10 @@ range rather than a whole file, `researcher` before a wide search.
 At any point, if `~/.autofleet/STOP` exists, put the work down: say where you
 got to and do nothing further. Nothing can go out while it exists.
 
+**Interrupted or stopped, write down where you got to** --
+`./scripts/fleet/handoff.sh write __ISSUE__ --stdin`. The next attempt here
+reads that note instead of deriving it again.
+
 @@AFTER-PR@@
 
 **4. Push, open the PR, and queue the merge -- in that order, now.**
@@ -283,9 +287,9 @@ reads instead of working the last hour out again -- the note on stdin:
 
 The decisions you took and why, the files you touched, what each review round
 said and how you answered it, and what is still open. NOT the plan, which is in
-the PR body, and not the diff. It is capped -- 300 words by default -- and over
-the cap it refuses and names the cap rather than truncating.
-`issue-command.sh` prints it back at the top of the next session here.
+the PR body, and not the diff. It is capped, and over the cap it refuses and
+names the cap rather than truncating. `issue-command.sh` prints it back at the
+top of the next session here.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
@@ -334,9 +338,10 @@ is a webhook event, not a workflow trigger -- so the gate stays red on a thread
 you already closed, and auto-merge never fires. That script resolves the
 threads and, once the last one is shut, asks the gate again.
 
-Update the handoff after every round -- `./scripts/fleet/handoff.sh write
-__ISSUE__ --stdin` -- so what a round said and how you answered it survives an
-interruption between this round and the next.
+Update the handoff after every round, so what a round said and how you answered
+it survives an interruption between this round and the next:
+
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin
 
 IF YOU CHANGED ANYTHING, PUSH IT and go back to `await-review.sh`. The push
 re-runs the reviewer, and the review of what you actually sent is the next
