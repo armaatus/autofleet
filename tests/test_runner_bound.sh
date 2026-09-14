@@ -157,6 +157,31 @@ run_copy() {
 }
 ok()   { echo "  ok: $*"; }
 
+# The two fixtures the `bash32` phase writes, named for what is IN them rather
+# than for the verdict expected of them -- `bad_sh` said which way a row should
+# go and not why, and a row that changes direction would have had to rename it.
+#
+# ONE spelling of each, in one place, because four copies were four chances for
+# the next fixture to be written some other way. That is not hypothetical: the
+# first draft of the phase wrote them with `printf`, and the shipped rule reads
+# those -- it strips heredoc bodies, not quoted strings -- so this file failed
+# the very rule the phase drives. A heredoc keeps the form out of the rule's
+# sight; up here, there is one to keep true. Top level, like every other helper
+# in this file: bash functions are not scoped to a `case` arm anyway, so
+# defining them inside one only looks local. Found by the standards review.
+quoted_arith_sh() {
+  cat >"$1" <<'EOF'
+#!/usr/bin/env bash
+x=$(( "1" + 2 ))
+EOF
+}
+clean_arith_sh() {
+  cat >"$1" <<'EOF'
+#!/usr/bin/env bash
+x=$(( 1 + 2 ))
+EOF
+}
+
 WORK=""
 cleanup() {
   # Belt and braces. The `bounds` phase ASSERTS that the runner reaped the
@@ -1177,13 +1202,15 @@ EOF
   # an oversight, and it is written into #80 where the person who writes that
   # line will read it.
   #
-  # And one in the false-GREEN direction, which is worth naming rather than
-  # implying this row is safe in that direction: a job that reaches the suite
-  # INDIRECTLY -- `make test`, a composite action, a wrapper script -- is
-  # invisible to anything grepping ci.yml, and the direct job satisfies the
-  # `ci_runs > 0` floor on its behalf. Reading YAML with grep is the limit
-  # being accepted here; a second route into the suite would need its own row.
-  # Both directions found by /code-review.
+  # And two in the false-GREEN direction, worth naming rather than implying this
+  # row is safe there. A job that reaches the suite INDIRECTLY -- `make test`, a
+  # composite action, a wrapper script -- is invisible to anything grepping
+  # ci.yml. So is a DIRECT one spelled from another working directory:
+  # `cd tests && ./run.sh`, or the GitHub-native `working-directory: tests` with
+  # `run: ./run.sh`, neither of which contains the path this matches on. In both
+  # cases the honest job satisfies the `ci_runs > 0` floor on the quiet one's
+  # behalf. Reading YAML with grep is the limit being accepted here; a second
+  # route into the suite needs its own row. All found by /code-review.
   #
   # NOTE FOR WHOEVER EDITS THE BLOCK BELOW: it is a heredoc inside `$( )`, and
   # bash 3.2 -- the bash macOS ships -- tracks quotes across the whole command
@@ -1230,10 +1257,10 @@ LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
 # describing them in prose instead of stating them:
 #
 #   the optional path prefix -- any run of characters ending in a slash that
-#   holds none of ` \t;&|`, so it may hold a command substitution, a brace
-#   expansion, a quote or an equals sign. Three drafts described this class and
-#   three were wrong; the spelling "$GITHUB_WORKSPACE/tests/run.sh" is real and
-#   the first missed it, and excluding parentheses -- the second draft -- made
+#   holds no whitespace and none of `;&|`, so it may hold a command
+#   substitution, a brace expansion, a quote or an equals sign. Earlier drafts
+#   described it and were wrong: the spelling "$GITHUB_WORKSPACE/tests/run.sh"
+#   is real and the first missed it, and excluding parentheses made
 #   `$(pwd)/tests/run.sh` count ZERO.
 #
 #   what may precede the whole match -- a LOOKBEHIND rather than a list of
@@ -1242,8 +1269,10 @@ LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
 #   missed invocation raises neither counter, so the row stays green with a
 #   quiet run in the file, which is the false green it exists to prevent. The
 #   question is not "what may sit before a path" -- it is "is this the tail of a
-#   LONGER word", and the answer is the characters a path or identifier is made
-#   of. That cannot be short by omission. All four found by /code-review.
+#   LONGER WORD", so the class is the one a word is made of. `/` is deliberately
+#   NOT in it: every legitimate prefix ends in one. Found by /code-review, in
+#   four consecutive rounds, which is why neither half is described by counting
+#   anything any more.
 #
 # It still cannot swallow mytests/run.sh: the character before is a letter. The
 # cost is a false RED on prose that merely names the path inside a string, which
@@ -1299,24 +1328,6 @@ open(dst, "w").write(block)
 PY2
   [ -s "$WORK/check.py" ] || fail "the bash 3.2 check could not be extracted"
 
-  # ONE spelling of the bad form, in one place. Four copies of it were four
-  # chances for the next fixture to be written some other way -- and the first
-  # draft of this phase wrote them with `printf`, which the shipped rule reads
-  # (it strips heredoc bodies, not quoted strings), so this file failed the very
-  # rule it drives. A heredoc, and only here.
-  bad_sh() {
-    cat >"$1" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
-  }
-  good_sh() {
-    cat >"$1" <<'EOF'
-#!/usr/bin/env bash
-x=$(( 1 + 2 ))
-EOF
-  }
-
   # A payload tree. `scripts/fleet/` is vendored, so it is judged everywhere.
   mkdir -p "$WORK/payload/scripts/fleet"
   cat >"$WORK/payload/scripts/fleet/bad.sh" <<'EOF'
@@ -1364,16 +1375,11 @@ EOF
   # fine, on a check it never opted into. The payload is autofleet's code
   # wherever it lands and is judged; `tests/` and `install.sh` are autofleet's
   # own and are judged only here. Found by both local passes.
-  #
-  # HEREDOCS, not `printf`, and the rule under test is why: a fixture that has
-  # to SPELL the bad form spells it, and the shipped check strips heredoc bodies
-  # but not quoted strings -- so `printf '...$(( "1" + 2 ))...'` made this file
-  # fail the very rule this phase drives. The other fixtures in this file are
-  # heredocs for unrelated reasons; this one is a heredoc for that one.
+
   mkdir -p "$WORK/host/scripts/fleet" "$WORK/host/tests"
-  good_sh "$WORK/host/scripts/fleet/ok.sh"
-  bad_sh "$WORK/host/tests/run.sh"
-  bad_sh "$WORK/host/install.sh"
+  clean_arith_sh "$WORK/host/scripts/fleet/ok.sh"
+  quoted_arith_sh "$WORK/host/tests/run.sh"
+  quoted_arith_sh "$WORK/host/install.sh"
   # `.autofleet/` is the one that matters most here: `tests/` and `install.sh`
   # are autofleet shapes a host may not have at all, but install.sh SEEDS
   # `.autofleet/setup.sh` into every host project. Move that glob up into the
@@ -1382,7 +1388,7 @@ EOF
   # green. It did, until this row. Found by both local passes, which each
   # mutated it and watched all six rows pass.
   mkdir -p "$WORK/host/.autofleet"
-  bad_sh "$WORK/host/.autofleet/setup.sh"
+  quoted_arith_sh "$WORK/host/.autofleet/setup.sh"
   out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] \
     || fail "a host project was failed for a quote in its OWN scripts: $out"
@@ -1394,6 +1400,14 @@ EOF
   : >"$WORK/host/tests/test_runner_bound.sh"
   out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && fail "autofleet's own tests/ and install.sh were not judged: $out"
+  # BY NAME, both of them. On `rc != 0` alone this row is satisfied by the
+  # `.autofleet/setup.sh` in the same tree, so dropping either of the other two
+  # globs left it green -- the one mutation that survived the phase. Found by
+  # /code-review.
+  grep -q "tests/run.sh" <<<"$out" \
+    || fail "autofleet's own tests/ was not judged: $out"
+  grep -q "install.sh" <<<"$out" \
+    || fail "autofleet's own install.sh was not judged: $out"
   ok "...while in autofleet its own tests/ and install.sh are"
 
   # ...and `.autofleet/` on its own, in a tree where it is the ONLY bad file.
@@ -1402,8 +1416,8 @@ EOF
   # passes found surviving.
   mkdir -p "$WORK/only/.autofleet" "$WORK/only/tests" "$WORK/only/scripts/fleet"
   : >"$WORK/only/tests/test_runner_bound.sh"
-  good_sh "$WORK/only/scripts/fleet/ok.sh"
-  bad_sh "$WORK/only/.autofleet/setup.sh"
+  clean_arith_sh "$WORK/only/scripts/fleet/ok.sh"
+  quoted_arith_sh "$WORK/only/.autofleet/setup.sh"
   out="$(cd "$WORK/only" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && fail "autofleet's own .autofleet/ was not judged at all: $out"
   grep -q ".autofleet/setup.sh" <<<"$out" \
