@@ -1558,6 +1558,125 @@ else
   fail "docs/WORKFLOW.md is still a second copy of the loop (above)"
 fi
 
+echo "== the shell runs on the bash a mac ships"
+# bash 3.2 rejects a double quote inside `$(( ))`, and it rejects it at
+# EXPANSION time rather than at parse time. That combination is why this needs a
+# rule of its own: `bash -n` reads the quoted form happily, so the repo's
+# on-save parse hook cannot see it, and CI runs bash 5, where it works. The only
+# machine that notices is somebody's laptop, at the moment the line runs.
+#
+# It cost `tests/test_runner_bound.sh bounds` exactly that way: green in CI from
+# the day it was written, dead on every mac, and found only when an agent tried
+# to run the phase locally. Asserting "bash 3.2 rejects this" would be a fact
+# about bash and unrunnable on a runner -- but a quote inside an arithmetic
+# expansion is a fact about the SOURCE, and greppable anywhere. Raised by the
+# independent review of armaatus/autofleet#52.
+if python3 - <<'BASH32'
+import glob, re, sys
+
+def strip_comment(line):
+    """The line with a trailing shell comment removed, quotes respected.
+
+    Prose is where this rule would otherwise fire on itself: a comment
+    explaining the bad form names the bad form. The same function as the runner
+    contract check above, for the same reason it has one.
+    """
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+def arith_spans(text):
+    """Every `$(( ... ))` span, by walking parens rather than matching a regex.
+
+    `$(( (a + b) * c ))` closes on the SECOND `))`, and a regex that stops at
+    the first one reads the rest of the line as ordinary text -- which is a
+    false negative, the direction this rule cannot afford.
+    """
+    i = 0
+    while True:
+        i = text.find("$((", i)
+        if i < 0:
+            return
+        depth, j = 0, i + 1
+        while j < len(text):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        yield text[i:j + 1]
+        i = j + 1
+
+paths = sorted(set(
+    glob.glob("scripts/fleet/*.sh") + glob.glob("scripts/fleet/runner/*.sh")
+    + glob.glob(".claude/hooks/*.sh") + glob.glob(".github/scripts/*.sh")
+    + glob.glob("evals/*.sh") + glob.glob("tests/*.sh") + glob.glob("install.sh")))
+if not paths:
+    # A host installation with none of these is not a pass. Same reasoning as
+    # the phase-registry check below: a green line for an assertion that did not
+    # run is the false comfort hard rule 3 is about.
+    sys.exit("no shell scripts were found to check; this check now asserts nothing")
+
+def shell_lines(path):
+    """(line number, line) for the SHELL in a file, heredoc bodies dropped.
+
+    This file is the reason. It drives its checks through `python3 - <<'PY'`
+    blocks, and one of those blocks has to contain the literal `$((` in order to
+    look for it -- so the rule fired on the source of the rule, which is the
+    same self-trip the runner-contract check above documents.
+
+    A heredoc body is not necessarily shell, and here it usually is not. What
+    that gives up, said plainly: a body that IS shell -- the throwaway fixtures
+    tests/ writes -- is not checked by this rule. Those are written and run in
+    temp trees rather than shipped, and the alternative is a rule that cannot go
+    green on the file it lives in. Same stripping as the phase-registry check
+    below, for the same reason.
+    """
+    out, delim = [], None
+    for n, line in enumerate(path_lines(path), 1):
+        if delim is not None:
+            if line.strip() == delim:
+                delim = None
+            continue
+        here = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*$", line)
+        if here:
+            delim = here.group(1)
+        out.append((n, line))
+    return out
+
+
+def path_lines(path):
+    try:
+        return open(path).read().splitlines()
+    except OSError as e:
+        sys.exit(f"could not read {path}: {e}")
+
+
+bad = 0
+for path in paths:
+    for n, line in shell_lines(path):
+        for span in arith_spans(strip_comment(line)):
+            if '"' in span or "'" in span:
+                print(f"{path}:{n}: a quote inside $(( )): {span.strip()}")
+                bad = 1
+sys.exit(bad)
+BASH32
+then
+  ok "no arithmetic expansion carries a quote, which bash 3.2 refuses at expansion time"
+else
+  fail "a quote inside \$(( )) parses under bash -n and dies on bash 3.2, which is the bash macOS ships. The line above says where. Drop the quotes: \$(( \$(date +%s) - t ))"
+fi
+
 echo "== every test phase actually runs"
 # A phase defined in one of the phase-dispatching test scripts and missing from
 # the SUITES registry in tests/run.sh never runs -- not locally, not in CI -- and

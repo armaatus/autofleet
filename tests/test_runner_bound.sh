@@ -130,15 +130,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # backgrounding, and those are fine only because they do not assert that
 # something is ABSENT from the output: a row added to one of them that greps for
 # a MISSING `ok` or `==` line has to clear the variable on its own line, or it
-# goes red on a harness artefact rather than on a defect. Two do clear it
-# already -- `passes`, so that the `ok` row it greps for is supplied by the
-# `--verbose` on its line and not by an inherited environment, and the `env -u`
-# row in `quiet`, whose whole subject is the variable being unset.
+# goes red on a harness artefact rather than on a defect. The rows that do clear
+# it say so on their own line.
 #
-# No count here, deliberately: the first two drafts of this comment each stated
-# one and each was wrong by the time it was read, once by a row the same commit
-# added. A comment claiming a guarantee the code does not give is itself the
-# guard that stops guarding. Both drafts found by the independent review.
+# No count here, deliberately -- not of the invocations and not of the rows that
+# clear. Three drafts of this comment stated one, and each was wrong by the time
+# it was read; the third was invalidated by a row the same commit added, in the
+# paragraph declaring itself immune. A comment claiming a guarantee the code
+# does not give is itself the guard that stops guarding. All three found by the
+# independent review.
 run_copy() {
   AUTOFLEET_TEST_NO_SKIP="${COPY_NO_SKIP-}" AUTOFLEET_TEST_VERBOSE="${COPY_VERBOSE-}" \
     AUTOFLEET_TEST_TIMEOUT=10 \
@@ -1136,36 +1136,82 @@ EOF
   # the row that notices if it stops -- the whole point of quiet is that nothing
   # else in this repo will.
   #
-  # EVERY invocation, and comments do not count. Asking whether the file
-  # mentions the flag anywhere passes on the strength of this very row's
-  # counterpart comment in ci.yml, and asking whether ANY invocation carries it
-  # passes while a second job runs the suite quietly -- ci.yml is owed exactly
-  # such a job, the strict AUTOFLEET_TEST_NO_SKIP one tests/run.sh names as #80.
-  # Both found by /code-review.
+  # EVERY INVOCATION, and comments do not count -- both halves asserted rather
+  # than approximated, because the first two drafts of this row got each of them
+  # wrong in the cheap-looking way.
+  #
+  # Asking whether the FILE mentions the flag anywhere passes on the strength of
+  # this row's counterpart comment in ci.yml. Asking whether ANY invocation
+  # carries it passes while a second job runs the suite quietly -- and ci.yml is
+  # owed exactly such a job, the strict AUTOFLEET_TEST_NO_SKIP one tests/run.sh
+  # names as #80. Both found by /code-review.
+  #
+  # Then: `grep -v "^[[:space:]]*#"` drops a line only when `#` is its first
+  # non-space character, so `./tests/run.sh   # --verbose would be nice` survives
+  # the filter AND matches the flag -- in the comment. And `grep -c` counts
+  # LINES, so `./tests/run.sh --verbose && ./tests/run.sh` is one loud line with
+  # a quiet run inside it. Both found by the independent review, which pointed at
+  # evals/lint.sh's `strip_comment` and said this was that function's first draft
+  # again; it is borrowed here rather than re-derived.
+  #
+  # A VALUE is required of the variable: `AUTOFLEET_TEST_VERBOSE= ./tests/run.sh`
+  # is a quiet run that mentions it. `="1"` counts, because a pattern rejecting
+  # every quote reds a CI file that is correct -- the expensive direction.
+  #
+  # What it still cannot see is a step- or job-level `env:` block, which is the
+  # normal YAML way to set one: the flag has to be ON the invocation. That is a
+  # real constraint on how ci.yml may spell it rather than an oversight, it is
+  # written into #80 where the person who writes that line will read it, and the
+  # alternative is reading YAML with grep. A false red says exactly where to
+  # look; a false green is what this row exists to prevent.
   ci="$REPO_ROOT/.github/workflows/ci.yml"
-  ci_runs="$(grep -v "^[[:space:]]*#" "$ci" | grep -c "\./tests/run\.sh" || true)"
+  ci_report="$(python3 - "$ci" <<'CIPY'
+import re, sys
+
+def strip_comment(line):
+    """The line with a trailing shell comment removed, quotes respected.
+
+    Lifted from evals/lint.sh, where the docstring explains why cutting at the
+    first `#` anywhere is wrong. Here the quoting matters less and the trailing
+    comment matters more, but one spelling of this in the repo is worth more
+    than two that drift.
+    """
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+# The env prefix stays with its own invocation, which is the whole reason the
+# line is split: `AUTOFLEET_TEST_VERBOSE=1 ./tests/run.sh && ./tests/run.sh`
+# must read as one loud run and one quiet one, not as a loud line.
+LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
+runs = quiet = 0
+for line in open(sys.argv[1]):
+    for frag in re.split(r"&&|\|\||;", strip_comment(line)):
+        n = frag.count("./tests/run.sh")
+        if not n:
+            continue
+        runs += n
+        # Two invocations in one fragment with no separator between them is a
+        # shape this cannot judge, so it is counted quiet: a false red that
+        # names the line beats a green that assumed.
+        if n > 1 or not LOUD.search(frag):
+            quiet += n
+print(runs, quiet)
+CIPY
+)"
+  ci_runs="${ci_report%% *}"; ci_quiet="${ci_report##* }"
   [ "${ci_runs:-0}" -gt 0 ] \
     || fail "ci.yml no longer runs the suite; this row asserts nothing"
-  # The variable has to carry a VALUE. `AUTOFLEET_TEST_VERBOSE= ./tests/run.sh`
-  # is a quiet run that mentions the variable, and #80's strict job is exactly
-  # where somebody writes a variable-prefixed invocation. Quoted counts:
-  # `="1"` is loud and only `=""` and `=''` are not, because a pattern that
-  # rejected every quote would red a CI file that is correct -- which is the
-  # more expensive way to be wrong than the one it was guarding against. Found
-  # by the standards review.
-  #
-  # And it has to be ON THE LINE. A step-level or job-level `env:` block is the
-  # normal YAML way to set one, and this row cannot see it: a workflow that is
-  # correct that way goes red here. That is the cheap direction to be wrong in
-  # -- the alternative is reading YAML with grep, and a false red says exactly
-  # where to look -- but it is a real constraint on how ci.yml may spell it, so
-  # it is written down rather than discovered. Both found by the independent
-  # review.
-  ci_loud="$(grep -v "^[[:space:]]*#" "$ci" | grep "\./tests/run\.sh" \
-             | grep -cE -e "--verbose" \
-                        -e "AUTOFLEET_TEST_VERBOSE=[\"']?[^[:space:]\"']" || true)"
-  [ "${ci_loud:-0}" = "$ci_runs" ] \
-    || fail "$((ci_runs - ci_loud)) of ci.yml's $ci_runs suite runs are quiet, so a failed run no longer says which phases ran"
+  [ "${ci_quiet:-1}" = 0 ] \
+    || fail "$ci_quiet of ci.yml's $ci_runs suite invocations are quiet, so a failed run no longer says which phases ran"
   ok "every run of the suite in CI still asks for the per-phase lines"
   ;;
 
