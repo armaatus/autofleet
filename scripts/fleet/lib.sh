@@ -271,6 +271,16 @@ FLEET_DIR="${AUTOFLEET_DIR:-$HOME/.autofleet}"
 FLEET_STOP="$FLEET_DIR/STOP"
 FLEET_DRAIN="$FLEET_DIR/DRAIN"
 FLEET_OWNED="$FLEET_DIR/worktrees"
+# ...and what it HAS run, which is a different question. `own()` writes an
+# issue's worktree path here and `disown_issue` does NOT take it away, so the
+# record outlives the worktree -- `cost.sh` is built on it, and on $FLEET_OWNED
+# alone that report emptied itself exactly when a run finished.
+#
+# HERE, beside the others, for the reason stated above them: the writer is
+# fleet.sh and the reader is cost.sh, and two spellings of one path is one
+# chance for the reader to look somewhere the writer never wrote. Found by the
+# standards review, which pointed at this very paragraph as the rule it broke.
+FLEET_RAN="$FLEET_DIR/ran"
 
 # Which reviewer this repository runs, normalised -- `local` or `github`.
 #

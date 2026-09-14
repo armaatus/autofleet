@@ -119,6 +119,16 @@ STOP_FILE="$FLEET_STOP"
 DRAIN_FILE="$FLEET_DRAIN"
 OWNED_DIR="$FLEET_OWNED"
 STARTED_DIR="$STATE_DIR/started"
+# What the fleet HAS run, as opposed to what it is running. From lib.sh, because
+# cost.sh reads the same path and two spellings of it is one chance for the
+# reader to look where the writer never wrote.
+#
+# It gets the same exception `gaveup-` gets, and for the same reason: a record of
+# what happened is not state about what is happening, and a restart is not a
+# decision about an issue. It grows by one short file per issue the fleet ever
+# starts -- bounded by the backlog rather than by the clock, unlike the two
+# stores #72 capped, which grew per review and per log line. Nothing evicts it.
+RAN_DIR="$FLEET_RAN"
 # The `Closes #N` and `Blocked by #N` patterns, shared with merge_gate.py so the
 # dispatcher, the gate and GitHub cannot read the same body three ways. It sits
 # under .github/scripts/ because merge-gate.yml sparse-checks out that directory
@@ -199,7 +209,6 @@ BLOCKED_LABEL="${AUTOFLEET_BLOCKED_LABEL:-blocked}"
 # issue_labels_in split it here.
 ANSWER_SEP="$(printf '\t')"
 
-mkdir -p "$OWNED_DIR" "$STARTED_DIR"
 # The poll cache is emptied further down, and only when nobody is using it: see
 # the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
@@ -241,6 +250,34 @@ check_drain() {
 }
 
 # ------------------------------------------------------------- the runner ---
+# `cost` FIRST, because it is the one subcommand that needs no runner: it reads
+# transcripts off disk and opens no worktree, no terminal and no board. The
+# probe below is at SOURCE time and `die`s, so a `cost` arm in the case at the
+# foot of this file was unreachable on any machine without a runtime -- a CI
+# runner, a laptop with the app shut, the very machines somebody asks "what did
+# last night cost" from. It answered "the orca runner is not usable here, so
+# there is nothing to dispatch with", which is true and has nothing to do with
+# the question. Found by CI, which is exactly such a machine; the suite was
+# green on the laptop where the runtime answers.
+#
+# Guarded on BASH_SOURCE so sourcing this file for tests still defines
+# everything below rather than exec-ing away mid-source.
+if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ]; then
+  # A separate script rather than a cmd_* in here: it knows nothing about
+  # dispatching, and this file is 3.5k lines already. `exec` so its exit status
+  # is the one the caller sees.
+  shift
+  exec "$REPO_ROOT/scripts/fleet/cost.sh" "$@"
+fi
+
+# BELOW the cost dispatch, not above it. Up at the top this ran for `cost` too,
+# so a reporting command created three state directories under ~/.autofleet on a
+# machine that had never run the fleet -- and then reported that the fleet had
+# run nothing. "It reads transcripts off disk and opens no worktree" is how the
+# dispatch above describes itself. Nothing between here and there reads these
+# directories at source time. Found by the independent review.
+mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
+
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep
 # reports the consequence instead of the cause. The driver has already said why
@@ -306,6 +343,14 @@ interrupt_agent_in() {
 # --------------------------------------------------------------- the state ---
 own() {
   printf '%s\n' "$2" >"$OWNED_DIR/$1"; date +%s >"$STARTED_DIR/$1"
+  # ...and the copy that OUTLIVES the worktree, for `cost.sh`. See RAN_DIR.
+  #
+  # APPENDED, not replaced, and only if new. `fleet.sh retry 44` opens a SECOND
+  # worktree for the same issue at a different path, and truncating here threw
+  # the first attempt away -- which is "did the abandoned attempt cost more than
+  # the one that landed", the question the report exists to answer. Found by
+  # `/code-review`.
+  grep -qxF "$2" "$RAN_DIR/$1" 2>/dev/null || printf '%s\n' "$2" >>"$RAN_DIR/$1"
   clear_issue_markers "$1"
 }
 owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
@@ -3606,6 +3651,8 @@ case "${1:-}" in
   stop)   shift; cmd_stop "${1:-}" ;;
   resume) cmd_resume ;;
   retry)  shift; cmd_retry "$@" ;;
+  # `cost` is NOT here. It is dispatched before the runner probe near the top of
+  # this file, because it is the one subcommand that works without a runtime.
   *)
     cat >&2 <<USAGE
 usage: fleet.sh <command>
@@ -3618,6 +3665,7 @@ usage: fleet.sh <command>
   stop [--now]                       drain (or interrupt the agents too)
   resume                             clear the stop
   retry 44                           hand back an issue the time-box gave up on
+  cost [--json] [44 ...]             what each issue's worktree spent, in tokens
 
 Run it in a terminal the runner opens, so it is as visible as the work it starts:
   $(runner_dispatcher_hint)
