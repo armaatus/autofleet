@@ -136,6 +136,11 @@ the rule that survived both is the one worth keeping: **this file names every
 trailer that is allowed, and never says how many there are anywhere else.** A
 count stated twice is a count that goes stale in one of the two places.
 
+That rule was broken by the change that wrote it: the brief was headed "The
+three trailers" and `evals/lint.sh` reported "all three trailers", so adding a
+fourth would have left two files saying otherwise. Both now say "every", which
+is the only count that cannot go stale. Found by the independent review.
+
 `N` is Important plus Nit, across all three passes, inline comments included.
 `0` means the review found nothing. `M` is the Important subset of `N`, counted
 the same way; `0` means everything you found was a nit.

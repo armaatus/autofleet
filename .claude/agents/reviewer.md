@@ -161,7 +161,7 @@ Rounds one and two are unchanged. Behaviour findings arrive early, and a floor
 that suppressed them would be trading the thing the review is for. If the run
 block does not name a round, treat it as round one.
 
-## The three trailers, at the very end of the body
+## The trailers, at the very end of the body
 
 ```
 <!-- review-important: M -->

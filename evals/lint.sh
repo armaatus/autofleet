@@ -272,7 +272,7 @@ if [ -f .claude/agents/reviewer.md ]; then
     grep -q -- "$needle" .claude/agents/reviewer.md \
       || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to write or read"
   done
-  ok "the reviewer brief names all three trailers, REVIEW.md and the standards pass"
+  ok "the reviewer brief names every trailer, REVIEW.md and the standards pass"
 else
   fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
 fi
@@ -319,7 +319,7 @@ fi
 #     gate does not know which mode wrote the review it is looking at.
 sev_missing=""
 for f in REVIEW.md .claude/agents/reviewer.md scripts/fleet/review.sh \
-         .github/workflows/claude-review.yml; do
+         .github/workflows/claude-review.yml docs/WORKFLOW.md; do
   grep -q -- 'review-important' "$f" || sev_missing="$sev_missing $f"
 done
 if [ -z "$sev_missing" ]; then
@@ -369,7 +369,7 @@ def block(path):
 want = ["important", "findings"]
 bad = []
 for path in ("REVIEW.md", ".claude/agents/reviewer.md", "scripts/fleet/review.sh",
-             ".github/workflows/claude-review.yml"):
+             ".github/workflows/claude-review.yml", "docs/WORKFLOW.md"):
     got = block(path)
     if got != want:
         bad.append(f"{path} states the trailers as {got}, not {want}")
@@ -377,7 +377,7 @@ if bad:
     sys.exit("the trailer block has drifted:\n  " + "\n  ".join(bad))
 PYEOF
 then
-  ok "all four files state the two trailers in the same order"
+  ok "every file stating the two trailers states them in the same order"
 else
   fail "the trailer block has drifted between the policy and the prompts (above)"
 fi
@@ -416,31 +416,41 @@ else
   fail "the late-round floor is gone from:$floor_missing -- a reviewer can spend rounds on nits again"
 fi
 
-# 2h. ...and none of them tells the floor to report a zero count. `0` releases
-#      the gate: merge_gate takes `if found == 0: continue`, so a floor that
-#      reported it would land a PR with unanswered nits under the auto-merge
-#      armed at open. Two of the three said the right thing and the third did
-#      not.
+# 2h. ...and each of them pairs the floor with a NON-ZERO findings count.
+#      `0` releases the gate -- merge_gate takes `if found == 0: continue` -- so
+#      a floor reporting it would land a PR with unanswered nits under the
+#      auto-merge armed at open. Two of the three files said the right thing and
+#      the third did not.
 #
-#      STRUCTURAL, not the one historical sentence. The first version of this
-#      matched `follow-up issue and reports .0.` -- the exact pre-correction
-#      wording -- so it could only fire on a byte-exact revert, and the OTHER
-#      draft wording the same review found ("report both counts as 0") passed
-#      it green. A check that pins one string is a check that pins one commit.
-#      What it looks for now is any sentence that puts a zero count next to the
-#      floor: the counts named within a few words of "round three" or
-#      "follow-up issue". Found by the independent review, which pointed out
-#      the comment claimed a generality the pattern did not have.
+#      POSITIVE AND STRUCTURAL, after two failed attempts at detecting the wrong
+#      sentence. The first matched one historical wording, so it could only fire
+#      on a byte-exact revert. The second widened the gap and matched
+#      `report `0`` inside REVIEW.md's own "**Do not** report `0`" -- the
+#      negation trap #73 names and says to reject, arrived at by accident.
+#
+#      So this asserts what must be TRUE rather than hunting what must not be:
+#      every file stating the floor names `review-findings: N`, the letter, next
+#      to it. Rewrite the floor to report a zero and the `N` is what goes, in
+#      any phrasing, with no sentence-boundary or negation question to get
+#      wrong. Found by the independent review, rounds 1 and 3.
+#
+#      200 and not more: BSD grep -- which is what macOS ships and what this
+#      repo has to run on -- caps a bounded repetition at RE_DUP_MAX, 255.
+#      `.{0,300}` is not a pattern that matches nothing, it is an INVALID
+#      OPERAND: grep exits 2, the `||` fires, and every file reports as missing
+#      the thing it plainly has. Under `set -o pipefail` with grep's stderr
+#      going nowhere, that looked exactly like a real finding. Cost twenty
+#      minutes; written down so it costs nobody else any.
 zero_floor=""
 for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
   flat "$f" \
-    | qgrep -E '(round three|follow-up issue)[^.]{0,120}(both counts as .?0|reports? .?0.?[ .]|review-findings: 0)' \
-    && zero_floor="$zero_floor $f"
+    | qgrep -E '(round three|follow-up issue).{0,200}review-findings: N' \
+    || zero_floor="$zero_floor $f"
 done
 if [ -z "$zero_floor" ]; then
-  ok "...and none of them tells it to report a zero count, which would release the gate"
+  ok "...and each pairs it with a real findings count, not the 0 that releases the gate"
 else
-  fail "the late-round floor is told to report 0 findings in:$zero_floor -- that releases the gate on unanswered nits"
+  fail "the late-round floor does not name a non-zero findings count in:$zero_floor -- a floor reporting 0 releases the gate on unanswered nits"
 fi
 
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer

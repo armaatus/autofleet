@@ -600,6 +600,14 @@ PY
         echo "again on the whole diff. Three pull requests were measured going round that"
         echo "way with this script never once run. If something here IS worth a commit,"
         echo "make it -- but make that a decision, not the default."
+        echo
+        # The agent taking the sanctioned exception was the one reader here
+        # with no instruction: told a push is available and not what it costs.
+        # The other branch says this and this branch did not. Found by the
+        # independent review.
+        echo "If you do push: that ends this round. The review above is invalidated by the"
+        echo "new head, the reviewer runs again on what you sent, and there is nothing left"
+        echo "to answer here -- come back to this script rather than to answer-review.sh."
       else
         echo "Fix what is real. Where you disagree, reply on the thread with the reason"
         echo "rather than ignoring it, and resolve every thread."
