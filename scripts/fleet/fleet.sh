@@ -1359,13 +1359,25 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
 #
-# Only the first is a lock, and the three records must never be counted as one.
+# Only the first is a lock, and the four records must never be counted as one.
 # `is_review_record` is the predicate; use it rather than respelling the suffix
 # list. `cmd_status` respelled it as a `find ! -name` and counted all three as
 # reviewers in flight, permanently, on the screen its own comment calls the
 # first anybody looks at. Found by the independent review, which noted the
 # comment two lines above already stated the rule this broke.
 is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; esac; return 1; }
+
+# A TRANSCRIPT IS MORE THAN ONE FILE since armaatus/autofleet#65. A delta round
+# also leaves `pr-<n>-<head>.context.md` -- the carried-forward context it handed
+# the reviewer -- and a reviewer killed outside its own trap leaves `.log.raw`
+# and `.log.err`. All of them go WITH the log rather than by globs of their own,
+# so the set cannot fall out of step: anything that outlives its log is a store
+# that grows for as long as the fleet runs, which is the growth
+# AUTOFLEET_KEEP_REVIEWS exists to stop. Beside `is_review_record` and not
+# inside `prune_review_logs`, which is where it was: a helper defined mid-body
+# leaks to global scope anyway and is invisible to anyone reading the file-level
+# helpers. Found by `/mattpocock-skills:code-review`.
+rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1602,7 +1614,7 @@ prune_review_logs() {
       *" $num "*) ;;                # eligible since a previous pass: sweep it
       *) continue ;;                # first pass seeing it closed: keep them all
     esac
-    rm -f "$f" && removed=$((removed + 1))
+    rm_transcript "$f" && removed=$((removed + 1))
   done
   # ...and the newest N for each PR that IS open. `ls -t` is mtime order, which
   # is the order they were written.
@@ -1615,7 +1627,7 @@ prune_review_logs() {
       [ -n "$f" ] || continue
       kept=$((kept + 1))
       [ "$kept" -le "$AUTOFLEET_KEEP_REVIEWS" ] && continue
-      rm -f "$f" && removed=$((removed + 1))
+      rm_transcript "$f" && removed=$((removed + 1))
     done <<EOF
 $(ls -t "$dir"/pr-"$num"-*.log 2>/dev/null)
 EOF
@@ -1626,6 +1638,24 @@ EOF
     [ -e "$f" ] || continue
     num="$(basename "$f")"; num="${num#.closed-}"
     ls "$dir"/pr-"$num"-*.log >/dev/null 2>&1 || rm -f "$f"
+  done
+  # ...and a context file with no log beside it, which is the one way the
+  # pairing above can be escaped: a reviewer killed between writing its context
+  # and starting leaves a context whose log was never written. `review.sh`
+  # creates the log as a placeholder before it spawns precisely so that a LIVE
+  # reviewer is never this case -- deleting a running review's context out from
+  # under it is the failure this loop would otherwise be.
+  # `.raw` and `.err` are in the list for the same reason one step further on:
+  # `finish_log` folds them into the log and deletes them, but an exit that
+  # skips the trap -- SIGKILL, the OOM killer -- leaves them, and no glob in
+  # this function matched either. Found by `/code-review`.
+  for f in "$dir"/pr-*.context.md "$dir"/pr-*.log.raw "$dir"/pr-*.log.err; do
+    [ -e "$f" ] || continue
+    case "$f" in
+      *.context.md) base="${f%.context.md}.log" ;;
+      *)            base="${f%.raw}"; base="${base%.err}" ;;
+    esac
+    [ -e "$base" ] || { rm -f "$f"; removed=$((removed + 1)); }
   done
   # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
   # first question about a missing transcript is whether this took it. The
@@ -3154,6 +3184,27 @@ cmd_status() {
       n=$((n + 1))
     done
     echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
+    # How many rounds each open pull request has spent, on the first screen
+    # anybody looks at. A PR quietly on its eleventh round is the failure
+    # armaatus/autofleet#65 is about, and before this nothing anywhere counted
+    # them -- not the log, not this screen, not `cost`.
+    # A GLOB, not `is_review_record`, and deliberately: the predicate answers
+    # "is this any record", and this wants ONE kind of record and its number.
+    # The rule the comment above states is about counting records as reviewers,
+    # which is what a `find ! -name` got wrong; naming one suffix to read one
+    # file is not that.
+    local r rn rpr
+    for r in "$REVIEWING_DIR"/*.rounds; do
+      [ -e "$r" ] || continue
+      rn="$(cat "$r" 2>/dev/null)"
+      case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
+      rpr="$(basename "$r")"; rpr="${rpr%.rounds}"
+      if [ "$rn" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
+        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds -- AT THE CAP, a person decides"
+      else
+        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds"
+      fi
+    done
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"

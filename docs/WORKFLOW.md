@@ -557,9 +557,34 @@ Two things differ, and both are the agent's business:
   `~/.autofleet/fleet.log` and a transcript under `~/.autofleet/reviews/`, not a
   `verdict` comment on the PR.
 
+**The round count is the pull request's, not this fleet's.** `#91` bounded the
+rounds and `#65` made the number honest. `<pr>.rounds` was a tally `review.sh`
+incremented on exit 0, and its own comment recorded three reviews it could not
+see: one submitted by the workflow rather than by this script, one found on exit
+8 that no run ever counted, and one a killed reviewer had already left. Each is
+a real review a real PR really had, so a PR could pass the cap unnoticed.
+`review.sh` now also derives the count from the PR payload it already fetches —
+how many distinct heads carry a review `merge_gate` counts — and keeps the
+larger of the two. Larger, never smaller: a force-push that orphans every
+earlier review drops the derived count to zero, and that must not reopen the
+loop the cap closed. `fleet.sh status` shows the count per open PR, which is
+where a person sees a pull request quietly on its fourth round.
+
+**What a round reads is also a knob.** `AUTOFLEET_REVIEW_SCOPE=delta` scopes
+round N to `<last reviewed head>..<head>` — derived from the pull request
+`review.sh` already fetches, never stored — and hands the reviewer a byte-capped
+file holding what the last round found, how it was answered, and the threads
+still open. It degrades to `full` on round one, on a force-push that orphans the
+last reviewed head, when the fetch of the PR ref fails, and every
+`AUTOFLEET_REVIEW_FULL_EVERY`th round, and it says in the log which it used.
+What it does **not** change is what the gate accepts: `merge_gate.py` still
+requires a counting independent review on the current head, per head. A narrower
+read is not a weaker gate.
+
 [CONFIGURATION.md](CONFIGURATION.md#the-review) has the trade in full, including
-what `local` gives up. autofleet itself runs on `local`, because it has no
-`CLAUDE_CODE_OAUTH_TOKEN`.
+what `local` gives up, the three counters side by side, and the per-round cost
+row every review appends to `$FLEET_DIR/reviews/cost.tsv`. autofleet itself runs
+on `local`, because it has no `CLAUDE_CODE_OAUTH_TOKEN`.
 
 On GitHub, in `github` mode:
 
