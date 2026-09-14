@@ -291,7 +291,11 @@ run_pass() {
   echo "  $err   (why it stopped)" >&2
   echo "Run this again, or run the pass by hand and record what it found with" >&2
   echo "  ./scripts/fleet/record-review.sh findings.md" >&2
-  echo "  ./scripts/fleet/record-review.sh --none   # it ran, and found nothing" >&2
+  # NOT `--none`. It is the one command that opens the push gate with no review
+  # in it, and printing it directly under "the gate is still closed, which is
+  # correct" hands the bypass to an agent that has just had two passes fail and
+  # is watching a time-box. `record-review.sh`'s own refusal still names it,
+  # where a person is typing the command. Found by the local /code-review pass.
   return 5
 }
 
