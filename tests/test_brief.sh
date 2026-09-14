@@ -186,7 +186,18 @@ case "${1:-}" in
                "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
     [ -n "${COUNTED// /}" ] \
       || fail "no \"count\" rows found in evals/lint.sh's reading table; this phase would sum nothing and pass"
-    allowed="$(printf '%s\n' $COUNTED findings.md | sed 's/\./\\./g' | paste -sd'|' -)"
+    # The WRITTEN rows come out of the same table, for the reason the paragraph
+    # above gives about the counted ones. `findings.md` was hardcoded here as
+    # the one exception, so the day step 3 named a second file it writes --
+    # `.autofleet/run/self-review.md` -- this phase failed on a path the lint's
+    # own table already allowed. A restated membership list drifts from the
+    # table it was copied out of; that is the whole point of reading it.
+    # Found by the local /code-review pass.
+    WRITTEN="$(sed -n 's/^ *"\([A-Za-z0-9_./-]*\)": *("written".*/\1/p' \
+               "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
+    [ -n "${WRITTEN// /}" ] \
+      || fail "no \"written\" rows found in evals/lint.sh's reading table; the brief could name no file it writes"
+    allowed="$(printf '%s\n' $COUNTED $WRITTEN | sed 's/\./\\./g' | paste -sd'|' -)"
     named="$(grep -oE '[A-Za-z0-9_./-]+\.md' <<<"$brief" | sort -u \
              | grep -vxE "$allowed" || true)"
     [ -z "$named" ] \

@@ -223,13 +223,13 @@ failed before your change. Run it and read the output.
 **3. Review it yourself, before anything leaves this worktree.** One command,
 which runs both passes outside this session and records the marker:
 
-    ./scripts/fleet/self-review.sh
+    ./scripts/fleet/self-review.sh   # findings: .autofleet/run/self-review.md
 
 Commit first -- it refuses a dirty tree -- and **start it in the background**: it
 outlasts a tool call. `/code-review high` finds defects,
 `/mattpocock-skills:code-review` conformance, REVIEW.md is the policy. Fix what
-is real, re-run the tests, run it again: the marker is per-commit. Without it for
-the commit you push, the guard hook refuses `git push` and `gh pr create`.
+is real, re-run the tests, run it again: the marker is per-commit, and without
+one the guard hook refuses `git push` and `gh pr create`.
 
 **Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
 marker exists, run:
