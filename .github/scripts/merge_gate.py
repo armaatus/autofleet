@@ -109,6 +109,32 @@ LOCAL_REVIEW_RE = re.compile(
     r"<!--\s*independent-review:\s*local\s+([0-9a-f]{6,40})\s*-->", re.I
 )
 
+# What `scripts/fleet/validate.sh` writes, and the successor of the marker above.
+#
+# A VALIDATION IS NOT A REVIEW. The review judges a diff once, at PR-open; the
+# validation judges whether that review's findings were addressed and whether
+# the commits answering them broke anything. They are different jobs and they
+# are told apart HERE, by this trailer, because they arrive through the same
+# `gh pr review --comment` call -- which they do for one reason: `guard.py`
+# already refuses `gh pr review` from a fleet-owned worktree, so the trailer is
+# out of the reach of the agent it judges. A `gh pr comment` route would have
+# been reachable, `answer-review.sh` needs that command, and a certificate an
+# agent can write about itself certifies nothing.
+#
+# It carries the head sha for the same reason `LOCAL_REVIEW_RE` and `ANSWER_RE`
+# do: a body carried forward to a later push must not keep certifying code
+# nobody validated.
+#
+# The verdict is `pass` or `fail`, and ANYTHING ELSE IS NEITHER -- including a
+# missing trailer. `validation_verdict()` returns None for all of them and
+# `evaluate()` reads None as "not validated yet", which holds the PR. That is
+# the fail-closed direction, and it is the one this trailer exists to take: a
+# validator that crashed writes nothing at all, and nothing at all must not read
+# as consent.
+VALIDATED_RE = re.compile(
+    r"<!--\s*validated:\s*([0-9a-f]{6,40})\s+([a-z]+)\s*-->", re.I
+)
+
 # How `.autofleet/config` spells the knob, in either of the two shapes a shell
 # config file uses: a plain `AUTOFLEET_REVIEW_MODE=local`, and the
 # `: "${AUTOFLEET_REVIEW_MODE:=github}"` form `scripts/fleet/config.sh` writes
@@ -149,12 +175,18 @@ REVIEW_MODES = ("github", "local")
 
 HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 
-# What the PR body has to show. These are the two local passes CLAUDE.md
-# requires before anything leaves a worktree. The `.autofleet/run/reviewed-<sha>` marker
-# that gated the push is per-worktree and invisible from CI, so the body is what
-# can actually be checked here.
+# What the PR body has to show: the local pass CLAUDE.md requires before anything
+# leaves a worktree. The `.autofleet/run/reviewed-<sha>` marker that gated the
+# push is per-worktree and invisible from CI, so the body is what can actually be
+# checked here.
+#
+# ONE pass, not two. `/code-review` used to be required alongside this and is
+# not any more: the opening prompt is `/implement`, which runs
+# `/mattpocock-skills:code-review` itself at the end of the build, and that pass
+# covers both axes -- standards, and spec-vs-diff. Requiring a second overlapping
+# review before a pull request even exists was cost with no reader. A body that
+# names `/code-review` as well is still fine; nothing here forbids it.
 LOCAL_PASSES = (
-    ("/code-review", "a local /code-review pass"),
     ("mattpocock-skills:code-review",
      "a local /mattpocock-skills:code-review pass (standards, and spec-vs-diff)"),
 )
@@ -272,11 +304,105 @@ def independent_reviews(pull_request, head_sha):
         return any(head_sha.lower().startswith(m.lower())
                    for m in LOCAL_REVIEW_RE.findall(review.get("body") or ""))
 
+    # A VALIDATION IS NOT A REVIEW, and it arrives through the same `gh pr review`
+    # call -- so without this the validator's own record would satisfy the
+    # independence requirement it exists downstream of. In `github` mode it
+    # arrives from an account that is not the author, which is all `counts()`
+    # asks; the PR would then be "independently reviewed" by the thing that was
+    # only ever meant to check the review had been answered. See VALIDATED_RE.
+    #
+    # `validation_verdict()` is None for a trailer this does not recognise, so
+    # that case falls through to being read as an ordinary review -- which is the
+    # safe direction here and the unsafe one is the other: a garbled verdict must
+    # not become a silent second reviewer.
     return sorted(
         (r for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
-         if counts(r) and ((r.get("commit") or {}).get("oid") == head_sha)),
+         if counts(r) and ((r.get("commit") or {}).get("oid") == head_sha)
+         and not VALIDATED_RE.search(r.get("body") or "")),
         key=lambda r: r.get("submittedAt") or "",
     )
+
+
+def validation_verdict(review):
+    """`"pass"`, `"fail"`, or None for a review record that is not a validation.
+
+    None spans three different things -- an ordinary review, a validation whose
+    trailer says something this does not recognise, and a validator that died
+    before writing one -- and `evaluate()` treats all three the same: not
+    validated. Collapsing them is deliberate. The only alternative is to read an
+    unrecognised verdict as consent, and the whole reason the verdict is written
+    down is that silence must not be consent.
+    """
+    matches = VALIDATED_RE.findall(review.get("body") or "")
+    if not matches:
+        return None
+    # The LAST match, for the reason `declared_findings()` reads the last
+    # trailer: a validation of THIS repository quotes the format out of the
+    # fixtures below, and reading the first one would let a quoted `pass` stand
+    # in for a real `fail`.
+    verdict = matches[-1][1].lower()
+    return verdict if verdict in ("pass", "fail") else None
+
+
+def validation(pull_request, head_sha):
+    """The verdict of the newest validation submitted against `head_sha`.
+
+    None when there is none -- which is every PR until the validator has run, and
+    every PR whose head moved after it ran. The sha is checked twice, against the
+    commit GitHub recorded the review on AND against the sha inside the trailer,
+    because they answer different questions: the first is "which commit was this
+    submitted on", the second is "which commit did the validator believe it was
+    judging". A body copied forward satisfies the first and fails the second.
+    """
+    newest = None
+    for r in ((pull_request.get("reviews") or {}).get("nodes") or []):
+        if (r.get("commit") or {}).get("oid") != head_sha:
+            continue
+        verdict = validation_verdict(r)
+        if verdict is None:
+            continue
+        if not any(head_sha.lower().startswith(m[0].lower())
+                   for m in VALIDATED_RE.findall(r.get("body") or "")):
+            continue
+        if newest is None or (r.get("submittedAt") or "") >= (newest[0].get("submittedAt") or ""):
+            newest = (r, verdict)
+    return newest[1] if newest else None
+
+
+def needs_validation(pull_request, head_sha):
+    """Whether this PR is waiting on a validation of `head_sha`.
+
+    Two conditions, and the second is what keeps the best case at ONE post-PR
+    agent run:
+
+    NOTHING IS VALIDATED ON THIS HEAD yet -- a `pass` or a `fail` both count as
+    answered, because a `fail` is waiting on the author, not on another
+    validator. The next validation comes after the next push, which is a new
+    head and a fresh question.
+
+    AND SOME REVIEW ON THIS PULL REQUEST DECLARED FINDINGS. The validator's job
+    is "were the findings addressed, and did the commits answering them break
+    anything". A review that found nothing leaves it nothing to do, and a PR that
+    merges on a clean review has cost one review and no validation at all.
+
+    Any review on ANY head, not just the current one -- the whole reason this
+    phase exists is that the commit answering the findings moves the head out
+    from under the review that asked for them.
+
+    `scripts/fleet/validate.sh` asks this rather than deciding for itself, for
+    the reason `review.sh` asks `independent_reviews()`: three paraphrases of
+    "what counts" drifted apart once already (#114), always in the permissive
+    direction.
+    """
+    if validation(pull_request, head_sha) is not None:
+        return False
+    for r in ((pull_request.get("reviews") or {}).get("nodes") or []):
+        if validation_verdict(r) is not None:
+            continue          # a validation is not a review; see VALIDATED_RE
+        found = declared_findings(r)
+        if found is not None and found > 0:
+            return True
+    return False
 
 
 def is_substantive(review):
@@ -478,6 +604,34 @@ def evaluate(head_sha, pull_request, changed_files):
             "accepts any of " + ", ".join(CLOSING_KEYWORDS) + ", in any case."
         )
 
+    # THE VALIDATION, read before the review conditions because it is what
+    # answers most of them.
+    #
+    # The loop is one review and then at most two validations. That shape has a
+    # consequence this gate has to know about: the commit answering the review's
+    # findings MOVES THE HEAD, and a review is bound to the commit it judged --
+    # so from the first fix onward there is no review on the head and no second
+    # review is coming. Every PR would block forever on a review that cannot
+    # arrive, which is the failure `AUTOFLEET_REVIEW_MODE=local` exists to
+    # remove, reintroduced one layer up.
+    #
+    # So a `pass` validation on the current head STANDS IN FOR the review: it is
+    # the later, stricter statement -- this reader looked at the findings, the
+    # answers, the commits since, and a full test run, and says the branch is
+    # sound. What it does not stand in for is anything below: an unresolved
+    # thread still holds the PR, and the enforcement-layer paths still need a
+    # person. Those are deliberate, and `--selftest` has a row for each.
+    verdict = validation(pull_request, head_sha)
+    if verdict == "fail":
+        problems.append(
+            f"the validation of {head_sha[:8]} failed. The validator judges two "
+            "things -- were the review's findings addressed, and did the commits "
+            "answering them break anything -- and it says no. Its body names "
+            "which. Fix that, push, and the next validation judges the new head; "
+            "`AUTOFLEET_VALIDATE_MAX` bounds how many times, and past it a person "
+            "decides."
+        )
+
     # Who counts, and what counts as a review -- both from the functions above,
     # which is what `review-status.sh` and `await-review.sh` import so that the
     # three answers cannot drift apart again.
@@ -490,7 +644,13 @@ def evaluate(head_sha, pull_request, changed_files):
             "PR #95 merged on one whose body was the word \"test\". Wait for the "
             "review job to actually submit its findings."
         )
-    if not on_head:
+    if not on_head and verdict == "pass":
+        # Validated on this head: the review requirement is met by the thing that
+        # succeeded it. Nothing to add to `problems` here -- and nothing below
+        # this point is skipped, because the thread and protected-path refusals
+        # are not review conditions.
+        pass
+    elif not on_head:
         # The last sentence depends on the mode, and it is read at exactly the
         # moment somebody is working out why their review did not count. In
         # `local` mode "a review by the author does not count" is false and sends
@@ -570,6 +730,14 @@ def evaluate(head_sha, pull_request, changed_files):
                 continue
             if answered(pull_request, head_sha, review):
                 continue
+            # A `pass` validation on this head is a stronger statement than the
+            # author's own answer: it is an independent reader saying the
+            # findings were addressed, having read the answer AND the commits.
+            # Reachable only when the review and the validation sit on the same
+            # head -- an answer in words, with no commit, which is how a nit is
+            # meant to be settled.
+            if verdict == "pass":
+                continue
             # A nit-only review gets a different sentence, not a different
             # decision. The hold is the same one; what changes is that the
             # remedy stops reading as "go fix these". Every agent that has hit
@@ -643,6 +811,143 @@ def evaluate(head_sha, pull_request, changed_files):
 
 
 SELFTEST = [
+    (
+        # The validated trailer is the successor of the review, and it is what
+        # lets a PR merge on a head the review never saw. Without this row the
+        # whole one-review/two-validations shape is untested.
+        "a validation pass on the head merges with no review on that head",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "The review of the commit before the fix, long enough to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-important: 1 -->\n<!-- review-findings: 3 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Every finding from the review is addressed and the suite is green."
+                 "\n<!-- validated: def456 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+    ),
+    (
+        "a validation fail on the head blocks",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Finding 2 is not addressed and the suite is red on tests/test_brief.sh."
+                 "\n<!-- validated: def456 fail -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "the validation of def456 failed",
+    ),
+    (
+        # Same reason LOCAL_REVIEW_RE carries a sha: a body carried forward to a
+        # later push must not keep certifying code nobody validated.
+        "a validation naming an older commit does not count",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Every finding from the review is addressed and the suite is green."
+                 "\n<!-- validated: abc123 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+    ),
+    (
+        # A validation is not a review. In github mode it arrives from an account
+        # that is not the author, so without the exclusion it would satisfy the
+        # independence requirement AND then demand an answer to its own findings.
+        "a validation alone is not an independent review",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Nothing was reviewed here; this record only carries a verdict."
+                 "\n<!-- validated: def456 unknown -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "no independent review",
+    ),
+    (
+        # A validation pass does not override an open thread. Threads were kept
+        # precisely so the per-finding ledger survives; the validator resolves
+        # the ones it is satisfied by, and what it leaves open still holds.
+        "a validation pass does not clear an unresolved thread",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Every finding from the review is addressed and the suite is green."
+                 "\n<!-- validated: def456 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [
+                {"isResolved": False, "path": "src/app.c", "line": 12},
+            ]},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "unresolved",
+    ),
+    (
+        # /code-review is no longer one of the required local passes: /implement
+        # runs /mattpocock-skills:code-review and that is the pre-PR pass now.
+        "the body needs only the mattpocock pass",
+        "abc123",
+        {
+            "body": "Closes #7\n## Review findings\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+    ),
+    (
+        "the body still needs the mattpocock pass",
+        "abc123",
+        {
+            "body": "Closes #7\n/code-review high\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "mattpocock-skills:code-review",
+    ),
     (
         "a clean PR merges",
         "abc123",
@@ -1514,10 +1819,45 @@ def selftest():
             failures += 1
         else:
             print(f"  ok: {what}")
+    # `needs_validation()` is not reachable from the table above -- that drives
+    # `evaluate()`, and this is what the DISPATCHER asks before it spends an
+    # agent. Hard rule 3: a rule with no assertion is not shipped, and "should a
+    # validator start" is a rule.
+    def _review(body, oid="abc123"):
+        return {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                "commit": {"oid": oid}, "author": {"login": "claude[bot]"},
+                "body": body}
+
+    clean = {"reviews": {"nodes": [_review("a review\n<!-- review-findings: 0 -->")]}}
+    dirty = {"reviews": {"nodes": [_review("a review\n<!-- review-findings: 2 -->")]}}
+    done = {"reviews": {"nodes": [
+        _review("a review\n<!-- review-findings: 2 -->"),
+        _review("a validation\n<!-- validated: def456 pass -->", "def456"),
+    ]}}
+    silent = {"reviews": {"nodes": [_review("a review with no trailer at all")]}}
+    checks = [
+        ("a clean review needs no validation -- the best case is one agent run",
+         needs_validation(clean, "abc123"), False),
+        ("a review with findings does", needs_validation(dirty, "def456"), True),
+        ("...and stops needing one once the head is validated",
+         needs_validation(done, "def456"), False),
+        # A review that did not say what it found is held by `evaluate()` until
+        # it is answered, and there is nothing for a validator to check against.
+        # Starting one on it would spend an agent to say "no findings listed".
+        ("a review that said nothing needs no validation",
+         needs_validation(silent, "def456"), False),
+    ]
+    for what, got, want in checks:
+        if got != want:
+            print(f"FAIL: {what} (expected {want}, got {got})", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"  ok: {what}")
+
     if failures:
         print(f"{failures} merge-gate assertion(s) failed", file=sys.stderr)
         return 1
-    print(f"{len(SELFTEST)} merge-gate assertions hold")
+    print(f"{len(SELFTEST) + len(checks)} merge-gate assertions hold")
     return 0
 
 

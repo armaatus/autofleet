@@ -30,14 +30,25 @@ name: claude review
 
 on:
   pull_request:
-    # `synchronize` and `review_requested` are here because `merge-gate` requires
-    # a review on the CURRENT head: push a fix and the previous review no longer
-    # counts. Without a re-review on push, round two of the loop deadlocks --
-    # the agent waits for a review that nothing will ever start.
+    # NO `synchronize`, and that is the change that makes this one review rather
+    # than one per push.
     #
-    # That does mean one review per push. The three-round cap in the agent brief
-    # is what bounds it, not the trigger list.
-    types: [opened, ready_for_review, reopened, synchronize, review_requested]
+    # It used to be here because `merge-gate` requires a review on the CURRENT
+    # head: push a fix and the previous review no longer counts, so without a
+    # re-review on push the loop deadlocked. The cost was a full re-review of the
+    # whole diff for every fix, which found one more thing a level down, which
+    # bought another push. #86 spent four reviews without one ever judging the
+    # commit that merged.
+    #
+    # What satisfies the gate on the new head now is `validate.yml` -- a narrower
+    # job asking only whether these findings were addressed and whether the
+    # commits answering them broke anything. `merge_gate.py` reads its `pass` as
+    # standing in for the review. So a push fires the VALIDATOR, and the reviewer
+    # fires once, when the pull request appears.
+    #
+    # `review_requested` stays: it is the one manual route to a second opinion,
+    # and a person asking for one is not the loop this bounds.
+    types: [opened, ready_for_review, reopened, review_requested]
   issue_comment:
     types: [created]
   pull_request_review_comment:
@@ -204,9 +215,19 @@ jobs:
             keeps getting bitten by. Read the PR with
             `gh pr view <N> --json title,body` and
             `gh pr diff <N>` rather than assuming a checkout.
-            It defines the three passes, what counts as Important rather than a
-            Nit, the nit cap, and an explicit list of what not to report at all.
-            Read it first and follow it exactly.
+            It defines the seven dimensions, what makes a finding Critical
+            rather than Important rather than a Suggestion, the cap on
+            Suggestions, and an explicit list of what not to report at all. Read
+            it first and follow it exactly. If the repository has an
+            `.autofleet/review.md`, that is the host project's own correctness
+            rules and part of the same policy -- read it second.
+
+            THIS IS THE ONLY REVIEW THIS PULL REQUEST GETS. A push does not buy
+            another: what judges the fix is `validate.yml`, which asks only
+            whether these findings were addressed and whether the commits
+            answering them broke anything. It does not go looking for what you
+            missed. Spend your budget accordingly -- on the dimensions where a
+            defect is expensive, not on a sixth naming preference.
 
             Read CLAUDE.md for the five hard rules, and the linked issue for
             Scope and Acceptance. The PR body carries a `## Plan` section; check
@@ -238,8 +259,13 @@ jobs:
             Submit a REVIEW, not a comment, because the verdict has to live in
             the PR's own state where the worktree can read it back:
 
-              gh pr review <N> --request-changes --body "<your findings>"   # any Important finding
-              gh pr review <N> --comment         --body "<your findings>"   # nothing Important
+              gh pr review <N> --request-changes --body "<your findings>"   # any Critical or Important finding
+              gh pr review <N> --comment         --body "<your findings>"   # Suggestions only, or nothing
+
+            Never write a `<!-- validated: ... -->` trailer. That is
+            `validate.yml`'s, it is what releases the merge gate, and a review
+            carrying one is discarded as a validation rather than counted as a
+            review.
 
             `--body`, never `--body-file`. The tools this job grants you are
             Read, Grep, Glob and a fixed list of `gh` and `git` commands: there
@@ -252,7 +278,7 @@ jobs:
             Never `--approve`. The agent that wrote the code has no route to
             approve it, and neither do you.
 
-            Put the findings in the review body, grouped by pass, Important
+            Put the findings in the review body, grouped by dimension, Critical
             first, each naming a file and line. Where a finding is about one
             specific line, prefer an inline comment on that line so the author
             can resolve it as a thread -- the loop on the other side is driven by
@@ -261,8 +287,9 @@ jobs:
 
             A behaviour claim needs a file:line citation in the actual source,
             not an inference from a name -- if you are unsure a finding is real,
-            drop it or say so. A wrong finding costs the author a round trip. If
-            a pass found nothing, say so in one line rather than padding it. End
+            drop it or say so. A wrong finding costs the author a round trip, and
+            there is no later round to take it back in. If a dimension found
+            nothing, say so in one line rather than padding it. End
             with the counts, so the numbers can be compared between PRs.
 
             THEN END THE BODY WITH THESE TWO EXACT LINES, in this order, and
@@ -271,9 +298,10 @@ jobs:
               <!-- review-important: M -->
               <!-- review-findings: N -->
 
-            N is how many findings you are leaving behind -- Important plus Nit,
-            across all three passes, inline comments included. `0` means you
-            found nothing. M is how many of those N were Important.
+            N is how many findings you are leaving behind -- Critical plus
+            Important plus Suggestions, across all seven dimensions, inline
+            comments included. `0` means you found nothing. M is the Critical
+            plus Important subset of N.
 
             M does not decide whether the branch merges -- N above zero holds it
             either way. What M == 0 does is tell the author that answering in

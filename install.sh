@@ -26,15 +26,27 @@ PAYLOAD=(
   ".github/workflows/merge-gate.yml"
   ".github/workflows/unblock.yml"
   ".github/workflows/claude-review.yml"
+  # The `github`-mode twin of `scripts/fleet/validate.sh`. Both modes get a
+  # validator or hard rule 1 is broken: a host repository with the review secret
+  # and no dispatcher would otherwise inherit the merge gate's demand for a
+  # validation with nothing on the machine able to write one, and every PR with
+  # findings would block forever -- which is the exact failure `local` mode was
+  # added to remove, one phase further down.
+  ".github/workflows/validate.yml"
   ".github/workflows/agent-config.yml"
   ".github/scripts/merge_gate.py"
   ".github/scripts/issue_refs.py"
   ".github/scripts/pr_payload.sh"
   ".claude/hooks/guard.py"
   ".claude/hooks/shell-parses.sh"
-  ".claude/agents/verifier.md"
   ".claude/agents/researcher.md"
   ".claude/agents/reviewer.md"
+  # The brief `scripts/fleet/validate.sh` and `.github/workflows/validate.yml`
+  # both inline. `verifier.md` used to sit here and does not any more: it gave an
+  # independent build-and-test verdict BEFORE the PR opened, which is now the
+  # fourth full suite run in one loop -- `/implement` runs it, CI runs it, and
+  # the validator runs it again with a reason to.
+  ".claude/agents/validator.md"
   "evals/lint.sh"
   # lint.sh RUNS this one -- a vendored lint that shells out to a file the
   # installer did not deliver fails on every host PR, on a check about the host's
@@ -419,8 +431,14 @@ Next, in the repo you just installed into:
      that job no-ops and every PR blocks forever on a review that cannot arrive.
      `local` runs the reviewer on your machine instead, with a weaker
      independence guarantee that docs/CONFIGURATION.md spells out.
-  7. Make `merge-gate` a required check on your default branch.
-  8. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
+  7. Write .autofleet/review.md -- YOUR project's correctness rules, the ones
+     REVIEW.md cannot know. The file that must be written atomically, the header
+     that may not appear in that directory, the address a test may not reach.
+     The reviewer reads it after REVIEW.md wherever it exists, and it is not
+     seeded because seeding it would hand you somebody else's. REVIEW.md's "...and
+     this project's own" section says what belongs in it.
+  8. Make `merge-gate` a required check on your default branch.
+  9. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
 
 If the plugin step above could not run, these are the two commands, from inside
 the repo you installed into:

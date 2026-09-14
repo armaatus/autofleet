@@ -60,10 +60,11 @@
 #                                 questions: `.tries` is per head and counts only
 #                                 silence, and .autofleet/run/review-rounds is
 #                                 per worktree and undercounts.
-#   test_review_mode.sh roundcap   ...and at AUTOFLEET_REVIEW_MAX_ROUNDS the
-#                                 dispatcher stops starting reviewers for that PR
-#                                 and asks a person -- on a new head too, or the
-#                                 cap is one push away from not existing.
+#   test_review_mode.sh roundcap   ...and at AUTOFLEET_REVIEW_MAX the dispatcher
+#                                 stops starting reviewers for that PR and hands
+#                                 it to the VALIDATOR instead -- on a new head
+#                                 too, or the cap is one push away from not
+#                                 existing.
 #   test_review_mode.sh retries    ...while a reviewer that submitted NOTHING is
 #                                 tried again. The asymmetry is the whole fix:
 #                                 backwards, it is the silent block the mode
@@ -175,7 +176,12 @@ make_fixture() {
   cp -R "$REPO_ROOT"/scripts/fleet/. "$WORK/repo/scripts/fleet/"
   cp "$REPO_ROOT"/.github/scripts/*.py \
      "$REPO_ROOT/.github/scripts/pr_payload.sh" "$WORK/repo/.github/scripts/"
-  cp "$REPO_ROOT/.claude/agents/reviewer.md" "$WORK/repo/.claude/agents/"
+  # BOTH briefs. `validate.sh` refuses to start without `validator.md` -- exit 2,
+  # "no validator brief" -- and that exit deliberately leaves no `.done` record,
+  # so a fixture missing the file gets a validator started on every poll forever
+  # and every assertion about the second phase measures a config error instead.
+  cp "$REPO_ROOT/.claude/agents/reviewer.md" \
+     "$REPO_ROOT/.claude/agents/validator.md" "$WORK/repo/.claude/agents/"
   git -C "$WORK/repo" init -q -b work
   git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
   PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
@@ -430,6 +436,39 @@ n_started() {
 # caller compares "0\n0" against a number. That has now cost time twice in this
 # file.
 n_spawned() { local n; n="$(grep -c "reviewing PR #42 at .* (pid" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s\n' "${n:-0}"; }
+# ...and the same question about the VALIDATOR, which is what a head move buys
+# now that the reviewer runs once. `grep -c` on "validating", which cannot match
+# "reviewing" -- the two say-lines were deliberately given different verbs so a
+# counter for one cannot silently count the other.
+n_validated() { local n; n="$(grep -c "validating PR #42 at .* (pid" "$AUTOFLEET_DIR/fleet.log" 2>/dev/null || true)"; printf '%s\n' "${n:-0}"; }
+
+# `await`, for a counter that may legitimately OVERSHOOT. `await` waits for an
+# exact value and gives up when the number sails past it, which is right for a
+# lock and wrong for a spawn count whose race is documented as benign: the phase
+# then fails saying "waited for 1; it is 4", which reads as a defect and is not
+# one. Same bound and same failure text, `-ge` instead of `=`.
+await_min() {
+  local what="$1" want="$2" limit="${3:-120}" waited=0 got
+  while [ "$waited" -lt "$limit" ]; do
+    got="$($what)"
+    case "$got" in (*[!0-9]*) got=0 ;; esac
+    [ "$got" -ge "$want" ] && return 0
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "         (waited ${limit}s for $what to be at least $want; it is $($what))" >&2
+  return 1
+}
+
+# ...and for a file a background process writes. Same bound, same shape.
+await_file() {
+  local path="$1" limit="${2:-120}" waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    [ -e "$path" ] && return 0
+    sleep 1; waited=$((waited + 1))
+  done
+  echo "         (waited ${limit}s for $path to appear)" >&2
+  return 1
+}
 # Whether a reviewer still holds PR 42's lock. A poll taken while one is running
 # is CORRECTLY skipped, so a phase that polls again immediately is testing the
 # dedup rather than the thing it means to.
@@ -838,13 +877,51 @@ GHSTUB
       || fail "three further polls started $(n_spawned) reviewers on a head that already has one"
     ok "a head with a counting review is not handed to another reviewer"
 
-    # A push invalidates it: new head, new review.
+    # A PUSH DOES NOT BUY ANOTHER REVIEW, and that is the change. It used to:
+    # `merge-gate` wants a verdict on the CURRENT head, so every fix started a
+    # full re-review of the whole diff, which found one more thing a level down,
+    # which bought another push. #86 spent four reviews without one ever judging
+    # the commit that merged.
+    #
+    # What judges the fix now is the VALIDATOR -- a narrower question, bounded at
+    # two, and `merge_gate.py` reads its `pass` as standing in for the review.
     (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m push)
     git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
     poll_review_open_prs
-    await n_spawned 2 || fail "a new head did not get a reviewer"
-    ok "...and a push starts one again"
+    await n_spawned 2 10 >/dev/null 2>&1 || true
+    [ "$(n_spawned)" = 1 ] \
+      || fail "a push started a $(n_spawned)th reviewer; the review runs once per pull request"
+    ok "...and a push does not buy another review"
+
+    # ...but it IS handed to a validator. `validate.sh` decides for itself
+    # whether one is due -- the stub's review reports `review-findings: 0`, so
+    # there is nothing to check and it exits 8 without spawning an agent -- and
+    # what this asserts is that the DISPATCHER offered it the pull request at
+    # all. Without that line the second phase is unreachable and every PR with
+    # findings blocks forever on a validation nothing starts.
+    # AT LEAST ONE, not exactly one. `start_validator` writes its lock AFTER the
+    # spawn -- the pid is what goes in it -- so back-to-back polls can each start
+    # one before the first has written anything, which is the same benign race
+    # review.sh documents at its own `printf`. What settles it is the `.done`
+    # record, asserted next.
+    await_min n_validated 1 || fail "a new head was offered to no validator, so nothing can ever judge a fix"
+    ok "...it is handed to the validator instead"
+
+    # ...and it STOPS. `validate.sh` writes `v-42.done` on the exit-8 path -- the
+    # stub's review reports `review-findings: 0`, so there is nothing to check --
+    # and `start_validator` reads it before spawning. Without that record a
+    # validator is started every poll for the life of the pull request, which is
+    # armaatus/autofleet#33 in the second phase: fourteen spawns in thirteen
+    # minutes, each exiting two API calls later, burying the dispatcher log.
+    await_file "$AUTOFLEET_DIR/reviewing/v-42.done" 30 \
+      || fail "the validator left no done-record, so every poll starts another one: $(tail -30 "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+    settled="$(n_validated)"
+    for _ in 1 2 3; do poll_review_open_prs; done
+    await n_validated "$(( settled + 1 ))" 10 >/dev/null 2>&1 || true
+    [ "$(n_validated)" = "$settled" ] \
+      || fail "three further polls started $(( $(n_validated) - settled )) more validators on a head already handled"
+    ok "...and a handled head is not handed to another one"
     ;;
 
 # -------------------------------------------------------------------- rounds
@@ -872,23 +949,32 @@ GHSTUB
     git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
     poll_review_open_prs
-    await n_reviews 2 || fail "the new head got no review"
-    await lock_held no || fail "the second reviewer never released its lock"
-    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 2 ] \
-      || fail "a push reset the round count, which is the case the cap exists for"
-    ok "...and a push does not reset it"
+    # The count SURVIVES the head move -- which is the whole reason it is not
+    # another column in `.tries` -- and it does not grow, because with
+    # AUTOFLEET_REVIEW_MAX at 1 the pull request has had its review.
+    await_min n_validated 1 || fail "the new head was offered to no validator"
+    [ "$(n_reviews)" = 1 ] \
+      || fail "a push bought a $(n_reviews)th review; the reviewer runs once per pull request"
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 1 ] \
+      || fail "the round count changed across a push (got '$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)')"
+    ok "...and a push neither resets it nor adds to it"
 
     # A reviewer that submits NOTHING is not a round. It burns a try, which is a
     # different cap for a different population, and counting it here would
     # retire a pull request nobody reviewed.
-    stub_reviewer silent
-    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m again)
-    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    #
+    # ON A FRESH FIXTURE, with the review cap RAISED. At the default of 1 the
+    # pull request above is past its cap and no second reviewer starts at all,
+    # so the phase would assert the property on a reviewer that never ran --
+    # green, and measuring nothing. The `.rounds`/`.tries` asymmetry is not about
+    # the cap's value, so driving it at 2 is the honest way to reach it.
+    make_fixture; stub_reviewer silent
+    export AUTOFLEET_REVIEW_MAX=2
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
     poll_review_open_prs
     await lock_held no || fail "the silent reviewer never released its lock"
-    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 2 ] \
-      || fail "a reviewer that submitted nothing was counted as a round"
+    [ ! -e "$AUTOFLEET_DIR/reviewing/42.rounds" ] \
+      || fail "a reviewer that submitted nothing was counted as a round (got '$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)')"
     ok "...and a reviewer that submitted nothing is not one"
     ;;
 
@@ -900,18 +986,30 @@ GHSTUB
     # (AWAIT_REVIEW_MAX_ROUNDS) only binds while the agent is alive -- #85's
     # stopped at its cap and a fourth review landed with nobody left to answer.
     make_fixture; stub_reviewer marked
-    export AUTOFLEET_REVIEW_MAX_ROUNDS=2
+    export AUTOFLEET_REVIEW_MAX=2
     mkdir -p "$AUTOFLEET_DIR/reviewing"
     printf '2\n' >"$AUTOFLEET_DIR/reviewing/42.rounds"
     printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
-    out="$(poll_review_open_prs 2>&1; cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+    poll_review_open_prs
     await n_spawned 1 10 >/dev/null 2>&1 || true
     [ "$(n_spawned)" = 0 ] \
-      || fail "a PR at the round cap was handed to another reviewer anyway"
+      || fail "a PR at the review cap was handed to another reviewer anyway"
     ok "at the cap, no further reviewer is started"
-    grep -q "which is the cap. Needs you" <<<"$out" \
-      || fail "it stopped at the cap without saying so: $out"
-    ok "...and it says so, naming a person rather than another lap"
+
+    # ...AND IT IS HANDED TO THE VALIDATOR, which is what reaching the cap means
+    # now. With AUTOFLEET_REVIEW_MAX at its default of 1 every healthy pull
+    # request reaches this branch on its second poll, so a `continue` here would
+    # not be "this PR has failed to converge" -- it would be the second phase
+    # never starting on any pull request at all, and every PR with findings
+    # blocking forever on a validation nothing writes.
+    #
+    # The old assertion here was for a message ("which is the cap. Needs you")
+    # that has correctly gone: a hold announcing a person is due is false on the
+    # path every PR takes. The hold that still means something is the VALIDATION
+    # cap, and `validate.sh` prints it where the number lives.
+    await_min n_validated 1 \
+      || fail "a PR past the review cap was handed to no validator, so the second phase never starts"
+    ok "...it is handed to the validator instead"
 
     # AND ON A NEW HEAD TOO. This is what separates it from the per-head cap: a
     # push must not buy a fresh set of rounds, or the cap is only ever one push
@@ -922,7 +1020,7 @@ GHSTUB
     poll_review_open_prs
     await n_spawned 1 10 >/dev/null 2>&1 || true
     [ "$(n_spawned)" = 0 ] \
-      || fail "a push past the round cap started a reviewer, so the cap is one push from nothing"
+      || fail "a push past the review cap started a reviewer, so the cap is one push from nothing"
     ok "...and a push does not buy a fresh set of rounds"
 
     # The knob is validated the way its neighbour is, and for the same reason:
@@ -930,23 +1028,40 @@ GHSTUB
     # exist and fleet.sh runs without `-e` to notice.
     for bad in abc 0 2x -1; do
       cfg_out="$( (cd "$WORK/repo" \
-        && AUTOFLEET_REVIEW_MAX_ROUNDS="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+        && AUTOFLEET_REVIEW_MAX="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
       cfg_rc=$?
       [ "$cfg_rc" = 2 ] \
-        || fail "AUTOFLEET_REVIEW_MAX_ROUNDS='$bad' was accepted (rc=$cfg_rc): $cfg_out"
+        || fail "AUTOFLEET_REVIEW_MAX='$bad' was accepted (rc=$cfg_rc): $cfg_out"
       grep -q "must be a positive whole number" <<<"$cfg_out" \
-        || fail "AUTOFLEET_REVIEW_MAX_ROUNDS='$bad' failed without saying why: $cfg_out"
+        || fail "AUTOFLEET_REVIEW_MAX='$bad' failed without saying why: $cfg_out"
     done
     ok "...and a cap that is not a positive number is refused, not ignored"
+
+    # THE KNOB THAT WAS REPLACED IS AN ERROR, NOT AN ALIAS. A host project that
+    # tuned `AUTOFLEET_REVIEW_MAX_ROUNDS` meant "give this repository more
+    # rounds", which maps onto neither of the two knobs that replaced it --
+    # aliasing it would keep the file working and quietly change what it asks
+    # for. Empty as well as set, because a half-edited config leaves `KNOB=` and
+    # that is still someone who thinks they have configured the cap.
+    for dead in 4 ""; do
+      cfg_out="$( (cd "$WORK/repo" \
+        && AUTOFLEET_REVIEW_MAX_ROUNDS="$dead" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "the replaced knob AUTOFLEET_REVIEW_MAX_ROUNDS='$dead' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q 'AUTOFLEET_VALIDATE_MAX' <<<"$cfg_out" \
+        || fail "it refused the replaced knob without naming what replaced it: $cfg_out"
+    done
+    ok "...and the knob it replaced is refused, naming both of its successors"
 
     # Through .autofleet/config, which is sourced LAST and is the route a host
     # project actually uses. Its neighbour's check sat with the defaults and was
     # decorative for every real user of the knob until that was found.
     hostcfg="$WORK/hostcfg"
     for bad in three 0 ""; do
-      printf 'AUTOFLEET_REVIEW_MAX_ROUNDS=%s\n' "$bad" >"$hostcfg"
+      printf 'AUTOFLEET_REVIEW_MAX=%s\n' "$bad" >"$hostcfg"
       cfg_out="$( (cd "$WORK/repo" \
-        && env -u AUTOFLEET_REVIEW_MAX_ROUNDS AUTOFLEET_CONFIG="$hostcfg" \
+        && env -u AUTOFLEET_REVIEW_MAX AUTOFLEET_CONFIG="$hostcfg" \
              bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
       cfg_rc=$?
       [ "$cfg_rc" = 2 ] \
@@ -954,6 +1069,86 @@ GHSTUB
     done
     ok "...including when it arrives through .autofleet/config, which is read last"
     ;;
+
+# ------------------------------------------------------------------ validate
+  validate)
+  # `validate.sh`'s OWN behaviour, driven directly rather than through the
+  # dispatcher. The `once` and `roundcap` phases assert that a pull request gets
+  # handed to it; this asserts what it does when it is.
+  make_fixture; stub_reviewer marked
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+
+  run_validate() { (cd "$WORK/repo" && ./scripts/fleet/validate.sh 42 2>&1); }
+
+  # NOTHING TO VALIDATE is exit 8, and it is the common answer. The stub's
+  # review declares `review-findings: 0`, so no finding was ever left to check
+  # and starting a full-budget agent to say so would cost more than the phase
+  # saves. `merge_gate.needs_validation` is the one definition of this and
+  # `validate.sh` asks it rather than deciding for itself -- three paraphrases of
+  # "what counts" drifted apart once already (#114), always permissively, and
+  # permissive here is a branch merging on a validation nobody asked for.
+  out="$(run_validate)"; rc=$?
+  [ "$rc" = 8 ] || { echo "$out" >&2; fail "a PR with no findings did not exit 8 (got $rc)"; }
+  grep -q 'wants no validation' <<<"$out" \
+    || { echo "$out" >&2; fail "it declined without saying why"; }
+  ok "a PR whose review found nothing wants no validation"
+
+  # THE MODE GATE. A `github`-mode repository reaching this script is not an
+  # error -- the dispatcher never calls it there, `validate.yml` does the job --
+  # so it is a quiet 4 rather than a failure.
+  printf 'AUTOFLEET_REVIEW_MODE=github\n' >"$WORK/repo/.autofleet/config"
+  out="$(run_validate)"; rc=$?
+  [ "$rc" = 4 ] || { echo "$out" >&2; fail "github mode did not exit 4 (got $rc)"; }
+  grep -q 'validate.yml' <<<"$out" \
+    || { echo "$out" >&2; fail "it declined without naming the workflow that does the job there"; }
+  ok "...and in github mode it declines quietly, naming validate.yml"
+  printf 'AUTOFLEET_REVIEW_MODE=local\n' >"$WORK/repo/.autofleet/config"
+
+  # THE STOP IS A STOP. This submits a review to a pull request, which is
+  # exactly what nothing may do while that file exists.
+  : >"$AUTOFLEET_DIR/STOP"
+  out="$(run_validate)"; rc=$?
+  [ "$rc" = 3 ] || { echo "$out" >&2; fail "a stopped fleet did not exit 3 (got $rc)"; }
+  ok "...and a stopped fleet stops it"
+  rm -f "$AUTOFLEET_DIR/STOP"
+
+  # NO BRIEF IS A REFUSAL, NOT A GUESS. Without `.claude/agents/validator.md`
+  # there is no scope, and a validator with no scope re-reviews the whole branch
+  # -- which is the behaviour this entire phase exists to remove.
+  mv "$WORK/repo/.claude/agents/validator.md" "$WORK/repo/.claude/agents/validator.md.away"
+  out="$(run_validate)"; rc=$?
+  [ "$rc" = 2 ] || { echo "$out" >&2; fail "a missing validator brief did not exit 2 (got $rc)"; }
+  ok "...and it refuses to run with no brief rather than improvising a scope"
+  mv "$WORK/repo/.claude/agents/validator.md.away" "$WORK/repo/.claude/agents/validator.md"
+
+  # THE CAP, exit 9, and the message that names a person. Past
+  # AUTOFLEET_VALIDATE_MAX this is not a failure -- it is the design, and a PR
+  # quietly held with nothing explaining it is the failure.
+  #
+  # `.rounds` primed directly: what the cap counts is validations this pull
+  # request has had, and reaching it by running two real ones would make this
+  # phase a test of the agent stub rather than of the cap.
+  export AUTOFLEET_VALIDATE_MAX=2
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '2\n' >"$AUTOFLEET_DIR/reviewing/v-42.rounds"
+  # ...and a finding to check, so it gets past the exit-8 branch above and
+  # reaches the cap at all. Without this the phase would pass against a script
+  # that has no cap, because it would never look for one.
+  python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" <<'PY_FIX'
+import json, sys
+path, oid = sys.argv[1], sys.argv[2]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "armaatus",
+                "body": "Important: the retry has no backoff.\n"
+                        "<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"})
+json.dump(records, open(path, "w"))
+PY_FIX
+  out="$(AUTOFLEET_VALIDATE_MARKER="$AUTOFLEET_DIR/reviewing/v-42" run_validate)"; rc=$?
+  [ "$rc" = 9 ] || { echo "$out" >&2; fail "a PR at the validation cap did not exit 9 (got $rc)"; }
+  grep -q 'a person decides' <<<"$out" \
+    || { echo "$out" >&2; fail "it stopped at the cap without saying a person is due: $out"; }
+  ok "at AUTOFLEET_VALIDATE_MAX it stops and says a person decides"
+  ;;
 
 # ------------------------------------------------------------------- retries
   retries)

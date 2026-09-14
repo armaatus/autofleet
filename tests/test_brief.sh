@@ -117,18 +117,30 @@ case "${1:-}" in
     grep -q 'SPEC-BODY-MARKER' <<<"$out" \
       || fail "the spec is no longer printed, so the agent starts from a title: $out"
     # `self-review.sh` rather than `record-review.sh` since
-    # armaatus/autofleet#51: step 3 is one command that runs both passes in
+    # armaatus/autofleet#51: step 2 is one command that runs both passes in
     # processes that are not the agent's, and records the marker itself. The two
     # slash commands are still named -- they are the words `merge_gate.py` greps
     # the PR body for, and the agent has to know which set of findings is which.
+    #
+    # `/implement` is named for a different reason: the skill ships
+    # `disable-model-invocation: true`, so an agent will not reach for it on its
+    # own and a brief that merely described the work would get a hand-rolled
+    # build with no tdd behind it. What makes it reachable at all is that
+    # `agent-autostart.sh` delivers this text as a TYPED prompt rather than as an
+    # instruction to a model.
     has "stage 1" "$out" \
+      '/implement' '/mattpocock-skills:tdd' \
       '/code-review high' '/mattpocock-skills:code-review' \
       './scripts/fleet/self-review.sh' \
       './scripts/fleet/issue-command.sh --after-pr 42'
-    # The two things the brief never said and the issue asks for. Without them
-    # the fleet's own agents are the only ones that never hear that the subagents
-    # exist, and nothing tells them the session has to last three review rounds.
-    has "stage 1" "$out" 'researcher' 'verifier' 'gh pr diff --stat' 'sed -n'
+    has "stage 1" "$out" 'researcher' 'gh pr diff --stat' 'sed -n'
+
+    # THE PLANNING PHASE IS GONE, and this is the assertion that says so rather
+    # than a comment claiming it. The issue body is the plan -- `## Plan` in the
+    # PR body is now "what the issue asked, and where the implementation
+    # departed" -- so a brief that grew a plan-mode step back would be spending
+    # a phase before the first edit that nothing downstream reads.
+    lacks "stage 1" "$out" 'plan mode' '/code-review high' 'verifier'
 
     # ...and NONE of the post-PR contract. This is the whole issue: these words
     # ride in the prompt prefix of every request made before the PR exists.
@@ -149,9 +161,24 @@ case "${1:-}" in
       'gh pr merge <n> --auto --squash' 'Closes #42' \
       './scripts/fleet/board.sh in-review "#42:' \
       './scripts/fleet/await-review.sh' './scripts/fleet/review-status.sh' \
-      './scripts/fleet/resolve-thread.sh' './scripts/fleet/answer-review.sh' \
+      './scripts/fleet/answer-review.sh' \
       'GitHub says BLOCKED' 'GitHub says DIRTY' 'GitHub says BEHIND' \
       '.github/workflows/' '.github/scripts/' '.claude/'
+
+    # THE TWO-PHASE LOOP, asserted rather than described. An agent that comes
+    # away thinking a push buys another review is the failure this shape exists
+    # to remove -- it is what made #86 spend four reviews without one ever
+    # judging the commit that merged -- so the brief has to say both halves: the
+    # review runs once, and what judges the fix is a validation with a narrower
+    # question.
+    has "stage 2" "$out" \
+      'THERE IS ONLY ONE' 'VALIDATOR' 'At most TWO validations'
+
+    # ...and the author does NOT resolve the threads. The validator resolves what
+    # it is satisfied by, which is the whole of what makes a resolved thread mean
+    # anything; a brief that told the author to close them would hand the subject
+    # of the review the ledger it is judged against.
+    lacks "stage 2" "$out" './scripts/fleet/resolve-thread.sh'
 
     # "and nothing else": an agent running this already has the spec and steps
     # 1-3 in its context, and reprinting them is the duplication #49 is about.
@@ -161,7 +188,7 @@ case "${1:-}" in
     # of this list -- stage 2's rebase remedy names it, because a rebase needs a
     # marker for the new head and not a second pair of full passes.
     lacks "stage 2" "$out" \
-      'SPEC-BODY-MARKER' '**1. Plan.**' '**3. Review it yourself' \
+      'SPEC-BODY-MARKER' '**1. Build it.**' '**2. Review it yourself' \
       '/mattpocock-skills:tdd' 'self-review.sh'
     echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
     ;;

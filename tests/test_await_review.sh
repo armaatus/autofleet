@@ -70,6 +70,9 @@ make_fixture() {
   GH_THREADS="$WORK/threads"; printf '%s' "${2:-}" >"$GH_THREADS"
   # Non-empty means a SECOND, older reviewer left an Important finding.
   GH_SECOND="$WORK/second"; printf '%s' "${3:-}" >"$GH_SECOND"
+  # `pass` or `fail` means the PR carries a VALIDATION of this head, submitted
+  # after the review. Empty means it does not.
+  GH_VERDICT="$WORK/verdict"; printf '%s' "${4:-}" >"$GH_VERDICT"
 
   cat >"$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
@@ -91,7 +94,7 @@ case "$*" in
     printf 'src/app.c:12  claude\nNit: name this for what it returns.\n\n'
     exit 0 ;;
   *graphql*)
-    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" "$(cat "$GH_THREADS")" "$(cat "$GH_SECOND")" <<'PY'
+    python3 - "$(cat "$GH_HEAD")" "$(cat "$GH_TRAILERS")" "$(cat "$GH_THREADS")" "$(cat "$GH_SECOND")" "$(cat "$GH_VERDICT")" <<'PY'
 import json, sys
 oid, trailers = sys.argv[1], sys.argv[2]
 body = ("Nit: the comment above sync_tick() says what, not why.\n"
@@ -113,7 +116,17 @@ print(json.dumps({"data": {"repository": {"pullRequest": {
          if len(sys.argv) > 4 and sys.argv[4] else [])
         + [{"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
             "commit": {"oid": oid}, "author": {"login": "claude"},
-            "body": body, "comments": {"totalCount": 0}}])},
+            "body": body, "comments": {"totalCount": 0}}]
+        # ...and the VALIDATION, newest, carrying the trailer that tells it from
+        # a review. It rides in a `gh pr review` like everything else here --
+        # `guard.py` refuses that command from a fleet worktree, which is what
+        # keeps the certificate out of reach of the branch it certifies.
+        + ([{"state": "COMMENTED", "submittedAt": "2026-09-06T03:00:00Z",
+             "commit": {"oid": oid}, "author": {"login": "claude"},
+             "body": "Every finding is addressed and the suite is green.\n"
+                     "<!-- validated: %s %s -->" % (oid, sys.argv[5]),
+             "comments": {"totalCount": 0}}]
+           if len(sys.argv) > 5 and sys.argv[5] else []))},
     "comments": {"nodes": []},
     "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                       "nodes": ([{"isResolved": False, "isOutdated": False,
@@ -128,7 +141,7 @@ esac
 exit 0
 STUB
   chmod +x "$WORK/bin/gh"
-  export GH_CALLS GH_HEAD GH_TRAILERS GH_THREADS GH_SECOND
+  export GH_CALLS GH_HEAD GH_TRAILERS GH_THREADS GH_SECOND GH_VERDICT
   # One poll, and a deadline it cannot reach: every phase here ends on the first
   # payload, and a phase that does not should say so as a hang, not as a pass.
   export AWAIT_REVIEW_POLL=1 AWAIT_REVIEW_DEADLINE=30
@@ -155,6 +168,44 @@ FIX_LINE='Fix what is real'
 ANSWER_LINE='not a commit'
 
 case "${1:-}" in
+# ----------------------------------------------------------------- validated
+  validated)
+  # THE SECOND CALL OF THE LOOP, and the one that deadlocked.
+  #
+  # This wait is used twice: once for the review, and once for the validation of
+  # the commits answering it. A validation rides in a `gh pr review` and carries
+  # a `validated:` trailer, and `merge_gate.independent_reviews()` EXCLUDES
+  # anything carrying one -- a validation is not a review, and counting it as one
+  # would let it satisfy the independence requirement it exists downstream of.
+  #
+  # So on a validated head the reviews list is empty, and it stays empty: the
+  # review was invalidated by the push that answered it, and no second review is
+  # coming. Without the check this phase guards, the agent spends its whole
+  # deadline three times over waiting for something that has already happened,
+  # and then stops saying the PR is unresolved.
+  for verdict in pass fail; do
+    make_fixture "$NIT_ONLY" "" "" "$verdict"
+    out="$(run_it)"; rc=$?
+    [ "$rc" = 0 ] || { echo "$out" >&2; fail "a $verdict validation in hand did not exit 0 (got $rc)"; }
+    grep -qi "came back $verdict" <<<"$out" \
+      || { echo "$out" >&2; fail "a $verdict validation was not reported, so the agent waits out the deadline for a review that cannot arrive"; }
+    grep -q 'review-status.sh' <<<"$out" \
+      || { echo "$out" >&2; fail "it reported the $verdict without naming the next step"; }
+  done
+  ok "a validation on the head ends the wait, and says which verdict"
+
+  # ...and the review path is UNCHANGED when there is no validation. Without
+  # this the phase above passes just as well against a check that fires on
+  # every payload, which would end the FIRST wait before any review existed.
+  make_fixture "$NIT_ONLY"
+  out="$(run_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "an unvalidated head did not exit 0 (got $rc)"; }
+  grep -qi 'came back' <<<"$out" \
+    && { echo "$out" >&2; fail "a head with no validation was reported as validated; the first wait would end before any review arrived"; }
+  grep -qF "$ANSWER_LINE" <<<"$out" \
+    || { echo "$out" >&2; fail "the review path stopped reporting the review"; }
+  ok "...and a head with no validation is still the review's wait"
+  ;;
 # ------------------------------------------------------------------- nitonly
   nitonly)
   make_fixture "$NIT_ONLY"
@@ -307,5 +358,5 @@ case "${1:-}" in
   ok "one clean round is $lines lines, ceiling $limit"
   ;;
   *)
-  echo "usage: $0 {nitonly|threads|tworeviewers|knob|important|untrailered|quiet}" >&2; exit 2 ;;
+  echo "usage: $0 {nitonly|threads|tworeviewers|knob|important|untrailered|quiet|validated}" >&2; exit 2 ;;
 esac

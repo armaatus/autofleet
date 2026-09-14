@@ -557,6 +557,45 @@ def check_bash(command, cwd=""):
                         "./scripts/fleet/fleet.sh resume"
                     )
 
+        # The agent does not start the thing that judges it. `review.sh` is
+        # protected transitively -- a reviewer it spawned from here would inherit
+        # this worktree and be refused at its own `gh pr review` -- but that
+        # refusal arrives one process deep, in a log, after a full-budget agent
+        # run. `validate.sh` gets it said here instead, and for a sharper reason:
+        # a `pass` validation is what releases the merge gate, so an agent that
+        # could start its own validator could certify its own branch.
+        #
+        # Both scripts, by basename, because `./scripts/fleet/validate.sh`,
+        # `bash scripts/fleet/validate.sh` and an absolute path are the same act.
+        # Only in a fleet-owned worktree: the DISPATCHER runs both from the repo
+        # root, which is not one, and a person running either by hand is the
+        # ordinary case this must not argue about.
+        if _fleet_owns_this_worktree():
+            for w in words:
+                base = os.path.basename(w)
+                if base in ("validate.sh", "review.sh"):
+                    deny(
+                        "Blocked: this worktree was opened by the fleet, and an agent does "
+                        "not start\n"
+                        f"the {base.split('.')[0]} that judges its own pull request.\n"
+                        "\n"
+                        "The dispatcher runs both, from the repository root, which is not a "
+                        "fleet\n"
+                        "worktree -- that is the whole of what separates their verdict from "
+                        "yours. A\n"
+                        "validation `pass` is what releases the merge gate, so a branch that "
+                        "could\n"
+                        "start its own validator could certify itself.\n"
+                        "\n"
+                        "Wait for them instead:\n"
+                        "  ./scripts/fleet/await-review.sh\n"
+                        "\n"
+                        "To answer findings, reply on the thread and resolve it, then say "
+                        "what you did:\n"
+                        "  ./scripts/fleet/resolve-thread.sh\n"
+                        "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+                    )
+
         # In the automatic flow, a PR arrives already reviewed or it does not
         # arrive. `/code-review` locally, findings recorded, THEN push -- so the
         # independent review on the PR is a second opinion rather than the first
@@ -1091,7 +1130,7 @@ SELFTEST = [
     # The enforcement layer is guarded only in a fleet worktree, so both halves
     # of that live in _stateful_checks below.
     ("Edit", {"file_path": "/w/demo-project/.claude/skills/house-style/SKILL.md"}, 0, "skills are advisory and stay editable"),
-    ("Edit", {"file_path": "/w/demo-project/.claude/agents/verifier.md"}, 0, "so do subagents"),
+    ("Edit", {"file_path": "/w/demo-project/.claude/agents/validator.md"}, 0, "so do subagents"),
     ("Edit", {"file_path": "/w/demo-project/src/app.c"}, 0, "ordinary source files are editable"),
     ("NotebookEdit", {"notebook_path": "/w/demo-project/.env"}, 2, "NotebookEdit names its target notebook_path, and is guarded too"),
     ("Bash", {"command": "cat > /tmp/doc.md <<'EOF'\nrm .env\nEOF"}, 0,
@@ -1259,6 +1298,22 @@ def _stateful_checks():
                        because="does not submit")
                 expect(0, {"command": "gh pr view 7 --json body"},
                        "...but reading the PR is not reviewing it")
+                # ...nor start the validator, which is the sharper half: a `pass`
+                # validation releases the merge gate outright, so an agent that
+                # could run this would be certifying its own branch.
+                expect(2, {"command": "./scripts/fleet/validate.sh 7"},
+                       "a fleet worktree cannot start its own validator",
+                       because="does not start")
+                expect(2, {"command": "bash scripts/fleet/validate.sh"},
+                       "...nor through bash, which is the same act",
+                       because="does not start")
+                expect(2, {"command": "./scripts/fleet/review.sh 7"},
+                       "...nor its own reviewer, said here rather than one process deep",
+                       because="does not start")
+                expect(0, {"command": "./scripts/fleet/await-review.sh"},
+                       "...but WAITING for them is the whole of what it should do")
+                expect(0, {"command": "./scripts/fleet/answer-review.sh 'fixed it'"},
+                       "...and answering the findings is still its job")
                 # The REST spelling. `gh pr merge` has had one of these since it
                 # was written; `gh pr review` did not, and `Bash(gh api:*)` is on
                 # the agent allowlist -- so this was the live way to forge the

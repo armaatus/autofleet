@@ -209,18 +209,18 @@ instructions, and name anything else. Work autonomously: do not stop to ask for 
 anything CLAUDE.md already decides. If a question is genuinely open, write it in
 the PR body and carry on with the rest of the scope.
 
-**1. Plan.** Stay in plan mode until the plan is right: Files that change, Order
-of work, Risks, Proof. The bar is that someone who never saw this conversation
-could implement it from the plan alone. It goes in the PR body under `## Plan`,
-not in a file.
+**1. Build it.** The issue above IS the plan -- Goal, Scope, Design notes and
+Acceptance are meant to be sufficient, and there is no planning phase before you
+edit. Type this and nothing else, naming the issue above as the input:
 
-**2. Build it, test-first where the issue is a bug.** Reproduce the bug as a
-failing test, watch it fail for the reason you expect, commit that test, and only
-then fix the code -- `/mattpocock-skills:tdd` is that loop.
-__TEST_COMMAND__ green, with a test that would have
-failed before your change. Run it and read the output.
+    /implement
 
-**3. Review it yourself, before anything leaves this worktree.** One command,
+It drives `/mattpocock-skills:tdd` at the seams, typechecks as it goes, runs
+__TEST_COMMAND__ once at the end, and commits. For a bug, the failing test is
+committed before the fix. Read the suite output: a phase reporting `skip` judged
+nothing.
+
+**2. Review it yourself, before anything leaves this worktree.** One command,
 which runs both passes outside this session and records the marker:
 
     ./scripts/fleet/self-review.sh   # findings: .autofleet/run/self-review.md
@@ -231,21 +231,20 @@ outlasts a tool call. `/code-review high` finds defects,
 is real, re-run the tests, run it again: the marker is per-commit, and without
 one the guard hook refuses `git push` and `gh pr create`.
 
-**Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
-marker exists, run:
+**3. The post-PR contract arrives when it applies.** Once the marker exists:
 
     ./scripts/fleet/issue-command.sh --after-pr __ISSUE__
 
-It is what the body must carry, how the merge is queued, and the review loop.
-Skip it and the PR sits green forever, or merges over a review.
+It is what the body must carry, how the merge is queued, and the loop that ends
+it -- one review, then the validations that judge your answer to it. How many of
+each is stated there, where the wait for them is.
 
-**Two subagents keep reading out of this context** (`.claude/agents/`):
-`researcher` answers "where is this handled" with the answer, not the files;
-`verifier` gives an independent build-and-test verdict before the PR.
+**The `researcher` subagent** (`.claude/agents/`) answers "where is this
+handled" with the answer rather than the files it read.
 
-**This context has to last** plan, build and three review rounds in one
-time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
-whole file, `researcher` before a wide search.
+**This context has to last** the build and the answers in one time-box:
+`gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a whole file,
+`researcher` before a wide search.
 
 Interrupted, or `~/.autofleet/STOP` exists? Put the work down, and write where
 you got to first: `./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'`.
@@ -265,11 +264,15 @@ clean and untouched forever, which is what #90 did. Queued here it simply waits,
 and fires the moment the last required check passes. Step 6 is only the check
 that you did it.
 
-The body must carry `## Plan`, BOTH sets of findings
-and what you did about them, any issue you edited and why, and `Closes #__ISSUE__`.
-The `merge-gate` check reads that body: it looks for the words `/code-review`,
-`mattpocock-skills:code-review` and a closing line, and without any one of them
-the PR cannot merge. The closing line is the one the PR template leaves as a
+The body must carry `## Plan` -- what the issue asked for, and where the
+implementation departed from it and why -- the `/mattpocock-skills:code-review`
+findings and what you did about them, any issue you edited and why, and
+`Closes #__ISSUE__`. Departing from the issue is normal; departing silently is
+not, and the review checks that section against the diff.
+
+The `merge-gate` check reads that body: it looks for the words
+`mattpocock-skills:code-review` and a closing line, and without either the PR
+cannot merge. The closing line is the one the PR template leaves as a
 placeholder -- fill it in. Then tell the board where the work is:
 
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
@@ -283,11 +286,11 @@ The heredoc marker is shown because the bare form reads an empty stdin when it
 is run as one command, and an empty note is refused -- correctly, since it would
 otherwise destroy the round before it. The closing `NOTE` goes at column 0.
 
-The decisions you took and why, the files you touched, what each review round
-said and how you answered it, and what is still open. NOT the plan, which is in
-the PR body, and not the diff. It is capped, and over the cap it refuses and
-names the cap rather than truncating. `issue-command.sh` prints it back at the
-top of the next session here.
+The decisions you took and why, the files you touched, what the review said and
+how you answered it, and what is still open. NOT the plan, which is in the PR
+body, and not the diff. It is capped, and over the cap it refuses and names the
+cap rather than truncating. `issue-command.sh` prints it back at the top of the
+next session here.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**
@@ -295,10 +298,9 @@ top of the next session here.
 judging PRs is not merged by the machinery those rules govern. Take it to a
 reviewed, green PR with every thread resolved, set the board comment to
 "#__ISSUE__: ready, needs a human merge -- touches <path>", and stop there.
-Do not spend review rounds trying to turn that gate green.
 
-**5. Wait for the independent review.** One blocking call, which costs nothing
-while it waits:
+**5. Wait for the review. THERE IS ONLY ONE.** One blocking call, which costs
+nothing while it waits:
 
     ./scripts/fleet/await-review.sh
 
@@ -309,12 +311,18 @@ because something merged underneath your branch. Exit 8 wants a rebase, a fresh
 head, and `git push --force-with-lease`; it prints all three. Do not come back here until it is
 rebased.
 
+The review runs ONCE, on the head the PR opened with. Pushing does not buy
+another: what judges your fix is the VALIDATOR, and it asks a narrower question
+-- were these findings addressed, and did the commits answering them break
+anything. It is not looking for new things. So the findings in front of you are
+all the findings this branch will get, and the round you are in is the only one.
+
 **A clean verdict is not the same as no findings.** A review can come back
 COMMENTED and still carry inline comments, each of which is a THREAD, and
 `merge-gate` refuses to merge while any thread is unresolved. #88 and #89 both
 sat blocked on exactly one unresolved thread with every check green.
 
-So after every review, whatever its verdict:
+So after the review, whatever its verdict:
 
     ./scripts/fleet/review-status.sh
 
@@ -322,62 +330,57 @@ It prints every thread that is still UNRESOLVED -- where it is, what it says,
 and the thread ID `resolveReviewThread` wants -- along with anything else
 keeping the PR from merging. Do NOT reach for
 `gh api repos/{owner}/{repo}/pulls/<n>/comments` instead: that endpoint cannot
-say whether a thread is resolved, so on round two it hands you every comment
-ever left with the live ones buried among them.
+say whether a thread is resolved, so it hands you every comment ever left with
+the live ones buried among them.
 
-Fix what is real; where you disagree, reply on the thread with your reasoning --
-both are acceptable, silence is not. Then RESOLVE each thread:
+**A Critical or Important finding is FIXED. A Suggestion is ANSWERED.** That is
+the whole of what to do with them, and the asymmetry is because no second
+reviewer is coming: whatever an argument closes here, nothing else will catch.
+Reply on the thread either way -- silence is not an answer -- and where you
+fixed something, say which commit.
 
-    ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]
+Do NOT resolve the threads yourself. The validator resolves what it is satisfied
+by; that is what makes the resolution mean something, and a thread you close is
+one nobody checked.
 
-Use that, not the `resolveReviewThread` mutation by hand. NOTHING on GitHub
-re-runs `merge-gate` when a thread is resolved -- `pull_request_review_thread`
-is a webhook event, not a workflow trigger -- so the gate stays red on a thread
-you already closed, and auto-merge never fires. That script resolves the
-threads and, once the last one is shut, asks the gate again.
+Then ANSWER the review, whether or not you changed anything:
 
-Update the handoff after every round, so what a round said and how you answered
-it survives an interruption between this round and the next:
+    ./scripts/fleet/answer-review.sh "<what you fixed, and why you did not fix the rest>"
 
-    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
+That answer is what the validator reads against the findings, so write it for
+that reader: one line per finding. "I am not doing this, because" is a complete
+answer to a Suggestion; silence is not an answer to anything. A review that
+reported nothing needs none, and `merge-gate` will say so rather than making you
+guess.
 
-IF YOU CHANGED ANYTHING, PUSH IT and go back to `await-review.sh`. The push
-re-runs the reviewer, and the review of what you actually sent is the next
-round's. Do NOT answer a review you have just pushed over: there is no review on
-the new head yet, an answer written before one arrives is discarded by it, and
-`answer-review.sh` refuses for exactly that reason.
+IF YOU CHANGED ANYTHING, PUSH IT. Answer first, then push: `answer-review.sh`
+refuses an answer written against a head that has already moved, because an
+answer the review never saw is discarded by the next reader anyway.
 
-When a review arrives that you are NOT going to change anything for -- because
-nothing needed changing, or because you disagree and said so on the thread --
-ANSWER IT:
+**6. Wait for the validation, then confirm the merge is queued.**
 
-    ./scripts/fleet/answer-review.sh "<what you did, or why you did not>"
-
-That is the one thing standing between the review's findings and a merge. You
-armed auto-merge back at step 4 -- correctly, that is what stops a finished PR
-sitting green forever -- so the moment the review lands, every check is
-satisfiable and the branch can go in while you are still editing. It has, four
-times: #146, #154, #159, #168, and #154's took a real defect to main. The window
-is not the life of the PR, it is one test run, which is exactly what you do
-between reading the findings and pushing them.
-
-"I am not doing this, because" is as good an answer as a fix; silence is not an
-answer. A review that reported nothing needs none, and `merge-gate` will say so
-rather than making you guess. Then run it again:
-
+    ./scripts/fleet/await-review.sh
     ./scripts/fleet/review-status.sh
 
-Exit 0 means every thread is resolved and every check is green, and exit 4 means
-the same on a PR only a person can merge -- both are done, stop there. Exit 1
-prints the reasons; go back to `await-review.sh` for the ones a review can
-answer.
+A `pass` releases the gate: it stands in for the review, which your fix moved the
+head out from under. A `fail` names exactly what is unsettled -- a finding it did
+not accept as addressed, or something your fix broke. Fix that, push, and the
+next validation judges the new head.
 
-Three of those reasons are NOT waiting for a review, and it says so in the output:
+**At most TWO validations.** Past that a person decides, and that is the design
+rather than a failure. If a second `fail` still leaves something unresolved,
+stop: comment on the PR saying exactly what is unresolved and why you disagree,
+set the board comment to "#__ISSUE__: needs you -- 2 validations", and stop.
+Another lap is not what a disagreement needs.
+
+Exit 0 from `review-status.sh` means every thread is resolved and every check is
+green; exit 4 means the same on a PR only a person can merge. Both are done.
+Exit 1 prints the reasons. Three of them are NOT waiting for anything, and it
+says so in the output:
 
 - **`GitHub says BLOCKED`** with every check green is #84 -- branch protection is
   still counting a stale run whose newer run passed. Run the `gh run rerun --job`
-  it prints, then run `review-status.sh` again. Waiting for another review here
-  costs 45 minutes and changes nothing.
+  it prints, then run `review-status.sh` again.
 - **`GitHub says DIRTY`** is a conflict with the base. Rebase, re-run
   `record-review.sh .autofleet/run/self-review.md` for the new head, and
   `git push --force-with-lease` -- the
@@ -385,22 +388,7 @@ Three of those reasons are NOT waiting for a review, and it says so in the outpu
 - **`GitHub says BEHIND`** means the base moved and the branch has to catch up.
   Rebase and push.
 
-**A nit is answered, not fixed.** When `await-review.sh` says the review left no
-Important findings, take it at its word: run `answer-review.sh` saying which
-nits you took and which you did not, open ONE follow-up issue for anything worth
-keeping, and name it in the answer. That clears the hold with no commit. A
-commit would move the head, and a moved head throws away the review that asked
-for it and buys another full round -- which is how three pull requests ended up
-with four reviews each and nothing merged. Push only if something in there is
-genuinely worth it, as a decision rather than a reflex.
-
-**At most THREE rounds of this.** If a third round still leaves something
-unresolved, stop: comment on the PR saying exactly what is unresolved and why you
-disagree, set the board comment to "#__ISSUE__: needs you -- 3 review rounds", and
-stop. Another lap is not what a disagreement needs.
-
-**6. Confirm the merge is queued.** You ran `gh pr merge <n> --auto --squash`
-back at step 4; this is only the check that it took:
+Finally, the check that the queue took:
 
     gh pr view <n> --json autoMergeRequest --jq '.autoMergeRequest != null'
 
@@ -417,6 +405,6 @@ A PR that touches `.claude/`, `.github/workflows/` or `.github/scripts/` never
 auto-merges: those are the paths that can disable or rewrite the checks gating
 their own PR, and a person merges them. All three, and the same three named
 above -- `merge_gate.py` refuses exactly this list, and a brief that named fewer
-would send an agent to spend its review rounds turning green a gate that never
-will. `merge-gate` will say so.
+would send an agent to spend its rounds turning green a gate that never will.
+`merge-gate` will say so.
 BRIEF

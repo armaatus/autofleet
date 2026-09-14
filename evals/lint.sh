@@ -302,7 +302,7 @@ echo "== REVIEW.md"
 if [ ! -f REVIEW.md ]; then
   fail "REVIEW.md is missing; /code-review and the PR review workflow both read it"
 else
-  for needle in "Correctness" "Important vs Nit" "Do not report"; do
+  for needle in "The dimensions" "Critical, Important, Suggestion" "What not to report"; do
     grep -q "$needle" REVIEW.md || fail "REVIEW.md has no '$needle' section"
   done
   ok "REVIEW.md names its passes and its thresholds"
@@ -625,68 +625,78 @@ fi
 #     stops firing on every PR forever, and nothing goes red -- the same
 #     silent-in-the-cheap-direction failure 2c exists to prevent, one level
 #     down. Found by the independent review.
-if grep -q 'Review round: \$round' scripts/fleet/review.sh \
-   && grep -q 'review_round' scripts/fleet/review.sh; then
-  ok "review.sh tells the reviewer which round it is, so the floor can fire"
+if grep -q 'Validation round: \$round' scripts/fleet/validate.sh \
+   && grep -q 'validate_round' scripts/fleet/validate.sh; then
+  ok "validate.sh tells the validator which round it is, and what the cap is"
 else
-  fail "review.sh no longer passes the round number, so the late-round floor never fires and nothing else says so"
+  fail "validate.sh no longer passes the round number, so a validator cannot tell its last pass from its first and the 'a fail at the cap is the right outcome' rule never fires"
 fi
 
-# 2g. The floor itself, in the three files that state it. Prose, so `flat`.
+# 2g. THE VALIDATION TRAILER, spelled the same way in every file that writes it
+#     and the one file that reads it.
 #
-#     docs/WORKFLOW.md is in this list because it was NOT, and that cost a real
-#     defect: it kept the pre-correction sentence telling the floor to report
-#     `review-findings: 0`, which releases the gate outright -- so a reviewer
-#     following the page CLAUDE.md calls the loop would have let a PR with
-#     unanswered nits merge under an armed auto-merge. REVIEW.md and the brief
-#     were both corrected and this page was not, and none of 2c, 2e or 2g could
-#     see it, because none of their file lists had it. Found by the independent
-#     review. A third file stating a rule is a third file that can drift.
-floor_missing=""
-for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
-  flat "$f" | qgrep 'round three' || floor_missing="$floor_missing $f"
+#     This replaced the late-round nit floor, which existed because a review
+#     could spend four rounds on a pull request. It cannot any more: the reviewer
+#     runs once and the validator runs at most twice, and what makes that
+#     terminate rather than deadlock is `merge_gate.py` reading a `pass` on the
+#     current head as standing in for a review the author's own fix moved the
+#     head out from under.
+#
+#     So the trailer is now the load-bearing string of the whole loop, and every
+#     way it can break is silent: a validator writing a format the gate does not
+#     read submits a verdict that is discarded, the PR is held forever on a
+#     validation that already happened, and nothing goes red. Exactly the
+#     silent-in-the-cheap-direction failure 2c exists to prevent, one phase down.
+trailer_missing=""
+for f in .github/scripts/merge_gate.py scripts/fleet/validate.sh \
+         .claude/agents/validator.md .github/workflows/validate.yml; do
+  [ -f "$f" ] || { trailer_missing="$trailer_missing $f(absent)"; continue; }
+  grep -q 'validated:' "$f" || trailer_missing="$trailer_missing $f"
 done
-if [ -z "$floor_missing" ]; then
-  ok "REVIEW.md, the brief and WORKFLOW.md all carry the late-round floor"
+if [ -z "$trailer_missing" ]; then
+  ok "the validated trailer is named by the gate, both drivers and the brief"
 else
-  fail "the late-round floor is gone from:$floor_missing -- a reviewer can spend rounds on nits again"
+  fail "the validated trailer is missing from:$trailer_missing -- a verdict nothing reads holds every PR forever"
 fi
 
-# 2h. ...and each of them pairs the floor with a NON-ZERO findings count.
-#      `0` releases the gate -- merge_gate takes `if found == 0: continue` -- so
-#      a floor reporting it would land a PR with unanswered nits under the
-#      auto-merge armed at open. Two of the three files said the right thing and
-#      the third did not.
+# 2h. ...and every one of them states the FAIL-CLOSED property: a missing or
+#      unrecognised verdict is not a pass.
 #
-#      POSITIVE AND STRUCTURAL, after two failed attempts at detecting the wrong
-#      sentence. The first matched one historical wording, so it could only fire
-#      on a byte-exact revert. The second widened the gap and matched
-#      `report `0`` inside REVIEW.md's own "**Do not** report `0`" -- the
-#      negation trap #73 names and says to reject, arrived at by accident.
+#      POSITIVE AND STRUCTURAL, for the reason the check this replaced arrived at
+#      after two failed attempts: hunting the wrong sentence matches one historic
+#      wording and fires only on a byte-exact revert, and widening the pattern
+#      walks straight into a negation trap. So this asserts what must be TRUE --
+#      each file names both verdicts, so neither can quietly become the default.
 #
-#      So this asserts what must be TRUE rather than hunting what must not be:
-#      every file stating the floor names `review-findings: N`, the letter, next
-#      to it. Rewrite the floor to report a zero and the `N` is what goes, in
-#      any phrasing, with no sentence-boundary or negation question to get
-#      wrong. Found by the independent review, rounds 1 and 3.
-#
-#      200 and not more: BSD grep -- which is what macOS ships and what this
-#      repo has to run on -- caps a bounded repetition at RE_DUP_MAX, 255.
-#      `.{0,300}` is not a pattern that matches nothing, it is an INVALID
-#      OPERAND: grep exits 2, the `||` fires, and every file reports as missing
-#      the thing it plainly has. Under `set -o pipefail` with grep's stderr
-#      going nowhere, that looked exactly like a real finding. Cost twenty
-#      minutes; written down so it costs nobody else any.
-zero_floor=""
-for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
-  flat "$f" \
-    | qgrep -E '(round three|follow-up issue).{0,200}review-findings: N' \
-    || zero_floor="$zero_floor $f"
+#      The direction is the whole safety of the phase. A validator that crashed
+#      writes nothing at all, and nothing at all must not read as consent.
+verdicts_missing=""
+for f in .github/scripts/merge_gate.py scripts/fleet/validate.sh \
+         .claude/agents/validator.md; do
+  [ -f "$f" ] || { verdicts_missing="$verdicts_missing $f(absent)"; continue; }
+  # Both words, each on its own pass: a file naming only `pass` is one where
+  # `fail` has become unreachable, which is the same hole wearing a green face.
+  flat "$f" | qgrep -F 'pass' || verdicts_missing="$verdicts_missing $f(pass)"
+  flat "$f" | qgrep -F 'fail' || verdicts_missing="$verdicts_missing $f(fail)"
 done
-if [ -z "$zero_floor" ]; then
-  ok "...and each pairs it with a real findings count, not the 0 that releases the gate"
+if [ -z "$verdicts_missing" ]; then
+  ok "...and each names both verdicts, so an unrecognised one cannot default to consent"
 else
-  fail "the late-round floor does not name a non-zero findings count in:$zero_floor -- a floor reporting 0 releases the gate on unanswered nits"
+  fail "a validation verdict is unnamed in:$verdicts_missing -- a verdict that cannot be written is one the gate never sees"
+fi
+
+# 2i. THE VALIDATOR IS NOT THE AUTHOR'S TO START, asserted here rather than only
+#     in guard.py's own table.
+#
+#     A `pass` releases the merge gate outright, so an agent that could run
+#     `validate.sh` from its own worktree could certify its own branch. The hook
+#     refuses it; this is the assertion that the hook still contains the rule,
+#     which is hard rule 3 -- a rule with no assertion is not shipped.
+if grep -q 'validate.sh' .claude/hooks/guard.py \
+   && python3 .claude/hooks/guard.py --selftest >/dev/null 2>&1; then
+  ok "guard.py refuses validate.sh from a fleet worktree, and its selftest holds"
+else
+  fail "guard.py no longer refuses validate.sh from a fleet worktree, or its selftest does not hold -- a branch that can start its own validator can certify itself"
 fi
 
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer
@@ -1575,7 +1585,7 @@ fi
 # `.claude/agents/`", so a union grep for `.claude/` matched forever, and
 # deleting `.claude/` from stage 2's list of paths no agent may merge still
 # printed ok. That is hard rule 3 -- a guard that silently stops guarding -- and
-# the cost of it is an agent spending its three review rounds turning green a
+# the cost of it is an agent spending its review and both validations turning green a
 # gate that can never pass.
 # The brief is ONE heredoc with a `@@AFTER-PR@@` line in it -- which is also
 # what keeps main's copy of this check readable, since its extraction is the
@@ -1604,8 +1614,11 @@ else
   # agent's, and records the marker itself. `record-review.sh` is still the
   # primitive and stage 2 still names it -- the rebase remedy re-records without
   # re-reviewing -- so it is asserted there, in the list below.
+  #
+  # `verifier` left this list with the subagent: one review and two validations
+  # replaced it, and the brief names those two by their own scripts.
   for named in self-review.sh "/code-review" "mattpocock-skills:code-review" \
-                --after-pr researcher verifier "gh pr diff --stat" handoff.sh; do
+                --after-pr researcher "gh pr diff --stat" handoff.sh; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
   done
@@ -1616,7 +1629,7 @@ else
   # both in its own negative list and tests/ is NOT vendored, so this loop is
   # the only thing holding the split in a host installation. Found by the
   # independent review.
-  for named in await-review.sh answer-review.sh review-status.sh resolve-thread.sh \
+  for named in await-review.sh answer-review.sh review-status.sh validate.sh \
                 board.sh "--auto --squash" "Closes #"; do
     grep -qF -- "$named" <<<"$stage1" \
       && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
@@ -1636,14 +1649,21 @@ else
   # and stage 2 asks for it at the push and after every round. An instruction
   # that arrives only after the PR exists cannot serve a case that happens
   # before one does; the independent review of #55 is where that was measured.
-  for named in record-review.sh await-review.sh review-status.sh resolve-thread.sh \
+  # `resolve-thread.sh` is NOT in this list any more, and its absence is the
+  # assertion. The validator resolves what it is satisfied by; an author that
+  # closed its own threads would be holding the per-finding ledger it is judged
+  # against. The negative is checked below, where the rest of the negatives are.
+  for named in record-review.sh await-review.sh review-status.sh \
                 answer-review.sh handoff.sh "--auto --squash" "Closes #" \
+                "THERE IS ONLY ONE" "VALIDATOR" "At most TWO validations" \
                 ".github/workflows/" ".github/scripts/" ".claude/"; do
     grep -qF -- "$named" <<<"$stage2" \
       || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
   done
+  grep -qF -- "resolve-thread.sh" <<<"$stage2" \
+    && fail "the post-PR brief tells the author to resolve its own review threads; the validator resolves what it accepts, or a resolved thread means nothing"
   [ "$fails" = "$brief_fails_before" ] \
-    && ok "stage 2 still names the whole review loop and the paths a person has to merge"
+    && ok "stage 2 names one review, two validations, and the paths a person has to merge"
 
   # The `brief` row, in the vendored check and not only in autofleet's own
   # suite: a host project gets the brief and the reason it was split, so it
@@ -1799,17 +1819,25 @@ def triple(text):
 #                       (armaatus/autofleet#51). Stage 2 names `record-review.sh`
 #                       bare in the rebase remedy, which is the primitive under
 #                       this one and a pointer rather than the instruction.
-#   at most three rounds  the phrasing IS the rule. Stage 1 says "three review
-#                       rounds" about the context budget, which is a different
-#                       claim and does not match.
+#   at most two validations  the phrasing IS the rule. It replaced "at most
+#                       three rounds", which was the cap on REVIEWS when a pull
+#                       request could have four of them; the reviewer now runs
+#                       once and the bound that is left to state is the
+#                       validator's.
 RULES = [
     ("run both self-review passes and record the result before pushing",
      "the brief, stage 1",
      lambda t: "self-review.sh" in t),
     ("arm `--auto --squash` the moment the PR exists", "the brief, stage 2",
      lambda t: "--auto --squash" in t),
-    ("the three-round cap", "the brief, stage 2",
-     lambda t: re.search(r"at most\s+three\s+rounds", t, re.I) is not None),
+    ("the two-validation cap", "the brief, stage 2",
+     lambda t: re.search(r"at most\s+two\s+validations", t, re.I) is not None),
+    # The reviewer runs ONCE, and an agent that believes otherwise answers a
+    # review with a push expecting a fresh one -- which is the loop this shape
+    # removed, re-derived from a brief that forgot to say so. Stage 2's home,
+    # next to the wait that reads it back.
+    ("the review runs once", "the brief, stage 2",
+     lambda t: "THERE IS ONLY ONE" in t),
     ("the paths only a person may merge", "the brief, stage 2", triple),
     ("the STOP file", "the brief, stage 1",
      lambda t: ".autofleet/STOP" in t),
@@ -1817,8 +1845,17 @@ RULES = [
     # pass names `merge_gate.py` greps the body for. Keyed on `Closes #` alone,
     # stage 2 could drop the pass names and this still printed ok, on a check
     # named for a rule it was covering half of. Found by the independent review.
+    # BOTH halves, because the rule is both: the closing line AND the pass name
+    # `merge_gate.py` greps the body for. Keyed on `Closes #` alone, stage 2
+    # could drop the pass name and this still printed ok, on a check named for a
+    # rule it was covering half of.
+    #
+    # ONE pass name now, not two. `/code-review` left `LOCAL_PASSES` when
+    # `/implement` became the opening prompt -- it runs
+    # `/mattpocock-skills:code-review` itself, and requiring a second overlapping
+    # review before the pull request existed was cost with no reader.
     ("`Closes #N`, and what merge-gate reads from the body", "the brief, stage 2",
-     lambda t: all(n in t for n in ("Closes #", "/code-review",
+     lambda t: all(n in t for n in ("Closes #",
                                     "mattpocock-skills:code-review"))),
 ]
 
@@ -1860,7 +1897,9 @@ DOCS = {
     "README.md":                    ("map",   "read when deciding whether to install it, not before editing"),
     "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
     ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
-    ".claude/agents/verifier.md":   ("map",   "read by the subagent, in the subagent's own context"),
+    ".claude/agents/reviewer.md":   ("map",   "inlined by review.sh into the reviewer's own prompt, not read here"),
+    ".claude/agents/validator.md":  ("map",   "inlined by validate.sh and validate.yml into the validator's own prompt"),
+    ".autofleet/review.md":         ("map",   "the host project's own correctness rules; read by the reviewer, in its own context"),
     "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is the one below"),
     ".autofleet/run/self-review.md": ("written", "where self-review.sh leaves what the two passes found -- gitignored, and the file the rebase remedy re-records"),
 }

@@ -483,7 +483,7 @@ def stop(code):
 
 sys.path.insert(0, ".github/scripts")
 try:
-    from merge_gate import (independent_reviews, is_substantive,
+    from merge_gate import (validation, independent_reviews, is_substantive,
                             declared_important)
 except Exception as exc:  # missing, half-edited, or broken at import time
     # Not ImportError alone: merge_gate.py is a file agents in this repo edit --
@@ -512,6 +512,37 @@ if head != local_head:
     notes.append(f"this worktree is on {local_head[:8]} and the PR's head is "
                  f"{head[:8]} -- there is something unpushed. The review being "
                  "waited for is of what GitHub has.")
+
+# THE VALIDATION FIRST, because from the first fix onward it is the only thing
+# that can arrive.
+#
+# This wait is called twice in the loop: once for the review, and once for the
+# validation of the commits answering it. The second call is the one that breaks
+# without this. A validation rides in a `gh pr review` and carries a `validated:`
+# trailer, and `independent_reviews()` EXCLUDES anything carrying one -- a
+# validation is not a review, and counting it as one would let it satisfy the
+# independence requirement it exists downstream of. So the reviews list below is
+# empty on a validated head, forever: the review was invalidated by the push, no
+# second review is coming, and the wait would spend its whole deadline three
+# times over on something that has already happened.
+#
+# Reported and returned, not waited through. `review-status.sh` is what the
+# caller runs next either way; this only has to stop.
+verdict = validation(pull, head)
+if verdict is not None:
+    notes.append(
+        f"the validation of {head[:8]} came back {verdict.upper()}. That is what "
+        "judges a fix -- the review runs once, on the head the PR opened with, "
+        "and this is the pass that judges your answer to it. A PASS releases the "
+        "gate; run ./scripts/fleet/review-status.sh, which is the next step "
+        "either way. A FAIL names what is unsettled in its body: fix that and "
+        "push, and the next validation judges the new head.")
+    # `stop(0)`, not `stop(1)`. A `1` means "nothing yet, poll again", which for
+    # this condition is a lie that costs the whole deadline: the validation has
+    # ALREADY arrived and no later poll will find anything else, because a
+    # validated head has no review coming and no second validation until the next
+    # push. `0` is "something is in hand, go and read it", which is what happened.
+    stop(0)
 
 # The rules the gate itself uses, imported rather than paraphrased: not by the
 # PR author, on this head, and carrying something to act on.

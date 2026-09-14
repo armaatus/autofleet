@@ -1350,7 +1350,7 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
 #   <pr>.rounds  a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
 #                had that DID produce a verdict, across every head it has ever
-#                been on, against AUTOFLEET_REVIEW_MAX_ROUNDS. Written by
+#                been on, against AUTOFLEET_REVIEW_MAX. Written by
 #                review.sh on exit 0 only. The opposite population from
 #                `.tries`, which is why it is a separate file and not a second
 #                column: a review that submits findings clears `.tries` and
@@ -1361,6 +1361,21 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
+#
+#   v-<pr>       ...and the same four, for the VALIDATOR, under a `v-` prefix.
+#   v-<pr>.done  One directory rather than two, deliberately: `live_reviewers`,
+#   v-<pr>.tries `stop_reviewers` and the closed-PR sweep all walk this directory
+#   v-<pr>.rounds and all three want to treat a validator exactly as they treat a
+#                reviewer -- it is another agent holding this machine's `gh`
+#                login, it dies on a stop, and it is reaped the same way. A
+#                second directory would have been a second copy of each of them,
+#                and the copy that drifts is the one nobody is looking at.
+#
+#                `is_review_record` works on both unchanged -- it matches the
+#                SUFFIX -- and the one place that reads the number out of a
+#                filename strips the prefix first. Getting that wrong deletes
+#                `v-42.done` on the first poll after it is written, which starts
+#                a fresh validator every minute for the life of the PR.
 #
 # Only the first is a lock, and the four records must never be counted as one.
 # `is_review_record` is the predicate; use it rather than respelling the suffix
@@ -1381,6 +1396,59 @@ is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; es
 # leaks to global scope anyway and is invisible to anyone reading the file-level
 # helpers. Found by `/mattpocock-skills:code-review`.
 rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
+
+# Start a validator for $1 at head $2, if a slot is free.
+#
+# Deliberately THIN. Every question about whether a validation is due -- has this
+# head one already, did any review leave findings to check, has this pull request
+# had its two -- is `validate.sh`'s, and it asks `merge_gate.py` rather than
+# answering from here. That is the #114 lesson applied to the second phase before
+# it can be learned again: three paraphrases of "what counts" drifted apart once,
+# always in the permissive direction, and the permissive direction here is a
+# branch merging on a validation nobody asked for.
+#
+# So this decides one thing only: is there an agent slot. The cost of asking too
+# often is one exit 8, two API calls.
+start_validator() {
+  local pr="$1" head="$2" marker="$REVIEWING_DIR/v-$1"
+
+  # Already running one for this PR -- on any head. Unlike the reviewer's lock,
+  # which is per head and restarts when the head moves, a validator whose head
+  # moved is judging a commit whose successor it has not read. Killing and
+  # restarting it would spend a validation out of a cap of two on a commit that
+  # is already superseded; letting it finish costs one wasted verdict that the
+  # sha binding makes harmless, and the next poll starts the one that counts.
+  [ -e "$marker" ] && return 0
+  [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ] && return 0
+  rm -f "$marker.done"
+
+  # RE-COUNTED, not carried: this shares the reviewers' pool because it is the
+  # same resource -- an agent holding this machine's `gh` login -- and the count
+  # has to be current or three fast exits hold every slot for the whole pass.
+  #
+  # `live_reviewers` is defined INSIDE `review_open_prs`, which is the only
+  # caller of this and defines it before the loop that calls here -- bash makes a
+  # nested definition global once the enclosing function has run. Said out loud
+  # because moving this call anywhere earlier would find it undefined, and `set
+  # -e` is not on in this file, so the failure would be a silent zero and a
+  # validator started past the cap.
+  local running; running="$(live_reviewers)"
+  [ "${running:-0}" -ge "$MAX_WORKTREES" ] && return 0
+
+  # `</dev/null` is load-bearing where this is called from: the caller's stdin IS
+  # the pipe carrying the remaining pull requests, and a background child that
+  # inherits it eats them -- the next PR in the pass then silently gets nothing.
+  #
+  # The marker is written AFTER the spawn, because the pid is what goes in it.
+  # The race that opens is the same benign one review.sh documents: an exit-8
+  # validator can remove a marker that does not exist yet, and the `printf` then
+  # recreates it holding a dead pid, which `live_reviewers` reaps on its next
+  # call.
+  AUTOFLEET_VALIDATE_MARKER="$marker" \
+    "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
+  printf '%s %s\n' "$!" "$head" >"$marker"
+  say "validating PR #$pr at ${head:0:8} (pid $!)"
+}
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -2050,13 +2118,24 @@ for p in prs:
     # here rather than in words.
     rounds_n="${rounds_n:-0}"
     case "$rounds_n" in (*[!0-9]*) rounds_n=0 ;; esac
-    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
-      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
-        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
-        "  Not starting more, on this head or any later one. The reviews are in" \
-        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
-        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
-        "  genuinely still converging."
+    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX" ]; then
+      # THIS IS THE ORDINARY PATH NOW, not the exhausted one. The cap is 1: a
+      # pull request that has had its review reaches here on every later poll,
+      # and what it wants from then on is a VALIDATION -- did the commits
+      # answering the findings address them, and did they break anything.
+      #
+      # `validate.sh` decides whether one is actually due (it asks
+      # `merge_gate.needs_validation`, the one definition) and enforces its own
+      # cap, so this only decides whether to ASK. A PR with nothing to validate
+      # costs one cheap exit 8, the same shape `review.sh` has on the other side.
+      #
+      # No `hold_say_into` here any more. The old message announced "N reviews,
+      # which is the cap. Needs you." -- true when the cap was four and reaching
+      # it meant a PR had failed to converge, and false now that reaching it is
+      # what every healthy pull request does on its second poll. The hold that
+      # still means something is the VALIDATION cap, and `validate.sh` says it
+      # where the number lives.
+      start_validator "$pr" "$head"
       continue
     fi
 
@@ -2201,7 +2280,13 @@ for p in prs:
   for rec in "$REVIEWING_DIR"/*; do
     [ -e "$rec" ] || continue
     is_review_record "$rec" || continue
-    base="$(basename "$rec")"; num="${base%%.*}"
+    # `v-` is the validator's half of this directory -- the two phases share it
+    # so that `live_reviewers`, `stop_reviewers` and this sweep keep working on
+    # both with no second copy of any of them. Strip it before the number is
+    # read, or `v-42.done` parses as pull request "v-42", matches no open PR, and
+    # is deleted on the first poll after it is written -- which starts a fresh
+    # validator every minute for the life of the PR.
+    base="$(basename "$rec")"; base="${base#v-}"; num="${base%%.*}"
     case " ${open_prs:-} " in
       *" $num "*) continue ;;
     esac

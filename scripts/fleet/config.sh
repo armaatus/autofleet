@@ -155,22 +155,34 @@
 # `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
 # the cap unchecked and the guard was decorative for the one route that matters.
 
-# How many reviews one PULL REQUEST may accrue before a person is asked.
+# How many reviews one PULL REQUEST gets, and how many validations may follow.
 #
-# A different question from the one above, and nothing was answering it. That
-# cap is per HEAD and counts only reviewers that submitted NOTHING -- a reviewer
-# that submits findings clears it, so a PR whose every round produces findings
-# is bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the agent's
-# side, but only while the agent is alive and only on rounds it read back:
-# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
-# on #88. #85's agent stopped at its cap and a fourth review landed with nobody
-# left to answer it.
+# THE LOOP IS ONE REVIEW AND THEN AT MOST TWO VALIDATIONS, and these are the two
+# numbers that say so. It replaced a loop bounded at four reviews per PR that
+# routinely spent all four: #86 burned four without one ever judging its current
+# head, because every answer to a finding was a commit, every commit moved the
+# head, and a head move invalidates the review that asked for it. Reviewing the
+# same branch four times is not four times the assurance; it is the same review
+# of four different commits, none of which is the one that merges.
 #
-# So this bounds the DISPATCHER: after this many reviews on one PR, it stops
-# starting them and says so. Four rather than three, because it must not fire
-# before the agent's own three-round cap has had its say -- two caps at the same
-# number is one of them being dead code.
-: "${AUTOFLEET_REVIEW_MAX_ROUNDS:=4}"
+# So the two phases are bounded separately, because they are different jobs:
+#
+#   AUTOFLEET_REVIEW_MAX     how many times the REVIEWER judges the diff. One.
+#                            It fires at PR-open, on the head the PR opened
+#                            with, and everything after that is the fix.
+#   AUTOFLEET_VALIDATE_MAX   how many times the VALIDATOR judges the answer.
+#                            Two: one for the commits answering the review, and
+#                            one more for the commits answering the validator.
+#                            Past it a person decides, which is the point -- an
+#                            unbounded loop ends in a person too, just later and
+#                            having spent a night getting there.
+#
+# Both are per PULL REQUEST, not per head, and both count only runs that
+# submitted something. A validator killed at its deadline, or one whose CLI was
+# not on PATH, is refunded -- `validate.sh` says which exits do that and why,
+# in the same words `review.sh` says it.
+: "${AUTOFLEET_REVIEW_MAX:=1}"
+: "${AUTOFLEET_VALIDATE_MAX:=2}"
 # ABOVE the `.autofleet/config` source, like every other default here. Placed
 # below it once, in the same change that added it, and the empty-value refusal
 # became unreachable: the host file sets `KNOB=`, then a `:=` running afterwards
@@ -420,7 +432,9 @@ config_whole_number AUTOFLEET_HANDOFF_MAX_WORDS "$AUTOFLEET_HANDOFF_MAX_WORDS" \
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error
 # anybody sees, so the cap silently does not exist.
-config_whole_number AUTOFLEET_REVIEW_MAX_ROUNDS "$AUTOFLEET_REVIEW_MAX_ROUNDS" \
+config_whole_number AUTOFLEET_REVIEW_MAX "$AUTOFLEET_REVIEW_MAX" \
+  1 "a positive whole number"
+config_whole_number AUTOFLEET_VALIDATE_MAX "$AUTOFLEET_VALIDATE_MAX" \
   1 "a positive whole number"
 
 # The two knobs armaatus/autofleet#65 added, refused for the same reason: each
@@ -451,3 +465,32 @@ case "$AUTOFLEET_REVIEW_SCOPE" in
           "got '$AUTOFLEET_REVIEW_SCOPE'" >&2
      exit 2 ;;
 esac
+
+# THE OLD KNOB IS AN ERROR, NOT AN ALIAS.
+#
+# `AUTOFLEET_REVIEW_MAX_ROUNDS` bounded reviews-per-PR at four when four reviews
+# was the shape. The two knobs above replaced it, and a host repository that
+# tuned the old one meant something by the number -- "give this project more
+# rounds" -- which maps onto neither of them. Aliasing it to the review cap
+# would keep the file working and quietly change what it asks for, which is the
+# failure mode every other check in this file is written against: a setting that
+# is read, accepted, and does something else.
+#
+# So it is loud. A host repo hits this once, on the first run after upgrading,
+# with both replacements named in the message.
+# `${VAR+set}`, not `-n "${VAR:-}"`. A host config that has been half-edited
+# leaves `AUTOFLEET_REVIEW_MAX_ROUNDS=` with nothing after the `=` -- still a
+# line about a knob nothing reads, and still someone who thinks they have
+# configured the cap. `-n` sees an empty string and says nothing, which is the
+# silent-acceptance this check exists to refuse. Found by the suite, which
+# already drove the empty case through `.autofleet/config` for the old knob.
+if [ -n "${AUTOFLEET_REVIEW_MAX_ROUNDS+set}" ]; then
+  echo "AUTOFLEET_REVIEW_MAX_ROUNDS is set, and nothing reads it any more." >&2
+  echo "The loop is one review and then at most two validations, bounded" >&2
+  echo "separately because they are different jobs:" >&2
+  echo "  AUTOFLEET_REVIEW_MAX=1     how many times the reviewer judges the diff" >&2
+  echo "  AUTOFLEET_VALIDATE_MAX=2   how many times the validator judges the answer" >&2
+  echo "Remove the old line from .autofleet/config and set whichever of those" >&2
+  echo "you meant. docs/CONFIGURATION.md has both rows." >&2
+  exit 2
+fi
