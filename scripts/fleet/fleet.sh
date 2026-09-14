@@ -3241,7 +3241,7 @@ cmd_status() {
     # The rule the comment above states is about counting records as reviewers,
     # which is what a `find ! -name` got wrong; naming one suffix to read one
     # file is not that.
-    local r rn rpr
+    local r rn rpr found=0
     for r in "$REVIEWING_DIR"/*.rounds; do
       [ -e "$r" ] || continue
       rn="$(cat "$r" 2>/dev/null)"
@@ -3252,7 +3252,17 @@ cmd_status() {
       else
         echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds"
       fi
+      found=1
     done
+    # ...AND WHAT THE LIST IS, because it is local state and not a query. These
+    # records are swept when the dispatcher next sees the PR fall off the open
+    # list, so on a machine where nothing is polling -- which is exactly when a
+    # person runs this -- a merged PR can still print "AT THE CAP, a person
+    # decides" on the first screen anybody reads. Filtering would cost the
+    # `gh pr list` this screen deliberately does not spend, so the line says
+    # what it is instead. Found by the independent review.
+    [ "${found:-0}" = 1 ] \
+      && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
   else
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"

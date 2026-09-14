@@ -238,12 +238,30 @@ payload=""
 raw_out=""
 raw_err=""
 review_ref=""
+log=""
 drop_review_ref() {
   [ -n "$review_ref" ] || return 0
   git update-ref -d "$review_ref" 2>/dev/null || true
 }
+# The placeholder `$log` written before the fetch, dropped again if this run
+# dies before the reviewer ever starts -- a TERM taken during the fetch or the
+# context build, which is before the TERM trap further down exists. Left, it is
+# a transcript by `prune_review_logs`'s reckoning, holding one line saying a
+# reviewer is running and naming two files that were never created. The keep-N
+# cap does collect it eventually; it should not be there to collect. Only when
+# it is still the placeholder: `finish_log` owns the file from the spawn on.
+# Found by the independent review.
+drop_placeholder_log() {
+  [ -n "${log:-}" ] && [ -e "${log:-}" ] || return 0
+  [ -e "$raw_out" ] && return 0
+  grep -q '^reviewer running; live output is in$' "$log" 2>/dev/null \
+    && rm -f "$log"
+  return 0
+}
 on_exit() {
-  rm -f "${AUTOFLEET_REVIEW_MARKER:-}" "$payload" "$raw_out" "$raw_err"
+  rm -f "${AUTOFLEET_REVIEW_MARKER:-}" "$payload" "$raw_err"
+  drop_placeholder_log
+  rm -f "$raw_out"
   drop_review_ref
 }
 trap on_exit EXIT
@@ -700,6 +718,16 @@ round="$(review_round)"
 # lines -- one statement of a rule, which is what CLAUDE.md requires. Do not
 # copy them into the brief and leave them here as well.
 #
+# CLAUSE 2 AND 3 NAME THE COMMIT, and that is the correction round two found.
+# `Read` and `Grep` resolve against this checkout -- the repository root, on
+# whatever branch it happens to be -- and the head under review is not checked
+# out anywhere: it exists here only as the object the fetch above put in the
+# store. So a clause telling the reviewer to `Read` a touched file handed it the
+# BASE's copy, with the delta's own additions absent and the hunk line numbers
+# landing on unrelated code, and a clause telling it to `Grep` the tree searched
+# the base -- inverting the round-one-breakage case clause 3 exists to catch.
+# Silently, in the direction the whole mechanism is built to avoid.
+#
 # CLAUSE 2 IS SIZE-AWARE, and that is a measurement rather than a preference.
 # Read unqualified -- "every touched file, whole" -- it costs MORE than the full
 # diff it replaces on this repository, because a handful of files here are
@@ -740,17 +768,29 @@ $carried
 Review **the delta, plus everything the delta reaches**:
 
 1. The delta itself: \`git diff $last_head..$head\`.
-2. The surroundings of every change. \`git diff --name-only $last_head..$head\`
-   lists the files. Read one WHOLE when it is small enough to read whole --
-   roughly under 500 lines -- and for a larger one \`Read\` only the region
-   around each hunk, whose line numbers are in the diff. A two-line diff judged
-   without its surroundings is a patch email, not a review; a 3,600-line file
-   read whole to judge two lines is the cost this round exists to avoid.
+2. The surroundings of every change, READ AT $head AND NOT FROM THE WORKING
+   TREE. \`git diff --name-only $last_head..$head\` lists the files. For each:
+
+   - small enough to read whole, roughly under 500 lines:
+     \`git show $head:<path>\`
+   - larger: \`git diff -U40 $last_head..$head -- <path>\`, which is the hunks
+     with enough of their surroundings to judge them.
+
+   NOT \`Read <path>\`. \`Read\` and \`Grep\` resolve against this checkout,
+   which is the repository root on whatever branch it happens to be -- normally
+   the base, never this pull request. \`Read\` would hand you the BASE's copy:
+   the helper the delta added is absent, and the hunk line numbers land on
+   unrelated code. The head exists here only as a fetched object, which is why
+   these two commands name it. A path that the delta DELETED has no content at
+   $head; the diff is all there is of it.
 3. Every caller of every function, variable or exit code whose CONTRACT the
-   delta moved -- \`Grep\` the name across the tree. This is the clause that
-   catches a round-five commit breaking something round one approved, which a
-   diff range cannot show you. At most ten callers; if there are more, say in
-   the body that you sampled them.
+   delta moved: \`git grep -n <name> $head\`. This is the clause that catches a
+   round-five commit breaking something round one approved, which a diff range
+   cannot show you -- and it takes the commit for the same reason clause 2 does.
+   A bare \`Grep\` searches the base, so a caller this pull request ADDED is
+   invisible to it and one this pull request DELETED still appears, which
+   inverts the case this clause exists for. At most ten callers; if there are
+   more, say in the body that you sampled them.
 
 \`gh pr view $pr --json title,body\` and \`gh pr diff $pr\` are still there for the
 whole change if you need them. The range above is what is new, and what you were
@@ -821,6 +861,16 @@ fi
 # gives up. Found by the independent review.
 tools='Read,Grep,Glob,Skill,Task,Agent'
 tools="$tools,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+# `git grep`, which the brief does not declare and does not need to: lint holds
+# the brief to granting no MORE than this list, never the same. It is here for
+# the delta prompt's clause 3, and it is the narrower tool rather than the
+# wider one -- `Grep` is already granted and searches the WORKING TREE, which
+# is the base branch and not the head under review, so a caller this PR added
+# is invisible to it and one this PR deleted still appears. `git grep <name>
+# <sha>` searches the commit. Read-only over an object store this script has
+# already fetched into; no network, no API, no ceiling to give away. Found by
+# the independent review.
+tools="$tools,Bash(git grep:*)"
 tools="$tools,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
 tools="$tools,Bash(gh pr review:*)"
 

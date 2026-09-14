@@ -122,6 +122,13 @@ assumes flag tolerance — `--allowed-tools`, `--max-turns` and
 its arguments is fine and one that filters them was already broken. This is a measurement, not a
 gate — nothing blocks on a missing row.
 
+**`cost.tsv` is the one store under `$FLEET_DIR/reviews/` that
+`AUTOFLEET_KEEP_REVIEWS` does not prune, and that is deliberate: it *is* the
+before-and-after, so a sweep would delete the "before".** It grows by one short
+row per reviewed head — under a hundred bytes — so a thousand rounds is under
+100 KB. Delete it by hand when a measurement is finished with; nothing reads it
+but a person.
+
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
 submits it, from that workflow's own account. It needs a
 `CLAUDE_CODE_OAUTH_TOKEN` secret on the repository; mint one with

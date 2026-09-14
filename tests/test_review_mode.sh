@@ -2293,6 +2293,22 @@ XX
   prompt_has "The surroundings of every change" || fail "clause 2 (the surroundings) is missing"
   prompt_has "roughly under 500 lines" \
     || fail "clause 2 is not size-aware, so a delta round reads more than the full diff it replaces"
+  # THE CLAUSES NAME THE COMMIT. `Read` and `Grep` resolve against this
+  # checkout, which is the repository root on the base branch -- the head under
+  # review is not checked out anywhere, it is a fetched object. A clause saying
+  # `Read <path>` hands the reviewer the BASE's copy with the delta's additions
+  # absent and the hunk line numbers on unrelated code; a clause saying `Grep`
+  # searches the base, so a caller this PR added is invisible and one it deleted
+  # still appears -- inverting the case clause 3 exists for. Found by the
+  # independent review.
+  prompt_has "git show $PR_HEAD:" \
+    || { cat "$PROMPT_FILE" >&2; fail "clause 2 reads the working tree, not the head under review"; }
+  prompt_has "git grep -n <name> $PR_HEAD" \
+    || { cat "$PROMPT_FILE" >&2; fail "clause 3 greps the working tree, not the head under review"; }
+  ok "...and both name the head under review, not this checkout"
+  grep -q 'Bash(git grep' "$ARGV_FILE" \
+    || { cat "$ARGV_FILE" >&2; fail "clause 3 asks for git grep and the reviewer is not granted it"; }
+  ok "...and the reviewer is granted the one tool those clauses need"
   prompt_has "whose CONTRACT the" || fail "clause 3 (the callers) is missing"
   ok "...and carries the two clauses that keep a narrower read from being a weaker one"
 
@@ -2417,6 +2433,31 @@ XX
   ok "...and no cost row is invented for it"
   ;;
 
+
+# ------------------------------------------------------------ scope_noplaceholder
+  scope_noplaceholder)
+  # THE PLACEHOLDER `$log` IS WRITTEN BEFORE THE FETCH, so a run that never
+  # reaches a reviewer must take it back. Left, it is a transcript by
+  # `prune_review_logs`'s reckoning -- one line saying a reviewer is running,
+  # naming two stream files that were never created. The `stopped` path is the
+  # one that reaches it deterministically: `review.sh` writes the placeholder,
+  # then finds the stop file on its next look. Found by the independent review.
+  make_fixture; stub_reviewer marked
+  # Not on PATH, so the run exits 6 after the log path is decided.
+  export AUTOFLEET_REVIEW_CMD=no-such-reviewer-anywhere
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 6 ] || { cat "$WORK/out" >&2; fail "a missing reviewer command did not exit 6 (got $rc)"; }
+  [ -e "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log" ] \
+    && fail "a run that never started a reviewer left a placeholder transcript behind"
+  ok "a run that never reaches a reviewer leaves no placeholder transcript"
+  # ...while a run that DID start one keeps its log, which is the half that
+  # matters: the placeholder exists so `$log` is there for the whole run.
+  stub_reviewer text
+  run_it 42 >"$WORK/out2" 2>&1
+  [ -s "$AUTOFLEET_DIR/reviews/pr-42-${PR_HEAD:0:8}.log" ] \
+    || fail "the cleanup took a real transcript"
+  ok "...while a run that started one keeps its transcript"
+  ;;
 
 # -------------------------------------------------------------- scope_nofetch
   scope_nofetch)
@@ -2592,6 +2633,6 @@ XX
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_noplaceholder|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row" >&2
   exit 2 ;;
 esac

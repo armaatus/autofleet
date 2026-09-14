@@ -310,7 +310,6 @@ fi
 
 # ----------------------------------------------------- knobs that must be sane
 #
-#
 # AFTER the host config, because that is the route that matters: a value only
 # checked before it is checked on the one path nobody uses. See the note by
 # AUTOFLEET_REVIEW_MAX_TRIES above for why this knob in particular cannot be
