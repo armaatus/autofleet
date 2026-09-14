@@ -224,11 +224,17 @@ run_pass() {
   echo "==> $label  (${AUTOFLEET_SELF_REVIEW_TIMEOUT}s," \
        "${AUTOFLEET_SELF_REVIEW_MAX_TURNS} turns, $AUTOFLEET_SELF_REVIEW_CMD)" >&2
   set -m
+  # `</dev/null`, because SYSTEM tells the pass its stdin is closed and without
+  # this that is a lie: the spawn inherits the caller's. `set -m` puts the pass
+  # in a background process group, so a read from a tty raises SIGTTIN -- the
+  # pass STOPS, `kill -0` still succeeds, and it burns the whole timeout without
+  # having done anything. Found by the local /code-review pass.
   "$AUTOFLEET_SELF_REVIEW_CMD" -p "$label" \
     --allowed-tools "$TOOLS" \
+    --disallowed-tools "$DENIED" \
     --max-turns "$AUTOFLEET_SELF_REVIEW_MAX_TURNS" \
     --append-system-prompt "$SYSTEM" \
-    >"$out" 2>"$err" &
+    </dev/null >"$out" 2>"$err" &
   local child=$! waited=0
   set +m
 
@@ -306,6 +312,25 @@ TOOLS='Read,Grep,Glob,Skill,Task,Agent'
 TOOLS="$TOOLS,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 TOOLS="$TOOLS,Bash(git status:*),Bash(git merge-base:*),Bash(git rev-parse:*)"
 TOOLS="$TOOLS,Bash(gh issue view:*)"
+
+# ...AND A DENY LIST, because `--allowed-tools` IS NOT A CEILING. It is additive:
+# it grants on top of what the settings file already permits, and
+# `.claude/settings.json` permits `Write(.claude/agents/**)` and
+# `Edit(.claude/agents/**)` by design -- guard.py's own comment says skills and
+# subagents "stay editable". So the list above never took the pen away, and the
+# lint assertion that read it as a ceiling was certifying a property the spawn
+# did not impose: hard rule 3, arriving through a check rather than a guard.
+#
+# What that reaches is not academic. `guard.py` protects `.claude/hooks/` and
+# `settings.json`, so the file the paragraph above names is safe -- but
+# `.claude/agents/reviewer.md` is the brief the INDEPENDENT reviewer runs on, and
+# a self-review pass able to rewrite it is a reviewed PR editing its own
+# reviewer. Found by the local /mattpocock-skills:code-review pass, which
+# measured the gap by noticing the pass had just used tools this list never
+# granted.
+DENIED='Write,Edit,NotebookEdit'
+
+
 
 # The range is in the SYSTEM prompt rather than appended to the slash command,
 # because a slash command's arguments are whatever follows it on the line and
@@ -419,6 +444,20 @@ if [ -n "$failed" ]; then
   echo "names two reviews must have had two." >&2
   exit "$rc_first"
 fi
+
+# THE COMMIT THAT WAS REVIEWED IS THE ONE THE MARKER MAY COVER. `record-review.sh`
+# keys the marker on `git rev-parse HEAD` at the moment it runs, and step 3 now
+# tells the agent to start this in the BACKGROUND -- so an agent that commits
+# while the passes read gets a marker for a commit nothing has reviewed, and
+# guard.py opens the push gate on it. That is the hole this file's header says it
+# closes, arriving through the sentence that made it usable. Found by the local
+# /code-review pass.
+now="$(git rev-parse HEAD)"
+[ "$now" = "$sha" ] || {
+  echo "HEAD moved while the passes ran: they read ${sha:0:8}, HEAD is now" >&2
+  echo "${now:0:8}. Recording would mark a commit nothing has reviewed. The" >&2
+  echo "findings are in $DRAFT; run this again on the commit you mean to push." >&2
+  exit 2; }
 
 mv "$DRAFT" "$FINDINGS"
 echo "==> findings: $FINDINGS" >&2

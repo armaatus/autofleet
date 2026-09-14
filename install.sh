@@ -163,7 +163,13 @@ for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 # secrets in the tree. Found by both local review passes.
 ignore_line() {
   local gi="$TARGET/.gitignore"
-  grep -qxF -- "$1" "$gi" 2>/dev/null && return 0
+  grep -qxF -- "$1" "$gi" 2>/dev/null && { kept=$((kept + 1)); return 0; }
+  # COUNTED, like every other file this script touches. Without it `--dry-run`
+  # printed "would add ..." and then "Nothing was written", and a real run
+  # reported "0 written" having just mutated a file the host owns -- the one
+  # change in the payload that edits something autofleet did not write. Found by
+  # the local /code-review pass.
+  changed=$((changed + 1))
   if $DRY; then echo "   would add to .gitignore: $1"; return 0; fi
   # A trailing newline first if the file lacks one, or the append lands on the
   # end of somebody else's pattern and silently changes what it matches.
@@ -174,6 +180,10 @@ ignore_line() {
 echo "==> .gitignore (appended, never rewritten)"
 ignore_line ".autofleet/run/"
 ignore_line ".env"
+# ...and the file a review run BY HAND writes. autofleet's own `.gitignore` has
+# carried `/findings.md` since #54 swept one into a commit; a host repo had the
+# same agents, the same instruction and none of the protection.
+ignore_line "/findings.md"
 
 # The seed is autofleet's own config, and autofleet runs itself on
 # `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that

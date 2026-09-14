@@ -497,12 +497,33 @@ if not block:
     sys.exit("scripts/fleet/self-review.sh no longer builds a `TOOLS=` allowlist, "
              "so its two passes run with whatever the command defaults to")
 granted = block.group(0)
-for forbidden in ("Write", "Edit", "NotebookEdit", "Bash(gh api:*)"):
-    if forbidden in granted:
-        sys.exit(f"self-review.sh grants `{forbidden}` directly. The self-review "
-                 "passes report and the author fixes -- and this one runs in a "
-                 "fleet-owned worktree, where a pass that can write can rewrite the "
-                 "guard that is watching it")
+if "Bash(gh api:*)" in granted:
+    sys.exit("self-review.sh grants `Bash(gh api:*)`. It is withheld on purpose: "
+             "it is the one grant on the list with no ceiling, and this pass runs "
+             "under the maintainer's own gh login")
+# THE DENY LIST IS WHAT ACTUALLY TAKES THE PEN AWAY. `--allowed-tools` is
+# ADDITIVE -- it grants on top of `.claude/settings.json`, which permits
+# `Write(.claude/agents/**)` and `Edit(.claude/agents/**)` by design. An earlier
+# version of this check read the absence of those words in `TOOLS=` as a
+# guarantee, which is hard rule 3 with the silence in the check rather than in
+# the guard. Assert the flag that binds. Found by the local
+# /mattpocock-skills:code-review pass.
+denied = re.search(r"^DENIED=.*$", src, re.M)
+if not denied:
+    sys.exit("scripts/fleet/self-review.sh no longer sets a `DENIED=` list, so "
+             "nothing stops a pass writing: `--allowed-tools` only ADDS to what "
+             ".claude/settings.json already permits, and that includes "
+             "Write/Edit under .claude/agents/ -- the independent reviewer's brief")
+for forbidden in ("Write", "Edit", "NotebookEdit"):
+    if forbidden not in denied.group(0):
+        sys.exit(f"self-review.sh's DENIED list no longer refuses `{forbidden}`. "
+                 "The self-review passes report and the author fixes -- and this "
+                 "one runs in a fleet-owned worktree, where a pass that can write "
+                 "can rewrite .claude/agents/reviewer.md, the brief the "
+                 "independent reviewer runs on")
+if "--disallowed-tools" not in src:
+    sys.exit("scripts/fleet/self-review.sh builds a DENIED list and never passes "
+             "it with `--disallowed-tools`, so it refuses nothing")
 if "Skill" not in granted:
     sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
              "skills -- silently review with most of what they are for switched off")

@@ -329,13 +329,14 @@ AGAIN
 CI is failing on this PR, on two consecutive checks: $broken
 
 No review will fix a red build. Reproduce it locally:
-  ctest --test-dir build --output-on-failure
+  ${AUTOFLEET_TEST_COMMAND:-the project's test command}
 then fix it, re-run the local reviews, record them for the new commit:
   ./scripts/fleet/record-review.sh .autofleet/run/self-review.md
 then push, and come back here.
 
 A failure here is yours until you have shown otherwise. This used to name
-harness.partial as a known race to be re-run rather than investigated; #155 found
+harness.partial as a known race to be re-run rather than investigated;
+armaatus/rommsync-nx#155 found
 what that actually was -- a fixture server retiring a worker under a request in
 flight -- and turned it off in the fixture, so there is no longer a test whose
 red is somebody else's by default. execute.occupied still carries a retry
