@@ -119,7 +119,8 @@ make_fixture() {
   # answers according to which slash command it was handed.
   SELF_CALLS="$WORK/calls"; : >"$SELF_CALLS"; export SELF_CALLS
   SELF_ARGV="$WORK/argv";   : >"$SELF_ARGV";  export SELF_ARGV
-  SELF_TOOLS="$WORK/tools"; : >"$SELF_TOOLS"; export SELF_TOOLS
+  SELF_TOOLS="$WORK/tools";   : >"$SELF_TOOLS";  export SELF_TOOLS
+  SELF_DENIED="$WORK/denied"; : >"$SELF_DENIED"; export SELF_DENIED
   SELF_CHILD="$WORK/child"; : >"$SELF_CHILD"; export SELF_CHILD
   cat >"$WORK/bin/fake-pass" <<'STUB'
 #!/usr/bin/env bash
@@ -134,6 +135,7 @@ while [ $# -gt 0 ]; do
     # that has nothing to do with what it is checking. Found by the local
     # /mattpocock-skills:code-review pass.
     --allowed-tools) printf '%s\n' "${2:-}" >>"$SELF_TOOLS"; shift 2 ;;
+    --disallowed-tools) printf '%s\n' "${2:-}" >>"$SELF_DENIED"; shift 2 ;;
     --max-turns|--append-system-prompt) shift 2 ;;
     *) shift ;;
   esac
@@ -209,14 +211,24 @@ case "${1:-}" in
   # moving it out of the session was supposed to buy back.
   grep -q -- '--max-turns' "$SELF_ARGV" || fail "a pass ran with no turn budget"
   [ -s "$SELF_TOOLS" ] || fail "a pass ran with no tool allowlist"
-  # Read-only over the tree: these passes report, the author fixes. And no
-  # `gh api`, which is the one grant with no ceiling -- the same reasoning
-  # review.sh spells out, and this runs in a fleet-owned worktree besides.
-  for granted in Write Edit NotebookEdit 'gh api'; do
-    grep -qF -- "$granted" "$SELF_TOOLS" \
-      && fail "the pass allowlist grants $granted"
+  # `gh api` is the one grant with no ceiling -- the same reasoning review.sh
+  # spells out, and this runs in a fleet-owned worktree besides.
+  grep -qF -- 'gh api' "$SELF_TOOLS" && fail "the pass allowlist grants gh api"
+
+  # THE DENY LIST IS WHAT TAKES THE PEN AWAY, and it is what this asserts.
+  # `--allowed-tools` is ADDITIVE: it grants on top of `.claude/settings.json`,
+  # which permits Write/Edit under `.claude/agents/` by design -- so the ABSENCE
+  # of `Write` from the allowlist proves nothing, and a phase that checked only
+  # that was asserting the property `self-review.sh`'s own comment says the
+  # allowlist does not have. `evals/lint.sh` proves the flag reaches the spawn;
+  # this proves the spawn was given the right list. Found by the local
+  # /mattpocock-skills:code-review pass.
+  [ -s "$SELF_DENIED" ] || fail "a pass ran with no --disallowed-tools, so nothing stops it writing"
+  for refused in Write Edit NotebookEdit; do
+    grep -qF -- "$refused" "$SELF_DENIED" \
+      || fail "the pass is not refused $refused; it could rewrite .claude/agents/reviewer.md"
   done
-  ok "each pass is given a turn budget and a read-only allowlist"
+  ok "each pass is given a turn budget, and is refused every tool that writes"
 
   # THE TWO WORDS merge_gate.py GREPS THE BODY FOR. What the agent pastes into
   # the pull request is what this printed; unlabelled, the paste does not satisfy

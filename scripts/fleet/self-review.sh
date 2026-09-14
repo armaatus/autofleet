@@ -334,8 +334,6 @@ TOOLS="$TOOLS,Bash(gh issue view:*)"
 # granted.
 DENIED='Write,Edit,NotebookEdit'
 
-
-
 # The range is in the SYSTEM prompt rather than appended to the slash command,
 # because a slash command's arguments are whatever follows it on the line and
 # these two passes do not share an argument grammar. Said once, it reaches both.
