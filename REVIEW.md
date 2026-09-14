@@ -57,6 +57,8 @@ Bugs, logic errors, and the failure paths this project cares about most:
   absence is Important regardless of how green the suite is.
 - Did the work invalidate an issue -- any issue -- that has not been edited? That
   is Important: those bodies are the only channel between parallel worktrees.
+- **A fleet PR body carries its `fleet.sh cost` figure.** The ceilings bound the
+  text; that number says whether the run got cheaper. Missing, it is a Nit.
 
 ## Important vs Nit
 
@@ -133,7 +135,7 @@ as though findings were left. Write the line.
 
 - Anything CI already enforces: compiler warnings, `core/` include hygiene,
   shell scripts that do not parse, an unformatted Python file, artifact shape.
-  CI going red says it better and does not need a human to read it.
+  CI going red says it better, and says it without a reader.
 - Comment density or naming that matches the surrounding code. CLAUDE.md asks
   for consistency with what is there, not for a house style this file does not
   define.
@@ -153,9 +155,7 @@ They do hold the branch, though, and that is not the same thing. `merge-gate`
 refuses a PR while a `--request-changes` is standing, while a review thread is
 open, and while a review reporting findings has not been answered by its author
 -- `./scripts/fleet/answer-review.sh "<what you did>"` is that answer, and "I am
-not doing this, because" is as good an answer as a fix. What none of that does
-is judge the finding; it only makes sure somebody read it before the code went
-in.
+not doing this, because" is as good an answer as a fix.
 
 That answer costs **no commit** — which is what `review-important: 0` is for:
 a fix moves the head and buys the next round; words do not.
