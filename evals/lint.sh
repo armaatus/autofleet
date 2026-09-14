@@ -1572,14 +1572,17 @@ echo "== the shell runs on the bash a mac ships"
 # expansion is a fact about the SOURCE, and greppable anywhere. Raised by the
 # independent review of armaatus/autofleet#52.
 if python3 - <<'BASH32'
-import glob, re, sys
+import glob, os, re, sys
 
 def strip_comment(line):
     """The line with a trailing shell comment removed, quotes respected.
 
-    Prose is where this rule would otherwise fire on itself: a comment
-    explaining the bad form names the bad form. The same function as the runner
-    contract check above, for the same reason it has one.
+    A comment explaining the bad form has to name the bad form, and this rule
+    would otherwise fire on that. Nothing in the tree needs it TODAY -- the
+    first draft of this docstring implied otherwise, which was checkable and
+    false -- so `tests/test_runner_bound.sh bash32` pins it with a tree that
+    does, rather than leaving it as a line nothing would notice the loss of.
+    Same function as the runner contract check above, for the same reason.
     """
     out, quote = [], ""
     for ch in line:
@@ -1596,9 +1599,11 @@ def strip_comment(line):
 def arith_spans(text):
     """Every `$(( ... ))` span, by walking parens rather than matching a regex.
 
-    `$(( (a + b) * c ))` closes on the SECOND `))`, and a regex that stops at
-    the first one reads the rest of the line as ordinary text -- which is a
-    false negative, the direction this rule cannot afford.
+    The case that needs the walk is a NESTED close: `$(( ((a)) + "b" ))`, where
+    a non-greedy `\$\(\(.*?\)\)` stops at `((a))` and never sees the quote --
+    a false negative, the direction this rule cannot afford. `$(( (a + b) * c ))`
+    is NOT that case and the first draft of this docstring used it, which
+    demonstrated nothing. Found by /code-review.
     """
     i = 0
     while True:
@@ -1617,15 +1622,41 @@ def arith_spans(text):
         yield text[i:j + 1]
         i = j + 1
 
+# THE PAYLOAD, and in autofleet also the files that are not vendored.
+#
+# This file is vendored and `.github/workflows/agent-config.yml` runs it on
+# every pull request in every host project, so the question "whose scripts may
+# this judge" is hard rule 1 with the damage landing on the payload. The payload
+# is autofleet's own code wherever it lands, and it has to run on a mac in a
+# host repo exactly as it does here -- judging it is the point. The HOST's
+# scripts are the host's business: a quote inside `$(( ))` works on bash 5, so a
+# Linux-only project would get a red on code that is fine, on a check it never
+# opted into. That is the failure the phase-registry check below spends twenty
+# lines avoiding, and this is the same shape one section up. Found by both local
+# passes.
+#
+# `tests/` and `install.sh` are autofleet's own and are NOT vendored, so they
+# are added only here -- keyed on the same sentinel the phase-registry check
+# uses, for the same reason it uses one.
 paths = sorted(set(
     glob.glob("scripts/fleet/*.sh") + glob.glob("scripts/fleet/runner/*.sh")
     + glob.glob(".claude/hooks/*.sh") + glob.glob(".github/scripts/*.sh")
-    + glob.glob("evals/*.sh") + glob.glob("tests/*.sh") + glob.glob("install.sh")))
+    + glob.glob("evals/*.sh")))
+if os.path.exists("tests/test_runner_bound.sh"):
+    paths += glob.glob("tests/*.sh") + glob.glob("install.sh")
+paths = sorted(set(paths))
 if not paths:
-    # A host installation with none of these is not a pass. Same reasoning as
-    # the phase-registry check below: a green line for an assertion that did not
-    # run is the false comfort hard rule 3 is about.
-    sys.exit("no shell scripts were found to check; this check now asserts nothing")
+    # Unreachable where this file runs, because `evals/*.sh` always matches this
+    # file itself -- in a host installation too. It is here for the EXTRACTED
+    # form: `tests/test_runner_bound.sh bash32` drives this block in throwaway
+    # trees, the way `hostlint` drives the phase-registry check, and an empty
+    # tree is the case that would otherwise print a green line for an assertion
+    # that scanned nothing. NOT the phase-registry check's reasoning, which
+    # treats a host installation as a legitimate non-run: the payload is here in
+    # a host repo, so finding none of it is a broken tree rather than a tree
+    # this does not apply to. Found by both local passes, which each caught the
+    # comment claiming the opposite.
+    sys.exit("no payload scripts were found to check; this check now asserts nothing")
 
 def shell_lines(path):
     """(line number, line) for the SHELL in a file, heredoc bodies dropped.
@@ -1674,7 +1705,7 @@ BASH32
 then
   ok "no arithmetic expansion carries a quote, which bash 3.2 refuses at expansion time"
 else
-  fail "a quote inside \$(( )) parses under bash -n and dies on bash 3.2, which is the bash macOS ships. The line above says where. Drop the quotes: \$(( \$(date +%s) - t ))"
+  fail "the bash 3.2 check did not pass; the line above says what. A quote inside \$(( )) parses under bash -n and dies at expansion time on the bash macOS ships -- drop the quotes: \$(( \$(date +%s) - t ))"
 fi
 
 echo "== every test phase actually runs"
