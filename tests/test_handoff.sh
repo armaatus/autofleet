@@ -39,6 +39,12 @@
 #                             reached: the dispatcher's prompt only names it in
 #                             the narrow state where the old worktree's
 #                             directory outlives the runner's listing of it.
+#   test_handoff.sh ships     install.sh puts handoff.sh in a host repo AND
+#                             gets `.autofleet/run/` into that repo's
+#                             .gitignore. The note is the first file with
+#                             content to land there, and untracked content in a
+#                             repo an agent drives is what `git add -A` sweeps
+#                             into a commit.
 #   test_handoff.sh brief     the post-PR half of the brief is what tells an
 #                             agent to write one. Nobody writes a note no
 #                             document asks for.
@@ -422,6 +428,16 @@ case "${1:-}" in
     grep -qF -- 'still the file' "$WORK/repo/$NOTE" \
       || fail "the path was read as the issue again; #42's note holds $(cat "$WORK/repo/$NOTE")"
 
+    # ...and the REPO-ROOT half of that fallback, which had no phase at all:
+    # every other assertion here runs with the caller standing in the repo root
+    # or with the file under it. This is the one path where the `[ -f
+    # "$CALLER_PWD/$src" ] &&` AND-list is false, in a file with `set -e`.
+    printf 'from the repo root\n' >"$WORK/repo/root-note.md"
+    (cd "$WORK" && "$WORK/repo/scripts/fleet/handoff.sh" write 42 root-note.md) >/dev/null 2>&1 \
+      || fail "a source that is relative to the repo root, and absent from the caller's directory, was refused"
+    grep -qF -- 'from the repo root' "$WORK/repo/$NOTE" \
+      || fail "the repo-root fallback did not read the file; #42's note holds $(cat "$WORK/repo/$NOTE")"
+
     # ...and a relative source is the caller's, not the repo root's. The usage
     # advertises `write 42 note.md` unqualified, and from a subdirectory that
     # looked for it beside the repo root and said there was no such file.
@@ -458,6 +474,37 @@ case "${1:-}" in
     echo "ok: fleet.sh retry names the note the stopped attempt left"
     ;;
 
+  ships)
+    make_fixture
+    host="$WORK/host"; mkdir -p "$host"; git -C "$host" init -q -b main
+    ( cd "$REPO_ROOT" && ./install.sh --force "$host" ) >/dev/null 2>&1 \
+      || fail "install.sh would not install into a fresh repo"
+    [ -x "$host/scripts/fleet/handoff.sh" ] \
+      || fail "handoff.sh did not ship, or did not ship executable"
+    grep -qxF -- '.autofleet/run/' "$host/.gitignore" \
+      || fail "the host's .gitignore does not cover .autofleet/run/, so the note is sweepable by git add -A"
+
+    # A re-run adds nothing. An installer that stacks a block per run is a
+    # .gitignore nobody reads after the third upgrade.
+    before="$(cat "$host/.gitignore")"
+    ( cd "$REPO_ROOT" && ./install.sh --force "$host" ) >/dev/null 2>&1 \
+      || fail "a second install.sh run failed"
+    [ "$(cat "$host/.gitignore")" = "$before" ] \
+      || fail "a second run changed the .gitignore again"
+
+    # A host that already ignores it keeps its own file untouched, and one with
+    # no trailing newline does not get its last line joined to the new block.
+    host2="$WORK/host2"; mkdir -p "$host2"; git -C "$host2" init -q -b main
+    printf 'node_modules/' >"$host2/.gitignore"
+    ( cd "$REPO_ROOT" && ./install.sh --force "$host2" ) >/dev/null 2>&1 \
+      || fail "install.sh would not install over an existing .gitignore"
+    grep -qxF -- 'node_modules/' "$host2/.gitignore" \
+      || fail "the host's own .gitignore line was lost or joined to the payload's block"
+    grep -qxF -- '.autofleet/run/' "$host2/.gitignore" \
+      || fail "the payload's entry was not added to an existing .gitignore"
+    echo "ok: handoff.sh ships, and the host ignores what the payload writes"
+    ;;
+
   brief)
     make_fixture
     out="$(brief --after-pr 42 2>&1)" || fail "--after-pr exited non-zero: $out"
@@ -483,5 +530,5 @@ case "${1:-}" in
     echo "ok: stage 1 asks for the note when the work is put down, stage 2 at the push"
     ;;
   *)
-    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|brief}" >&2; exit 2 ;;
+    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|ships|brief}" >&2; exit 2 ;;
 esac

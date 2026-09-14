@@ -139,6 +139,49 @@ seed_one() {
 
 echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
+# WHAT THE PAYLOAD WRITES AT RUNTIME, kept out of the host's history.
+#
+# `.autofleet/run/` is where `record-review.sh` puts its `reviewed-<sha>`
+# markers, where `agent-autostart.sh` puts its pidfile, and -- since
+# armaatus/autofleet#55 -- where `handoff.sh` puts the note one attempt leaves
+# the next. The installer never touched the host's `.gitignore`, and that was
+# survivable while everything in there was an empty marker. The note is the
+# first file with CONTENT in it, and untracked content in a repo an agent drives
+# is what `git add -A` sweeps into a commit -- which is why `/findings.md` is in
+# this repo's own `.gitignore`, and it got there by being committed once.
+#
+# APPENDED, never rewritten, and only when no line already covers it: a host's
+# `.gitignore` is the host's. Matching is on the exact lines the payload would
+# add, which is deliberately dumber than gitignore's own semantics -- a host
+# that ignores the directory some other way gets one redundant line, and a
+# regression here is a duplicate entry rather than a clobbered file. Found by
+# the independent review of #55.
+IGNORES=(".autofleet/run/" "/findings.md")
+ensure_ignored() {
+  local gi="$TARGET/.gitignore" want missing=()
+  for want in "${IGNORES[@]}"; do
+    grep -qxF -- "$want" "$gi" 2>/dev/null || missing+=("$want")
+  done
+  [ "${#missing[@]}" -gt 0 ] || { echo "   kept (yours): .gitignore already covers what the payload writes"; return 0; }
+  changed=$((changed + 1))
+  if $DRY; then
+    echo "   would add to .gitignore: ${missing[*]}"
+    return 0
+  fi
+  echo "   .gitignore += ${missing[*]}"
+  {
+    # A leading blank line only when the file exists and does not end in one,
+    # so a re-run does not stack them.
+    if [ -s "$gi" ] && [ -n "$(tail -c 1 "$gi" 2>/dev/null)" ]; then printf '\n'; fi
+    printf '# Written at runtime by the autofleet payload, never committed:\n'
+    printf '# review markers, the autostart pidfile, and the handoff note.\n'
+    printf '%s\n' "${missing[@]}"
+  } >>"$gi"
+}
+
+echo "==> what the payload writes at runtime"
+ensure_ignored
+
 echo "==> your answers (seeded once, never overwritten)"
 # Recorded BEFORE the loop, because after it the file exists either way and
 # nothing can tell a fresh seed from the host's own answers.

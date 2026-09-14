@@ -1237,9 +1237,17 @@ slug() {
 # a person is certainly on. Both found by the local review, which showed this
 # branch could not carry the claim alone.
 #
-# NEWEST FIRST, because an issue can have run three times and the last attempt
-# is the one worth reading. A path whose directory is gone is skipped rather
-# than reported: the note died with that worktree, which is what it is for.
+# THE LAST RECORDED PATH that still has a note, which is NOT quite "the newest
+# attempt" and the difference is worth naming: `own` appends a path only when it
+# is absent, so an issue that ran in A, then B, then A again leaves `A,B` and
+# this returns B while A is the newer attempt. It needs a REUSED worktree path
+# to happen at all, and both notes are that issue's, so the cost is reading the
+# older of two -- not worth an mtime sort and its own failure modes here. Said
+# rather than implied: the first comment promised "newest first", which the
+# record cannot give. Found by the independent review.
+#
+# A path whose directory is gone is skipped rather than reported: the note died
+# with that worktree, which is what it is for.
 #
 # ABSOLUTE, and printed rather than assumed, because the attempt that reads the
 # prompt below IS starting somewhere else: `.autofleet/run/` is per worktree, so

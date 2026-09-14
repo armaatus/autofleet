@@ -219,9 +219,11 @@ It holds the decisions taken and why, the files touched, what each review round
 said and how it was answered, and what is still open — not the plan, which is in
 the PR body, and not the diff.
 
-Two things read it back. `issue-command.sh` prints it at the top of the next
-session **in that worktree**, which is the case it is for and the one that
-always works. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
+Two things read it back. `issue-command.sh` prints it **between the issue's
+spec and the brief** in the next session **in that worktree** — which is the
+case it is for and the one that always works; the `resumed` test phase asserts
+that ordering, so a session gets the spec, then what the last attempt left, then
+its marching orders. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
 you hand the issue back, so a second worktree opened alongside a first one still
 standing can be pointed at it. The dispatcher's own opening prompt names it too,
 in a narrower state than either — `handoff_note_for` in `scripts/fleet/fleet.sh`

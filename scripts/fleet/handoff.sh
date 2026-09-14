@@ -65,8 +65,12 @@ usage:
   handoff.sh write <issue> --stdin
 
 exits 2 on a reference that is not an issue, on a worktree holding more than one
-note with no issue named, and on a source file that is not there; 3 when the
-note is over AUTOFLEET_HANDOFF_MAX_WORDS.
+note with no issue named, and on a source file that is not there. 3 when the
+note is EMPTY -- the one an agent hits by accident, running the --stdin form
+with nothing on stdin -- or over AUTOFLEET_HANDOFF_MAX_WORDS.
+
+A relative FILE is resolved against the directory you ran this from, then
+against the repo root.
 USAGE
   exit 2
 }
@@ -176,9 +180,16 @@ cmd_write() {
   # opens the note while it is being replaced sees the old one or the new one,
   # never half of each.
   tmp="$(mktemp "$RUN_DIR/.handoff-$num.XXXXXX")"
-  # No trap: `set -e` is on and the only exit before the `mv` is the refusal
-  # below, which removes this itself. A trap here would also have to survive the
-  # refusal's exit code, which is the thing the caller reads.
+  # ...and a trap, for the path neither refusal covers: a SIGNAL between here
+  # and the `mv`. `enforce_timebox` interrupting a worktree is the case this
+  # whole feature exists for, so an agent killed mid-write is not hypothetical,
+  # and what it leaves is a `.handoff-<n>.XXXXXX` that `resolve_issue`'s
+  # `handoff-*.md` glob cannot see and nothing sweeps. The earlier note here
+  # said a trap "would have to survive the refusal's exit code"; it does not --
+  # `trap ... EXIT` runs after the exit status is fixed and does not change it.
+  # Cleared before the `mv` so it cannot remove the note it just landed. Found
+  # by the independent review.
+  trap 'rm -f "$tmp"' EXIT
   case "$src" in
     --stdin|"")
       # SAID when there is a person there. `handoff.sh write 42` with no source
@@ -202,6 +213,7 @@ cmd_write() {
   refuse_if_over_cap "$tmp" || { rm -f "$tmp"; exit 3; }
   # Below this line nothing may fail on the note's account: the cap is the only
   # refusal, and it has already been made.
+  trap - EXIT
   mv "$tmp" "$target"
   echo "recorded: .autofleet/run/handoff-$num.md"
   echo "  $(wc -w <"$target" | tr -d ' ') words. It goes with this worktree --"
