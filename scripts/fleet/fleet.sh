@@ -1354,7 +1354,10 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                review.sh on exit 0 only. The opposite population from
 #                `.tries`, which is why it is a separate file and not a second
 #                column: a review that submits findings clears `.tries` and
-#                increments this.
+#                advances this. ADVANCES, not increments -- `review.sh` derives
+#                the count from the pull request as well as incrementing and
+#                keeps the larger, so a PR whose earlier rounds this fleet never
+#                saw jumps straight to the number it really has (#65).
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
@@ -1485,7 +1488,7 @@ stop_reviewers() {
 # arrived. Found by the independent review -- the same class of stale claim this
 # branch had already fixed once.
 prune_review_logs() {
-  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept
+  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
   # `$2` is whether the caller COULD ANSWER, and it is separate from the list
   # because an empty list has two meanings and they are opposite instructions.
@@ -1578,10 +1581,12 @@ prune_review_logs() {
   for f in "$dir"/pr-*.log; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"; num="${base#pr-}"; num="${num%%-*}"
-    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` holds its
-    # transcript open with `>"$log"` for the whole run -- up to
-    # AUTOFLEET_REVIEW_TIMEOUT, thirty minutes -- while the grace is one pass, a
-    # minute. A PR that auto-merges two minutes into its own review would have
+    # NOT WHILE A REVIEWER FOR THAT PR IS RUNNING. `review.sh` writes `$log` as
+    # a placeholder before it spawns and rewrites it at the end -- the file the
+    # reviewer actually streams into is `$log.raw`/`$log.err`, since
+    # armaatus/autofleet#65 split them so the JSON envelope could be parsed --
+    # and all three stand for the whole run, up to AUTOFLEET_REVIEW_TIMEOUT,
+    # thirty minutes, while the grace is one pass, a minute. A PR that auto-merges two minutes into its own review would have
     # had that review's output unlinked under the agent still writing it, and
     # the sweep would have SAID it swept it. `rotate_fleet_log` was given this
     # guard for the sibling file; this sweep was not. Found by `/code-review`.
@@ -1655,13 +1660,44 @@ EOF
       *.context.md) base="${f%.context.md}.log" ;;
       *)            base="${f%.raw}"; base="${base%.err}" ;;
     esac
-    [ -e "$base" ] || { rm -f "$f"; removed=$((removed + 1)); }
+    [ -e "$base" ] || { rm -f "$f"; orphans=$((orphans + 1)); }
   done
   # SAID, not silent. A sweep nobody can see is one nobody can debug, and the
   # first question about a missing transcript is whether this took it. The
   # comment sat two blocks above the line it describes, which is the same drift
   # as a stale one. Found by the independent review.
   [ "$removed" -gt 0 ] && say "swept $removed reviewer transcript(s) no longer being answered"
+  # COUNTED SEPARATELY, because they are not transcripts. Three files belong to
+  # one round -- the log, its context and its two raw streams -- so folding the
+  # strays into the number above made one orphaned round read as three swept
+  # transcripts, on the one line a person reads to find out whether this took
+  # the file they are looking for.
+  [ "$orphans" -gt 0 ] && say "...and $orphans stray file(s) whose transcript is gone"
+
+  # ...and the fetched PR refs of pull requests that are no longer open.
+  #
+  # `review.sh` fetches `refs/pull/<n>/head` into `refs/autofleet/review/<n>` so
+  # a delta round's range resolves, and drops it in its EXIT trap -- which does
+  # not run on a SIGTERM taken before the reviewer is spawned (the TERM trap is
+  # installed after it), nor on a SIGKILL from `stop.sh --now`, nor on an OOM.
+  # A ref left behind pins every object that pull request ever had, `git gc` can
+  # never collect them, and nothing else in the fleet looks at these at all.
+  # This is the only place that sees both the refs and the open list. Found by
+  # the local review of armaatus/autofleet#65.
+  #
+  # OPEN PRs ARE SPARED whatever their state, because a ref belonging to a
+  # reviewer running right now is the one thing this must not take -- the range
+  # it was fetched for is resolved against it for the whole run. The same
+  # `$open_prs` guard the records above use, so a listing nobody could answer
+  # for has already returned.
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    num="${ref##*/}"
+    case " $open_prs " in *" $num "*) continue ;; esac
+    git update-ref -d "$ref" 2>/dev/null || true
+  done <<EOF
+$(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
+EOF
   return 0
 }
 

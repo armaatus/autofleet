@@ -567,7 +567,10 @@ a real review a real PR really had, so a PR could pass the cap unnoticed.
 how many distinct heads carry a review `merge_gate` counts — and keeps the
 larger of the two. Larger, never smaller: a force-push that orphans every
 earlier review drops the derived count to zero, and that must not reopen the
-loop the cap closed. `fleet.sh status` shows the count per open PR, which is
+loop the cap closed. Two of the three are covered; the exit-8 case is not,
+because that run returns before the derivation, so a PR whose rounds arrive only
+that way overshoots by one and the correction lands on the next run that
+submits. `fleet.sh status` shows the count per open PR, which is
 where a person sees a pull request quietly on its fourth round.
 
 **What a round reads is also a knob.** `AUTOFLEET_REVIEW_SCOPE=delta` scopes

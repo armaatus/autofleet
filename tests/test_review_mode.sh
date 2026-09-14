@@ -1357,6 +1357,24 @@ PY2
   [ -e "$AUTOFLEET_DIR/reviews/pr-97-77777777.context.md" ] \
     && fail "a context file with no transcript beside it was never swept at all"
   ok "...and one orphaned by a reviewer that never wrote a log goes too"
+
+  # THE FETCHED PR REFS. `review.sh` drops its own in an EXIT trap that a
+  # SIGTERM taken before the reviewer is spawned, a SIGKILL, or an OOM all skip
+  # -- and a ref left behind pins every object that pull request ever had
+  # against `git gc`, forever. Nothing else in the fleet looks at them. 42 is
+  # open and must be spared, because a reviewer running right now resolves its
+  # range against that very ref; 96 is not open and must go. Found by the local
+  # review of armaatus/autofleet#65.
+  git -C "$WORK/repo" update-ref "refs/autofleet/review/42" "$PR_HEAD"
+  git -C "$WORK/repo" update-ref "refs/autofleet/review/96" "$PR_HEAD"
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
+  AUTOFLEET_KEEP_REVIEWS=2 poll_review_open_prs
+  git -C "$WORK/repo" rev-parse --verify -q "refs/autofleet/review/42" >/dev/null \
+    || fail "the sweep took an OPEN pull request's fetched ref, so a running delta review's range stops resolving"
+  ok "an open PR's fetched review ref is left alone"
+  git -C "$WORK/repo" rev-parse --verify -q "refs/autofleet/review/96" >/dev/null \
+    && fail "a closed PR's fetched ref survived, so its objects are pinned against git gc forever"
+  ok "...while one belonging to a PR that is gone is dropped"
   kill "$keeper" 2>/dev/null; wait "$keeper" 2>/dev/null
   rm -f "$AUTOFLEET_DIR/reviewing/98"
   ok "a transcript is not swept under its own running reviewer"

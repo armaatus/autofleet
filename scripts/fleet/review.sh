@@ -140,19 +140,30 @@ review_round() {
 # 7, where nothing was submitted at all, and not on 8, where a counting review
 # was already there before this run started.
 #
-# THIS UNDERCOUNTS, and knowingly. Three reviews it does not see: one submitted
-# by the GitHub workflow rather than by this script; one found on exit 8 that no
-# run of this script ever counted; and one a reviewer had already submitted when
-# the dispatcher killed it for a head move (the TERM trap exits 143 without
-# reaching here). Each leaves a real review on the PR that `.rounds` does not
-# know about, so a pull request can exceed AUTOFLEET_REVIEW_MAX_ROUNDS.
+# THIS INCREMENT UNDERCOUNTED, and `review_round` above now corrects it. Three
+# reviews the increment alone cannot see: one submitted by the GitHub workflow
+# rather than by this script; one found on exit 8 that no run of this script
+# ever counted; and one a reviewer had already submitted when the dispatcher
+# killed it for a head move (the TERM trap exits 143 without reaching here).
+# Each leaves a real review on the PR that the tally does not know about, so a
+# pull request could exceed AUTOFLEET_REVIEW_MAX_ROUNDS unnoticed.
 #
-# Left that way because the alternative errs the other direction: counting a
-# review this fleet cannot attribute would retire a pull request nobody
-# reviewed, and a cap that fires early is worse than one that fires late -- late
-# still ends in a person, early ends in a person being asked about nothing. An
-# earlier comment here claimed exit 8's review "has already been counted", which
-# is only true of reviews this fleet submitted. Found by the independent review.
+# The first and the third are covered: both are reviews the pull request
+# carries, so the derived count in `review_round` sees them and the marker takes
+# the larger number. THE EXIT-8 CASE IS NOT, and the reason is the order of this
+# file rather than a judgement: exit 8 returns above the derivation, so a run
+# that finds a review already there records nothing, and the correction arrives
+# on the next run that submits. A pull request whose rounds arrive only that way
+# still overshoots the cap by one. Left, because the overshoot ends in a person
+# one round late and the alternative -- deriving before the idempotence check --
+# moves work above the cheapest exit this script has.
+#
+# The direction of the remaining error is still the chosen one: a cap that fires
+# early is worse than one that fires late, because late still ends in a person
+# and early ends in a person being asked about nothing. An earlier comment here
+# claimed exit 8's review "has already been counted", which is only true of
+# reviews this fleet submitted. Found by the independent review; narrowed to
+# what is still true by the local review of armaatus/autofleet#65.
 record_round() {
   [ -n "$ROUNDS_MARKER" ] || return 0
   printf '%s\n' "$(review_round)" >"$ROUNDS_MARKER" 2>/dev/null || true
