@@ -71,12 +71,12 @@ STUB
   export AUTOFLEET_TEST_COMMAND="the full test suite"
 }
 
-# Set by #49 at 400, raised to 425 by #55, and held in evals/lint.sh too -- that
-# one is the vendored copy, so a host project gets the ceiling even though
-# tests/ is not vendored. The argument for the raise is written there, where the
-# number a host project sees lives. Raise it in both, deliberately, or move
-# something into --after-pr.
-BRIEF_WORD_BUDGET=425
+# Set by #49, and held in evals/lint.sh too -- that one is the vendored copy, so
+# a host project gets the ceiling even though tests/ is not vendored. Raising it
+# here alone is not raising it: `agent-config.yml` re-runs MAIN's lint against
+# the branch, so a number that moved on the branch and not on main is a red
+# check, not a raised budget. #55 is where that was learned.
+BRIEF_WORD_BUDGET=400
 
 run_it() { (cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"); }
 

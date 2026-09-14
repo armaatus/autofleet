@@ -1200,17 +1200,16 @@ else
   # placeholders are substituted with their defaults here, so the figure is the
   # rendered one and not one word per `__PLACEHOLDER__`. tests/test_brief.sh
   # measures the real output and holds the same number.
-  # 400 when armaatus/autofleet#49 split the brief; 425 since #55, RAISED
-  # DELIBERATELY and here is the argument. #55's Goal has two halves, and the
-  # second is an attempt the time-box interrupts writing nothing down. The only
-  # place an agent can be told to leave a note before a PR exists is stage 1 --
-  # stage 2 is fetched after the push, and an instruction that arrives after the
-  # moment it applies is an instruction nobody follows. It is ONE sentence
-  # attached to the paragraph that already says what to do when the work is put
-  # down, because that is the paragraph the case belongs to; 25 words in every
-  # agent's prompt prefix against a whole attempt re-derived from the files is
-  # the trade, and it is the trade this issue exists to make.
-  BRIEF_WORD_BUDGET=425
+  # The budget did NOT move for armaatus/autofleet#55, and the attempt to move
+  # it is worth recording. #55's other half is the attempt the time-box
+  # interrupts, and the only place an agent can be told to leave a note before a
+  # PR exists is stage 1 -- stage 2 is fetched after the push. The first
+  # spelling added a paragraph and raised this to 425; `agent-config.yml` re-runs
+  # MAIN's copy of this file against the branch and refused, which is the check
+  # doing exactly what it is for. The sentence was paid for out of stage 1
+  # instead: the STOP paragraph absorbed it (both are the work being put down),
+  # and three sentences elsewhere were tightened without losing a rule. 386.
+  BRIEF_WORD_BUDGET=400   # set by armaatus/autofleet#49
   # AUTOFLEET's words, not the host's. `__TEST_COMMAND__` is counted as the one
   # word it is and the host's command is never substituted in -- because this
   # check is vendored and `agent-config.yml` runs it on every PR in every repo

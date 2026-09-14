@@ -220,8 +220,8 @@ then fix the code -- `/mattpocock-skills:tdd` is that loop.
 __TEST_COMMAND__ green, with a test that would have
 failed before your change. Run it and read the output.
 
-**3. Review it yourself, before anything leaves this worktree.** Two passes,
-because they look for different things and this machine has the time:
+**3. Review it yourself, before anything leaves this worktree.** Two passes;
+they look for different things:
 
     /code-review high                  # defects: correctness, efficiency, reuse
     /mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
@@ -242,20 +242,17 @@ marker exists, run:
 It is what the body must carry, how the merge is queued, and the review loop.
 Skip it and the PR sits green forever, or merges over a review.
 
-**Two subagents in `.claude/agents/` keep reading out of this context.**
-`researcher` answers "where is this handled" with the answer, not the files it
-read; `verifier` gives an independent build-and-test verdict before the PR.
+**Two subagents keep reading out of this context** (`.claude/agents/`):
+`researcher` answers "where is this handled" with the answer, not the files;
+`verifier` gives an independent build-and-test verdict before the PR.
 
-**This context has to last** the plan, the build and three review rounds in one
-time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` over a
-range rather than a whole file, `researcher` before a wide search.
+**This context has to last** plan, build and three review rounds in one
+time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
+whole file, `researcher` before a wide search.
 
-At any point, if `~/.autofleet/STOP` exists, put the work down: say where you
-got to and do nothing further. Nothing can go out while it exists.
-
-**Interrupted or stopped, write down where you got to** --
-`./scripts/fleet/handoff.sh write __ISSUE__ --stdin`. The next attempt here
-reads that note instead of deriving it again.
+Interrupted, or `~/.autofleet/STOP` exists? Put the work down, and write where
+you got to first -- `./scripts/fleet/handoff.sh write __ISSUE__ --stdin`. The
+next attempt here reads that note. Nothing can go out while STOP exists.
 
 @@AFTER-PR@@
 
