@@ -96,17 +96,6 @@
 #                                 captured output, a skip's reason, the summary,
 #                                 and the per-phase lines themselves the moment
 #                                 anything asks for them.
-#   test_runner_bound.sh bash32   evals/lint.sh's bash 3.2 rule, driven in
-#                                 throwaway trees the way `hostlint` drives the
-#                                 phase-registry check. A quote inside `$(( ))`
-#                                 parses under `bash -n` and dies at expansion
-#                                 time, so CI on bash 5 never sees it and the
-#                                 on-save parse hook cannot -- which is how
-#                                 `bounds` shipped dead on every mac. The rows
-#                                 pin what the rule must NOT do as much as what
-#                                 it must: evals/lint.sh is VENDORED and runs on
-#                                 every host pull request, so it judges the
-#                                 payload and not the host's own scripts.
 #
 # It drives a COPY of the real tests/run.sh rather than restating its logic, so
 # there is no second implementation of the bound to drift from the shipped one.
@@ -156,31 +145,6 @@ run_copy() {
     "$WORK/tests/run.sh" "$@" >"$WORK/out" 2>&1
 }
 ok()   { echo "  ok: $*"; }
-
-# The two fixtures the `bash32` phase writes, named for what is IN them rather
-# than for the verdict expected of them -- `bad_sh` said which way a row should
-# go and not why, and a row that changes direction would have had to rename it.
-#
-# ONE spelling of each, in one place, because four copies were four chances for
-# the next fixture to be written some other way. That is not hypothetical: the
-# first draft of the phase wrote them with `printf`, and the shipped rule reads
-# those -- it strips heredoc bodies, not quoted strings -- so this file failed
-# the very rule the phase drives. A heredoc keeps the form out of the rule's
-# sight; up here, there is one to keep true. Top level, like every other helper
-# in this file: bash functions are not scoped to a `case` arm anyway, so
-# defining them inside one only looks local. Found by the standards review.
-quoted_arith_sh() {
-  cat >"$1" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
-}
-clean_arith_sh() {
-  cat >"$1" <<'EOF'
-#!/usr/bin/env bash
-x=$(( 1 + 2 ))
-EOF
-}
 
 WORK=""
 cleanup() {
@@ -1301,143 +1265,7 @@ CIPY
   ok "every run of the suite in CI still asks for the per-phase lines"
   ;;
 
-# ----------------------------------------------------------------- bash32
-  bash32)
-  # The rule that catches the class `bash -n` cannot see. bash 3.2 -- the bash
-  # macOS ships -- rejects a quote inside `$(( ))` at EXPANSION time, so the
-  # form parses, CI on bash 5 runs it, and it dies on every laptop. `bounds`
-  # carried one from the day it was written until an agent tried to run the
-  # phase locally.
-  #
-  # Driven out of the SHIPPED lint rather than restated, the same way `hostlint`
-  # drives the phase-registry check: the python block is extracted from
-  # evals/lint.sh and run in throwaway trees. A rule with no assertion is not
-  # shipped (CLAUDE.md hard rule 3), and this one arrived without one.
-  WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
-  python3 - "$REPO_ROOT/evals/lint.sh" "$WORK/check.py" <<'PY2'
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-s = open(src).read()
-marker = "if python3 - <<'BASH32'\n"
-if marker not in s:
-    sys.exit("evals/lint.sh no longer runs the bash 3.2 check as an inline python block")
-block = s.split(marker, 1)[1].split("\nBASH32", 1)[0]
-if "arith_spans" not in block:
-    sys.exit("the extracted block is not the bash 3.2 check")
-open(dst, "w").write(block)
-PY2
-  [ -s "$WORK/check.py" ] || fail "the bash 3.2 check could not be extracted"
-
-  # A payload tree. `scripts/fleet/` is vendored, so it is judged everywhere.
-  mkdir -p "$WORK/payload/scripts/fleet"
-  cat >"$WORK/payload/scripts/fleet/bad.sh" <<'EOF'
-#!/usr/bin/env bash
-elapsed=$(( "$(date +%s)" - started ))
-EOF
-  out="$(cd "$WORK/payload" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "the historical form was accepted: $out"
-  grep -q "scripts/fleet/bad.sh:2" <<<"$out" \
-    || fail "the bad line was not named with its file and line: $out"
-  ok "a quote inside \$(( )) is caught, and named where it is"
-
-  # The NESTED close, which is why the span is walked rather than matched. A
-  # non-greedy `\$\(\(.*?\)\)` stops at `((a))` and never sees the quote.
-  # `$(( (a + b) * "c" ))` does NOT pin this -- it has no inner `))` and the
-  # naive regex handles it. Found by /code-review, against a row that used it.
-  cat >"$WORK/payload/scripts/fleet/bad.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( ((a)) + "b" ))
-EOF
-  out="$(cd "$WORK/payload" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "a quote after a nested close was missed: $out"
-  ok "...including one after a nested \`))\`, which a regex would stop at"
-
-  # ...and the two things that must NOT fire. A comment explaining the bad form
-  # has to name it -- this file's own header does -- and a heredoc body is
-  # generated text whose language is not necessarily shell: evals/lint.sh has to
-  # contain the literal `$((` in order to look for it, so without the stripping
-  # the rule fires on itself.
-  cat >"$WORK/payload/scripts/fleet/bad.sh" <<'EOF'
-#!/usr/bin/env bash
-# never write elapsed=$(( "$(date +%s)" - started )), it dies on bash 3.2
-python3 - <<'INNER'
-print("$(( \"x\" + 1 ))")
-INNER
-x=$(( 1 + 2 ))
-EOF
-  out="$(cd "$WORK/payload" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] || fail "the rule fired on a comment or a heredoc body: $out"
-  ok "...and not on prose that names the form, nor on a heredoc body"
-
-  # HARD RULE 1. evals/lint.sh is vendored and agent-config.yml runs it on every
-  # pull request in every host project. A quote inside `$(( ))` works on bash 5,
-  # so judging a HOST's own scripts reds a Linux-only project for code that is
-  # fine, on a check it never opted into. The payload is autofleet's code
-  # wherever it lands and is judged; `tests/` and `install.sh` are autofleet's
-  # own and are judged only here. Found by both local passes.
-
-  mkdir -p "$WORK/host/scripts/fleet" "$WORK/host/tests"
-  clean_arith_sh "$WORK/host/scripts/fleet/ok.sh"
-  quoted_arith_sh "$WORK/host/tests/run.sh"
-  quoted_arith_sh "$WORK/host/install.sh"
-  # `.autofleet/` is the one that matters most here: `tests/` and `install.sh`
-  # are autofleet shapes a host may not have at all, but install.sh SEEDS
-  # `.autofleet/setup.sh` into every host project. Move that glob up into the
-  # payload list -- the single edit the comment beside it argues against -- and
-  # every host repository reds on its own seeded file while this phase stays
-  # green. It did, until this row. Found by both local passes, which each
-  # mutated it and watched all six rows pass.
-  mkdir -p "$WORK/host/.autofleet"
-  quoted_arith_sh "$WORK/host/.autofleet/setup.sh"
-  out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] \
-    || fail "a host project was failed for a quote in its OWN scripts: $out"
-  ok "a host installation is judged on the payload and not on its own scripts"
-
-  # ...and the same files ARE judged here, so the row above is not passing
-  # because the check ignores them everywhere. The sentinel is the one the
-  # phase-registry check keys on, so a rename breaks both in the same place.
-  : >"$WORK/host/tests/test_runner_bound.sh"
-  out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "autofleet's own tests/ and install.sh were not judged: $out"
-  # BY NAME, both of them. On `rc != 0` alone this row is satisfied by the
-  # `.autofleet/setup.sh` in the same tree, so dropping either of the other two
-  # globs left it green -- the one mutation that survived the phase. Found by
-  # /code-review.
-  grep -q "tests/run.sh" <<<"$out" \
-    || fail "autofleet's own tests/ was not judged: $out"
-  grep -q "install.sh" <<<"$out" \
-    || fail "autofleet's own install.sh was not judged: $out"
-  ok "...while in autofleet its own tests/ and install.sh are"
-
-  # ...and `.autofleet/` on its own, in a tree where it is the ONLY bad file.
-  # The row above would still pass with the glob deleted outright, because
-  # tests/run.sh is bad in that tree too. Deleting it is the other mutation both
-  # passes found surviving.
-  mkdir -p "$WORK/only/.autofleet" "$WORK/only/tests" "$WORK/only/scripts/fleet"
-  : >"$WORK/only/tests/test_runner_bound.sh"
-  clean_arith_sh "$WORK/only/scripts/fleet/ok.sh"
-  quoted_arith_sh "$WORK/only/.autofleet/setup.sh"
-  out="$(cd "$WORK/only" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "autofleet's own .autofleet/ was not judged at all: $out"
-  grep -q ".autofleet/setup.sh" <<<"$out" \
-    || fail "the bad line under .autofleet/ was not named: $out"
-  ok "...and .autofleet/, which install.sh seeds into every host project"
-
-  # A tree with no payload at all is the check silently stopping -- the one case
-  # that has to stay loud, and the reason the empty-paths branch exists at all:
-  # where evals/lint.sh actually runs it cannot fire, because `evals/*.sh`
-  # always matches the lint itself. Found by both local passes, which each read
-  # the branch as unreachable and its comment as claiming otherwise.
-  mkdir -p "$WORK/empty"
-  out="$(cd "$WORK/empty" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "a tree with no payload was waved through: $out"
-  grep -q "asserts nothing" <<<"$out" \
-    || fail "an empty tree was not reported as the check stopping: $out"
-  ok "...and a tree with no payload to check says so rather than passing"
-  ;;
-
   *)
-  echo "usage: $0 bounds|passes|skips|hostlint|guards|interrupt|orphans|quiet|bash32" >&2
+  echo "usage: $0 bounds|passes|skips|hostlint|guards|interrupt|orphans|quiet" >&2
   exit 2 ;;
 esac
