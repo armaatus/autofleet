@@ -2581,6 +2581,31 @@ JSON
       && fail "stall-labels-42 survived into a fresh worktree, which is silenced by it"
     echo "ok: a fresh worktree starts with nothing already said on its behalf"
     ;;
+  own_records_run)
+    make_fixture ok
+    # The half of the ownership record that has to OUTLIVE the worktree. The
+    # owned registry is what is running, and `disown_issue` empties it the moment
+    # a worktree is released -- so a cost report built on it alone goes blank
+    # exactly when a run finishes, which is when somebody asks what it cost.
+    in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
+    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
+      || fail "own did not record #42's worktree path under ran/"
+    in_fleet disown_issue 42 >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
+      && fail "disown_issue left the OWNED entry behind; the fixture proves nothing"
+    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
+      || fail "releasing the worktree also erased the record that #42 ever ran"
+    # ...and a SECOND attempt, as `fleet.sh retry 42` opens: appended, not
+    # replaced. Truncating throws away the abandoned attempt, which is exactly
+    # the "did it cost more than the one that landed" comparison the report is
+    # for. Re-owning the SAME path must not duplicate the line.
+    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
+    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
+    [ "$(cat "$AUTOFLEET_DIR/ran/42")" = "$(printf '%s\n%s' "$WORK/wt" "$WORK/wt2")" ] \
+      || fail "a second worktree for #42 did not append cleanly; ran/42 holds:
+$(cat "$AUTOFLEET_DIR/ran/42")"
+    echo "ok: every worktree an issue has had survives its release, once each"
+    ;;
   one_card)
     make_fixture ok
     make_worktree

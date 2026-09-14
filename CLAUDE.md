@@ -57,6 +57,7 @@ python3 .github/scripts/merge_gate.py --selftest
 
 ./scripts/fleet/fleet.sh run --auto   # the dispatcher
 ./scripts/fleet/fleet.sh status
+./scripts/fleet/fleet.sh cost         # what each issue's worktree spent
 ./scripts/fleet/stop.sh               # drain (--now also freezes the agents)
 ./scripts/fleet/reap.sh               # stacks whose worktree is gone
 ```
