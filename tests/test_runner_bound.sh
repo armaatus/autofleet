@@ -1226,23 +1226,29 @@ LOUD = re.compile(r"--verbose\b|AUTOFLEET_TEST_VERBOSE=[\"']?[^\s\"']")
 # quietly and was not counted at ALL -- which is the exact scenario the comment
 # above claims this now catches, passing because the other job supplied the
 # count. Found by /code-review.
-# The prefix class excludes whitespace and the three separators the fragments
-# were split on, and nothing else -- so a prefix may hold a command
-# substitution, a brace expansion, a quote or an equals sign, and must end in a
-# slash. Said by enumeration because two earlier drafts described this class in
-# words and both descriptions were wrong: the spelling
-# "$GITHUB_WORKSPACE/tests/run.sh" is real and the first draft missed it, and
-# excluding parentheses -- which the second draft did -- made a command
-# substitution before the slash count ZERO, which is the false green this row
-# exists to prevent. Found by /code-review, three times in a row.
+# WHAT COUNTS AS AN INVOCATION. Two halves, and both of them were got wrong by
+# describing them in prose instead of stating them:
 #
-# The leading class is wider: whatever may sit immediately before the path, so
-# start-of-fragment, whitespace, or one of the characters a shell word can begin
-# after.
+#   the optional path prefix -- any run of characters ending in a slash that
+#   holds none of ` \t;&|`, so it may hold a command substitution, a brace
+#   expansion, a quote or an equals sign. Three drafts described this class and
+#   three were wrong; the spelling "$GITHUB_WORKSPACE/tests/run.sh" is real and
+#   the first missed it, and excluding parentheses -- the second draft -- made
+#   `$(pwd)/tests/run.sh` count ZERO.
 #
-# It cannot swallow mytests/run.sh: the prefix has to end in a slash, and what
-# precedes the whole match has to be a separator or the start of the fragment.
-RUN = re.compile(r"(?:^|[\s;&|(=\"'])(?:[^\s;&|]*/)?tests/run\.sh\b")
+#   what may precede the whole match -- a LOOKBEHIND rather than a list of
+#   allowed characters, because every list written here was short. The last one
+#   omitted the backtick, so `tests/run.sh` inside backticks scored zero: a
+#   missed invocation raises neither counter, so the row stays green with a
+#   quiet run in the file, which is the false green it exists to prevent. The
+#   question is not "what may sit before a path" -- it is "is this the tail of a
+#   LONGER word", and the answer is the characters a path or identifier is made
+#   of. That cannot be short by omission. All four found by /code-review.
+#
+# It still cannot swallow mytests/run.sh: the character before is a letter. The
+# cost is a false RED on prose that merely names the path inside a string, which
+# is the direction this row is willing to be wrong in.
+RUN = re.compile(r"(?<![A-Za-z0-9_.\-])(?:[^\s;&|]*/)?tests/run\.sh\b")
 runs = quiet = 0
 for line in open(sys.argv[1]):
     for frag in re.split(r"&&|\|\||;", strip_comment(line)):
@@ -1292,6 +1298,24 @@ if "arith_spans" not in block:
 open(dst, "w").write(block)
 PY2
   [ -s "$WORK/check.py" ] || fail "the bash 3.2 check could not be extracted"
+
+  # ONE spelling of the bad form, in one place. Four copies of it were four
+  # chances for the next fixture to be written some other way -- and the first
+  # draft of this phase wrote them with `printf`, which the shipped rule reads
+  # (it strips heredoc bodies, not quoted strings), so this file failed the very
+  # rule it drives. A heredoc, and only here.
+  bad_sh() {
+    cat >"$1" <<'EOF'
+#!/usr/bin/env bash
+x=$(( "1" + 2 ))
+EOF
+  }
+  good_sh() {
+    cat >"$1" <<'EOF'
+#!/usr/bin/env bash
+x=$(( 1 + 2 ))
+EOF
+  }
 
   # A payload tree. `scripts/fleet/` is vendored, so it is judged everywhere.
   mkdir -p "$WORK/payload/scripts/fleet"
@@ -1347,18 +1371,9 @@ EOF
   # fail the very rule this phase drives. The other fixtures in this file are
   # heredocs for unrelated reasons; this one is a heredoc for that one.
   mkdir -p "$WORK/host/scripts/fleet" "$WORK/host/tests"
-  cat >"$WORK/host/scripts/fleet/ok.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( 1 + 2 ))
-EOF
-  cat >"$WORK/host/tests/run.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
-  cat >"$WORK/host/install.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
+  good_sh "$WORK/host/scripts/fleet/ok.sh"
+  bad_sh "$WORK/host/tests/run.sh"
+  bad_sh "$WORK/host/install.sh"
   # `.autofleet/` is the one that matters most here: `tests/` and `install.sh`
   # are autofleet shapes a host may not have at all, but install.sh SEEDS
   # `.autofleet/setup.sh` into every host project. Move that glob up into the
@@ -1367,10 +1382,7 @@ EOF
   # green. It did, until this row. Found by both local passes, which each
   # mutated it and watched all six rows pass.
   mkdir -p "$WORK/host/.autofleet"
-  cat >"$WORK/host/.autofleet/setup.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
+  bad_sh "$WORK/host/.autofleet/setup.sh"
   out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] \
     || fail "a host project was failed for a quote in its OWN scripts: $out"
@@ -1390,14 +1402,8 @@ EOF
   # passes found surviving.
   mkdir -p "$WORK/only/.autofleet" "$WORK/only/tests" "$WORK/only/scripts/fleet"
   : >"$WORK/only/tests/test_runner_bound.sh"
-  cat >"$WORK/only/scripts/fleet/ok.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( 1 + 2 ))
-EOF
-  cat >"$WORK/only/.autofleet/setup.sh" <<'EOF'
-#!/usr/bin/env bash
-x=$(( "1" + 2 ))
-EOF
+  good_sh "$WORK/only/scripts/fleet/ok.sh"
+  bad_sh "$WORK/only/.autofleet/setup.sh"
   out="$(cd "$WORK/only" && python3 "$WORK/check.py" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && fail "autofleet's own .autofleet/ was not judged at all: $out"
   grep -q ".autofleet/setup.sh" <<<"$out" \
