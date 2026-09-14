@@ -76,6 +76,23 @@ exit 0
 STUB
   chmod +x "$WORK/bin/gh"
   PATH="$WORK/bin:$PATH"
+
+  # A runner that answers, because `fleet.sh` refuses to be sourced at all
+  # without one -- `runner_available || die "the $AUTOFLEET_RUNNER runner is not
+  # usable here"`. On this laptop the orca driver answers and the three phases
+  # that source fleet.sh passed; in CI there is no Orca app and they failed on
+  # a line that has nothing to do with what they assert. tests/test_fleet.sh
+  # carries the same stub for the same reason.
+  #
+  # MINIMAL, and deliberately so: neither `agent_brief` nor `cmd_retry` reaches
+  # the runner, so a fuller stub would be a fixture asserting itself. It lives
+  # in the FIXTURE's scripts/fleet/runner/, never in the source tree, so
+  # evals/lint.sh check 4b does not read its functions as contract phantoms.
+  cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
+#!/usr/bin/env bash
+runner_available() { return 0; }
+STUBDRIVER
+  export AUTOFLEET_RUNNER=stub
   export AUTOFLEET_TEST_COMMAND="the full test suite"
   # The dispatcher's state, away from the developer's own.
   export AUTOFLEET_DIR="$WORK/fleet"
