@@ -30,6 +30,7 @@ cd "$REPO_ROOT"
 SUITES=(
 "lint:"
 "brief:stage1 stage2 reading"
+"handoff:write print cap absent resumed relaunch brief"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
 "runner_bound:bounds passes skips hostlint guards interrupt orphans"
