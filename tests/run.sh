@@ -4,6 +4,8 @@
 #   ./tests/run.sh                 # everything
 #   ./tests/run.sh fleet           # one suite
 #   ./tests/run.sh fleet card_says # one phase of one suite
+#   ./tests/run.sh --verbose       # ...and one line per phase while it runs
+#   AUTOFLEET_TEST_VERBOSE=1       # ...the same, where a flag cannot be threaded
 #
 # The suites are shell, and several of them dispatch on a PHASE argument: one
 # process per case, so a case that wedges cannot take the rest of the file with
@@ -30,16 +32,18 @@ cd "$REPO_ROOT"
 SUITES=(
 "lint:"
 "brief:stage1 stage2 reading"
+"handoff:write print cap absent resumed relaunch empty refs retry ships brief"
 "env:concurrent readable python venv setup_fails_fast"
 "teardown:derives reap watcher profiles mtime"
-"runner_bound:bounds passes skips hostlint guards interrupt orphans"
+"runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts thin unpushed behind no_review flight stopped gate"
+"await_review:nitonly threads tworeviewers knob important untrailered"
 "cost:sums json empty attempts long_path filtered reaped subcommand"
 "install:ignores idempotent dry"
 "self_review:runs uncounted silent noise noisy dirty norange keeps midstop first empty timeout missing stopped"
-"review_mode:sweeps mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once retries capped stubwrite await_threads await_quiet await_moved await_own_reply await_own_reply_local await_cap"
-"fleet:foundation_holds foundation_break_is_local foundation_resays foundation_waiting_once foundation_closed_frees foundation_cold_start foundation_restart_speaks foundation_launch_held foundation_said_once foundation_one_lookup foundation_frees foundation_none foundation_blind foundation_cli_blind create_says create_warns card_says card_quiet remove_forces remove_advice remove_keeps_stack remove_sweeps_stack merged_keeps_dirty merged_keeps_owned merged_unknown_git merged_cli_silent remove_scoped_sweep stall_expected stall_reports timebox_waits timebox_stops queue_skips list_declines timebox_rearms labels_unknown outage_once one_lookup timebox_clears stop_clears own_clears own_records_run one_card abandon_blocked abandon_closed abandon_human_step abandon_keeps_dirty abandon_keeps_commits abandon_unknown_git abandon_leaves_working abandon_timebox gaveup_not_restarted gaveup_retry abandon_warns_first abandon_warned_saved abandon_two_keeps gaveup_pruned list_says_declined abandon_reason_flickers abandon_lookup_blind status_stale status_current status_unrecorded status_from_worktree status_draining status_stopped status_drained status_behind status_behind_revert status_unreadable status_names_root run_refuses run_stale_recycled run_stale_gone status_recycled stop_spares_stranger stop_stops_dispatcher run_blind_ps status_blind_ps stop_blind_ps drain_ends_on_merge drain_after_stop stop_writes_drain stop_now_writes_both drain_lets_agents_finish stop_freezes_agents drain_launches_nothing resume_clears_both stop_drain_blind_dispatcher runner_stub runner_unresolved selector_git_unusable create_scoped live_scoped foundation_foreign status_worktree_scope reap_blind_upstream poll_empties_cache restart_after_parked_drain drain_parked_counted_once drain_ends_with_parked status_keeps_cache cap_ends_on_merge priority_first status_priority priority_renamed"
+"review_mode:sweeps mode refuses stopped submits unmarked silent skips stale midstop reaper timeout queue records status_count holds once rounds roundcap retries capped stubwrite await_threads await_quiet await_moved await_own_reply await_own_reply_local await_cap"
+"fleet:foundation_holds foundation_break_is_local foundation_resays foundation_waiting_once foundation_closed_frees foundation_cold_start foundation_restart_speaks foundation_launch_held foundation_said_once foundation_one_lookup foundation_frees poll_list_once poll_list_after_launch poll_list_after_remove poll_list_cache_unreadable poll_list_reshape_fails poll_list_short_write poll_cache_gate_empty poll_list_once_in_run foundation_sees_launch status_list_uncached foundation_none foundation_blind foundation_cli_blind create_says create_warns card_says card_quiet remove_forces remove_advice remove_keeps_stack remove_sweeps_stack merged_keeps_dirty merged_keeps_owned merged_unknown_git merged_cli_silent remove_scoped_sweep stall_expected stall_reports timebox_waits timebox_stops queue_skips list_declines timebox_rearms labels_unknown outage_once one_lookup timebox_clears stop_clears own_clears own_records_run one_card abandon_blocked abandon_closed abandon_human_step abandon_keeps_dirty abandon_keeps_commits abandon_unknown_git abandon_leaves_working abandon_timebox gaveup_not_restarted gaveup_retry abandon_warns_first abandon_warned_saved abandon_two_keeps gaveup_pruned list_says_declined abandon_reason_flickers abandon_lookup_blind status_stale status_current status_unrecorded status_from_worktree status_draining status_stopped status_drained status_behind status_behind_revert status_unreadable status_names_root run_refuses run_stale_recycled run_stale_gone status_recycled stop_spares_stranger stop_stops_dispatcher run_blind_ps status_blind_ps stop_blind_ps drain_ends_on_merge drain_after_stop stop_writes_drain stop_now_writes_both drain_lets_agents_finish stop_freezes_agents drain_launches_nothing resume_clears_both stop_drain_blind_dispatcher runner_stub runner_unresolved selector_git_unusable create_scoped live_scoped foundation_foreign status_worktree_scope reap_blind_upstream poll_empties_cache restart_after_parked_drain drain_parked_counted_once drain_ends_with_parked status_keeps_cache cap_ends_on_merge priority_first status_priority priority_renamed"
 )
 
 # The one suite that is not a tests/test_*.sh file: it is the vendored lint, and
@@ -51,8 +55,76 @@ suite_command() {
   esac
 }
 
-want_suite="${1:-}"
-want_phase="${2:-}"
+# QUIET by default: a failing phase's whole captured output, a skip and its
+# reason, and the summary. Nothing per phase that passed, and no per-suite
+# header.
+#
+# The reader of this runner is usually an agent, and its context has to survive
+# an implementation plus three review rounds. One row per phase and one per
+# suite carried exactly what the summary line carries, the brief makes the suite
+# run at least three times per issue, and the bill grew with every phase added
+# to SUITES above -- so the useless part landed four or five times over and got
+# bigger each time (#52). A dot per phase is no better: a line of dots is still
+# a line, saying the same thing again.
+#
+# NO COUNT, deliberately. This paragraph carried one and it was wrong twice --
+# wrong arithmetic, and stale against a registry that had grown since -- which
+# is the defect class three review rounds of this change spent themselves on. It
+# is also not what the argument rests on: "one line per phase, and it grows" is
+# the whole of it.
+#
+# --verbose is today's output, unchanged, for a human debugging a wedged phase.
+# AUTOFLEET_TEST_VERBOSE=1 says it where the flag cannot be threaded through: a
+# CI matrix, a wrapper, a `make test` somebody else owns. ANY non-empty value is
+# on, so `AUTOFLEET_TEST_VERBOSE=0` is verbose and not quiet -- the same reading
+# `may_skip` gives AUTOFLEET_TEST_NO_SKIP, because two variables in one runner
+# disagreeing about what "set" means is worse than either answer. A matrix that
+# spells off as 0 wants the empty string.
+#
+# What quiet costs, said rather than discovered: a run killed from OUTSIDE this
+# runner -- a job cap, an agent's tool timeout -- now prints NOTHING, where
+# before it printed every phase that had finished. The runner's own bound
+# already reports the phase it killed (PHASE_TIMEOUT below), so this is only the
+# case where something else does the killing, and --verbose is the answer to it.
+VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
+
+# The arguments, parsed rather than read off $1 and $2, because a flag has to be
+# accepted WHEREVER it appears: `./tests/run.sh fleet card_says --verbose` is
+# where somebody actually types it, and positionally that is a phase named
+# --verbose and a run that matches nothing.
+#
+# An unknown flag is REFUSED, and that is the whole reason this is a parser and
+# not a `case` on $1. The way this change breaks CI is a typo -- `--verbsoe` in
+# the workflow, read as a suite name, nothing matched, and a quiet exit nobody
+# reads twice. Exit 2 is what a mistyped suite name has always got.
+# Both refusals end in the same usage clause, so it is spelled once. Found by
+# the independent review. The `quiet` phase asserts the clause and the stream,
+# because one function is now the single point where losing either would go
+# unnoticed.
+refuse() { echo "$1; usage: $0 [--verbose] [suite [phase]]" >&2; exit 2; }
+want_suite=""; want_phase=""; positional=0
+for arg in "$@"; do
+  case "$arg" in
+    --verbose) VERBOSE=1 ;;
+    -*) refuse "unknown option '$arg'" ;;
+    *)
+      positional=$((positional + 1))
+      case "$positional" in
+        1) want_suite="$arg" ;;
+        2) want_phase="$arg" ;;
+        *) refuse "too many arguments at '$arg'" ;;
+      esac ;;
+  esac
+done
+
+# Per-phase chatter, and the only thing --verbose brings back. Named for the
+# CONDITION and not for the printing: `say` is what fleet.sh calls its
+# unconditional narrator, and a reader who carries that meaning here reads every
+# call site as a line that always prints. A function rather than an `if` at each
+# site so there is one place that decides. The format string is a literal at
+# every call, which is what makes passing it through `printf` safe.
+say_verbose() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
+
 pass=0; fail=0; failed=""
 # A phase that could not judge anything is not a phase that judged and found
 # nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
@@ -343,7 +415,9 @@ run_one() {
     show_output "$out"
   elif [ "$rc" = 0 ]; then
     pass=$((pass + 1))
-    printf '  ok   %s\n' "$label"
+    # The one line quiet drops. Everything else in this cascade is a failure, a
+    # skip, or the reason for one, and quiet must never mean quieter about those.
+    say_verbose '  ok   %s\n' "$label"
   elif [ "$rc" = "$SKIP_RC" ] && [ "$skip_refusal" = 0 ]; then
     # The phase's own output carries WHY, and it is the half that matters: a
     # silent `skip` line is indistinguishable from a phase quietly opting out of
@@ -408,7 +482,7 @@ for entry in "${SUITES[@]}"; do
   suite="${entry%%:*}"
   phases="${entry#*:}"
   [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
-  echo "== $suite"
+  say_verbose '== %s\n' "$suite"
   # shellcheck disable=SC2046 -- suite_command is a deliberate word list
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }

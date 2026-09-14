@@ -154,6 +154,32 @@
 # read last so it can override these defaults, so a project writing
 # `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
 # the cap unchecked and the guard was decorative for the one route that matters.
+
+# How many reviews one PULL REQUEST may accrue before a person is asked.
+#
+# A different question from the one above, and nothing was answering it. That
+# cap is per HEAD and counts only reviewers that submitted NOTHING -- a reviewer
+# that submits findings clears it, so a PR whose every round produces findings
+# is bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the agent's
+# side, but only while the agent is alive and only on rounds it read back:
+# measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against 3
+# on #88. #85's agent stopped at its cap and a fourth review landed with nobody
+# left to answer it.
+#
+# So this bounds the DISPATCHER: after this many reviews on one PR, it stops
+# starting them and says so. Four rather than three, because it must not fire
+# before the agent's own three-round cap has had its say -- two caps at the same
+# number is one of them being dead code.
+: "${AUTOFLEET_REVIEW_MAX_ROUNDS:=4}"
+# ABOVE the `.autofleet/config` source, like every other default here. Placed
+# below it once, in the same change that added it, and the empty-value refusal
+# became unreachable: the host file sets `KNOB=`, then a `:=` running afterwards
+# substitutes the default, and the check the tests drive through that file has
+# nothing left to refuse. Green here, dead for the one route that matters --
+# the same failure this knob's neighbour records two comments up.
+#
+# The check itself is at the BOTTOM, with its neighbour's, for that reason.
+
 # Found by the independent review of the change that added it.
 # ------------------------------------------------------------- what is KEPT ---
 #
@@ -183,6 +209,24 @@
 # and holds the inode for up to AUTOFLEET_REVIEW_TIMEOUT, so the cap is a bound
 # the fleet reaches between reviews rather than a hard ceiling.
 : "${AUTOFLEET_LOG_MAX_BYTES:=1048576}"
+
+# ------------------------------------------------------------- the handoff
+# How long the note one attempt leaves the next may be, in words.
+#
+# `scripts/fleet/handoff.sh` REFUSES over this rather than truncating, and that
+# is the whole argument for the cap being a number a script enforces instead of
+# a sentence in the brief. Unbounded, the note grows into a second spec that the
+# next attempt reads in full before its first edit -- which is the cost
+# armaatus/autofleet#55 exists to remove, arriving through the fix. Truncated,
+# it is worse still: the reader cannot tell "nothing else was open" from "the
+# rest did not fit", and what falls off the end of a note written in that order
+# is exactly what is still open.
+#
+# 300 is a starting point. Set it to 0 to turn the cap off, the way
+# AUTOFLEET_KEEP_REVIEWS=0 turns the sweep off -- an unbounded note is then
+# something a host asked for, not something a mistyped value produced silently.
+# The check at the foot of this file is what makes that distinction hold.
+: "${AUTOFLEET_HANDOFF_MAX_WORDS:=300}"
 
 # --------------------------------------------------------------- the cost
 # Where the agent CLI writes its session transcripts, and therefore the only
@@ -288,10 +332,14 @@ fi
 # the exact untrue line the 0 rejection exists to prevent. One spare zero and the
 # guard was the failure. Found by the independent review.
 #
-# A FUNCTION, because there are now three knobs with this shape and the digits-
+# A FUNCTION, because there are now four knobs with this shape and the digits-
 # then-numeric pair above is exactly the reasoning that does not survive being
 # retyped. `fleet_positive_knob <name> <value>`; it is defined here rather than
 # in lib.sh because lib.sh sources THIS file, so nothing it defines exists yet.
+#
+# NOT every knob below: AUTOFLEET_HANDOFF_MAX_WORDS accepts 0, which means "no
+# cap", so it keeps its own `case`. A helper that refuses a legal value is the
+# same class of bug as one that accepts an illegal one.
 fleet_positive_knob() {
   case "$2" in
     ''|*[!0-9]*)
@@ -308,3 +356,30 @@ fleet_positive_knob AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES"
 # three-hour time-box expires. Found by the local /code-review pass.
 fleet_positive_knob AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT"
 fleet_positive_knob AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS"
+
+# The same shape of failure as the one above, one step earlier: `[ "$words" -le
+# "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
+# and returns 2, so the test is FALSE, `refuse_if_over_cap` returns early, and a
+# note of any length is accepted -- the guard absent, silently, which is hard
+# rule 3.
+#
+# BELOW the block above, and not between that block's comment and its `case`:
+# the paragraph ending "One spare zero and the guard was the failure" is about
+# AUTOFLEET_REVIEW_MAX_TRIES and has to stay next to it. Found by the local
+# /mattpocock-skills:code-review pass, which is the one that reads comments as
+# load-bearing.
+#
+# Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
+# non-number has to be refused, because only a non-number turns the guard off
+# without saying so.
+case "$AUTOFLEET_HANDOFF_MAX_WORDS" in
+  ''|*[!0-9]*)
+    echo "AUTOFLEET_HANDOFF_MAX_WORDS must be a whole number (0 turns the cap off);" \
+         "got '$AUTOFLEET_HANDOFF_MAX_WORDS'" >&2
+    exit 2 ;;
+esac
+
+# The same validation, for the same reason: the only consumer is an integer `[`
+# test in fleet.sh, and a non-number makes that test FALSE rather than an error
+# anybody sees, so the cap silently does not exist.
+fleet_positive_knob AUTOFLEET_REVIEW_MAX_ROUNDS "$AUTOFLEET_REVIEW_MAX_ROUNDS"

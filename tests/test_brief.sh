@@ -3,7 +3,8 @@
 # arrives in TWO stages out of the one file.
 #
 #   test_brief.sh stage1  the bare form -> the spec, steps 1-3, and a pointer at
-#                         stage 2. Under 400 words with the spec excluded, and
+#                         stage 2. Under BRIEF_WORD_BUDGET words with the spec
+#                         excluded, and
 #                         carrying NONE of the post-PR contract: the whole point
 #                         is that an agent does not pay for 1,272 words of review
 #                         loop in the prompt prefix of every request it makes
@@ -71,15 +72,11 @@ STUB
 }
 
 # Set by #49, and held in evals/lint.sh too -- that one is the vendored copy, so
-# a host project gets the ceiling even though tests/ is not vendored. KEEP THE
-# TWO EQUAL: a budget raised in one file and not the other is a ceiling that only
-# one of the two things checking it believes in.
-#
-# Raised to 410 by #51: step 3 became one command instead of four in-session
-# lines, and what it costs here is the sentence saying that command runs far
-# longer than one tool call. An agent that does not know blocks a tool call on it and
-# gets killed at its own ceiling with no marker written.
-BRIEF_WORD_BUDGET=410
+# a host project gets the ceiling even though tests/ is not vendored. Raising it
+# here alone is not raising it: `agent-config.yml` re-runs MAIN's lint against
+# the branch, so a number that moved on the branch and not on main is a red
+# check, not a raised budget. #55 is where that was learned.
+BRIEF_WORD_BUDGET=400
 
 run_it() { (cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh "$@"); }
 

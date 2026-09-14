@@ -49,6 +49,7 @@ seam, [README.md](README.md) for what this is.
 ./tests/run.sh                      # the whole suite
 ./tests/run.sh fleet                # one suite
 ./tests/run.sh fleet card_says      # one phase of one suite
+./tests/run.sh --verbose            # ...and a line per phase while it runs
 AUTOFLEET_TEST_NO_SKIP=1 ./tests/run.sh   # everything, and a phase that
                                     # declines to judge is a failure
 ./evals/lint.sh                     # is the agent config still well-formed
@@ -150,9 +151,8 @@ than the permission does.
    the green.
 2. **Both self-review passes — `/code-review` AND
    `/mattpocock-skills:code-review` — are required**, and both sets of findings
-   go in the PR body: `merge_gate.py` refuses a body that does not name both, and
-   [REVIEW.md](REVIEW.md) is the policy. Step 3 of the brief runs them; do not
-   run them here.
+   go in the PR body; `merge_gate.py` refuses a body naming only one. Step 3 of
+   the brief runs them, not you.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
 4. **The rest of the loop is one command**, fetched when it applies:
    `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must

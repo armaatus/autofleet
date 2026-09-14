@@ -105,6 +105,8 @@ it runs.
 | `AUTOFLEET_REVIEW_CMD` | `claude` | What `local` mode runs, with `-p` and a fixed tool allowlist. A command on `PATH`, so a wrapper can point it at another model or another account. |
 | `AUTOFLEET_REVIEW_TIMEOUT` | `1800` | Seconds one local review may run before it is killed and the PR left for the next poll. The wall-clock backstop for a wedged process. |
 | `AUTOFLEET_REVIEW_MAX_TRIES` | `3` | How many attempts one head may get that end with **no verdict** — a reviewer that ran and submitted nothing, or one killed at the timeout. A run that never reached a reviewer (the fleet was stopped, `gh` would not answer, the command is not on `PATH`) does not spend one. A reviewer that runs and returns no verdict is retried, because that is usually transient — unbounded, it is a full-budget reviewer every poll against a head that will never get one. At the cap the dispatcher says so, names the transcript, and stops; a push starts the count again. **Must be a positive whole number: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included.** A cap that is silently absent is the failure the check exists to prevent, so it refuses rather than warns. |
+| `AUTOFLEET_REVIEW_MAX_ROUNDS` | `4` | **`local` mode only** — `review_open_prs` returns early in `github` mode, so there are no dispatcher-started reviewers to cap. How many reviews one **pull request** may accrue before the dispatcher stops starting them and asks a person. A different question from `AUTOFLEET_REVIEW_MAX_TRIES`, which is per *head* and counts only reviewers that submitted **nothing** — a reviewer that submits findings clears that one, so a PR whose every round produces findings was bounded by nothing at all. `AWAIT_REVIEW_MAX_ROUNDS` bounds the *agent's* side and only while the agent is alive; a PR was measured collecting a fourth review after its agent had already stopped at that cap. The count lives in `<pr>.rounds` under the fleet's `reviewing/` directory, counts reviews **submitted** across every head, and survives `stop.sh` — what it counts belongs to the pull request, not to one dispatcher's run. Default is above the agent's `3` on purpose: two caps at the same number is one of them being dead code. **Must be a positive whole number**, refused the same way and for the same reason as its neighbour. |
+| `AWAIT_REVIEW_MAX_ROUNDS` | `3` | The **agent's** cap, and the only one of the three that is not `AUTOFLEET_`-prefixed — it is read by `await-review.sh` alone and has never had a row here. On the fourth call for one PR the script exits 5 rather than waiting, and the agent stops and says what is unresolved. Per *worktree*, in `.autofleet/run/review-rounds`, and counted only on the path that actually read a review back on this worktree's head — so it undercounts against the reviews a PR really had, deliberately: three CI timeouts in a row must not exhaust the cap without a finding having been seen. That undercount is why `AUTOFLEET_REVIEW_MAX_ROUNDS` exists as well; the two are not redundant. **Must be a positive whole number: a value that is not is refused, and `await-review.sh` exits 2 rather than waiting** — `[ 4 -gt three ]` returns 2, which reads as false, so an unvalidated cap never fires and the agent laps forever. Empty means unset, and the default applies. |
 | `AUTOFLEET_REVIEW_MAX_TURNS` | `80` | The reviewer's turn budget, passed as `--max-turns`. The bound it can *see* and spend against, which is what makes "submit before you run out" a budget rather than a hope. `claude-review.yml` grants the same number. |
 
 **`github`** — [`claude-review.yml`](../.github/workflows/claude-review.yml)
@@ -139,6 +141,18 @@ GitHub can attest to and becomes something the fleet asserts:
 | `--request-changes` | available | **refused by GitHub** — see below |
 | Reviewer's credential | an Actions token, scoped by the job's `permissions:`, in a container that is then destroyed | **your own `gh` login**, reaching every repo and org that account can |
 | Inline comments | yes (`gh api` is granted) | no — `gh api` is deliberately **not** granted, so findings go in the body |
+| The round-three floor | **never fires** — nothing tells the reviewer which round it is, and `REVIEW.md`'s fallback is "treat it as round one" | fires — `review.sh` passes `Review round: N` from `<pr>.rounds` |
+| `AUTOFLEET_REVIEW_MAX_ROUNDS` | **not applied** — `review_open_prs` returns early unless the mode is `local`, so the dispatcher starts no reviewers to cap | applied |
+
+The last two rows are new and point the other way from the rest: this is `local`
+having something `github` does not. Both belong here for the reason the section
+already gives about `--request-changes` — a control that is documented and
+silently inapplicable is worse than one that is absent. `REVIEW.md`,
+`.claude/agents/reviewer.md` and [WORKFLOW.md](WORKFLOW.md) all state the floor
+without a mode qualifier, because a reviewer reads them without knowing which
+mode started it; the fallback is what makes that safe, and this table is where
+the difference is recorded.
+
 
 **The reviewer runs as you.** That is the row above with the widest blast
 radius, and it is not narrowed by `guard.py`: the reviewer runs from the repo
@@ -158,7 +172,16 @@ condition is unreachable, and `<!-- review-findings: N -->` is the only lever
 holding the branch. It is enough — any `N` above zero blocks the merge until the
 author answers — but a control that is documented and silently inapplicable is
 worse than one that is absent, so it is written down here, in
-[REVIEW.md](../REVIEW.md) and in the reviewer's brief. This was found by the
+[REVIEW.md](../REVIEW.md) and in the reviewer's brief.
+
+`<!-- review-important: M -->` rides alongside it and is **not** a second lever:
+it holds nothing and releases nothing. It exists because the verdict type used
+to carry severity and in this mode cannot, so with `N` alone every reader
+downstream saw "five nits" and "one data-loss bug" as the same integer. What `M`
+buys is the *instruction*: at `0`, `await-review.sh` tells the agent that
+`answer-review.sh` discharges the hold with no commit, where a fix would move the
+head and buy the next round. Omitting `M` is read as "did not say", never as
+zero. This was found by the
 local reviewer being unable to submit its own verdict.
 
 `merge_gate.independent_reviews()` normally discards anything the PR's author
@@ -243,6 +266,50 @@ so.
 > [#27](https://github.com/armaatus/autofleet/issues/27), open against
 > `review.sh`; `self-review.sh` is deliberately a second consumer of the same
 > shape rather than a third convention, so one fix covers both.
+
+### The handoff note
+
+One session covers the plan, the implementation, both self-review passes, the
+push, the PR and up to three review rounds, inside one `AUTOFLEET_TIMEBOX` and
+one context window. When the dispatcher interrupts that worktree, or
+`./scripts/fleet/fleet.sh retry N` hands the issue back, the next attempt used
+to begin from the issue body alone and re-derive from the files every decision
+the first one made. `scripts/fleet/handoff.sh` is the note that carries those
+decisions across, and the opening brief asks for it in both halves — when the
+work is put down, and at the push and after every review round:
+
+```bash
+./scripts/fleet/handoff.sh write 42 --stdin <<'NOTE'
+...
+NOTE
+./scripts/fleet/handoff.sh          # print this worktree's note
+```
+
+It holds the decisions taken and why, the files touched, what each review round
+said and how it was answered, and what is still open — not the plan, which is in
+the PR body, and not the diff.
+
+Two things read it back. `issue-command.sh` prints it **between the issue's
+spec and the brief** in the next session **in that worktree** — which is the
+case it is for and the one that always works; the `resumed` test phase asserts
+that ordering, so a session gets the spec, then what the last attempt left, then
+its marching orders. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
+you hand the issue back, so a second worktree opened alongside a first one still
+standing can be pointed at it. The dispatcher's own opening prompt names it too,
+in a narrower state than either — `handoff_note_for` in `scripts/fleet/fleet.sh`
+is where that is argued, and `retry` is the line to read.
+
+**It lives at `.autofleet/run/handoff-<issue>.md`, and it dies with the
+worktree.** That directory is gitignored and per worktree: the note survives a
+session restart *inside* the worktree, which is the case it exists for, and it
+goes when the worktree is reaped. It is not durable storage and nothing backs it
+up. That is deliberate rather than unfinished — a note that outlived its
+worktree would be read by an attempt working from a different tree, telling it
+which files were touched in a tree it cannot see.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_HANDOFF_MAX_WORDS` | `300` | How long the note may be. Over it the script **refuses and changes nothing** rather than truncating: a note cut off at the sentence that said what is still open reads exactly like one where nothing was. Unbounded, the note grows into a second spec the next attempt reads in full before its first edit, which is the cost it exists to remove. `0` turns the cap off. **Must be a whole number**: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it — a non-number would otherwise make the comparison error out, the cap never fire, and the guard be absent with nothing on screen saying so. |
 
 ### What the fleet keeps
 

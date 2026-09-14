@@ -141,7 +141,10 @@ case "${1:-}" in
   # incrementing `changed`, so the summary said "Nothing was written" under a
   # list of things it would write, and a real run reported "0 written" having
   # mutated a file autofleet does not own.
-  grep -qF -- '0 would change' <<<"$out" \
+  # ANCHORED. `grep -qF '0 would change'` also matches "30 would change", so the
+  # assertion passed for the wrong reason the moment the payload grew a file --
+  # it is looking for a ZERO count, and every count ending in zero satisfied it.
+  grep -qE '(^|[^0-9])0 would change' <<<"$out" \
     && fail "--dry-run lists .gitignore changes and then counts zero of them: $out"
   ok "...and counts them, so the summary is not a contradiction"
   ;;

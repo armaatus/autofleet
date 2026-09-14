@@ -53,6 +53,17 @@
 #                                 or any later one -- and a push invalidates
 #                                 that. Fourteen spawns in thirteen minutes on
 #                                 PR #32's first head is what this stops.
+#   test_review_mode.sh rounds     a review that SUBMITTED counts a round against
+#                                 the pull request, across every head it is on,
+#                                 and one that submitted nothing does not. The
+#                                 two counters that already existed answer other
+#                                 questions: `.tries` is per head and counts only
+#                                 silence, and .autofleet/run/review-rounds is
+#                                 per worktree and undercounts.
+#   test_review_mode.sh roundcap   ...and at AUTOFLEET_REVIEW_MAX_ROUNDS the
+#                                 dispatcher stops starting reviewers for that PR
+#                                 and asks a person -- on a new head too, or the
+#                                 cap is one push away from not existing.
 #   test_review_mode.sh retries    ...while a reviewer that submitted NOTHING is
 #                                 tried again. The asymmetry is the whole fix:
 #                                 backwards, it is the silent block the mode
@@ -743,6 +754,114 @@ GHSTUB
     ok "...and a push starts one again"
     ;;
 
+# -------------------------------------------------------------------- rounds
+  rounds)
+    # The counter nothing had. `.tries` is per HEAD and counts reviewers that
+    # submitted NOTHING -- so a PR whose every round produces findings is
+    # bounded by nothing at all. `.autofleet/run/review-rounds` is per WORKTREE
+    # and increments only where a round was read back, and it undercounts:
+    # measured at 3 against 4 real reviews on #85, 2 against 4 on #86, 1 against
+    # 3 on #88. `.rounds` counts reviews SUBMITTED, on this pull request, across
+    # every head it has been on.
+    make_fixture; stub_reviewer marked
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_reviews 1 || fail "the first reviewer submitted nothing"
+    await lock_held no || fail "the first reviewer never released its lock"
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 1 ] \
+      || fail "a submitted review did not count a round (got '$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)')"
+    ok "a submitted review counts one round"
+
+    # ACROSS A HEAD MOVE, which is the whole reason this is not another column
+    # in `.tries`. Every measured PR was stuck because the head kept moving; a
+    # counter that resets on a push counts nothing about that.
+    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m push)
+    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_reviews 2 || fail "the new head got no review"
+    await lock_held no || fail "the second reviewer never released its lock"
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 2 ] \
+      || fail "a push reset the round count, which is the case the cap exists for"
+    ok "...and a push does not reset it"
+
+    # A reviewer that submits NOTHING is not a round. It burns a try, which is a
+    # different cap for a different population, and counting it here would
+    # retire a pull request nobody reviewed.
+    stub_reviewer silent
+    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m again)
+    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await lock_held no || fail "the silent reviewer never released its lock"
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/42.rounds" 2>/dev/null)" = 2 ] \
+      || fail "a reviewer that submitted nothing was counted as a round"
+    ok "...and a reviewer that submitted nothing is not one"
+    ;;
+
+# ------------------------------------------------------------------ roundcap
+  roundcap)
+    # The backstop. Nothing bounded the NUMBER of reviews a pull request could
+    # accrue: fleet.sh started one for every new head, forever, and #86 had four
+    # with none of them ever judging its current head. The agent-side cap
+    # (AWAIT_REVIEW_MAX_ROUNDS) only binds while the agent is alive -- #85's
+    # stopped at its cap and a fourth review landed with nobody left to answer.
+    make_fixture; stub_reviewer marked
+    export AUTOFLEET_REVIEW_MAX_ROUNDS=2
+    mkdir -p "$AUTOFLEET_DIR/reviewing"
+    printf '2\n' >"$AUTOFLEET_DIR/reviewing/42.rounds"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    out="$(poll_review_open_prs 2>&1; cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+    await n_spawned 1 10 >/dev/null 2>&1 || true
+    [ "$(n_spawned)" = 0 ] \
+      || fail "a PR at the round cap was handed to another reviewer anyway"
+    ok "at the cap, no further reviewer is started"
+    grep -q "which is the cap. Needs you" <<<"$out" \
+      || fail "it stopped at the cap without saying so: $out"
+    ok "...and it says so, naming a person rather than another lap"
+
+    # AND ON A NEW HEAD TOO. This is what separates it from the per-head cap: a
+    # push must not buy a fresh set of rounds, or the cap is only ever one push
+    # away from not existing.
+    (cd "$WORK/repo" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m push)
+    git -C "$WORK/repo" rev-parse HEAD >"$GH_HEAD"
+    printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+    poll_review_open_prs
+    await n_spawned 1 10 >/dev/null 2>&1 || true
+    [ "$(n_spawned)" = 0 ] \
+      || fail "a push past the round cap started a reviewer, so the cap is one push from nothing"
+    ok "...and a push does not buy a fresh set of rounds"
+
+    # The knob is validated the way its neighbour is, and for the same reason:
+    # `[ 2 -ge abc ]` returns 2, which is FALSE, so the cap silently does not
+    # exist and fleet.sh runs without `-e` to notice.
+    for bad in abc 0 2x -1; do
+      cfg_out="$( (cd "$WORK/repo" \
+        && AUTOFLEET_REVIEW_MAX_ROUNDS="$bad" bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "AUTOFLEET_REVIEW_MAX_ROUNDS='$bad' was accepted (rc=$cfg_rc): $cfg_out"
+      grep -q "must be a positive whole number" <<<"$cfg_out" \
+        || fail "AUTOFLEET_REVIEW_MAX_ROUNDS='$bad' failed without saying why: $cfg_out"
+    done
+    ok "...and a cap that is not a positive number is refused, not ignored"
+
+    # Through .autofleet/config, which is sourced LAST and is the route a host
+    # project actually uses. Its neighbour's check sat with the defaults and was
+    # decorative for every real user of the knob until that was found.
+    hostcfg="$WORK/hostcfg"
+    for bad in three 0 ""; do
+      printf 'AUTOFLEET_REVIEW_MAX_ROUNDS=%s\n' "$bad" >"$hostcfg"
+      cfg_out="$( (cd "$WORK/repo" \
+        && env -u AUTOFLEET_REVIEW_MAX_ROUNDS AUTOFLEET_CONFIG="$hostcfg" \
+             bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+      cfg_rc=$?
+      [ "$cfg_rc" = 2 ] \
+        || fail "a config file setting the round cap to '$bad' was accepted (rc=$cfg_rc): $cfg_out"
+    done
+    ok "...including when it arrives through .autofleet/config, which is read last"
+    ;;
+
 # ------------------------------------------------------------------- retries
   retries)
     # The asymmetry. A reviewer that submitted NOTHING must be tried again --
@@ -932,12 +1051,18 @@ GHSTUB
   printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.done"
   : >"$AUTOFLEET_DIR/reviewing/99.said"
   printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/99.tries"
+  # `.rounds` in the list too. It is the ONE record `stop_reviewers` keeps, and
+  # a reader who knows that could reasonably think the sweep keeps it as well --
+  # it does not, and must not: what it counts belongs to a pull request, and
+  # this pull request is closed. The two halves of that rule are asserted in the
+  # two places they differ. Found by the independent review.
+  printf '3\n' >"$AUTOFLEET_DIR/reviewing/99.rounds"
   poll_review_open_prs
-  for f in 99.done 99.said 99.tries; do
+  for f in 99.done 99.said 99.tries 99.rounds; do
     [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
       && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
   done
-  ok "...and a closed PR's records are swept"
+  ok "...and a closed PR's records are swept, .rounds included"
 
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a
@@ -947,10 +1072,26 @@ GHSTUB
   # be signalled, and nothing guarantees a future record's first field is not
   # numeric. Said rather than asserted, because a phase claiming to pin it would
   # be the inert kind this suite has shipped twice.
+  printf '3\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
   in_poll stop_reviewers >/dev/null 2>&1
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
   ok "...and a stop clears the records"
+
+  # ...EXCEPT `.rounds`, and this is the assertion that rule did not have. The
+  # exemption is one `case ... continue` inside a loop whose stated purpose is
+  # "the records go too", so it reads as a special case somebody could tidy
+  # away -- and every phase in this suite would stay green. What breaks is
+  # invisible until it matters: AUTOFLEET_REVIEW_MAX_ROUNDS resets on every
+  # `stop.sh` and every dispatcher restart, both routine and both in CLAUDE.md's
+  # Environment block, so the PR-level cap is one drain from not existing.
+  # docs/CONFIGURATION.md and docs/WORKFLOW.md both promise it survives.
+  # Found by the independent review, which called it hard rule 3, and it is.
+  [ -e "$AUTOFLEET_DIR/reviewing/43.rounds" ] \
+    || fail "stop_reviewers cleared 43.rounds, so every drain hands each open PR a fresh set of rounds and the cap is one stop.sh from nothing"
+  [ "$(cat "$AUTOFLEET_DIR/reviewing/43.rounds")" = 3 ] \
+    || fail "stop_reviewers changed the round count rather than leaving it alone"
+  ok "...except .rounds, which counts the pull request and not this dispatcher's run"
 
   # --------------------------------------------- when the sweep must NOT run
   #
@@ -1962,6 +2103,6 @@ PY2
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap" >&2
   exit 2 ;;
 esac
