@@ -365,7 +365,7 @@ CI is failing on this PR, on two consecutive checks: $broken
 
 No review will fix a red build. Reproduce it locally:
   ${AUTOFLEET_TEST_COMMAND:-the project's test command}
-then fix it and review the fix -- `self-review.sh`, NOT a re-record. A red build
+then fix it and review the fix -- \`self-review.sh\`, NOT a re-record. A red build
 means the code changed, and re-stamping the previous run's findings onto a new
 commit opens the push gate on something nobody read. (The DIRTY remedy above is
 the opposite case: a rebase is the same review on a new sha.)

@@ -126,7 +126,11 @@ case "${1:-}" in
   # line is `"$changed written, $kept unchanged"`, and a line already present is
   # counted as kept -- which is what makes the count on the DRY run below mean
   # something.
-  grep -qF -- 'added to .gitignore' <<<"$out" \
+  # `.gitignore +=` is what `ensure_ignored` prints. The first spelling of this
+  # assertion looked for "added to .gitignore", a message that died with the
+  # duplicate appender this branch deleted -- so it could never fail, which is
+  # hard rule 3 in a test. Found by the local /code-review pass.
+  grep -qF -- '.gitignore +=' <<<"$out" \
     && fail "the second run claims to have added lines that were already there: $out"
   grep -qE '[0-9]+ unchanged' <<<"$out" \
     || fail "the second run does not report a summary: $out"
