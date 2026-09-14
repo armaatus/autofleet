@@ -14,6 +14,12 @@
 #                                the findings come back labelled with the two
 #                                words `merge_gate.py` greps the body for, and
 #                                the push marker is written for THIS commit.
+#   test_self_review.sh uncounted
+#                                a pass that reports findings but no count is
+#                                RECORDED -- `/code-review` emitted the trailer
+#                                zero times in three measured rounds, so a hard
+#                                bar on it blocks the push on real findings. The
+#                                findings say the number is missing instead.
 #   test_self_review.sh silent   one pass produces nothing -> non-zero, the pass
 #                                is NAMED, and no marker is written. The row that
 #                                goes green if the gate ever becomes decorative.
@@ -137,6 +143,12 @@ emit() {
 }
 case "$mode" in
   findings) emit ;;
+  # Findings, and no count. `/code-review` does exactly this -- measured zero
+  # trailers in three rounds -- so it must still be recorded, with a line saying
+  # the number is missing rather than a number nobody wrote.
+  untrailed)
+    printf 'One finding, and no count at the end of it.\n'
+    printf -- '- thing.txt:1 -- from %s\n' "$prompt" ;;
   silent) : ;;
   # #51's observed failure, reproduced exactly: exit 0, 446-ish bytes, all of it
   # on STDERR. The pass said nothing; only the stream split can tell.
@@ -215,6 +227,29 @@ case "${1:-}" in
   grep -qF -- 'mattpocock-skills:code-review' "$MARKER" \
     || fail "the marker does not hold what the passes found"
   ok "the push marker is recorded for the exact commit, holding both sets"
+
+  grep -qF -- 'did not report a finding count' "$out" \
+    && fail "a pass that DID report a count was annotated as if it had not"
+  ok "a pass that reported its count is not annotated"
+  ;;
+
+# ----------------------------------------------------------------- uncounted
+  uncounted)
+  make_fixture
+  export SELF_MODE=untrailed
+  out="$WORK/out"; err="$WORK/err"
+  run_it >"$out" 2>"$err"; rc=$?
+
+  # THE TRAILER IS NOT A GATE. `/code-review` is a harness skill with an output
+  # contract of its own and emitted the trailer zero times in three measured
+  # rounds; a hard bar on it blocks the push on a pass that produced real
+  # findings. What the missing count costs is a reader of the PR body who cannot
+  # tell "found nothing" from "gave up", so it is said in the findings instead.
+  [ "$rc" = 0 ] || { cat "$err" >&2; fail "findings without a count were rejected (rc $rc)"; }
+  [ -f "$MARKER" ] || fail "no marker; the trailer is acting as a gate again"
+  grep -qF -- 'did not report a finding count' "$out" \
+    || fail "a pass with no count was recorded with nothing saying so"
+  ok "a pass with no count is recorded, and the findings say the number is missing"
   ;;
 
 # -------------------------------------------------------------------- silent
@@ -443,5 +478,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|silent|noise|noisy|dirty|norange|keeps|midstop|worst|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|worst|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac

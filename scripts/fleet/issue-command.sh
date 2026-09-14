@@ -192,7 +192,7 @@ runs both passes outside this session and records the marker:
 
     ./scripts/fleet/self-review.sh
 
-**It runs for ~20 minutes -- longer than one tool call. Start it in the
+**It can run 40 minutes -- longer than one tool call. Start it in the
 background.** `/code-review high` finds defects,
 `/mattpocock-skills:code-review` finds conformance, REVIEW.md is the policy. Fix
 what is real, re-run the tests, run it again -- the marker is per-commit. Until
@@ -258,8 +258,8 @@ while it waits:
 It returns when the review lands -- or early, without one, when nothing a review
 could say would help: exit 7 for a red build, and exit 8 when GitHub says `DIRTY`
 because something merged underneath your branch. Exit 8 wants a rebase, a fresh
-`./scripts/fleet/record-review.sh .autofleet/run/self-review.md` for the new head, and `git push
---force-with-lease`; it prints all three. Do not come back here until it is
+`./scripts/fleet/record-review.sh .autofleet/run/self-review.md` for the new
+head, and `git push --force-with-lease`; it prints all three. Do not come back here until it is
 rebased.
 
 **A clean verdict is not the same as no findings.** A review can come back

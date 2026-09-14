@@ -46,7 +46,15 @@ target=".autofleet/run/reviewed-$sha"
 # "it ran and found nothing" explicitly is a person's call and is exactly what
 # the refusal below asks for.
 refuse_empty() {
-  [ -n "${1//[[:space:]]/}" ] && return 0
+# `case`, NOT `[ -n "${body//[[:space:]]/}" ]`. That expansion builds a whole new
+# string one character at a time, and bash 3.2 -- which is what macOS ships --
+# takes SEVENTY-FIVE SECONDS over a 12KB findings file, measured on this branch
+# while a run appeared to have wedged after both passes had already finished. It
+# gets worse as the findings get longer, which is the wrong way round. `case`
+# matches in place and stops at the first non-space.
+  case "$1" in
+    *[![:space:]]*) return 0 ;;
+  esac
   echo "nothing to record: the findings are empty." >&2
   echo "A marker with no findings under it opens the push gate for a review" >&2
   echo "that produced no text. What you probably want, after a rebase:" >&2

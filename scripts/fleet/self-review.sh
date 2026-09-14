@@ -175,10 +175,21 @@ mkdir -p "$LOG_DIR"
 # makes it reliable, tightening this is a two-line change and the reason it was
 # loosened is here.
 not_blank() {
-  local body
-  body="$(cat "$1")"
-  [ -n "${body//[[:space:]]/}" ]
+# `case`, NOT `[ -n "${body//[[:space:]]/}" ]`. That expansion builds a whole new
+# string one character at a time, and bash 3.2 -- which is what macOS ships --
+# takes SEVENTY-FIVE SECONDS over a 12KB findings file, measured on this branch
+# while a run appeared to have wedged after both passes had already finished. It
+# gets worse as the findings get longer, which is the wrong way round. `case`
+# matches in place and stops at the first non-space.
+  case "$(cat "$1")" in
+    *[![:space:]]*) return 0 ;;
+  esac
+  return 1
 }
+# Whether the pass wrote the count it was asked for. NOT a gate -- see above --
+# but a pass that skipped it is worth a line in the findings, because the count
+# is what a reader of the PR body uses to tell "nothing found" from "gave up".
+declared() { grep -qF -- '<!-- self-review-findings:' "$1"; }
 
 # A DEADLINE AND A PROCESS GROUP, the same shape as `review.sh` and for the same
 # two reasons stated there: `timeout` is GNU coreutils and this repo runs on
@@ -187,9 +198,11 @@ not_blank() {
 # `set -m` gives the job its own process group; `kill -- -N` reaches everything
 # in it.
 #
-# Not shared with `review.sh`: that copy also polls the dispatcher's stop file,
-# refunds a try against AUTOFLEET_REVIEW_MAX_TRIES and drops a slot marker, none
-# of which exist here. What IS shared is the reasoning, which is why this comment
+# Not shared with `review.sh`: that copy also refunds a try against
+# AUTOFLEET_REVIEW_MAX_TRIES and drops the dispatcher's slot marker, neither of
+# which exists here. The stop poll below is in both, deliberately -- an earlier
+# version of this comment listed it as a difference, which it is not. Found by
+# the local /mattpocock-skills:code-review pass. What IS shared is the reasoning, which is why this comment
 # points at it rather than restating it.
 run_pass() {
   # The slash command IS the prompt -- one argument, not two. A third parameter
@@ -249,7 +262,10 @@ run_pass() {
     # and what the agent pastes into that body is what this prints. Label the
     # sets and the gate is satisfied by the paste; leave them unlabelled and the
     # agent has to remember to write them, which is the step that gets forgotten.
-    { printf '### %s\n\n' "$label"; cat "$out"; printf '\n\n'; } >>"$DRAFT"
+    { printf '### %s\n\n' "$label"
+      declared "$out" \
+        || printf '_This pass did not report a finding count; read the list, not a number._\n\n'
+      cat "$out"; printf '\n\n'; } >>"$DRAFT"
     return 0
   fi
   echo "$label exited $rc and left NO findings this can use." >&2
@@ -300,7 +316,10 @@ Acceptance, and whether the diff matches them is part of what you are judging.
 
 SYSTEM="You are one of two mandatory self-review passes the autofleet fleet runs
 before a pull request is opened. The policy is REVIEW.md at the repository root;
-read it.
+read it for WHAT COUNTS as a finding and how to rank it. Its submission rules are
+the INDEPENDENT reviewer's and are not yours: you have no \`gh pr review\`, no
+verdict to pick, and no \`review-findings\` trailer to write. You print, and the
+author pastes what you printed into the pull request.
 
 $issue_line
 THERE IS NO USER. You were started headless by a script, your stdin is closed,
@@ -319,14 +338,14 @@ what you find, and you have no tools to do it with.
 
 Your FINAL MESSAGE is the entirety of what the caller receives -- nothing else
 you print is read. Put the findings there, in markdown, each naming the file and
-line, and END IT with this line, verbatim, with the count filled in:
+line, and end it with this line, verbatim, with the count filled in:
 
 <!-- self-review-findings: N -->
 
-That line is what tells the caller a pass RAN. Without it the run is recorded as
-a FAILURE and the pull request does not go out -- so write it even when N is 0,
-and when it is 0 say in a sentence what you checked, so the author can tell a
-clean diff from a pass that gave up."
+The count is what a reader of the pull request uses to tell \"found nothing\" from
+\"gave up\", so write it even when N is 0 -- and when it is 0, say in a sentence
+what you checked. It is not a gate and never truncate findings to reach it: an
+empty final message is the only thing recorded as a failure."
 
 # Both passes run even when the first one fails, because the caller is an agent
 # on a time-box: one invocation that names both outcomes beats two rounds of

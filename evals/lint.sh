@@ -1583,9 +1583,9 @@ for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
 
 # The loop's steps. `issue-command.sh` itself is NOT here: printing the command
 # that fetches the brief is the pointer this check is asking for.
-STEPS = ["record-review.sh", "await-review.sh", "review-status.sh",
-         "resolve-thread.sh", "answer-review.sh", "gh pr merge",
-         "/code-review", "/mattpocock-skills:code-review"]
+STEPS = ["self-review.sh", "record-review.sh", "await-review.sh",
+         "review-status.sh", "resolve-thread.sh", "answer-review.sh",
+         "gh pr merge", "/code-review", "/mattpocock-skills:code-review"]
 found = sorted({s for b in blocks for s in STEPS if s in b})
 if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
