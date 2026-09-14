@@ -1348,6 +1348,13 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                review does not get a reviewer started every poll.
 #   <pr>.tries   a RECORD. Holds `head n` -- how many reviewers this head has
 #                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
+#   <pr>.rounds  a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
+#                had that DID produce a verdict, across every head it has ever
+#                been on, against AUTOFLEET_REVIEW_MAX_ROUNDS. Written by
+#                review.sh on exit 0 only. The opposite population from
+#                `.tries`, which is why it is a separate file and not a second
+#                column: a review that submits findings clears `.tries` and
+#                increments this.
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
@@ -1358,7 +1365,7 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 # reviewers in flight, permanently, on the screen its own comment calls the
 # first anybody looks at. Found by the independent review, which noted the
 # comment two lines above already stated the rule this broke.
-is_review_record() { case "$1" in *.done|*.tries|*.said) return 0 ;; esac; return 1; }
+is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; esac; return 1; }
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1415,6 +1422,14 @@ stop_reviewers() {
     # The records go too: a dispatcher starting fresh re-derives what has been
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
+    #
+    # `.rounds` is the exception, and it is not an oversight. What it counts is
+    # a property of the PULL REQUEST -- how many reviews it has cost -- not of
+    # this dispatcher's run, and nothing here re-derives it. Clearing it would
+    # hand every open PR a fresh set of rounds on each drain, which is exactly
+    # the cap not existing for anybody who restarts the fleet. It is pruned when
+    # the PR closes, by the sweep at the end of review_open_prs.
+    case "$marker" in *.rounds) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ <"$marker" 2>/dev/null || true
@@ -1923,6 +1938,50 @@ for p in prs:
 ' | while IFS="$(printf '\t')" read -r pr head; do
     [ -n "$pr" ] || continue
     marker="$REVIEWING_DIR/$pr"
+
+    # THE PR-LEVEL CAP, AND IT IS CHECKED FIRST -- above the `.done`
+    # short-circuit, which is the opposite of where the head-level cap belongs
+    # and for a reason worth stating. The run that reaches this cap is the one
+    # that just wrote BOTH `.done = head` and `.rounds = cap`. Checked below the
+    # short-circuit, every later poll takes that `continue` and the hold is
+    # never said: the message appears only after the next push, and the case it
+    # is FOR is the one where no next push comes -- an agent that stopped at its
+    # own three-round cap while reviews kept landing. That was #85 exactly.
+    # Found by the independent review, which called it unreachable in the steady
+    # state, and it was.
+    #
+    # Safe this early, unlike the tries cap below: `.rounds` is written only on
+    # review.sh exit 0, so at the cap that many reviews have DEFINITIVELY
+    # completed. There is no "the running one might still submit" ambiguity to
+    # get wrong, which is the whole reason the other cap has to wait for the
+    # lock.
+    #
+    # This is the backstop, not the mechanism. If the nit-only path in
+    # await-review.sh does its job a PR converges in two rounds and never
+    # arrives here; a PR that does arrive here has a real disagreement in it or
+    # an agent that died mid-loop, and both of those want a person.
+    local rounds_n=0
+    [ -f "$marker.rounds" ] && read -r rounds_n <"$marker.rounds"
+    # ASSIGN the defaulted value, then test THAT. `case "${rounds_n:-0}"` tests
+    # the default and leaves the variable empty, which an EMPTY `.rounds` file
+    # produces: `read` assigns "" and returns 1 at EOF. `[ "" -ge 4 ]` is not
+    # false, it is `integer expression expected` and exit 2 -- which reads as
+    # false, so the cap silently does not exist, and fleet.sh runs without `-e`
+    # to notice. The same shape config.sh's own validation comment warns about,
+    # one file over. Found by the independent review, round 1, and answered
+    # here rather than in words.
+    rounds_n="${rounds_n:-0}"
+    case "$rounds_n" in (*[!0-9]*) rounds_n=0 ;; esac
+    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
+      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
+        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
+        "  Not starting more, on this head or any later one. The reviews are in" \
+        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
+        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
+        "  genuinely still converging."
+      continue
+    fi
+
     # ...and the record of a head already handled, which is not the same
     # question as "is a reviewer running". Without it, a head that HAS its
     # review had a reviewer started for it every poll -- each exiting 8 two API

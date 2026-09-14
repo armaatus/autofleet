@@ -267,12 +267,12 @@ echo "== local review mode"
 # 1. The reviewer's brief. review.sh inlines it into the prompt, so a missing
 #    file is a review submitted against no policy at all.
 if [ -f .claude/agents/reviewer.md ]; then
-  for needle in "review-findings" "independent-review: local" "REVIEW.md" \
-                "mattpocock-skills:code-review"; do
+  for needle in "review-findings" "review-important" "independent-review: local" \
+                "REVIEW.md" "mattpocock-skills:code-review"; do
     grep -q -- "$needle" .claude/agents/reviewer.md \
       || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to write or read"
   done
-  ok "the reviewer brief names both trailers, REVIEW.md and the standards pass"
+  ok "the reviewer brief names every trailer, REVIEW.md and the standards pass"
 else
   fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
 fi
@@ -289,7 +289,7 @@ flat() { tr -s '[:space:]' ' ' <"$1"; }
 if flat REVIEW.md | qgrep 'nothing else after it'; then
   fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
 elif grep -q 'independent-review: local' REVIEW.md; then
-  ok "REVIEW.md allows the second trailer local review mode depends on"
+  ok "REVIEW.md allows the trailers local review mode depends on"
 else
   fail "REVIEW.md does not mention the local-review marker, so a reviewer reading it in full does not know to write one"
 fi
@@ -304,6 +304,153 @@ if flat REVIEW.md | qgrep 'request changes on your own pull request' \
   ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
 else
   fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
+fi
+
+# 2c. The severity trailer, in all four places that have to agree about it.
+#     It is what tells a nit-only review from an Important one, and the failure
+#     it exists to prevent is silent in the cheap direction: a brief that stops
+#     asking for it produces reviews with no `review-important` line, the gate
+#     reads that as "did not say" forever, and the nit-only wording -- the whole
+#     point of the trailer -- is never printed again. Nothing goes red. The loop
+#     just quietly costs what it used to.
+#
+#     `github` mode gets the trailer too. It has no round number to gate the
+#     late-round rule on, but the count is what `merge_gate.py` reads, and the
+#     gate does not know which mode wrote the review it is looking at.
+sev_missing=""
+for f in REVIEW.md .claude/agents/reviewer.md scripts/fleet/review.sh \
+         .github/workflows/claude-review.yml docs/WORKFLOW.md; do
+  grep -q -- 'review-important' "$f" || sev_missing="$sev_missing $f"
+done
+if [ -z "$sev_missing" ]; then
+  ok "the severity trailer is asked for by both briefs, the policy and the spawner"
+else
+  fail "review-important is missing from:$sev_missing -- severity stops reaching merge_gate.py, and the nit-only remedy stops being printed"
+fi
+
+# 2d. ...and merge_gate.py still reads it. A trailer three files ask for and
+#     nothing parses is worse than no trailer: every reviewer pays to write it
+#     and no reader is any better off.
+if grep -q 'review-important:\\s\*(' .github/scripts/merge_gate.py \
+   && grep -q 'declared_important' .github/scripts/merge_gate.py; then
+  ok "merge_gate.py parses the severity trailer the briefs write"
+else
+  fail "merge_gate.py no longer parses review-important, so the trailer every review writes reaches nothing"
+fi
+
+# 2e. THE TRAILER BLOCK, CHARACTER FOR CHARACTER, in the three places that
+#     dictate it and the one that documents it. Presence (2c) is not enough:
+#     the first draft of this change had REVIEW.md stating the two trailers in
+#     the OPPOSITE order from the block review.sh tells the reviewer to copy,
+#     and every grep for presence was green. Parsing is order-independent, so
+#     nothing would have broken -- but REVIEW.md is the file the brief calls
+#     the authority a reviewer reads "first and in full", and the last time it
+#     contradicted the dictated trailers a real review was discarded and the PR
+#     blocked on a review that already existed. That paragraph is still in
+#     REVIEW.md. Found by both independent reviews of this change.
+if python3 - <<'PYEOF'
+import re, sys
+
+def block(path):
+    """The dictated trailer block: the first two ADJACENT trailer lines.
+
+    Anchored on the literal `<!-- ... -->` lines, not on the names: every one of
+    these files also discusses the trailers in prose, in whatever order the
+    sentence wanted, and matching that reported drift where there was none.
+    Adjacency is what makes it the block a reviewer copies.
+    """
+    lines = [re.search(r"<!--\s*review-(important|findings):", ln)
+             for ln in open(path).read().split("\n")]
+    for i in range(len(lines) - 1):
+        if lines[i] and lines[i + 1]:
+            return [lines[i].group(1), lines[i + 1].group(1)]
+    return []
+
+want = ["important", "findings"]
+bad = []
+for path in ("REVIEW.md", ".claude/agents/reviewer.md", "scripts/fleet/review.sh",
+             ".github/workflows/claude-review.yml", "docs/WORKFLOW.md"):
+    got = block(path)
+    if got != want:
+        bad.append(f"{path} states the trailers as {got}, not {want}")
+if bad:
+    sys.exit("the trailer block has drifted:\n  " + "\n  ".join(bad))
+PYEOF
+then
+  ok "every file stating the two trailers states them in the same order"
+else
+  fail "the trailer block has drifted between the policy and the prompts (above)"
+fi
+
+# 2f. ...and the round number reaches the reviewer at all. 2g below asserts the floor
+#     is WRITTEN in both files; nothing asserted the one line that makes it
+#     reachable. Delete `Review round:` from review.sh's prompt and every
+#     reviewer falls back to the documented "treat it as round one", the floor
+#     stops firing on every PR forever, and nothing goes red -- the same
+#     silent-in-the-cheap-direction failure 2c exists to prevent, one level
+#     down. Found by the independent review.
+if grep -q 'Review round: \$round' scripts/fleet/review.sh \
+   && grep -q 'review_round' scripts/fleet/review.sh; then
+  ok "review.sh tells the reviewer which round it is, so the floor can fire"
+else
+  fail "review.sh no longer passes the round number, so the late-round floor never fires and nothing else says so"
+fi
+
+# 2g. The floor itself, in the three files that state it. Prose, so `flat`.
+#
+#     docs/WORKFLOW.md is in this list because it was NOT, and that cost a real
+#     defect: it kept the pre-correction sentence telling the floor to report
+#     `review-findings: 0`, which releases the gate outright -- so a reviewer
+#     following the page CLAUDE.md calls the loop would have let a PR with
+#     unanswered nits merge under an armed auto-merge. REVIEW.md and the brief
+#     were both corrected and this page was not, and none of 2c, 2e or 2g could
+#     see it, because none of their file lists had it. Found by the independent
+#     review. A third file stating a rule is a third file that can drift.
+floor_missing=""
+for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
+  flat "$f" | qgrep 'round three' || floor_missing="$floor_missing $f"
+done
+if [ -z "$floor_missing" ]; then
+  ok "REVIEW.md, the brief and WORKFLOW.md all carry the late-round floor"
+else
+  fail "the late-round floor is gone from:$floor_missing -- a reviewer can spend rounds on nits again"
+fi
+
+# 2h. ...and each of them pairs the floor with a NON-ZERO findings count.
+#      `0` releases the gate -- merge_gate takes `if found == 0: continue` -- so
+#      a floor reporting it would land a PR with unanswered nits under the
+#      auto-merge armed at open. Two of the three files said the right thing and
+#      the third did not.
+#
+#      POSITIVE AND STRUCTURAL, after two failed attempts at detecting the wrong
+#      sentence. The first matched one historical wording, so it could only fire
+#      on a byte-exact revert. The second widened the gap and matched
+#      `report `0`` inside REVIEW.md's own "**Do not** report `0`" -- the
+#      negation trap #73 names and says to reject, arrived at by accident.
+#
+#      So this asserts what must be TRUE rather than hunting what must not be:
+#      every file stating the floor names `review-findings: N`, the letter, next
+#      to it. Rewrite the floor to report a zero and the `N` is what goes, in
+#      any phrasing, with no sentence-boundary or negation question to get
+#      wrong. Found by the independent review, rounds 1 and 3.
+#
+#      200 and not more: BSD grep -- which is what macOS ships and what this
+#      repo has to run on -- caps a bounded repetition at RE_DUP_MAX, 255.
+#      `.{0,300}` is not a pattern that matches nothing, it is an INVALID
+#      OPERAND: grep exits 2, the `||` fires, and every file reports as missing
+#      the thing it plainly has. Under `set -o pipefail` with grep's stderr
+#      going nowhere, that looked exactly like a real finding. Cost twenty
+#      minutes; written down so it costs nobody else any.
+zero_floor=""
+for f in REVIEW.md .claude/agents/reviewer.md docs/WORKFLOW.md; do
+  flat "$f" \
+    | qgrep -E '(round three|follow-up issue).{0,200}review-findings: N' \
+    || zero_floor="$zero_floor $f"
+done
+if [ -z "$zero_floor" ]; then
+  ok "...and each pairs it with a real findings count, not the 0 that releases the gate"
+else
+  fail "the late-round floor does not name a non-zero findings count in:$zero_floor -- a floor reporting 0 releases the gate on unanswered nits"
 fi
 
 # 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer

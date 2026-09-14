@@ -32,6 +32,16 @@
 # disagreement needs -- a person is. The count lives in .autofleet/run/review-rounds,
 # which is per-worktree and gitignored, and resets when the PR number changes.
 #
+# WHAT THE AGENT IS TOLD TO DO depends on what the review found, which until
+# recently it did not: one instruction was printed whatever the verdict, and it
+# led with "Fix what is real". A fix moves the head, a moved head invalidates
+# the review that asked for it, and the reviewer runs again on the whole diff --
+# so a nit cost a full round, every time. Measured on three pull requests stuck
+# in that cycle with `answer-review.sh`, which clears the hold with no commit at
+# all, never once run. A review declaring `<!-- review-important: 0 -->` now gets
+# the cheap instruction instead. Not a weaker one: the nits are still printed in
+# full, and a commit is still available to an agent that decides one is worth it.
+#
 # WHAT COUNTS AS THE REVIEW IS NOT DECIDED HERE. This imports
 # .github/scripts/merge_gate.py and asks it, exactly as review-status.sh does,
 # because a wait that ends on a review merge-gate does not count ends it for
@@ -51,6 +61,27 @@ POLL_SECONDS="${AWAIT_REVIEW_POLL:-30}"
 # an overnight wait. The review job itself is capped at 30 minutes.
 DEADLINE_SECONDS="${AWAIT_REVIEW_DEADLINE:-2700}"
 MAX_ROUNDS="${AWAIT_REVIEW_MAX_ROUNDS:-3}"
+# Validated here rather than in config.sh, because this is the only reader and
+# config.sh does not set it. It became a documented knob in
+# docs/CONFIGURATION.md with the round cap, and a documented knob that accepts
+# `three` is the same silent failure both its table neighbours are checked
+# against: `[ 4 -gt three ]` returns 2, which reads as false, so the cap never
+# fires and the agent laps forever. Refused rather than defaulted, so the
+# operator learns which value was wrong. Found by the independent review.
+# No `''` arm: `:-` above already turned an empty or unset value into the
+# default, so empty means "unset" here and never reaches this. Unlike
+# config.sh's knobs, which are `:=`-defaulted from a file a host project edits
+# and where an explicit `KNOB=` IS reachable and IS a mistake.
+case "$MAX_ROUNDS" in
+  *[!0-9]*)
+    echo "AWAIT_REVIEW_MAX_ROUNDS must be a positive whole number;" \
+         "got '$MAX_ROUNDS'" >&2
+    exit 2 ;;
+esac
+[ "$MAX_ROUNDS" -gt 0 ] || {
+  echo "AWAIT_REVIEW_MAX_ROUNDS must be a positive whole number; got '$MAX_ROUNDS'" >&2
+  exit 2; }
+
 # How many review THREADS one round prints in full. Bounded by threads and never
 # by lines: the thing this replaced cut its output with `head -200`, mid-comment,
 # in the middle of the text the agent was being told to act on. Twenty is past
@@ -169,8 +200,12 @@ echo "round $round of $MAX_ROUNDS -- waiting for a review on PR #$pr, on its cur
 echo "  (polling every ${POLL_SECONDS}s; stop everything with ./scripts/fleet/stop.sh --now)"
 
 payload="$(mktemp)"; reviews_out="$(mktemp)"; stamp="$(mktemp)"; notes="$(mktemp)"
+# How many Important findings the review being handed back declared, and the
+# threads payload. Files rather than `$(...)`, for the same bash 3.2 reason
+# the payload is one.
+sev="$(mktemp)"
 threads="$(mktemp)"
-trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes" "$threads"' EXIT
+trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes" "$sev" "$threads"' EXIT
 waited=0
 checks_due=0
 broken_before=""
@@ -424,10 +459,10 @@ query($owner:String!,$name:String!,$pr:Int!){
     # syntax error, and the message it gives names neither the line nor the
     # quote. Outside `$(...)` the heredoc is just a heredoc.
     python3 - "$payload" "$head" "$seen_head" "$seen_stamp" "$stamp" "$notes" \
-      >"$reviews_out" <<'PY'
+      "$sev" >"$reviews_out" <<'PY'
 import json, sys
 
-path, local_head, seen_head, seen_stamp, stamp_path, notes_path = sys.argv[1:7]
+path, local_head, seen_head, seen_stamp, stamp_path, notes_path, sev_path = sys.argv[1:8]
 
 # Every reason this poll did not end the wait, for the caller to print once. A
 # reason discovered on poll 1 and said only at the deadline is a reason the agent
@@ -443,7 +478,8 @@ def stop(code):
 
 sys.path.insert(0, ".github/scripts")
 try:
-    from merge_gate import independent_reviews, is_substantive
+    from merge_gate import (independent_reviews, is_substantive,
+                            declared_important)
 except Exception as exc:  # missing, half-edited, or broken at import time
     # Not ImportError alone: merge_gate.py is a file agents in this repo edit --
     # this very PR edits it -- and a SyntaxError in it must not read as "no
@@ -517,6 +553,38 @@ if not reviews:
 
 with open(stamp_path, "w") as fh:
     fh.write("%s\n%s\n" % (head, reviews[-1].get("submittedAt") or ""))
+
+# What the caller needs to know to choose an instruction, asked of the gate
+# rather than re-derived: `declared_important` is the same function merge_gate
+# uses, so the sentence printed here and the sentence the gate prints cannot
+# disagree about which review was nit-only.
+#
+# EVERY review being handed back has to say 0, not just the newest one. Taking
+# the newest alone is right for one reviewer and wrong for two: merge_gate holds
+# on the latest unanswered review of EACH author, so an older Important review
+# from a second reviewer keeps refusing while the newest says nothing is
+# Important -- and the cheap remedy would be printed for a branch the gate is
+# still blocking for a reason the remedy does not touch.
+#
+# `all(m == 0)`, and NOT `any`: one review declaring zero is not the claim. A
+# single review that said nothing (None) or said one, keeps the old
+# instruction. An earlier draft of this comment said `any` while the code said
+# `all` -- the code was right and the comment would have talked the next reader
+# into the failure the paragraph above argues against. Found by the independent
+# review, which has now caught this same class of drift three times in this
+# change.
+#
+# The set is the reviews being HANDED BACK, which on a second wait against an
+# unchanged head is the newly-arrived ones rather than every review the gate
+# still holds on. That narrowing is deliberate and costs nothing here: the
+# agent was handed the older Important review in the round that printed it, and
+# one `answer-review.sh` answer discharges every standing review at the gate.
+#
+# Empty file means "did not say", which is not the same as zero -- see the
+# caller, which tests for the literal 0 and nothing else.
+with open(sev_path, "w") as fh:
+    said = [declared_important(r) for r in reviews]
+    fh.write("0" if said and all(m == 0 for m in said) else "")
 for r in reviews:
     who = (r.get("author") or {}).get("login", "?")
     print(f"--- {r.get('state')} by {who} at {r.get('submittedAt')}")
@@ -733,13 +801,46 @@ PY
         echo
       fi
 
-      echo "Fix what is real; where you disagree, reply on the thread with the reason."
-      echo "Then resolve every thread -- merge-gate refuses the PR while one is open:"
-      echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
-      echo "Changed something? Push and come back here. Changed nothing? Say so --"
-      echo "it is the one thing standing between these findings and auto-merge:"
-      echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
-      echo "  ./scripts/fleet/review-status.sh $pr"
+      # The literal `0`, and nothing else. An empty file is a review that did
+      # not say -- from a brief that predates the trailer, or one that dropped
+      # it -- and reading that as "no Important findings" is the one way this
+      # branch can fail open: it would offer the cheap remedy for a finding
+      # nobody classified. Anything non-numeric lands here too, deliberately.
+      if [ "$(cat "$sev" 2>/dev/null)" = 0 ]; then
+        echo "The review above declares NO Important findings. So the cheap answer is the"
+        echo "right one, and it is not a commit:"
+        echo
+        echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+        echo
+        echo "Say which nits you took, which you did not and why, and open one follow-up"
+        echo "issue for anything worth keeping -- name it in the answer so the next reader"
+        echo "can find it."
+        echo
+        echo "Where you disagree with a thread, reply on it with the reason rather than"
+        echo "ignoring it, and RESOLVE EVERY THREAD -- the answer does not do that for you."
+        echo "merge-gate refuses the PR while one is open, whatever the counts say, so a nit"
+        echo "left as an open thread holds the branch just as an Important one would:"
+        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
+        echo
+        echo "Pushing a nit fix instead is what costs: the push moves the head, a moved"
+        echo "head invalidates the review that asked for the fix, and the reviewer runs"
+        echo "again on the whole diff. Three pull requests were measured going round that"
+        echo "way with this script never once run. If something here IS worth a commit,"
+        echo "make it -- but make that a decision, not the default."
+        echo
+        echo "If you do push: that ends this round. The review above is invalidated by the"
+        echo "new head, the reviewer runs again on what you sent, and there is nothing left"
+        echo "to answer here -- come back to this script rather than to answer-review.sh."
+        echo "  ./scripts/fleet/review-status.sh $pr"
+      else
+        echo "Fix what is real; where you disagree, reply on the thread with the reason."
+        echo "Then resolve every thread -- merge-gate refuses the PR while one is open:"
+        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
+        echo "Changed something? Push and come back here. Changed nothing? Say so --"
+        echo "it is the one thing standing between these findings and auto-merge:"
+        echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+        echo "  ./scripts/fleet/review-status.sh $pr"
+      fi
       echo "Why each of those, in full: ./scripts/fleet/issue-command.sh --after-pr <issue>"
       # The round cap counts rounds of DISAGREEMENT. A review of a head this
       # worktree has already moved past is not one: the agent will push what it

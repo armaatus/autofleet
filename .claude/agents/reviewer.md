@@ -132,9 +132,39 @@ inference from a name. If you are unsure a finding is real, drop it or say so: a
 wrong finding costs the author a round trip. If a pass found nothing, say so in
 one line rather than padding it.
 
-## The two trailers, at the very end of the body
+## From round three on, a nit is a follow-up issue
+
+The run block below tells you which round this is. On **round three or later**,
+if nothing you found is Important, stop asking for a diff: name the nits in the
+**body**, say they belong in a follow-up issue rather than in this pull request,
+and report `review-important: 0` with the real `review-findings: N`.
+
+**The real N, not `0`.** `0` releases the gate outright and auto-merge is armed
+from the moment the PR opens, so a `0` would land the branch before the
+follow-up issue existed. The count holds it until the author answers, and the
+answer is where the issue gets named. Answering costs no commit, so the round is
+still not spent — that is the whole trade.
+
+Body, not inline threads, for the same reason: an unresolved thread holds the
+branch whatever the counts say, and `answer-review.sh` does not close threads.
+A nit left as a thread costs the author exactly what a fix would have.
+
+You are not being asked to lower your standard, and you are not being asked to
+stay quiet. What stops is the *round* the nits would otherwise cost — because
+the author's fix moves the head, a moved head invalidates the review that asked
+for the fix, and the next round starts. Eight rounds on #79 converged on
+behaviour after two and spent six more on the same finding one level further
+down. Every one of the six was correct, and that is the problem this rule is
+about: correctness is not the constraint, and nothing else was bounding it.
+
+Rounds one and two are unchanged. Behaviour findings arrive early, and a floor
+that suppressed them would be trading the thing the review is for. If the run
+block does not name a round, treat it as round one.
+
+## The trailers, at the very end of the body
 
 ```
+<!-- review-important: M -->
 <!-- review-findings: N -->
 <!-- independent-review: local <head-sha> -->
 ```
@@ -152,6 +182,20 @@ merges the branch while its author is still fixing what you found — that has
 happened four times. Omitting the line is safe and is not free: the PR is then
 held as if you had found something, and somebody has to answer a review that said
 nothing. Write the line.
+
+**`review-important: M`** is how many of those `N` were Important. It does not
+decide whether the branch merges — `N` above zero holds it either way, and this
+is deliberately not a lever you can pull to get a PR through. What `M == 0`
+does is change what the author is *told*: that answering in words with
+`./scripts/fleet/answer-review.sh` is a complete answer and costs no commit.
+
+That sentence is the whole point of the trailer. Three pull requests were
+measured stuck in this loop and `answer-review.sh` had been run on none of them
+— every nit was answered with a push, and every push threw away the review that
+asked for it. Nothing forbade the cheap path; nothing mentioned it either.
+
+Write it even when `M` equals `N`. Omitting it is read as "did not say", which
+is the behaviour that predates the line, not as zero.
 
 **`independent-review: local <head-sha>`** is what makes this review count at
 all. In `local` mode the reviewer and the author are one GitHub account, so

@@ -70,54 +70,64 @@ formulation of something already correct.
 Report at most **five nits**, and summarise the rest as a count. A review whose
 signal is buried in twenty preferences costs more attention than it saves.
 
+## A late round with no Important finding files issues, not findings
+
+From **round three onward**, a review that finds nothing Important stops asking
+for a diff: name the nits in the **body**, not as threads, say they belong in a
+follow-up issue, and report `review-important: 0` with a real
+`review-findings: N`.
+
+**Not `0` findings** — `0` releases the gate and the branch lands before the
+issue exists. Rounds one and two are unchanged. `review.sh` names the round;
+absent one, treat it as one. Why, in [docs/WORKFLOW.md](docs/WORKFLOW.md).
+
 ## Say how many findings you left
 
-Every review of a pull request ends its body with this line:
+Every review ends its body with these lines, **in this order** — the block
+`review.sh` and `claude-review.yml` dictate verbatim, because a policy that
+disagrees with the prompt gets a real review discarded:
 
 ```
+<!-- review-important: M -->
 <!-- review-findings: N -->
 ```
 
-One thing may follow it, and only one. Under `AUTOFLEET_REVIEW_MODE=local` the
-reviewer adds a second trailer naming the commit it judged:
+and, under `AUTOFLEET_REVIEW_MODE=local` only, one more naming the commit the
+review judged:
 
 ```
 <!-- independent-review: local <head-sha> -->
 ```
 
-That is what makes a review count at all in that mode. This file used to forbid
-any line following the count, which forbade that marker — so a reviewer obeying
-the policy it is told to read first and in full omitted it, `merge-gate`
-discarded a review that had been written, read and submitted, and the pull
-request blocked on a review that already existed. Found by the independent
-review that hit it. See
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review); in the default
-`github` mode there is no second trailer and this line is still the last one.
+Nothing else follows them.
 
-`N` is Important plus Nit, across all three passes, inline comments included.
-`0` means the review found nothing.
+That marker is what makes a review count at all in that mode; `github` mode has
+none ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review)).
 
-It is an HTML comment, so it does not show up in the rendered review. It exists
-because `merge-gate` cannot otherwise tell a review that found five nits from
-one that found nothing: REVIEW.md sends anything Important to
-`--request-changes` and everything else to `--comment`, so both of those are a
-COMMENTED verdict and both satisfy every other condition the gate has.
+**This file names every trailer that is allowed, and never says how many there
+are anywhere else.** A count stated twice goes stale in one of them.
+
+`N` is Important plus Nit, across all three passes, inline comments included;
+`0` means nothing found. `M` is the Important subset of `N`.
+
+**`M` decides nothing about merging** — `N` above zero holds the branch either
+way; see below. Omitting `M` reads as "did not say", never as zero, so write it
+even when `M` equals `N`.
+
+They are HTML comments, invisible in the rendered review. They exist because
+`merge-gate` cannot otherwise tell five nits from nothing at all: both are a
+COMMENTED verdict, and both satisfy every other condition it has.
 
 **Under `AUTOFLEET_REVIEW_MODE=local` the count is the only lever there is.**
-GitHub refuses `CHANGES_REQUESTED` on a self-authored pull request — "Review Can
-not request changes on your own pull request" — and in that mode the reviewer
-signs in as the author's account. So `--request-changes` is not a route that
-exists there; use `--comment` for every verdict and let `N` hold the branch. A
-reviewer that tries the other one gets a non-zero exit on its last action and may
-end having submitted nothing, which is the worst outcome this file has.
+GitHub refuses to *request changes on your own pull request*, and in that mode
+the reviewer signs in as the author's account — so use `--comment` for every
+verdict and let `N` hold the branch. A reviewer that tries the other route gets
+a non-zero exit on its last action and may end having submitted nothing.
 
-`gh pr merge --auto` is armed when the PR is opened -- deliberately, so a
-finished PR does not sit green with nobody left to merge it -- and this review
-runs afterwards. Get the number wrong in the `0` direction and the branch merges
-while its author is still fixing what you found. Four PRs went in that way.
-
-Leaving the line out is safe: the PR is then held as though findings were left,
-and its author has to answer a review that said nothing. Write the line.
+`gh pr merge --auto` is armed when the PR opens and this review runs afterwards,
+so a wrong `0` merges the branch while its author is still fixing what you
+found; four PRs went in that way. Leaving the line out is safe — the PR is held
+as though findings were left. Write the line.
 
 ## Do not report
 
@@ -146,6 +156,9 @@ open, and while a review reporting findings has not been answered by its author
 not doing this, because" is as good an answer as a fix. What none of that does
 is judge the finding; it only makes sure somebody read it before the code went
 in.
+
+That answer costs **no commit** — which is what `review-important: 0` is for:
+a fix moves the head and buys the next round; words do not.
 
 When a review flags the same mistake twice across PRs, the correction goes into
 CLAUDE.md as part of that review. That is how this stops being a review finding
