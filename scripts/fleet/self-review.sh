@@ -467,8 +467,15 @@ if [ -n "$failed" ]; then
   # failure -- one pass timing out at 1200s -- the agent was re-running a
   # twenty-minute pass whose findings were already written. Found by the
   # independent review.
+  # NOT "only the failing one is re-run": the loop re-runs BOTH, and `run_pass`
+  # truncates each `$out` on entry. What survives is the finished pass's file
+  # from THIS run, which is worth reading before spending another twenty minutes
+  # -- it is not a saving the script makes for you. Saying otherwise was a
+  # comment describing an optimisation that does not exist. Found by the local
+  # /code-review pass.
   echo "Any pass that did finish left its findings under $LOG_DIR," >&2
-  echo "keyed by the sha it read; only the failing one is re-run for free." >&2
+  echo "keyed by the sha it read. Read them before re-running: the next run" >&2
+  echo "starts both passes again from nothing." >&2
   exit "$rc_first"
 fi
 
