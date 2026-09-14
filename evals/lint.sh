@@ -1221,8 +1221,10 @@ else
   # of the review were both circling: the answer was not a better reader for
   # `.autofleet/config`, it was not reading it at all.
   #
-  # So the ceiling is on the 391 words autofleet ships, and a host's test command
-  # costs it nothing. tests/test_brief.sh measures the RENDERED brief against the
+  # So the ceiling is on the words AUTOFLEET ships -- 386 at the time of writing,
+  # and the figure moves with the brief -- and a host's test command costs it
+  # nothing. A number written here as a standing fact goes stale the next time
+  # the brief is edited, which is what happened to the 391 this replaces. tests/test_brief.sh measures the RENDERED brief against the
   # same number with the command pinned to the four-word default, which is the
   # closest thing to what an agent here receives.
   rendered="${stage1//__ISSUE__/49}"

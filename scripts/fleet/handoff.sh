@@ -72,7 +72,10 @@ with nothing on stdin -- or over AUTOFLEET_HANDOFF_MAX_WORDS.
 A relative FILE is resolved against the directory you ran this from, then
 against the repo root.
 USAGE
-  exit 2
+  # The caller decides the status: `usage 0` for an explicit `--help`, `usage 2`
+  # for the misuse paths. A script the brief names by path is one a person runs
+  # `--help` on, and a non-zero there trips whatever is wrapping it.
+  exit "${1:-2}"
 }
 
 # The issue number, from the argument if there is one.
@@ -281,7 +284,7 @@ case "${1:-}" in
       exit 2; }
     cmd_write "$resolved" "${1:-}"
     ;;
-  -h|--help|help) usage ;;
+  -h|--help|help) usage 0 ;;
   # The print form, which is also the no-argument form. Absent, it says nothing
   # and exits 0: no note is the ordinary state, and a reader that treated it as
   # an error would make every fresh worktree look broken.

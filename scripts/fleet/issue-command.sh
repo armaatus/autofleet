@@ -251,8 +251,8 @@ time-box: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
 whole file, `researcher` before a wide search.
 
 Interrupted, or `~/.autofleet/STOP` exists? Put the work down, and write where
-you got to first -- `./scripts/fleet/handoff.sh write __ISSUE__ --stdin`. The
-next attempt here reads that note. Nothing can go out while STOP exists.
+you got to first: `./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'`.
+The next attempt here reads it. Nothing can go out while STOP exists.
 
 @@AFTER-PR@@
 
@@ -278,9 +278,13 @@ placeholder -- fill it in. Then tell the board where the work is:
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
 Then write the handoff, which is what a session restarting in this worktree
-reads instead of working the last hour out again -- the note on stdin:
+reads instead of working the last hour out again:
 
-    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
+
+The heredoc marker is shown because the bare form reads an empty stdin when it
+is run as one command, and an empty note is refused -- correctly, since it would
+otherwise destroy the round before it. The closing `NOTE` goes at column 0.
 
 The decisions you took and why, the files you touched, what each review round
 said and how you answered it, and what is still open. NOT the plan, which is in
@@ -338,7 +342,7 @@ threads and, once the last one is shut, asks the gate again.
 Update the handoff after every round, so what a round said and how you answered
 it survives an interruption between this round and the next:
 
-    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin
+    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
 
 IF YOU CHANGED ANYTHING, PUSH IT and go back to `await-review.sh`. The push
 re-runs the reviewer, and the review of what you actually sent is the next

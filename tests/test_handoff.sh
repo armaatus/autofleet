@@ -481,8 +481,18 @@ case "${1:-}" in
       || fail "install.sh would not install into a fresh repo"
     [ -x "$host/scripts/fleet/handoff.sh" ] \
       || fail "handoff.sh did not ship, or did not ship executable"
-    grep -qxF -- '.autofleet/run/' "$host/.gitignore" \
-      || fail "the host's .gitignore does not cover .autofleet/run/, so the note is sweepable by git add -A"
+    # ALL FOUR that the payload writes into a host tree, read out of THIS
+    # repo's own .gitignore rather than restated: hard rule 1 is that the
+    # installer ships what this repo runs on, and the first version of the block
+    # shipped two of the four -- leaving out `.env`, the one guard.py calls a
+    # secret and says is always gitignored. A hardcoded list here would have
+    # passed for the two it knew about. Found by the independent review.
+    for want in .env '.env.tmp*' .autofleet/run/ /findings.md; do
+      grep -qxF -- "$want" "$REPO_ROOT/.gitignore" \
+        || fail "this repo no longer ignores $want, so the assertion below is against a stale list"
+      grep -qxF -- "$want" "$host/.gitignore" \
+        || fail "the host's .gitignore does not cover $want, which the payload writes into its tree"
+    done
 
     # A re-run adds nothing. An installer that stacks a block per run is a
     # .gitignore nobody reads after the third upgrade.
