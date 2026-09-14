@@ -47,7 +47,32 @@
 # `gh pr review` gets through the same hook. `guard.py` refuses this script by
 # name from a worktree as well, so the refusal arrives here rather than one
 # process deep in a log after a full-budget agent run.
-set -euo pipefail
+# NO `-e`, and that is the one place this deliberately does not match its own
+# header. `review.sh` runs under `set -uo pipefail` for a reason that lands on a
+# single line further down:
+#
+#     # `wait` is what `-e` was dropped for; see the top of the file. `rc` is the
+# validator's own exit code and it is REPORTED, never acted on: whether it left
+# a verdict is asked of GitHub below, because an agent can burn its whole budget,
+# decide, end without submitting, and exit 0.
+wait "$validator"; rc=$?
+#
+# Under `-e` a non-zero exit from the supervised process terminates this script
+# AT the `wait`. Everything after it is skipped -- the "did it leave a verdict"
+# check, `record_done`, the attempt count, and the diagnostic naming the log --
+# while the EXIT trap still drops the lock. The dispatcher then starts another
+# validator on the next poll, and the one after that: armaatus/autofleet#33's
+# spawn loop, arriving through the guard written to prevent it.
+#
+# That is not an exotic input. An agent that hits an API error or runs out of
+# turns exits non-zero and submits nothing, which is exactly the case the whole
+# verdict check exists for. `tests/test_review_mode.sh crash` drives it.
+#
+# The cost of dropping `-e` is that a failing command no longer stops the
+# script, so every path that must not continue says so itself. They all do, and
+# the call sites that used to lean on `-e` carry a comment where they were
+# changed.
+set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -218,15 +243,17 @@ PY
 
 # `|| rc=$?`, NOT a bare call followed by `case $?`.
 #
-# `set -e` is on, and a bare `wants_validation` returning 1 -- "there is nothing
-# to validate", the ORDINARY answer on most polls -- kills this script before the
-# `case` below ever runs. Silently: no message, no `.done` record, exit 1. The
-# dispatcher then starts another validator on the next poll, and the one after
-# that, for the life of the pull request.
+# Kept after `-e` was dropped at the top, rather than reverted with it. It was
+# written for the `-e` failure -- a bare `wants_validation` returning 1, the
+# ORDINARY answer on most polls, killed this script before the `case` ran, with
+# no message and no record, and the dispatcher started another validator every
+# poll for the life of the pull request. Three spawns in one second on one head,
+# no output from any of them.
 #
-# The `|| ` is what makes the failure part of a list, which `set -e` exempts.
-# Measured: with the bare form the suite saw three spawns in one second on one
-# head and no output from any of them.
+# Dropping `-e` fixes that too, so this form is now belt and braces. It stays
+# because it is the shape that is CORRECT under either setting, and the next
+# person to reach for `-e` here -- the header is the only thing arguing against
+# it -- should not take a second silent exit with them.
 wrc=0
 wants_validation || wrc=$?
 case $wrc in
@@ -257,6 +284,37 @@ command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {
   echo "Set it in .autofleet/config, or install the validator." >&2
   unspent_try; exit 6; }
 
+# WHICH COMMIT THE REVIEW JUDGED, which is the other end of this run's scope.
+#
+# Asked of merge_gate.py rather than left to the validator, because it CANNOT
+# work it out from the PR page: `gh pr view --json reviews` does not carry the
+# commit a review was submitted against. Without it the brief's fallback fires --
+# "judge the whole diff, but say so" -- and the whole diff is the second full
+# review this phase exists to stop.
+#
+# Empty is not fatal. It means no substantive review was found, which the brief
+# already has an honest answer for, and a run that refused here would turn a
+# degraded verdict into no verdict at all.
+reviewed=""
+sha_payload="$(mktemp)"
+if fleet_pr_payload "$pr" "$sha_payload"; then
+  reviewed="$(python3 - "$sha_payload" <<'SHAPY'
+import json, sys
+sys.path.insert(0, ".github/scripts")
+try:
+    from merge_gate import reviewed_sha
+except Exception:
+    raise SystemExit(0)
+try:
+    pull = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"] or {}
+except Exception:
+    raise SystemExit(0)
+print(reviewed_sha(pull) or "")
+SHAPY
+)"
+fi
+rm -f "$sha_payload"
+
 mkdir -p "$LOG_DIR"
 log="$LOG_DIR/pr-$pr-${head:0:8}.log"
 
@@ -276,7 +334,13 @@ prompt="$brief
 Repository: $fleet_owner/$fleet_repo_name
 Pull request: #$pr
 Head commit: $head
+The review judged: ${reviewed:-could not be established -- say so in your body}
+The project's test command: ${AUTOFLEET_TEST_COMMAND:-none configured -- say so, and that is a fail}
 Validation round: $round of $AUTOFLEET_VALIDATE_MAX
+
+YOUR DIFF IS \`git diff ${reviewed:-<the reviewed sha>}..$head\`, and nothing
+wider. \`gh pr diff\` is the whole branch, which is the second full review this
+phase exists to stop.
 
 The number and the sha are stated here because you have no event context to read
 them from. Use \`gh pr view $pr --json title,body,reviews,comments\` and
@@ -378,8 +442,6 @@ wait "$validator"; rc=$?
 #
 # The SAME question as before the run, deliberately: `needs_validation()` is
 # false once a verdict of either kind is on this head.
-# `if !`, which is a condition context and therefore exempt from `set -e` for
-# the same reason the `|| rc=$?` above is.
 if ! wants_validation; then
   echo "==> a validation is on ${head:0:8} (round $round)"
   record_done

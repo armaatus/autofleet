@@ -106,6 +106,69 @@ jobs:
             echo "::notice::No CLAUDE_CODE_OAUTH_TOKEN secret; validation is local-only (scripts/fleet/validate.sh)."
           fi
 
+      # IS A VALIDATION DUE, and what commit did the review judge -- both asked
+      # of merge_gate.py, which is the one definition of each.
+      #
+      # WITHOUT THIS GATE THE WORKFLOW IS NOT THE TWIN IT CLAIMS TO BE. It fires
+      # on every `synchronize`, so a push made before the reviewer has run would
+      # produce a perfectly honest `pass` -- it judged the commits since the
+      # review, and found nothing, because there was no review -- and
+      # `merge_gate.py` reads a `pass` as STANDING IN FOR the review. A branch
+      # nobody had looked at would merge. The gate refuses that case itself now,
+      # belt and braces; this is the braces, and it also stops the run costing a
+      # full agent budget to produce a verdict that will be thrown away.
+      #
+      # `reviewed_sha` is the other half, and it is why this is one step rather
+      # than two: `gh pr view --json reviews` does not carry the commit a review
+      # was submitted against, so the validator cannot work out its own scope
+      # from the PR page. Stated in the prompt instead.
+      - id: due
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NWO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          sha="${HEAD_SHA:-$(gh pr view "$PR" --json headRefOid --jq .headRefOid)}"
+          echo "head_sha=$sha" >>"$GITHUB_OUTPUT"
+          payload="$(mktemp)"
+          # `<owner> <name> <pr>` and stdout -- the same call merge-gate.yml
+          # makes, because it is the same script. `scripts/fleet/lib.sh` wraps it
+          # as `fleet_pr_payload <pr> <outfile>`, and reaching for that signature
+          # here is a step that fails with "no such file" on every run.
+          owner="${NWO%%/*}"; name="${NWO##*/}"
+          bash .github/scripts/pr_payload.sh "$owner" "$name" "$PR" >"$payload"
+          python3 - "$payload" "$sha" <<'PY' >>"$GITHUB_OUTPUT"
+          import json, sys
+          sys.path.insert(0, ".github/scripts")
+          from merge_gate import needs_validation, reviewed_sha
+          pull = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"] or {}
+          print("due=%s" % ("true" if needs_validation(pull, sys.argv[2]) else "false"))
+          print("reviewed=%s" % (reviewed_sha(pull) or ""))
+          PY
+
+      # THE PROJECT'S TEST COMMAND, read from the host's own config rather than
+      # guessed at. This line used to name `./tests/run.sh` -- autofleet's own
+      # runner -- plus three guesses at everybody else's, in a file that is
+      # VENDORED into every host repository. `.autofleet/review.md` names a
+      # hardcoded test command as the payload breach it is, and `validate.sh`
+      # already did this correctly one file over.
+      - id: testcmd
+        run: |
+          set -euo pipefail
+          cmd=""
+          if [ -f .autofleet/config ]; then
+            # Sourced in a subshell, not parsed: it is a shell file and a project
+            # may compose the value. Nothing else from it is carried out.
+            cmd="$( . ./.autofleet/config >/dev/null 2>&1; printf '%s' "${AUTOFLEET_TEST_COMMAND:-}" )"
+          fi
+          # No fallback guess. A project that has not said what its tests are
+          # gets a validator with no test tool, which reports "I could not run
+          # the suite" -- a `fail`, and an honest one. Guessing produces a `pass`
+          # from a command that was never run.
+          echo "cmd=$cmd" >>"$GITHUB_OUTPUT"
+
       # THE BRIEF, read off the checkout rather than restated in this file.
       # `.claude/agents/validator.md` is the one copy of the scope, and a second
       # wording here is one that drifts -- silently, in the direction of a
@@ -127,7 +190,7 @@ jobs:
       # Pinned to a commit, with the tag in the comment. A mutable tag is a
       # supply-chain hole: whoever can move `v1` can change what runs here.
       - uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1
-        if: steps.token.outputs.have_token == 'true'
+        if: steps.token.outputs.have_token == 'true' && steps.due.outputs.due == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The same single bot claude-review.yml allows, and for the same
@@ -141,7 +204,7 @@ jobs:
           # resolves the threads this validation is satisfied by, and it is the
           # narrow grant rather than `gh api:*` because `resolveReviewThread` is
           # a mutation with no `gh pr` spelling.
-          claude_args: '--allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(./tests/run.sh:*),Bash(make:*),Bash(npm test:*),Bash(pytest:*)" --max-turns 80'
+          claude_args: '--allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(${{ steps.testcmd.outputs.cmd }})" --max-turns 80'
           prompt: |
             ${{ env.VALIDATOR_BRIEF }}
 
@@ -151,7 +214,13 @@ jobs:
 
             Repository: ${{ github.repository }}
             Pull request: #${{ github.event.pull_request.number || inputs.pr }}
-            Head commit: ${{ github.event.pull_request.head.sha || 'read it with gh pr view' }}
+            Head commit: ${{ steps.due.outputs.head_sha }}
+            The review judged: ${{ steps.due.outputs.reviewed || 'could not be established -- say so in your body' }}
+            The project's test command: ${{ steps.testcmd.outputs.cmd || 'none configured -- say so, and that is a fail' }}
+
+            YOUR DIFF IS `git diff <the review judged>..<head commit>`, and
+            nothing wider. `gh pr diff` is the whole branch, which is the second
+            full review this phase exists to stop.
 
             The number and the sha are stated explicitly because on a
             `workflow_dispatch` there is no pull request in the event context.
@@ -183,9 +252,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # RESOLVED, not read off the event. `github.event.pull_request` does not
+          # exist on a `workflow_dispatch`, so this was empty there -- and the
+          # grep below then matched ANY validation on ANY head, so the warning
+          # never fired on the exact path the dispatch input was added for. The
+          # `due` step already resolved it; reuse that rather than a second
+          # lookup that can disagree with it.
+          HEAD_SHA: ${{ steps.due.outputs.head_sha }}
+          DUE: ${{ steps.due.outputs.due }}
         run: |
           set -euo pipefail
+          if [ "${DUE:-}" != "true" ]; then
+            echo "no validation was due on ${HEAD_SHA}; nothing to check for."
+            exit 0
+          fi
           # NOT piped into `grep -q`: `-q` exits on the first match, the producer
           # dies of EPIPE, and with `pipefail` a check that HELD reports as
           # failed -- on large input only, so green on a laptop and red here.

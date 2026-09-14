@@ -365,6 +365,20 @@ PY
     esac
     ;;
   silent) : ;;
+  # SUBMITS NOTHING AND EXITS NON-ZERO, which is the ordinary shape of a real
+  # failure: an agent that hit an API error, ran out of turns, or crashed. The
+  # distinction from \`silent\` is the exit code, and it is the whole of what the
+  # \`crash\` phase is about -- a supervisor that dies at its own \`wait\` when the
+  # thing it supervises fails is a supervisor for the case that never happens.
+  #
+  # THE BACKTICKS ABOVE ARE ESCAPED, like every other one in this heredoc: it is
+  # UNQUOTED, so a bare backtick is command substitution run at the moment the
+  # stub is WRITTEN. Unescaped, this comment ran the three words it names as
+  # commands and printed a "command not found" line for each into the middle of
+  # the phase. The warning at the bottom of this case already said so -- and the
+  # first attempt at THIS comment escaped two of the three and left the third,
+  # which is the same bug one round smaller.
+  crash) exit 3 ;;
   # A child, not the stub itself. AUTOFLEET_REVIEW_CMD is advertised as a
   # wrapper seam, so the process holding the gh login is routinely a CHILD of
   # what review.sh signals -- and a kill that reaps only the direct child leaves
@@ -473,6 +487,10 @@ await_file() {
 # is CORRECTLY skipped, so a phase that polls again immediately is testing the
 # dedup rather than the thing it means to.
 lock_held() { [ -e "$AUTOFLEET_DIR/reviewing/42" ] && echo yes || echo no; }
+# ...and the validator's, which is a different file. A poll taken while one is
+# running is correctly skipped, so a phase that polls again immediately is
+# testing the dedup rather than the cap it means to.
+vlock_held() { [ -e "$AUTOFLEET_DIR/reviewing/v-42" ] && echo yes || echo no; }
 
 # Wait until `$1` prints `$2`, or give up after `$3` seconds and say what it was.
 #
@@ -1069,6 +1087,101 @@ GHSTUB
     done
     ok "...including when it arrives through .autofleet/config, which is read last"
     ;;
+
+# --------------------------------------------------------------------- crash
+  crash)
+  # A VALIDATOR THAT EXITS NON-ZERO MUST STILL BE REPORTED, and for one round it
+  # was not. `validate.sh` ran under `set -euo pipefail` where `review.sh`
+  # deliberately runs under `set -uo pipefail` -- no `-e` -- and the difference
+  # lands on one line:
+  #
+  #     wait "$validator"; rc=$?
+  #
+  # Under `-e` a non-zero exit from the supervised process terminates the script
+  # AT the `wait`. Everything after it is skipped: the "did it leave a verdict"
+  # check, `record_done`, the `.tries` burn, and the diagnostic naming the log.
+  # The EXIT trap still drops the lock, so the dispatcher starts another
+  # validator on the next poll, and the one after that -- which is
+  # armaatus/autofleet#33's spawn loop arriving through the guard written to
+  # prevent it.
+  #
+  # The failing case is the one this phase drives, and it is not exotic: an agent
+  # that hits an API error or runs out of turns exits non-zero and submits
+  # nothing.
+  make_fixture; stub_reviewer marked
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+  # A finding to check, so `validate.sh` gets past its exit-8 branch and actually
+  # starts an agent. Without this the phase passes against a script that never
+  # reaches `wait` at all.
+  python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" <<'PY_SEED'
+import json, sys
+path, oid = sys.argv[1], sys.argv[2]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "armaatus",
+                "body": "Important: the retry has no backoff.\n"
+                        "<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"})
+json.dump(records, open(path, "w"))
+PY_SEED
+  stub_reviewer crash
+  out="$( (cd "$WORK/repo" && AUTOFLEET_VALIDATE_MARKER="$AUTOFLEET_DIR/reviewing/v-42" \
+            ./scripts/fleet/validate.sh 42) 2>&1 )"; rc=$?
+  # Exit 5 is "ran, submitted nothing" -- the documented answer. Anything else,
+  # and in particular the validator's own exit code leaking through, means the
+  # script died at `wait` instead of judging.
+  [ "$rc" = 5 ] \
+    || { echo "$out" >&2; fail "a validator that exited non-zero was not reported as having submitted nothing (got rc=$rc)"; }
+  grep -q 'left NO verdict' <<<"$out" \
+    || { echo "$out" >&2; fail "it died at the wait instead of saying no verdict arrived: $out"; }
+  grep -q 'validated:' <<<"$out" \
+    || { echo "$out" >&2; fail "the diagnostic does not name the trailer that is missing, which is the usual cause"; }
+  ok "a validator that exits non-zero is reported, not silently fatal"
+  ;;
+
+# ------------------------------------------------------------------- vcapped
+  vcapped)
+  # A VALIDATOR THAT SUBMITS NOTHING IS RETRIED -- AND NOT FOREVER.
+  #
+  # `validate.sh` exit 5 writes no `.done` record, correctly: retrying is usually
+  # right. Unbounded, that is a full-budget agent started every poll against a
+  # head that will never get a verdict, for the life of the pull request. For one
+  # round nothing bounded it at all -- the refund helpers in `validate.sh` were
+  # decrementing a `v-<pr>.tries` file the dispatcher never wrote.
+  #
+  # Not the same counter as AUTOFLEET_VALIDATE_MAX, which counts verdicts this
+  # PR has HAD. This counts attempts on ONE head that produced nothing.
+  make_fixture; stub_reviewer marked
+  export AUTOFLEET_REVIEW_MAX_TRIES=2
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$(cat "$GH_HEAD")" >"$GH_PRLIST"
+  poll_review_open_prs
+  await n_reviews 1 || fail "the first reviewer submitted nothing"
+  await lock_held no || fail "the first reviewer never released its lock"
+  # A finding, so a validation is genuinely due on every later poll.
+  python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" <<'PY_SEED'
+import json, sys
+path, oid = sys.argv[1], sys.argv[2]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "armaatus",
+                "body": "Important: the retry has no backoff.\n"
+                        "<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"})
+json.dump(records, open(path, "w"))
+PY_SEED
+  # ...and a validator that runs and submits nothing, every time.
+  stub_reviewer silent
+  for _ in 1 2 3 4 5; do
+    poll_review_open_prs
+    await vlock_held no 60 >/dev/null 2>&1 || true
+  done
+  out="$(cat "$AUTOFLEET_DIR/fleet.log" 2>/dev/null)"
+  started="$(n_validated)"
+  [ "$started" -le 2 ] \
+    || { echo "$out" >&2; fail "five polls started $started validators on one head; the cap is 2"; }
+  ok "a validator that submits nothing is retried, and bounded"
+  grep -q "submitted nothing, which is the cap" <<<"$out" \
+    || { echo "$out" >&2; fail "it stopped at the cap without saying so"; }
+  grep -q "a missing verdict is not a passing one" <<<"$out" \
+    || { echo "$out" >&2; fail "it stopped without saying the PR stays HELD, which is the half a reader needs"; }
+  ok "...and says so once, naming the log and the safe direction"
+  ;;
 
 # ------------------------------------------------------------------ validate
   validate)

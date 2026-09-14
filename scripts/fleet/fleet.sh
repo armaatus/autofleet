@@ -1412,6 +1412,31 @@ rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
 start_validator() {
   local pr="$1" head="$2" marker="$REVIEWING_DIR/v-$1"
 
+  # ...AND THE HEAD THAT HAS HAD ITS ATTEMPTS. A validator that runs its whole
+  # budget and submits nothing (validate.sh exit 5) writes no `.done` record --
+  # correctly, because retrying is usually right and the next attempt may well
+  # succeed. Unbounded, that is a full-budget agent started every poll against a
+  # head that will never get a verdict, for the life of the pull request. It is
+  # the same shape as the reviewer's `.tries`, bounded by the same knob, and it
+  # was missing here for one round: the refund helpers in `validate.sh` were
+  # decrementing a file nothing ever wrote.
+  #
+  # NOT the same counter as `AUTOFLEET_VALIDATE_MAX`, and the difference is the
+  # one `.tries` and `.rounds` have always had. That one counts validations this
+  # pull request has HAD -- verdicts, on any head -- and past it a person
+  # decides. This counts attempts on ONE head that produced NOTHING, and a push
+  # starts it again, because a new head is a new question.
+  local tries_head tries_n
+  tries_head=""; tries_n=0
+  read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
+  [ "${tries_head:-}" = "$head" ] || tries_n=0
+  # Assigned, then tested: an EMPTY `.tries` leaves `tries_n` empty, and
+  # `[ "" -ge 3 ]` is `integer expression expected` and exit 2 -- which reads as
+  # FALSE, so the cap silently does not exist. fleet.sh runs without `-e` to
+  # notice. The reviewer's copy of this carries the same comment.
+  tries_n="${tries_n:-0}"
+  case "$tries_n" in (*[!0-9]*) tries_n=0 ;; esac
+
   # Already running one for this PR -- on any head. Unlike the reviewer's lock,
   # which is per head and restarts when the head moves, a validator whose head
   # moved is judging a commit whose successor it has not read. Killing and
@@ -1421,6 +1446,22 @@ start_validator() {
   [ -e "$marker" ] && return 0
   [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ] && return 0
   rm -f "$marker.done"
+
+  # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding the
+  # reviewer's copy of this records at length: checked before it, the branch is
+  # taken while the LAST validator is still running -- the count is incremented
+  # before the spawn -- so at a cap of 3 the third spawn leaves `.tries` at 3 and
+  # every poll for the rest of that validator's timeout announces a cap only two
+  # attempts have reached. Below the lock the message is true whenever it prints.
+  if [ "$tries_n" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
+    hold_say_into "$REVIEWING_DIR/v-$pr.said" "vgaveup-$head" \
+      "PR #$pr: $tries_n validators on ${head:0:8} submitted nothing, which is the cap." \
+      "  Not starting more on this head. Read $FLEET_DIR/validations/pr-$pr-${head:0:8}.log," \
+      "  then either ./scripts/fleet/validate.sh $pr by hand, or push -- a new head" \
+      "  starts the count again. The PR stays held meanwhile, which is the safe" \
+      "  direction: a missing verdict is not a passing one."
+    return 0
+  fi
 
   # RE-COUNTED, not carried: this shares the reviewers' pool because it is the
   # same resource -- an agent holding this machine's `gh` login -- and the count
@@ -1444,6 +1485,12 @@ start_validator() {
   # validator can remove a marker that does not exist yet, and the `printf` then
   # recreates it holding a dead pid, which `live_reviewers` reaps on its next
   # call.
+  # Written BEFORE the spawn, because the dispatcher has to decide from
+  # something and the decision is made here. `validate.sh` refunds it on every
+  # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
+  # answer, no CLI on PATH, a kill at the deadline -- so what is left in it is
+  # attempts that reached an agent and got nothing back.
+  printf '%s %s\n' "$head" "$(( tries_n + 1 ))" >"$marker.tries"
   AUTOFLEET_VALIDATE_MARKER="$marker" \
     "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
   printf '%s %s\n' "$!" "$head" >"$marker"

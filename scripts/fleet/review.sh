@@ -146,7 +146,7 @@ review_round() {
 # ever counted; and one a reviewer had already submitted when the dispatcher
 # killed it for a head move (the TERM trap exits 143 without reaching here).
 # Each leaves a real review on the PR that the tally does not know about, so a
-# pull request could exceed AUTOFLEET_REVIEW_MAX_ROUNDS unnoticed.
+# pull request could exceed AUTOFLEET_REVIEW_MAX unnoticed.
 #
 # The first and the third are covered: both are reviews the pull request
 # carries, so the derived count in `review_round` sees them and the marker takes

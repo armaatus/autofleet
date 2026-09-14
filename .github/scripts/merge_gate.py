@@ -369,6 +369,35 @@ def validation(pull_request, head_sha):
     return newest[1] if newest else None
 
 
+def reviews_on_pr(pull_request):
+    """Every record on the PR that is a REVIEW rather than a validation.
+
+    Both ride in a `gh pr review`, so `VALIDATED_RE` is what tells them apart --
+    see the comment on it. Three callers want this set and each used to filter
+    inline; the third disagreed with the other two about whether an unrecognised
+    verdict counts, which is the drift this function exists to stop.
+    """
+    return [r for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
+            if not VALIDATED_RE.search(r.get("body") or "")]
+
+
+def reviewed_sha(pull_request):
+    """The commit the newest substantive review judged, or None.
+
+    The validator's scope is the diff SINCE THAT COMMIT and nothing else, and
+    working it out is not something a prompt should be asked to do from the PR
+    page: `gh pr view --json reviews` does not carry the commit a review was
+    submitted against. So the drivers read it from here and state it.
+    """
+    newest = None
+    for r in reviews_on_pr(pull_request):
+        if not is_substantive(r):
+            continue
+        if newest is None or (r.get("submittedAt") or "") >= (newest.get("submittedAt") or ""):
+            newest = r
+    return ((newest or {}).get("commit") or {}).get("oid") or None
+
+
 def needs_validation(pull_request, head_sha):
     """Whether this PR is waiting on a validation of `head_sha`.
 
@@ -396,9 +425,23 @@ def needs_validation(pull_request, head_sha):
     """
     if validation(pull_request, head_sha) is not None:
         return False
-    for r in ((pull_request.get("reviews") or {}).get("nodes") or []):
-        if validation_verdict(r) is not None:
-            continue          # a validation is not a review; see VALIDATED_RE
+    reviews = reviews_on_pr(pull_request)
+    if not reviews:
+        return False          # nothing has been reviewed; a review comes first
+    # THE HEAD MOVED OUT FROM UNDER THE REVIEW. Whatever that review found, the
+    # gate now wants a verdict on a commit no review judged and no second review
+    # is coming -- so the validation is the only thing that can ever satisfy it.
+    #
+    # This case is not about findings at all, and reading it as though it were
+    # is a permanent silent hold: a pull request whose review found NOTHING, then
+    # rebased or pushed a CI fix, wants no validation by the findings test, gets
+    # no second review by the cap, and blocks forever with nothing saying why.
+    if not any((r.get("commit") or {}).get("oid") == head_sha for r in reviews):
+        return True
+    # ...and on the reviewed head itself, only findings are worth an agent. A
+    # review that found nothing leaves nothing to check, and a PR that merges on
+    # a clean review costs one review and no validation at all.
+    for r in reviews:
         found = declared_findings(r)
         if found is not None and found > 0:
             return True
@@ -622,6 +665,27 @@ def evaluate(head_sha, pull_request, changed_files):
     # thread still holds the PR, and the enforcement-layer paths still need a
     # person. Those are deliberate, and `--selftest` has a row for each.
     verdict = validation(pull_request, head_sha)
+    # A VALIDATION STANDS IN FOR A REVIEW; IT DOES NOT REPLACE ONE THAT NEVER
+    # HAPPENED. `validate.yml` fires on every `synchronize`, so a push made
+    # before the reviewer has run produces a perfectly honest `pass` -- it judged
+    # the commits since the review, and there were no findings, because there was
+    # no review. Read as satisfying the independence requirement, that merges a
+    # branch nobody has looked at.
+    #
+    # Checked HERE rather than only in the drivers, because this is the condition
+    # the merge actually turns on and a driver-side gate is one a second driver
+    # can forget. `validate.yml` has no equivalent of `needs_validation` today,
+    # which is exactly the case this catches.
+    if verdict == "pass" and not any(is_substantive(r)
+                                     for r in reviews_on_pr(pull_request)):
+        verdict = None
+        problems.append(
+            f"there is a validation of {head_sha[:8]} but no review for it to "
+            "stand in for. A validation judges the commits written since a "
+            "review -- with no review on this pull request it has judged a "
+            "branch nobody has read, and it does not satisfy the independence "
+            "requirement. Wait for the review."
+        )
     if verdict == "fail":
         problems.append(
             f"the validation of {head_sha[:8]} failed. The validator judges two "
@@ -728,15 +792,41 @@ def evaluate(head_sha, pull_request, changed_files):
                 # unconditional "the agent declares done", which would put a
                 # finished PR back to waiting on an agent that may be gone.
                 continue
-            if answered(pull_request, head_sha, review):
-                continue
             # A `pass` validation on this head is a stronger statement than the
-            # author's own answer: it is an independent reader saying the
-            # findings were addressed, having read the answer AND the commits.
-            # Reachable only when the review and the validation sit on the same
-            # head -- an answer in words, with no commit, which is how a nit is
-            # meant to be settled.
+            # author's own answer: an independent reader saying the findings were
+            # addressed, having read the answer AND the commits since.
             if verdict == "pass":
+                continue
+            important = declared_important(review)
+            # THE AUTHOR'S WORDS CLEAR A SUGGESTION-ONLY REVIEW, AND NOTHING
+            # MORE. `answered()` cannot tell "fixed it" from "I disagree" -- it
+            # asserts only that somebody read the findings and decided -- and
+            # that was the right bar when a second reviewer was coming to see
+            # what the decision produced. One review per pull request removes
+            # that reader, so whatever an answer can close here, nothing else
+            # will catch.
+            #
+            # So above zero Important, the answer is necessary and not
+            # sufficient: the validator has to agree. REVIEW.md states the same
+            # rule from the reviewer's side and validator.md from the
+            # validator's; this is the half that enforces it.
+            #
+            # `None` is "did not say", not zero -- a review written before the
+            # trailer existed falls through to the behaviour that predates this,
+            # which is what every other reader of this trailer does.
+            if answered(pull_request, head_sha, review) and important != 0 \
+                    and important is not None:
+                problems.append(
+                    f"the review from {who} reports {important} finding(s) it "
+                    "called Important, and this PR's author has answered in "
+                    "words. That clears a Suggestion; it does not clear these. "
+                    "An Important finding is fixed, or a validation says why it "
+                    "did not need to be -- there is no second reviewer behind "
+                    "this one, so nothing else will catch what an answer closes. "
+                    "Push the fix, and the validator judges the new head."
+                )
+                continue
+            if answered(pull_request, head_sha, review):
                 continue
             # A nit-only review gets a different sentence, not a different
             # decision. The hold is the same one; what changes is that the
@@ -746,7 +836,6 @@ def evaluate(head_sha, pull_request, changed_files):
             # so the fix bought a fresh full-diff review, which found one more
             # nit. Answering costs no commit and clears this line, and until
             # now nothing said so.
-            important = declared_important(review)
             problems.append(
                 (f"the review from {who} reports {found} finding(s)"
                  + (", none of them Important" if important == 0 else "")
@@ -811,6 +900,84 @@ def evaluate(head_sha, pull_request, changed_files):
 
 
 SELFTEST = [
+    (
+        # A `pass` may only stand in for a review that EXISTS. Without this a
+        # push before any review -- which `validate.yml` fires on, because it
+        # triggers on every `synchronize` -- produces a validation of a branch
+        # nobody has reviewed, and the gate reads it as reviewed.
+        "a validation does not stand in for a review that never happened",
+        "def456",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Nothing was found in the commits since the review."
+                 "\n<!-- validated: def456 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "no independent review",
+    ),
+    (
+        # An Important finding is FIXED, not argued away -- there is no second
+        # reviewer behind this one, so whatever an answer can close here nothing
+        # else will catch. The author's words clear a Suggestion-only review (the
+        # row below); they do not clear this one on their own.
+        "an Important finding is not cleared by the author's words alone",
+        "abc123",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "author": {"login": "armaatus"},
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the retry has no backoff and will spin."
+                 "\n<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"},
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "armaatus"}, "createdAt": "2026-09-05T11:00:00Z",
+                 "body": "I disagree, the caller already backs off.\n"
+                         "<!-- review-answered abc123 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("does not clear these", "there is no second reviewer"),
+    ),
+    (
+        # ...and a validation IS what clears it. The validator read the findings,
+        # the answer and the commits, and said so.
+        "...and a pass validation does clear it",
+        "abc123",
+        {
+            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "author": {"login": "armaatus"},
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the retry has no backoff and will spin."
+                 "\n<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T12:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "The backoff argument holds; nothing else changed."
+                 "\n<!-- validated: abc123 pass -->"},
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "armaatus"}, "createdAt": "2026-09-05T11:00:00Z",
+                 "body": "I disagree, the caller already backs off.\n"
+                         "<!-- review-answered abc123 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+    ),
     (
         # The validated trailer is the successor of the review, and it is what
         # lets a PR merge on a head the review never saw. Without this row the
@@ -1834,7 +2001,18 @@ def selftest():
         _review("a review\n<!-- review-findings: 2 -->"),
         _review("a validation\n<!-- validated: def456 pass -->", "def456"),
     ]}}
-    silent = {"reviews": {"nodes": [_review("a review with no trailer at all")]}}
+    # ON THE QUERIED HEAD, deliberately. Off it, the head-moved rule below wants
+    # a validation whatever the review said -- which is right, and is a different
+    # assertion. What this one is about is a review that judged THIS commit and
+    # did not say what it found.
+    silent = {"reviews": {"nodes": [_review("a review with no trailer at all",
+                                            "def456")]}}
+    # A CLEAN review, and then a push. The review is bound to the commit it
+    # judged, so the new head has none -- and no second review is coming. If this
+    # does not want a validation, nothing can ever satisfy the gate again: a
+    # rebase or a CI fix on a pull request whose review found nothing would hold
+    # it forever, silently.
+    moved = {"reviews": {"nodes": [_review("a clean review\n<!-- review-findings: 0 -->")]}}
     checks = [
         ("a clean review needs no validation -- the best case is one agent run",
          needs_validation(clean, "abc123"), False),
@@ -1846,6 +2024,10 @@ def selftest():
         # Starting one on it would spend an agent to say "no findings listed".
         ("a review that said nothing needs no validation",
          needs_validation(silent, "def456"), False),
+        ("a clean review on THIS head needs no validation",
+         needs_validation(clean, "abc123"), False),
+        ("...but once the head moves out from under it, one is the only way out",
+         needs_validation(moved, "def456"), True),
     ]
     for what, got, want in checks:
         if got != want:

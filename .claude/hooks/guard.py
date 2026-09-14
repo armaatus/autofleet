@@ -590,10 +590,16 @@ def check_bash(command, cwd=""):
                         "Wait for them instead:\n"
                         "  ./scripts/fleet/await-review.sh\n"
                         "\n"
-                        "To answer findings, reply on the thread and resolve it, then say "
-                        "what you did:\n"
-                        "  ./scripts/fleet/resolve-thread.sh\n"
-                        "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+                        "To answer findings, reply on the thread with what you did or why "
+                        "you did not,\n"
+                        "then say it once for the whole review:\n"
+                        "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\"\n"
+                        "\n"
+                        "Do NOT resolve the threads. The validator resolves the ones it is "
+                        "satisfied by,\n"
+                        "which is the whole of what makes a resolved thread mean anything -- "
+                        "a thread you\n"
+                        "close is one nobody checked."
                     )
 
         # In the automatic flow, a PR arrives already reviewed or it does not
@@ -659,10 +665,12 @@ def check_bash(command, cwd=""):
                     "runs the reviewer for you; wait for it:\n"
                     "  ./scripts/fleet/await-review.sh\n"
                     "\n"
-                    "To answer findings, reply on the thread and resolve it, then say "
-                    "what you did:\n"
-                    "  ./scripts/fleet/resolve-thread.sh\n"
-                    "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
+                    "To answer findings, reply on the thread with what you did or why "
+                    "you did not,\n"
+                    "then say it once for the whole review:\n"
+                    "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\"\n"
+                    "\n"
+                    "Resolving them is the VALIDATOR's, not yours."
                 )
             if sub_cmd[:2] == ["pr", "merge"]:
                 # `--auto` does not merge. It asks GitHub to merge later, once
