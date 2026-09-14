@@ -116,9 +116,14 @@ case "${1:-}" in
 
     grep -q 'SPEC-BODY-MARKER' <<<"$out" \
       || fail "the spec is no longer printed, so the agent starts from a title: $out"
+    # `self-review.sh` rather than `record-review.sh` since
+    # armaatus/autofleet#51: step 3 is one command that runs both passes in
+    # processes that are not the agent's, and records the marker itself. The two
+    # slash commands are still named -- they are the words `merge_gate.py` greps
+    # the PR body for, and the agent has to know which set of findings is which.
     has "stage 1" "$out" \
       '/code-review high' '/mattpocock-skills:code-review' \
-      './scripts/fleet/record-review.sh' \
+      './scripts/fleet/self-review.sh' \
       './scripts/fleet/issue-command.sh --after-pr 42'
     # The two things the brief never said and the issue asks for. Without them
     # the fleet's own agents are the only ones that never hear that the subagents
@@ -150,9 +155,14 @@ case "${1:-}" in
 
     # "and nothing else": an agent running this already has the spec and steps
     # 1-3 in its context, and reprinting them is the duplication #49 is about.
+    # `self-review.sh` on the negative list for the same reason `record-review.sh
+    # findings.md` was: step 3 belongs to stage 1, and a second copy here is what
+    # an agent reads instead of the original. `record-review.sh` BARE stays out
+    # of this list -- stage 2's rebase remedy names it, because a rebase needs a
+    # marker for the new head and not a second pair of full passes.
     lacks "stage 2" "$out" \
       'SPEC-BODY-MARKER' '**1. Plan.**' '**3. Review it yourself' \
-      '/mattpocock-skills:tdd' 'record-review.sh findings.md'
+      '/mattpocock-skills:tdd' 'self-review.sh'
     echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
     ;;
   reading)
@@ -184,7 +194,18 @@ case "${1:-}" in
                "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
     [ -n "${COUNTED// /}" ] \
       || fail "no \"count\" rows found in evals/lint.sh's reading table; this phase would sum nothing and pass"
-    allowed="$(printf '%s\n' $COUNTED findings.md | sed 's/\./\\./g' | paste -sd'|' -)"
+    # The WRITTEN rows come out of the same table, for the reason the paragraph
+    # above gives about the counted ones. `findings.md` was hardcoded here as
+    # the one exception, so the day step 3 named a second file it writes --
+    # `.autofleet/run/self-review.md` -- this phase failed on a path the lint's
+    # own table already allowed. A restated membership list drifts from the
+    # table it was copied out of; that is the whole point of reading it.
+    # Found by the local /code-review pass.
+    WRITTEN="$(sed -n 's/^ *"\([A-Za-z0-9_./-]*\)": *("written".*/\1/p' \
+               "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
+    [ -n "${WRITTEN// /}" ] \
+      || fail "no \"written\" rows found in evals/lint.sh's reading table; the brief could name no file it writes"
+    allowed="$(printf '%s\n' $COUNTED $WRITTEN | sed 's/\./\\./g' | paste -sd'|' -)"
     named="$(grep -oE '[A-Za-z0-9_./-]+\.md' <<<"$brief" | sort -u \
              | grep -vxE "$allowed" || true)"
     [ -z "$named" ] \

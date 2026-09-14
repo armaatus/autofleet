@@ -1007,23 +1007,21 @@ reviewer=$!
 # sentence a reader trusts when judging whether the trap is prompt.
 set +m
 
-# THE GROUP, not the pid. `kill -- -N` signals every process in group N, which is
-# what `set -m` above arranged for. The bare pid is tried as well, for the case
-# where job control was unavailable and no group was created -- signalling a
-# group that does not exist is an error, not a kill.
-signal_reviewer() {
-  kill "-$1" -- "-$reviewer" 2>/dev/null || kill "-$1" "$reviewer" 2>/dev/null
-}
-kill_reviewer() {
-  signal_reviewer TERM
-  # A short grace period, then insist -- the same shape as the deadline path.
-  sleep 2
-  signal_reviewer KILL
-}
+# THE GROUP, not the pid, and a grace period before the KILL --
+# `fleet_signal_group` and `fleet_kill_group` live in lib.sh: self-review.sh
+# needs the same pair for the same wrapper-seam reason, and the grace period
+# between the TERM and the KILL is the kind of number that drifts when it is
+# written twice (armaatus/autofleet#51). The reasoning is there, not here.
+kill_reviewer() { fleet_kill_group "$reviewer"; }
 # The one EXIT handler, now also taking the reviewer with it. Redefined rather
 # than a second `trap`, which would have discarded the marker cleanup above.
 on_exit() {
-  signal_reviewer TERM
+  # `fleet_signal_group`, not the one-line `signal_reviewer` wrapper this used to
+  # call: that wrapper had a single caller and carried no reasoning of its own,
+  # so it went when the pair moved to lib.sh (armaatus/autofleet#51). The merge
+  # brought the call back without the definition -- a `command not found` on
+  # every exit path that is not the bottom of this file.
+  fleet_signal_group TERM "$reviewer"
   # ...and the log, folded back from the two raw streams. Without this, every
   # exit that is not the bottom of this file -- the deadline, a stop mid-review,
   # a Ctrl-C -- left `$log` absent, and those are exactly the exits whose

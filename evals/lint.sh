@@ -857,6 +857,71 @@ else
   fail "the reviewer's tool allowlist has drifted (above)"
 fi
 
+#    ...and the SELF-review's allowlist, which has a sharper edge than the
+#    independent reviewer's: self-review.sh runs INSIDE a fleet-owned worktree,
+#    where a pass that could edit files could edit `.claude/hooks/guard.py` on
+#    its way past -- the one thing guard.py refuses the agent itself. It reports;
+#    the author fixes. `gh api` is withheld for the same no-ceiling reason as
+#    above.
+#
+#    WHAT THIS COVERS, stated because the check's own message overclaimed it:
+#    the DIRECT grant, and nothing more. `Task` and `Agent` are on the list --
+#    both passes are skills that fan out -- so whether a subagent inherits this
+#    ceiling is a property of the runner, not of this line. `review.sh` has the
+#    same shape and the same gap. Read this as "the pass itself was not handed a
+#    pen", which is the part a diff to this repo can change. armaatus/autofleet#51, found by the local
+#    /mattpocock-skills:code-review pass, which noted review.sh had this
+#    assertion and self-review.sh had none.
+if python3 - <<'PYEOF'; then
+import re, sys
+src = open("scripts/fleet/self-review.sh").read()
+block = re.search(r"^TOOLS=.*?(?=\n\n)", src, re.S | re.M)
+if not block:
+    sys.exit("scripts/fleet/self-review.sh no longer builds a `TOOLS=` allowlist, "
+             "so its two passes run with whatever the command defaults to")
+granted = block.group(0)
+if "Bash(gh api:*)" in granted:
+    sys.exit("self-review.sh grants `Bash(gh api:*)`. It is withheld on purpose: "
+             "it is the one grant on the list with no ceiling, and this pass runs "
+             "under the maintainer's own gh login")
+# THE DENY LIST IS WHAT ACTUALLY TAKES THE PEN AWAY. `--allowed-tools` is
+# ADDITIVE -- it grants on top of `.claude/settings.json`, which permits
+# `Write(.claude/agents/**)` and `Edit(.claude/agents/**)` by design. An earlier
+# version of this check read the absence of those words in `TOOLS=` as a
+# guarantee, which is hard rule 3 with the silence in the check rather than in
+# the guard. Assert the flag that binds. Found by the local
+# /mattpocock-skills:code-review pass.
+denied = re.search(r"^DENIED=.*$", src, re.M)
+if not denied:
+    sys.exit("scripts/fleet/self-review.sh no longer sets a `DENIED=` list, so "
+             "nothing stops a pass writing: `--allowed-tools` only ADDS to what "
+             ".claude/settings.json already permits, and that includes "
+             "Write/Edit under .claude/agents/ -- the independent reviewer's brief")
+for forbidden in ("Write", "Edit", "NotebookEdit"):
+    if forbidden not in denied.group(0):
+        sys.exit(f"self-review.sh's DENIED list no longer refuses `{forbidden}`. "
+                 "The self-review passes report and the author fixes -- and this "
+                 "one runs in a fleet-owned worktree, where a pass that can write "
+                 "can rewrite .claude/agents/reviewer.md, the brief the "
+                 "independent reviewer runs on")
+# ON THE SPAWN, not anywhere in the file. `"--disallowed-tools" in src` was true
+# of the COMMENT that explains it, so the assertion survived the flag being
+# dropped from the command line -- hard rule 3, in the check written to prevent
+# exactly that. Anchored on the flag followed by the variable, on a line that is
+# not a comment. Found by the local /code-review pass.
+if not re.search(r'^\s*--disallowed-tools "\$DENIED"', src, re.M):
+    sys.exit("scripts/fleet/self-review.sh builds a DENIED list and never passes "
+             "it to the command as `--disallowed-tools \"$DENIED\"`, so it "
+             "refuses nothing")
+if "Skill" not in granted:
+    sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
+             "skills -- silently review with most of what they are for switched off")
+PYEOF
+  ok 'the self-review passes report only, and cannot reach `gh api`'
+else
+  fail "the self-review's tool allowlist has drifted (above)"
+fi
+
 #    Everything the payload POINTS AT must be in the payload. docs/CONFIGURATION.md
 #    was cited by eight shipped files -- including a markdown link in REVIEW.md --
 #    while shipping nowhere, so the link 404'd in every host repo. Hard rule 1.
@@ -1448,7 +1513,7 @@ echo "== the flow's own scripts"
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
               resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
-              review.sh handoff.sh; do
+              review.sh self-review.sh handoff.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -1534,7 +1599,12 @@ else
   # pointer, without which stage 2 is unreachable and half the brief is dead
   # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
   # names them and the brief the fleet actually sends never did.
-  for named in record-review.sh "/code-review" "mattpocock-skills:code-review" \
+  # `self-review.sh` rather than `record-review.sh` since armaatus/autofleet#51:
+  # step 3 is one command that runs both passes in processes that are not the
+  # agent's, and records the marker itself. `record-review.sh` is still the
+  # primitive and stage 2 still names it -- the rebase remedy re-records without
+  # re-reviewing -- so it is asserted there, in the list below.
+  for named in self-review.sh "/code-review" "mattpocock-skills:code-review" \
                 --after-pr researcher verifier "gh pr diff --stat" handoff.sh; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
@@ -1722,15 +1792,20 @@ def triple(text):
 # Each signature is the OPERATIVE form, chosen so that naming the rule in
 # passing does not match it:
 #
-#   record-review.sh    with its argument. Stage 2 names the script bare, in the
-#                       rebase remedy, and that is a pointer rather than the
-#                       instruction to record a review before pushing.
+#   self-review.sh      by name. Nothing else may say it: CLAUDE.md's "Finishing
+#                       a task" used to carry its own copy of the two slash
+#                       commands, which is how an agent ends up running them in
+#                       the context the move was supposed to get them out of
+#                       (armaatus/autofleet#51). Stage 2 names `record-review.sh`
+#                       bare in the rebase remedy, which is the primitive under
+#                       this one and a pointer rather than the instruction.
 #   at most three rounds  the phrasing IS the rule. Stage 1 says "three review
 #                       rounds" about the context budget, which is a different
 #                       claim and does not match.
 RULES = [
-    ("record a local review before pushing", "the brief, stage 1",
-     lambda t: "record-review.sh findings.md" in t),
+    ("run both self-review passes and record the result before pushing",
+     "the brief, stage 1",
+     lambda t: "self-review.sh" in t),
     ("arm `--auto --squash` the moment the PR exists", "the brief, stage 2",
      lambda t: "--auto --squash" in t),
     ("the three-round cap", "the brief, stage 2",
@@ -1786,7 +1861,8 @@ DOCS = {
     "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
     ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
     ".claude/agents/verifier.md":   ("map",   "read by the subagent, in the subagent's own context"),
-    "findings.md":                  ("written", "the file the local review writes for record-review.sh"),
+    "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is the one below"),
+    ".autofleet/run/self-review.md": ("written", "where self-review.sh leaves what the two passes found -- gitignored, and the file the rebase remedy re-records"),
 }
 
 # `+`, not `*`. With `*` the prefix is optional, so the bare word `.md` in
@@ -1942,9 +2018,9 @@ for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
 
 # The loop's steps. `issue-command.sh` itself is NOT here: printing the command
 # that fetches the brief is the pointer this check is asking for.
-STEPS = ["record-review.sh", "await-review.sh", "review-status.sh",
-         "resolve-thread.sh", "answer-review.sh", "gh pr merge",
-         "/code-review", "/mattpocock-skills:code-review"]
+STEPS = ["self-review.sh", "record-review.sh", "await-review.sh",
+         "review-status.sh", "resolve-thread.sh", "answer-review.sh",
+         "gh pr merge", "/code-review", "/mattpocock-skills:code-review"]
 found = sorted({s for b in blocks for s in STEPS if s in b})
 if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "

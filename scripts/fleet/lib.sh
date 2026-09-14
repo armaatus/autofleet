@@ -168,6 +168,35 @@ fleet_run_with_deadline() {
   wait "$child"
 }
 
+# SIGNAL A SPAWNED AGENT AND EVERYTHING IT STARTED, not just the process this
+# shell forked.
+#
+# `AUTOFLEET_REVIEW_CMD` and `AUTOFLEET_SELF_REVIEW_CMD` are both advertised as
+# WRAPPER seams -- point them at a different model, a different account, an `ssh`
+# to the machine that holds the subscription -- so the process actually holding
+# this machine's credentials is routinely a CHILD of what we forked. Signalling
+# the direct child reaps the wrapper and orphans the agent: a full-budget run
+# nobody is counting, with nothing left to enforce its deadline because the loop
+# that enforced it was in the process that just died.
+#
+# So the caller runs `set -m` before the spawn, which gives the job its own
+# PROCESS GROUP, and these signal the group. The bare pid is tried as well, for
+# the case where job control was unavailable and no group was created --
+# signalling a group that does not exist is an error, not a kill.
+#
+# ONE copy, because there were two: review.sh grew this pair first and
+# self-review.sh needs exactly it (armaatus/autofleet#51). The grace period
+# before the KILL is part of the shape -- an agent that is mid-write gets a
+# chance to finish -- and two copies is two places for that 2 to drift.
+fleet_signal_group() {
+  kill "-$1" -- "-$2" 2>/dev/null || kill "-$1" "$2" 2>/dev/null
+}
+fleet_kill_group() {
+  fleet_signal_group TERM "$1"
+  sleep 2
+  fleet_signal_group KILL "$1"
+}
+
 # One row out of a `path`-keyed TSV, by path: the $2 column of the first line
 # whose $1 column equals $3, reading the table on stdin.
 #

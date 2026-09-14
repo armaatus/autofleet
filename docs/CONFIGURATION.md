@@ -85,11 +85,15 @@ the foundation issue is the one to label.
 
 ### The review
 
-Two reviews gate a pull request, and only the second one is configurable here.
-The first is the local `/code-review` and `/mattpocock-skills:code-review` pass
-the author runs before pushing — `guard.py` refuses the push without it, and
-`merge_gate.py` refuses to merge a PR whose body does not name both. That is
-required in every mode.
+Two reviews gate a pull request, and both are configurable here.
+
+The first is the **self-review**: the `/code-review` and
+`/mattpocock-skills:code-review` passes the author runs on its own diff before
+pushing — `guard.py` refuses the push without it, and `merge_gate.py` refuses to
+merge a PR whose body does not name both. Required in every mode.
+[`scripts/fleet/self-review.sh`](../scripts/fleet/self-review.sh) runs both, in
+processes that are not the author's session, and calls `record-review.sh` with
+what they found.
 
 The second is the **independent** review: a verdict from a context that has not
 seen the conversation which produced the diff. `AUTOFLEET_REVIEW_MODE` says where
@@ -243,6 +247,49 @@ The honest summary: `local` protects against an author's blind spots, which is
 what the second opinion is actually for. It does not protect against an author
 determined to forge one. If you need that, keep `github`, or give the reviewer
 its own account and log `gh` in as that.
+
+#### The self-review's own knobs
+
+Separate from the independent reviewer's above, because the two runs are shaped
+differently — one reads a pull request through `gh` and submits a verdict, the
+other reads a local commit range and prints findings — and a project that wants a
+cheaper model for its own diff than for the verdict on it has to be able to say
+so.
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_SELF_REVIEW_CMD` | `$AUTOFLEET_REVIEW_CMD` | What runs each pass, with `-p`, a fixed tool allowlist and a `--disallowed-tools` deny list. The deny list is the half that binds: `--allowed-tools` is **additive** — it grants on top of `.claude/settings.json`, which permits `Write`/`Edit` under `.claude/agents/` by design — so the absence of a tool from the grant is not a ceiling. Defaults to the independent reviewer's command, so a host that has set nothing — and a host that has set only `AUTOFLEET_REVIEW_CMD` — still works. |
+| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent out of the agent's `AUTOFLEET_TIMEBOX`, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". **Must be a positive whole number**, for the reason the `MAX_TRIES` row gives: a non-number makes `[ N -ge X ]` return 2, the deadline test false, and a wedged pass then holds the worktree until the time-box expires. A bad value is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included. |
+| `AUTOFLEET_SELF_REVIEW_MAX_TURNS` | `80` | Each pass's turn budget, passed as `--max-turns`. The same number the independent reviewer and `claude-review.yml` get: both passes fan out into sub-agents of their own. Validated the same way as the timeout above. |
+
+> **A pass that produces nothing records nothing.** `self-review.sh` exits
+> non-zero, names the pass that was silent, and writes no marker — so the push
+> gate stays closed. Recording an empty marker would satisfy that gate and let a
+> pull request go out claiming two reviews that never ran, which is strictly
+> worse than a review that is merely absent.
+>
+> A pass counts when it **exited zero** and its **stdout is not blank** — and
+> the load-bearing word is *stdout*. #51 measured the failure this catches: exit
+> 0 with 446 bytes of output, all of it unrelated permission warnings. Those
+> warnings are on stderr. `self-review.sh` writes the two streams to different
+> files, so stdout carries the pass's final message and nothing else; merge them,
+> as `review.sh` does, and noise is indistinguishable from a verdict.
+>
+> The passes are *asked* to end with `<!-- self-review-findings: N -->`, and the
+> count is worth having in the PR body, but it is **not** a gate: measured over
+> three rounds, `/code-review` emitted it zero times out of three. It is a
+> harness skill with an output contract of its own, and a gate it cannot pass is
+> a gate that never opens.
+>
+> `self-review.sh` refuses a **dirty working tree** for the same reason: the
+> marker is keyed on `HEAD` and `HEAD` is what gets pushed, so uncommitted work
+> would be neither reviewed nor sent. Commit first.
+
+> Like `AUTOFLEET_REVIEW_CMD`, this seam is advertised as model-agnostic and is
+> not: the flags are Claude Code's. That is
+> [#27](https://github.com/armaatus/autofleet/issues/27), open against
+> `review.sh`; `self-review.sh` is deliberately a second consumer of the same
+> shape rather than a third convention, so one fix covers both.
 
 ### The handoff note
 

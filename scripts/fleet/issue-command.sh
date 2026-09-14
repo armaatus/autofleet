@@ -220,19 +220,16 @@ then fix the code -- `/mattpocock-skills:tdd` is that loop.
 __TEST_COMMAND__ green, with a test that would have
 failed before your change. Run it and read the output.
 
-**3. Review it yourself, before anything leaves this worktree.** Two passes;
-they look for different things:
+**3. Review it yourself, before anything leaves this worktree.** One command,
+which runs both passes outside this session and records the marker:
 
-    /code-review high                  # defects: correctness, efficiency, reuse
-    /mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
+    ./scripts/fleet/self-review.sh   # findings: .autofleet/run/self-review.md
 
-REVIEW.md is the policy. Fix what is real, re-run the tests, then:
-
-    ./scripts/fleet/record-review.sh findings.md
-
-Until that marker exists for the exact commit you are pushing, the guard hook
-refuses `git push` and `gh pr create` here. A PR from the fleet arrives already
-reviewed or it does not arrive.
+Commit first -- it refuses a dirty tree -- and **start it in the background**: it
+outlasts a tool call. `/code-review high` finds defects,
+`/mattpocock-skills:code-review` conformance, REVIEW.md is the policy. Fix what
+is real, re-run the tests, run it again: the marker is per-commit, and without
+one the guard hook refuses `git push` and `gh pr create`.
 
 **Steps 4 to 6 -- the post-PR contract -- arrive when they apply.** Once that
 marker exists, run:
@@ -308,8 +305,8 @@ while it waits:
 It returns when the review lands -- or early, without one, when nothing a review
 could say would help: exit 7 for a red build, and exit 8 when GitHub says `DIRTY`
 because something merged underneath your branch. Exit 8 wants a rebase, a fresh
-`./scripts/fleet/record-review.sh` for the new head, and `git push
---force-with-lease`; it prints all three. Do not come back here until it is
+`./scripts/fleet/record-review.sh .autofleet/run/self-review.md` for the new
+head, and `git push --force-with-lease`; it prints all three. Do not come back here until it is
 rebased.
 
 **A clean verdict is not the same as no findings.** A review can come back
@@ -382,7 +379,8 @@ Three of those reasons are NOT waiting for a review, and it says so in the outpu
   it prints, then run `review-status.sh` again. Waiting for another review here
   costs 45 minutes and changes nothing.
 - **`GitHub says DIRTY`** is a conflict with the base. Rebase, re-run
-  `record-review.sh` for the new head, and `git push --force-with-lease` -- the
+  `record-review.sh .autofleet/run/self-review.md` for the new head, and
+  `git push --force-with-lease` -- the
   same three things `await-review.sh` exit 8 prints, for the same reason.
 - **`GitHub says BEHIND`** means the base moved and the branch has to catch up.
   Rebase and push.

@@ -337,9 +337,11 @@ GitHub says DIRTY: this PR conflicts with its base.
 No review will fix a merge conflict, and a conflicted branch cannot merge at
 all. Rebase it:
   git fetch origin && git rebase origin/${base_ref:-main}
-resolve the conflicts, re-run the build and the tests, then run
-./scripts/fleet/record-review.sh for the new head -- the marker is per-commit and
-a rebase changes every sha, so the guard refuses the push without a fresh one.
+resolve the conflicts, re-run the build and the tests, then record the review
+for the new head:
+  ./scripts/fleet/record-review.sh .autofleet/run/self-review.md
+The marker is per-commit and a rebase changes every sha, so the guard refuses
+the push without a fresh one.
 Then push the rewritten branch:
   git push --force-with-lease
 and come back here.
@@ -362,16 +364,19 @@ AGAIN
 CI is failing on this PR, on two consecutive checks: $broken
 
 No review will fix a red build. Reproduce it locally:
-  ctest --test-dir build --output-on-failure
-then fix it, re-run the local reviews, ./scripts/fleet/record-review.sh for the
-new commit, push, and come back here.
+  ${AUTOFLEET_TEST_COMMAND:-the project's test command}
+then fix it and review the fix -- \`self-review.sh\`, NOT a re-record. A red build
+means the code changed, and re-stamping the previous run's findings onto a new
+commit opens the push gate on something nobody read. (The DIRTY remedy above is
+the opposite case: a rebase is the same review on a new sha.)
+  ./scripts/fleet/self-review.sh
+then push, and come back here.
 
-A failure here is yours until you have shown otherwise. This used to name
-harness.partial as a known race to be re-run rather than investigated; #155 found
-what that actually was -- a fixture server retiring a worker under a request in
-flight -- and turned it off in the fixture, so there is no longer a test whose
-red is somebody else's by default. execute.occupied still carries a retry
-(tests/CMakeLists.txt) and so cannot reach CI red on its own.
+A failure here is yours until you have shown otherwise. A named "known flake" is
+the shape to distrust: on the project this came from, the one test carrying that
+label turned out to be a fixture server retiring a worker under a request in
+flight (armaatus/rommsync-nx#155), and it had been re-run rather than
+investigated for months. Reproduce it before you call it somebody else's.
 RED
       exit 7
     fi

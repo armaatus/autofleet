@@ -95,6 +95,37 @@
 # .claude/agents/reviewer.md a budget rather than a hope. 80 is what
 # claude-review.yml grants.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
+# ---------------------------------------------------------------- the SELF-review
+#
+# The OTHER review: the two passes the author runs on its own diff before the
+# pull request exists (`scripts/fleet/self-review.sh`). Separate knobs from the
+# independent reviewer's above, because the two runs are shaped differently --
+# one reads a pull request through `gh` and submits a verdict, the other reads a
+# local range and prints findings -- and a project that wants a cheaper model for
+# its own diff than for the verdict on it has to be able to say so.
+#
+# The command DEFAULTS to the independent reviewer's, so a host that has set
+# nothing, and a host that has set only `AUTOFLEET_REVIEW_CMD`, both still work.
+#
+# THE FALLBACK IS RESOLVED AT THE BOTTOM OF THIS FILE, not here. `.autofleet/config`
+# is sourced further down so it can override these defaults -- so a host that
+# sets `AUTOFLEET_REVIEW_CMD=my-wrapper` in that file would have had the
+# self-review fall back to the `claude` this line saw, which is the one route
+# the documented fallback is actually for. Empty here; `:=` treats empty as
+# unset, so the resolution below fires for anything the environment and the host
+# config did not set. Found by the local /code-review pass.
+: "${AUTOFLEET_SELF_REVIEW_CMD:=}"
+# How long ONE pass may run before it is killed. Lower than the independent
+# reviewer's 1800 because there are two of them and they are spent out of the
+# agent's AUTOFLEET_TIMEBOX (10800s), not out of the dispatcher's poll: two
+# wedged passes at 1800 would be an hour of a three-hour box with nothing to show.
+: "${AUTOFLEET_SELF_REVIEW_TIMEOUT:=1200}"
+# Each pass's turn budget, passed through as `--max-turns`. The same number
+# `claude-review.yml` and the independent reviewer get: both passes fan out into
+# sub-agents of their own, so the visible budget is what keeps "report what you
+# have while you still have turns" meaningful.
+: "${AUTOFLEET_SELF_REVIEW_MAX_TURNS:=80}"
+
 # How many attempts one head may get that produce NO VERDICT.
 #
 # A reviewer that runs and submits nothing is retried, because that is usually
@@ -308,6 +339,10 @@ if [ -f "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}" ]; then
   . "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}"
 fi
 
+# The self-review's command, now that the host config has had its say. See the
+# note by the knob above for why this cannot be done where it is declared.
+: "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
+
 # ----------------------------------------------------- knobs that must be sane
 #
 # AFTER the host config, because that is the route that matters: a value only
@@ -353,6 +388,16 @@ config_whole_number() {
 # guard was the failure. Found by the independent review.
 config_whole_number AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES" \
   1 "a positive whole number"
+# The self-review's two, refused for the same reason and with a sharper edge:
+# the timeout's only consumer is
+# `[ "$waited" -ge "$AUTOFLEET_SELF_REVIEW_TIMEOUT" ]` in self-review.sh, so a
+# non-number makes `[` return 2, the test FALSE, and the deadline never fires --
+# a wedged pass then holds the worktree until the three-hour time-box expires.
+# Found by the local /code-review pass.
+config_whole_number AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT" \
+  1 "a positive whole number of seconds"
+config_whole_number AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS" \
+  1 "a positive whole number of turns"
 
 # The same shape of failure as the one above, one step earlier: `[ "$words" -le
 # "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
@@ -371,7 +416,6 @@ config_whole_number AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES" \
 # without saying so.
 config_whole_number AUTOFLEET_HANDOFF_MAX_WORDS "$AUTOFLEET_HANDOFF_MAX_WORDS" \
   0 "a whole number (0 turns the cap off)"
-
 
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error

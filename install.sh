@@ -210,6 +210,7 @@ had_config=false; [ -e "$TARGET/.autofleet/config" ] && had_config=true
 had_settings=false; [ -e "$TARGET/.claude/settings.json" ] && had_settings=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 
+
 # The seed is autofleet's own config, and autofleet runs itself on
 # `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that
 # has to be exercised daily). Copying that verbatim would hand every host repo

@@ -149,10 +149,10 @@ than the permission does.
    runner allows it only for the phases named in `SKIPPABLE` in `tests/run.sh`,
    and on a machine where one of those skips, read the reason before believing
    the green.
-2. **Run `/code-review` AND `/mattpocock-skills:code-review` on your own branch**
-   and put both sets of findings in the PR body. Required, not optional —
-   `merge_gate.py` refuses a body that does not name both, and
-   [REVIEW.md](REVIEW.md) is the policy they follow.
+2. **Both self-review passes — `/code-review` AND
+   `/mattpocock-skills:code-review` — are required**, and both sets of findings
+   go in the PR body; `merge_gate.py` refuses a body naming only one. Step 3 of
+   the brief runs them, not you.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
 4. **The rest of the loop is one command**, fetched when it applies:
    `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must
