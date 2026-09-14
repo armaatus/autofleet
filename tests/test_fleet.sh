@@ -866,7 +866,23 @@ print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))
 # Both watchers in ONE process, which is what a real poll is: they share the
 # per-poll answer cache and the state dir, and only there can one of them undo
 # what the other just wrote.
-in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; for fn in "$@"; do "$fn"; done); }
+#
+# `IN_POLL=true`, because that is the whole of what "inside one pass" means to
+# fleet.sh: `cmd_run` sets it beside `forget_poll_answers` and the worktree-list
+# cache is open only while it is set. A helper named for a poll that did not set
+# it would model a pass with the caching switched off.
+in_poll() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; IN_POLL=true; for fn in "$@"; do "$fn"; done); }
+
+# ...and the same pass with the calls written as a SCRIPT rather than as bare
+# names. `in_poll` cannot carry these: they take arguments (`launch 44 "..."`,
+# `remove_worktree "$WORK/wt"`), shadow a command, and read $POLL_CACHE by name.
+# One helper rather than a copy of the preamble in each phase -- what a pass is
+# should have one definition in this file, and it nearly got a second. Found by
+# the independent review.
+#
+# `forget_poll_answers` is inside it, unlike `in_poll`, where the phases pass it
+# as the first function name.
+in_pass() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; IN_POLL=true; forget_poll_answers; eval "$1"); }
 
 # The fixture repo under git, because "which fixes are not live in the running
 # dispatcher" is answered in commits and cannot be faked with a hash alone.
@@ -2298,6 +2314,315 @@ JSON
     [ "${n:-0}" = 1 ] \
       || fail "three calls in one poll read the worktree list $n times"
     echo "ok: the answer is read once per poll, not once per candidate"
+    # ...AND IT IS THIS FUNCTION'S OWN CACHE THAT DID IT. armaatus/autofleet#30
+    # put a cache under `live_worktrees` too, and `in_poll` switches it on -- so
+    # the count above now passes whichever of the two caches is working. Delete
+    # `$POLL_CACHE/foundation` and calls two and three read the cached LIST
+    # instead of the runner, the count stays 1, and the phase stays green while
+    # the thing it is named for is gone. That is the hole this PR went and filled
+    # with `foundation_sees_launch`, reopened one level up by its own helper
+    # widening. Found by the independent review of that change.
+    #
+    # `IN_POLL=false` takes the lower cache out of the way, so the count is
+    # about the upper one and nothing else. Three reads is the answer when
+    # `foundation_in_flight` has no cache of its own.
+    : >"$ORCA_CALLS"
+    in_pass 'IN_POLL=false
+      foundation_in_flight
+      foundation_in_flight
+      foundation_in_flight' >/dev/null 2>&1
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "with the list cache out of the way, three calls read the list $n times -- this function's own cache is not what makes it one"
+    echo "ok: ...and it is this function's own cache doing it, not the one underneath"
+    ;;
+
+  poll_list_once)
+    # armaatus/autofleet#30. The list underneath that answer was read three times
+    # a pass -- the launch gate's count, `foundation_in_flight`, and
+    # `count_startable` -- plus once more per issue `in_flight` was asked about.
+    # Each one is a subprocess out to the runner for a list that cannot change
+    # between them, which is the pattern `count_startable` exists to avoid.
+    #
+    # `-eq 1`, not `-le 1`, for the reason `foundation_one_lookup` gives: a
+    # `live_worktrees` that never read the list at all would satisfy `-le` while
+    # answering from nothing.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_pass '
+      live_worktrees
+      foundation_in_flight
+      count_startable
+      in_flight 4' >/dev/null 2>&1
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "one pass read the worktree list $n times; four callers share one answer"
+    echo "ok: a pass that launches nothing reads the worktree list once"
+    ;;
+
+  poll_list_after_launch)
+    # ...and a pass that LAUNCHES reads it again, which is the half a count over
+    # a quiet pass cannot see. `launch` changes the list, so the cached copy
+    # describes a world one worktree out of date -- and the read after it is what
+    # makes `foundation_in_flight` on the next iteration see the worktree this
+    # launch just created. That guarantee is `foundation_sees_launch`'s; this
+    # phase is the cost half, and it fails in BOTH directions: at 1 the
+    # invalidation is gone, at 5 the cache is.
+    make_fixture ok
+    worktree_on_issue 4
+    issue_labels "ready,docs"
+    in_pass '
+      live_worktrees
+      foundation_in_flight
+      count_startable
+      launch 44 "a second issue"
+      # What the launch loop does next, and what the next iteration asks.
+      live_worktrees
+      foundation_in_flight' >/dev/null 2>&1
+    grep -q "^worktree create" "$ORCA_CALLS" \
+      || fail "the launch never happened, so what follows asserts nothing: $(cat "$ORCA_CALLS")"
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    # The dump, not just the count: this assertion has no slack, it was seen to
+    # flake once under load and not again in ~70 runs, and the next agent to meet
+    # it red will not have this PR body in front of them. Found by the
+    # independent review.
+    [ "${n:-0}" = 2 ] \
+      || fail "a pass that launched once read the worktree list $n times; it is one per pass plus one per launch. CALLS=[$(cat "$ORCA_CALLS")]"
+    echo "ok: a launch costs exactly one more read, and everything after it shares that one"
+    ;;
+
+  poll_list_after_remove)
+    # The other invalidation point. A removal takes a worktree OUT of the list,
+    # and a pass that kept reading the cached copy would count a slot that is
+    # already free as taken -- and `foundation_in_flight`, whose answer is read
+    # off the same list, would hold the fleet for a worktree that is gone.
+    #
+    # Which is why both drops go through one function: two caches over one list
+    # with two invalidation points is what armaatus/autofleet#30 says not to
+    # leave behind.
+    make_fixture ok
+    make_worktree
+    in_pass '
+      live_worktrees
+      remove_worktree "$WORK/wt"
+      live_worktrees' >/dev/null 2>&1
+    [ -d "$WORK/wt" ] \
+      && fail "the removal did not happen, so what follows asserts nothing"
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 2 ] \
+      || fail "a pass that removed a worktree read the list $n times; the read after a removal is not optional"
+    echo "ok: a removal drops the cached list too, not only the answer read off it"
+    ;;
+
+  poll_list_cache_unreadable)
+    # The cached read fails CLOSED. `[ -e ]` says the entry is an answer, but a
+    # `cat` that cannot read it prints nothing -- and an empty listing is not
+    # "could not tell", it is "no worktrees are running", which the launch gate
+    # reads as three free slots. This function's header opens with that exact
+    # failure: "reading a failed call as zero live worktrees is how one transient
+    # hiccup turns into three duplicate worktrees for issues that already have
+    # one". Found by both local review passes, independently.
+    #
+    # A DIRECTORY where the file should be, rather than `chmod 000`: it is the
+    # same "exists and will not read" to `[ -e ]` and to `cat`, and it stays that
+    # way for root, who ignores the mode bits and would pass this phase for the
+    # wrong reason on any machine that runs the suite as one.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$(in_pass '
+      live_worktrees >/dev/null || { echo "seed=failed"; exit 0; }
+      rm -f "$POLL_CACHE/worktrees"; mkdir -p "$POLL_CACHE/worktrees"
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
+    grep -q "seed=failed" <<<"$out" \
+      && fail "the first read cached nothing, so what follows asserts nothing: $out"
+    grep -q "rc=" <<<"$out" \
+      || fail "the phase never reached the second read: $out"
+    # `rc=1`, not just "not rc=0 and empty". An implementation that fell THROUGH
+    # from an unreadable entry to a fresh runner read passes the weaker form
+    # while doing the thing `live_worktrees` explicitly rejects -- a `cat` that
+    # died part-way has already printed half a listing, and the fresh read would
+    # hand the caller that half twice. Found by the independent review.
+    grep -q "rc=1" <<<"$out" \
+      || fail "an unreadable cache did not answer 'could not read it': $out"
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "the unreadable cache was answered by re-reading the runner ($n reads), not by failing"
+    echo "ok: a cache entry that will not read is a failure, not an empty fleet"
+    ;;
+
+  poll_list_reshape_fails)
+    # ...and so does the reshape. The awk that turns the driver's
+    # `path<TAB>branch<TAB>issue` into the `issue<TAB>path` every caller reads
+    # used to be this function's LAST command, so an awk that died came back as
+    # the function's own non-zero. Caching made it a middle command, with a
+    # `print_listing` after it that always succeeds -- and an empty listing
+    # returned with SUCCESS is three free slots, cached for the rest of the pass.
+    # Found by the local review.
+    #
+    # A shell function shadowing `awk`, because what is being modelled is an awk
+    # that is not there or cannot run -- this file is vendored onto host images
+    # nobody here chose. Emptying `PATH` would take the rest of the dispatcher
+    # with it and prove nothing about this line.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$(in_pass '
+      awk() { return 127; }
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
+    grep -q "rc=" <<<"$out" || fail "the phase never reached the read: $out"
+    grep -q "rc=0" <<<"$out" \
+      && fail "a reshape that failed answered 'no worktrees are running', with success: $out"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
+      && fail "a reshape that failed cached its empty answer for the rest of the pass"
+    echo "ok: a reshape that fails is a failure, not an empty fleet"
+    ;;
+
+  poll_list_short_write)
+    # ...and a WRITE that fails part-way. The `mv` closes the interruption half
+    # of the atomicity -- a dispatcher killed mid-write leaves the `.new` behind
+    # and the answer untouched -- and left the write-ERROR half open: a `printf`
+    # that put down half the listing and then died (ENOSPC or EIO on $STATE_DIR,
+    # its stderr already swallowed) still returned 0 through `print_listing`, the
+    # `&&` fired, and `mv` installed the half as the pass's answer.
+    #
+    # A SHORT listing is worse than an empty one. `in_flight` reads this same
+    # list, so an issue whose worktree fell off the end of the file reads as
+    # free, and the pass opens a second worktree for work that is already
+    # running. Found by the independent review.
+    #
+    # The shadow is keyed on the FORMAT, because `live_worktrees` calls `printf`
+    # twice and only one of them is this: `%s` reshapes the driver's lines and
+    # must go through, `%s\n` is `print_listing` and is the one being broken.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$(in_pass '
+      printf() {
+        if [ "$1" = "%s\n" ]; then command printf "%s" "trunc"; return 1; fi
+        command printf "$@"
+      }
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]"' 2>/dev/null)"
+    grep -q "rc=" <<<"$out" || fail "the phase never reached the read: $out"
+    grep -q "rc=0" <<<"$out" \
+      && fail "a write that died part-way was reported as success: $out"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
+      && fail "half a listing was installed as the pass's answer, and in_flight reads it as a free slot"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees.new" ] \
+      && fail "the half-written temporary was left behind for the next pass to find"
+    echo "ok: a write that dies part-way installs nothing and says so"
+    ;;
+
+  poll_cache_gate_empty)
+    # An EMPTY $IN_POLL reads as closed, not as open. Bash runs a simple command
+    # that expands to no words with status 0, so a bare `$IN_POLL` would read as
+    # true and switch the caching ON -- fail-open, in the one function whose
+    # every comment is about failing closed.
+    #
+    # Nothing in this tree can reach that: the assignment is at source time. It
+    # is covered because `forget_worktree_answers` carries a `${POLL_CACHE:-}`
+    # guard written for the armaatus/rommsync-nx `sed` extraction that may bring
+    # functions without the top-level assignments, and this gate is the other
+    # half of exactly that case -- with `$cached` becoming `/worktrees` and the
+    # write reaching for `/worktrees.new`. Found by the independent review.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$(in_pass 'IN_POLL=""
+      live_worktrees >/dev/null 2>&1
+      [ -e "$POLL_CACHE/worktrees" ] && echo "cached=yes" || echo "cached=no"
+      poll_cache_open && echo "gate=open" || echo "gate=closed"' 2>&1)"
+    grep -q "gate=closed" <<<"$out" \
+      || fail "an empty \$IN_POLL opened the cache gate: $out"
+    grep -q "cached=no" <<<"$out" \
+      || fail "an empty \$IN_POLL wrote the poll cache: $out"
+    echo "ok: an empty \$IN_POLL reads as closed, not as open"
+    ;;
+
+  poll_list_once_in_run)
+    # Acceptance 1 is about a POLL, and the phases above count over a sequence
+    # they spell out themselves -- right about the mechanism, but not a floor
+    # under the pass. A read added inside `reap_merged`, `review_open_prs` or
+    # `notice_stalled` satisfies every one of them and still breaks the
+    # acceptance. This one counts over `cmd_run`'s own body. Found by the
+    # independent review.
+    #
+    # One pass and then out, because the issue it is given is already closed:
+    # `wanted` empties, nothing is startable, and the run ends on its own. Same
+    # shape as `poll_empties_cache`, which needs a bounded real dispatcher for
+    # the same reason -- and `--max-prs 1` bounds the failure path, where a
+    # launch would otherwise keep it polling.
+    make_fixture ok
+    make_repo_git
+    add_origin
+    worktree_on_issue 4
+    issue_state CLOSED; issue_labels "ready"
+    ( in_fleet cmd_run --max-prs 1 148 >"$WORK/run.log" 2>&1 ) &
+    HELD_PID=$!
+    wait_for_log "fleet up" \
+      || fail "the dispatcher never started: $(cat "$WORK/run.log" 2>/dev/null)"
+    run_ended "$HELD_PID" >/dev/null 2>&1
+    HELD_PID=""
+    n="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "${n:-0}" = 1 ] \
+      || fail "one pass of cmd_run read the worktree list $n times: $(cat "$WORK/run.log")"
+    echo "ok: one pass of the real poll body reads the worktree list once"
+    ;;
+
+  foundation_sees_launch)
+    # armaatus/autofleet#30's third acceptance, and it did not hold before this
+    # phase existed -- not here and not on main. `launch`'s cache drop is what
+    # makes the NEXT iteration's `foundation_in_flight` see the worktree the
+    # launch just created, and deleting that line failed NOTHING:
+    # `foundation_cold_start`, `foundation_launch_held` and `foundation_holds`
+    # all stayed green. The launch loop breaks on `is_foundation "$labels"` from
+    # the issue it has just launched and never reaches the next iteration, so
+    # every phase that drives `cmd_run` stops one step short of the line.
+    #
+    # That per-iteration check's own comment already says it covers "the
+    # across-passes half". The within-a-pass half had no phase at all, which is
+    # hard rule 3's shape -- and it is why #30's premise, that the drop "is
+    # load-bearing enough to have its own test phase", is stale. #30 is edited
+    # to say so.
+    #
+    # Asserted on the FUNCTION rather than through `cmd_run`, because the launch
+    # loop's own break is exactly what hides this.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    out="$(in_pass '
+      foundation_in_flight; echo "before=$?"
+      launch 44 "the foundation one"
+      foundation_in_flight; echo "after=$?"' 2>&1)"
+    grep -q "before=1" <<<"$out" \
+      || fail "it held with nothing in flight, so what follows asserts nothing: $out"
+    grep -q "after=0" <<<"$out" \
+      || fail "the check after a launch did not see the foundation worktree that launch created: $out"
+    echo "ok: the check after a launch sees the worktree the launch created"
+    ;;
+
+  status_list_uncached)
+    # #35's acceptance, defended at the mechanism rather than at the call graph.
+    # `cmd_status` asks `in_flight` about every ready issue for its `next up`
+    # table, and `in_flight` reads the worktree list -- so the moment that list
+    # became cacheable, `status` became a writer into $STATE_DIR.
+    #
+    # The write is the small half. `status_keeps_cache` would still pass, because
+    # it compares the second status against the first and by then the entry is
+    # already there. The damage is a `status` in the watch loop docs/WORKFLOW.md
+    # prescribes handing the dispatcher beside it a list read at another moment
+    # in its pass -- a stale list is a duplicate worktree, or a foundation hold
+    # that never fires.
+    make_fixture ok
+    worktree_on_issue 42
+    mkdir -p "$AUTOFLEET_DIR/poll-cache"
+    out="$(in_fleet_keeping_cache cmd_status 2>&1)"
+    grep -q "#42" <<<"$out" \
+      || fail "status listed no worktree, so it never reached the read this phase is about: $out"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
+      && fail "status cached a worktree list into a live dispatcher's poll cache; #35 is that it leaves \$STATE_DIR alone"
+    # BOTH files. The write is `>"$cached.new"` and then a `mv`, so a shape where
+    # the `mv` fails leaves the temporary behind -- a `status` that wrote into
+    # $STATE_DIR with this phase still green. Found by the independent review.
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees.new" ] \
+      && fail "status left a half-written cache temporary in \$STATE_DIR"
+    echo "ok: status reads the worktree list without writing the poll cache"
     ;;
 
   foundation_frees)
