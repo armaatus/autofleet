@@ -651,6 +651,29 @@ head — `claude-review.yml` fires on `review_requested` as well as on
 `.autofleet/run/review-rounds` beside the round count, and waits for a *newer* one rather
 than spending a second round on findings already in hand.
 
+**The inline findings obey that same rule, and for one round did not.** A review
+verdict is only half of what the wait hands back; the other half is the review
+threads, which is where the findings actually are. That half used to come from
+`pulls/<n>/comments`, an endpoint that cannot report `isResolved` and has no
+notion of a round: it returns every review comment the PR has ever had, so round
+two re-read round one's findings — already fixed — and round three re-read both,
+with the one live comment buried among them. It was also cut at two hundred
+lines, mid-comment, in the middle of the text the agent was being told to act on.
+
+So the wait asks for *threads*, through the same
+[`pr_payload.sh`](../.github/scripts/pr_payload.sh) query `merge-gate` and
+`review-status.sh` use, and prints a thread when it is unresolved **and** its
+newest comment is newer than the one recorded on the last round. A thread the
+agent has already seen and nobody has touched is not repeated; a thread it
+replied to and the reviewer answered has *moved*, and is. Still-open threads it
+withholds are counted, never truncated, and pointed at `review-status.sh`, which
+exists to print every one of them.
+
+That leaves the wait's own closing prose as the commands and one line of why —
+what the PR body must carry, how the merge is queued and what auto-merge is doing
+meanwhile are the brief's, and a second copy of a contract is what an agent reads
+instead of the original.
+
 Then it fixes what is real, replies with a reason where it disagrees, and
 resolves every thread. If it changed anything it pushes and comes back for the
 next round; when a review arrives it is not going to change anything for, it says
