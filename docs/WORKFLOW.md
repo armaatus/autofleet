@@ -1,12 +1,27 @@
 # How work happens here
 
 This project is built by agents working in parallel, one per Orca worktree, with
-one human deciding what the rules are. This file is that loop end to end: what
-each stage produces, what starts the next, where a person is required, and how to
-stop the whole thing.
+one human deciding what the rules are. **This page is the maintainer's**, read
+once and not per issue: it is that loop end to end — what each stage produces,
+what starts the next, where a person is required, how to stop the whole thing,
+and why each rule is the shape it is. An agent's own instructions are the brief
+([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`,
+then `--after-pr <n>`), with [CLAUDE.md](../CLAUDE.md) the working agreement
+above it. `evals/lint.sh` holds what an agent reads before its first edit — those
+two and [REVIEW.md](../REVIEW.md), which the brief names at its review step —
+under a word ceiling.
 
-New here? Read [CLAUDE.md](../CLAUDE.md) first — it is the working agreement and
-it is short. This file is the longer explanation behind it.
+An agent comes here for the conventions behind a rule — the `<!-- blockers -->`
+marker in [Stage 2](#stage-2--spec) chief among them — and not for what to run.
+It used to be told otherwise: the
+brief opened by sending the agent here, and the agent that did as it was told
+read 13,425 words — CLAUDE.md, the brief, and this page's longer retelling of
+the brief — before its first edit, then carried them in the prompt prefix of
+every request for the rest of the session
+([#54](https://github.com/armaatus/autofleet/issues/54)). Nothing was deleted
+here for being long; what changed is who is told to read it. Where this page and
+the brief disagree about what to do, the brief is right, and `evals/lint.sh`
+keeps this one from growing a second copy of it.
 
 The shape is adapted from Anthropic's
 [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook).
@@ -503,20 +518,12 @@ the one grinding.
 ### Stage 4 — Local review, before anything leaves
 
 Two passes, because they look for different things and this machine has the time:
+one for defects, one for conformance, both against [REVIEW.md](../REVIEW.md).
+**What to run, and in what order, is the brief's step 3** — it names the two
+passes and the command that records them. This section is why that recording
+exists at all.
 
-```bash
-/code-review high                  # defects: correctness, efficiency, reuse
-/mattpocock-skills:code-review     # conformance: standards, and spec-vs-diff
-```
-
-[REVIEW.md](../REVIEW.md) is the policy both follow. Fix what is real, re-run the
-tests, then record it:
-
-```bash
-./scripts/fleet/record-review.sh findings.md
-```
-
-That writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
+Recording writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
 `gh pr create` from a fleet-owned worktree without it.** The marker records what
 it is given; it cannot tell whether a review really happened, so it is a
 checklist gate. What actually enforces the two passes is `merge-gate`, which
@@ -526,9 +533,9 @@ point. A worktree you opened by hand is never gated: pushing a half-finished
 branch is normal, and a guard that argues about it is a guard people route
 around.
 
-The PR body carries `## Plan`, both sets of findings and what was done about
-them, any issue that was edited and why, and `Closes #N`. That body is not
-decoration — `merge-gate` reads it.
+What the PR body must carry is the brief's step 4, and it is not decoration:
+[`merge-gate`](#the-merge-gate) reads it — which is why the list lives in one
+place and not here as well.
 
 ### Stage 5 — Independent review, and the merge
 
@@ -613,11 +620,8 @@ On GitHub, in `github` mode:
 - [`merge-gate.yml`](../.github/workflows/merge-gate.yml) — the required check
   that decides whether the PR may merge itself.
 
-Back in the worktree the agent waits with one blocking call:
-
-```bash
-./scripts/fleet/await-review.sh
-```
+Back in the worktree the agent waits with one blocking call, `await-review.sh`,
+which the brief's step 5 hands it at the moment it applies.
 
 This is the cheap half of the loop. An agent that waits by *thinking about
 whether the review has arrived* burns tokens the whole time. An agent that waits
@@ -647,16 +651,41 @@ head — `claude-review.yml` fires on `review_requested` as well as on
 `.autofleet/run/review-rounds` beside the round count, and waits for a *newer* one rather
 than spending a second round on findings already in hand.
 
+**The inline findings obey that same rule, and for one round did not.** A review
+verdict is only half of what the wait hands back; the other half is the review
+threads, which is where the findings actually are. That half used to come from
+`pulls/<n>/comments`, an endpoint that cannot report `isResolved` and has no
+notion of a round: it returns every review comment the PR has ever had, so round
+two re-read round one's findings — already fixed — and round three re-read both,
+with the one live comment buried among them. It was also cut at two hundred
+lines, mid-comment, in the middle of the text the agent was being told to act on.
+
+So the wait asks for *threads*, through the same
+[`pr_payload.sh`](../.github/scripts/pr_payload.sh) query `merge-gate` and
+`review-status.sh` use, and prints a thread when it is unresolved **and** its
+newest comment is newer than the one recorded on the last round. A thread the
+agent has already seen and nobody has touched is not repeated; a thread it
+replied to and the reviewer answered has *moved*, and is. The agent's *own*
+reply does not count as movement — the loop tells it to reply with its reasoning
+before resolving, so without that test every thread it answered would come back
+with its own answer underneath, which is the same failure by another route. In
+`local` mode the reviewer and the author are one account, nothing can tell the
+two replies apart, and the thread is shown rather than guessed at. Still-open threads it
+withholds are counted, never truncated, and pointed at `review-status.sh`, which
+exists to print every one of them.
+
+That leaves the wait's own closing prose as the commands and one line of why —
+what the PR body must carry, how the merge is queued and what auto-merge is doing
+meanwhile are the brief's, and a second copy of a contract is what an agent reads
+instead of the original.
+
 Then it fixes what is real, replies with a reason where it disagrees, and
 resolves every thread. If it changed anything it pushes and comes back for the
 next round; when a review arrives it is not going to change anything for, it says
-so and checks:
-
-```bash
-./scripts/fleet/resolve-thread.sh <thread-id> ...   # close them, and re-ask the gate
-./scripts/fleet/answer-review.sh "<what you did, or why you did not>"
-./scripts/fleet/review-status.sh    # exit 0 = every thread resolved, every check green
-```
+so and checks. `resolve-thread.sh`, then `answer-review.sh`, then
+`review-status.sh`, whose exit 0 means every thread resolved and every check
+green — the brief's step 5 is the order and the exact invocations; the rest of
+this section is why each of the three has to exist.
 
 The order matters: an answer has to come *after* the review it answers, and a
 push invalidates that review. So answering a review you have just pushed over
@@ -813,8 +842,13 @@ reviews *submitted* on the pull request, across every head, and at the cap the
 dispatcher stops starting them and says "needs you". It survives `stop.sh`,
 because what it counts belongs to the PR rather than to one dispatcher's run.
 
-When it is green the agent runs `gh pr merge --auto --squash`. That does **not**
-merge — it asks GitHub to merge once the required checks pass. Then it stops.
+Nothing in this section is where the merge gets armed. It used to end by saying
+the agent runs `gh pr merge --auto --squash` "when it is green" — a second copy
+of the rule, ninety lines below the first, saying the opposite of it: the merge
+is armed the moment the PR exists, which is the whole of
+[#90](https://github.com/armaatus/rommsync-nx/issues/90) and what
+[the section above](#answering-the-review-and-why-the-branch-waits-for-it) opens
+with. That is what a second copy costs, and why the brief is the only one.
 
 ### The merge gate
 

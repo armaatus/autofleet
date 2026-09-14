@@ -12,6 +12,14 @@
 #                         No spec, no steps 1-3, and the issue number still
 #                         substituted, because `Closes #N` and the board line
 #                         live in this half.
+#   test_brief.sh reading what the brief costs an agent BEFORE its first edit:
+#                         the rendered brief plus every document it is told to
+#                         read. #54 measured 13,425 words there, because the
+#                         first sentence sent the agent to docs/WORKFLOW.md and
+#                         that page is 10,036 words of a loop the brief had just
+#                         given it. evals/lint.sh asserts the same ceiling from
+#                         the heredoc; this phase asserts it on what the script
+#                         actually prints.
 #
 # The union of the two -- every instruction landing in exactly one stage -- is
 # asserted by evals/lint.sh, which reads the heredocs rather than running the
@@ -136,6 +144,63 @@ case "${1:-}" in
       '/mattpocock-skills:tdd' 'record-review.sh findings.md'
     echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
     ;;
+  reading)
+    make_fixture
+    out="$(run_it 42 2>&1)" || fail "issue-command.sh 42 exited non-zero: $out"
+    brief="$(brief_only <<<"$out")"
+
+    # The brief may not spend an agent's context on a document it does not need
+    # before its first edit. EVERY `.md` it names, not just the ones under
+    # `docs/`: the first spelling matched `docs/*.md` alone, so a brief that grew
+    # "read README.md first" passed this phase at an unchanged word total while
+    # the header above claimed to measure what the brief costs. Found by the
+    # local /code-review pass.
+    #
+    # What it may name is exactly what is COUNTED below, plus `findings.md` --
+    # a file the review WRITES rather than one it reads. One list drives both the
+    # allowance and the sum, so the phase cannot forbid a document and then leave
+    # its words out of the total, or allow one and never charge for it.
+    #
+    # And the list is READ OUT OF evals/lint.sh's reading table rather than
+    # restated here. Hardcoded, this phase kept summing two files when a third
+    # required document was added there -- green under an unchanged ceiling,
+    # while the header above claims to measure "every document it is told to
+    # read". armaatus/autofleet#56 folds the NUMBER into one table; the
+    # MEMBERSHIP is this, and it has to travel with it. Found by the independent
+    # review.
+    COUNTED="$(sed -n 's/^ *"\([A-Za-z0-9_./-]*\)": *("count".*/\1/p' \
+               "$REPO_ROOT/evals/lint.sh" | sort -u | tr '\n' ' ')"
+    [ -n "${COUNTED// /}" ] \
+      || fail "no \"count\" rows found in evals/lint.sh's reading table; this phase would sum nothing and pass"
+    allowed="$(printf '%s\n' $COUNTED findings.md | sed 's/\./\\./g' | paste -sd'|' -)"
+    named="$(grep -oE '[A-Za-z0-9_./-]+\.md' <<<"$brief" | sort -u \
+             | grep -vxE "$allowed" || true)"
+    [ -z "$named" ] \
+      || fail "the opening brief names $(tr '\n' ' ' <<<"$named"), which an agent does not need before its first edit"
+
+    # CLAUDE.md is read automatically, REVIEW.md is the policy the brief names
+    # at step 3, and the brief is the brief. Read from the real tree rather than
+    # the fixture: the fixture is scripts/fleet alone, and these are the files
+    # whose size the ceiling is about.
+    total=0
+    # shellcheck disable=SC2086 -- COUNTED is a deliberate word list, like SUITES
+    for f in $COUNTED; do
+      n="$(wc -w <"$REPO_ROOT/$f" | tr -d ' ')"
+      total=$((total + n))
+      echo "  $f: $n"
+    done
+    n="$(wc -w <<<"$brief" | tr -d ' ')"
+    total=$((total + n))
+    echo "  the brief: $n"
+
+    # Held in evals/lint.sh too, which is the vendored copy, so a host project
+    # gets the ceiling even though tests/ is not vendored. Raise it there and
+    # here together, deliberately.
+    READING_CEILING=3500
+    [ "$total" -lt "$READING_CEILING" ] \
+      || fail "a fleet agent is told to read $total words before its first edit; the ceiling is $READING_CEILING"
+    echo "ok: a fleet agent reads $total words before its first edit, ceiling $READING_CEILING"
+    ;;
   *)
-    echo "usage: $0 {stage1|stage2}" >&2; exit 2 ;;
+    echo "usage: $0 {stage1|stage2|reading}" >&2; exit 2 ;;
 esac

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Block until the PR's independent review lands, then print it.
+# Block until the PR's independent review lands, then print it -- and with it the
+# review THREADS that are still unresolved and have moved since the round this
+# last handed back. Not `pulls/<n>/comments`: that endpoint cannot say whether a
+# thread is resolved, so it returns every comment the PR ever had, once per
+# round, with the live one buried among the findings already fixed.
 #
 # This is the cheap half of the loop. An agent waiting for a review by thinking
 # about whether the review has arrived yet burns tokens the whole time and gets
@@ -77,6 +81,20 @@ esac
 [ "$MAX_ROUNDS" -gt 0 ] || {
   echo "AWAIT_REVIEW_MAX_ROUNDS must be a positive whole number; got '$MAX_ROUNDS'" >&2
   exit 2; }
+
+# How many review THREADS one round prints in full. Bounded by threads and never
+# by lines: the thing this replaced cut its output with `head -200`, mid-comment,
+# in the middle of the text the agent was being told to act on. Twenty is past
+# anything a review of one PR leaves, and what is withheld is named and pointed
+# at review-status.sh rather than dropped.
+MAX_THREADS=20
+# Normalised HERE rather than in the Python block, so the default is stated once
+# and what reaches Python is always a number. A mistyped override falls back
+# instead of raising a traceback into the middle of the agent's instructions.
+case "${AWAIT_REVIEW_MAX_THREADS:-}" in
+  ""|*[!0-9]*|0) : ;;
+  *)             MAX_THREADS="$AWAIT_REVIEW_MAX_THREADS" ;;
+esac
 ROUNDS_FILE="$REPO_ROOT/.autofleet/run/review-rounds"
 # Exit 8 is the one failure path with no natural bound: it fires on poll 1, so
 # the deadline never applies, and a conflict is not a round of disagreement so
@@ -95,15 +113,25 @@ mkdir -p "$REPO_ROOT/.autofleet/run"
 round=0
 seen_head=""
 seen_stamp=""
+seen_comment_at=""
 if [ -r "$ROUNDS_FILE" ]; then
-  # Four fields: the PR, the round, the head that round was answered on, and the
-  # newest `submittedAt` handed back. The last two are what stop a review being
-  # reported twice -- see the filter in the Python block below. Files written by
-  # an older version carry only the first two, and `read` leaves the rest empty,
-  # which is exactly the "nothing seen yet" state.
-  read -r seen_pr seen_round seen_head seen_stamp <"$ROUNDS_FILE" 2>/dev/null || true
+  # Five fields: the PR, the round, the head that round was answered on, the
+  # newest `submittedAt` handed back, and the newest review-thread comment handed
+  # back. Fields three and four are what stop a REVIEW being reported twice; the
+  # fifth is the same rule for the THREADS -- see the two Python blocks below.
+  # Files written by an older version carry fewer, and `read` leaves the rest
+  # empty, which is exactly the "nothing seen yet" state.
+  read -r seen_pr seen_round seen_head seen_stamp seen_comment_at \
+    <"$ROUNDS_FILE" 2>/dev/null || true
+  # A dash is how record_round writes a field it does not have; see there for
+  # why an empty one cannot be written literally.
+  [ "${seen_head:-}" = "-" ] && seen_head=""
+  [ "${seen_stamp:-}" = "-" ] && seen_stamp=""
+  [ "${seen_comment_at:-}" = "-" ] && seen_comment_at=""
   [ "${seen_pr:-}" = "$pr" ] && round="${seen_round:-0}"
-  if [ "${seen_pr:-}" != "$pr" ]; then seen_head=""; seen_stamp=""; fi
+  if [ "${seen_pr:-}" != "$pr" ]; then
+    seen_head=""; seen_stamp=""; seen_comment_at=""
+  fi
 fi
 round=$((round + 1))
 
@@ -112,16 +140,31 @@ round=$((round + 1))
 # three CI timeouts in a row must not exhaust the cap without a single finding
 # having been seen.
 #
-# `$stamp` is written by the Python block, one field per line: the head it judged
-# and the newest review it handed back, so the next round can tell a re-review
-# from the one it has already acted on. Read back as two lines and printed as two
-# fields rather than splicing the file in whole -- a null `submittedAt` would
-# otherwise collapse the line to three fields, `read` would leave `seen_stamp`
-# empty, and the dedupe would silently switch itself off.
+# `$stamp` is written by the Python blocks, one field per line: the head it
+# judged, the newest review it handed back, and the newest thread comment it
+# handed back -- so the next round can tell a re-review from the one it has
+# already acted on, and a thread that has moved from one that has not. Read back
+# a line at a time and printed as separate fields rather than splicing the file
+# in whole -- a null `submittedAt` would otherwise collapse the line to three
+# fields, `read` would leave `seen_stamp` empty, and the dedupe would silently
+# switch itself off.
+#
+# The third line is written by the THREAD block, which runs only after a review
+# is in hand and only if the payload could be read. Absent, it lands here as the
+# empty string and the next round prints every open thread again: the dedupe
+# fails towards showing a finding twice, never towards hiding one.
 record_round() {
-  local stamp_head="" stamp_at=""
-  { IFS= read -r stamp_head; IFS= read -r stamp_at; } <"$stamp" 2>/dev/null || true
-  printf '%s %s %s %s\n' "$pr" "$round" "$stamp_head" "$stamp_at" >"$ROUNDS_FILE"
+  local stamp_head="" stamp_at="" stamp_comment=""
+  { IFS= read -r stamp_head; IFS= read -r stamp_at
+    IFS= read -r stamp_comment; } <"$stamp" 2>/dev/null || true
+  # A MISSING FIELD IS A DASH, not an empty string, and that is the fifth
+  # field's doing. `read` splits on a RUN of whitespace, so `42 1 abc  <at>` --
+  # an absent `submittedAt` between two values that are present -- assigns the
+  # thread timestamp to `seen_stamp` and leaves `seen_comment_at` empty: the
+  # review dedupe silently reading the wrong clock. With four fields the empty
+  # one was always trailing and the collapse was harmless; with five it is not.
+  printf '%s %s %s %s %s\n' "$pr" "$round" "${stamp_head:--}" \
+    "${stamp_at:--}" "${stamp_comment:--}" >"$ROUNDS_FILE"
 }
 
 if [ "$round" -gt "$MAX_ROUNDS" ]; then
@@ -157,10 +200,12 @@ echo "round $round of $MAX_ROUNDS -- waiting for a review on PR #$pr, on its cur
 echo "  (polling every ${POLL_SECONDS}s; stop everything with ./scripts/fleet/stop.sh --now)"
 
 payload="$(mktemp)"; reviews_out="$(mktemp)"; stamp="$(mktemp)"; notes="$(mktemp)"
-# How many Important findings the review being handed back declared. A file
-# rather than a `$(...)`, for the same bash 3.2 reason the payload is one.
+# How many Important findings the review being handed back declared, and the
+# threads payload. Files rather than `$(...)`, for the same bash 3.2 reason
+# the payload is one.
 sev="$(mktemp)"
-trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes" "$sev"' EXIT
+threads="$(mktemp)"
+trap 'rm -f "$payload" "$reviews_out" "$stamp" "$notes" "$sev" "$threads"' EXIT
 waited=0
 checks_due=0
 broken_before=""
@@ -567,11 +612,195 @@ PY
     if [ "$verdict" = 0 ]; then
       echo
       cat "$reviews_out"
-      echo "--- inline comments"
-      GH_PAGER=cat gh api "repos/{owner}/{repo}/pulls/$pr/comments" \
-        --jq '.[] | "\(.path):\(.line // .original_line)  \(.user.login)\n\(.body)\n"' \
-        2>/dev/null | head -200
-      echo
+      # THREADS, NOT COMMENTS. This used to end with
+      # `gh api repos/{owner}/{repo}/pulls/<n>/comments`, which cannot report
+      # whether a thread is resolved and so hands back every review comment the
+      # PR ever had -- round two re-reading round one's findings, already fixed,
+      # with the live one buried among them. `issue-command.sh` warns the agent
+      # off that exact endpoint in those words, and this script was calling it on
+      # the agent's behalf. It also cut the result at `head -200`, mid-comment,
+      # in the middle of the text it was telling the agent to act on.
+      #
+      # The query is .github/scripts/pr_payload.sh, imported rather than written
+      # a third time -- the same reason `independent_reviews` is imported above.
+      # merge-gate, review-status.sh and this file must not be able to disagree
+      # about which threads are open, and three copies of a query is how they
+      # did (#114). No 2>/dev/null: pr_payload.sh has already said on stderr
+      # which failure it was, and swallowing that is what made the old silence.
+      if fleet_pr_payload "$pr" "$threads"; then
+        python3 - "$threads" "$seen_comment_at" "$MAX_THREADS" "$pr" "$stamp" <<'PY'
+import json, sys
+
+path, seen_at, cap, pr, stamp_path = sys.argv[1:6]
+
+sys.path.insert(0, ".github/scripts")
+# Safe by the time this runs: the block above already exited 2 if merge_gate.py
+# would not import, so reaching here means it does.
+from merge_gate import review_mode, unresolved_threads
+
+# Defensively, like the reviews block above: a null pullRequest here would
+# otherwise print a traceback into the MIDDLE of the instructions the agent is
+# being handed, which is worse than the missing section it replaces.
+try:
+    pull = json.load(open(path))["data"]["repository"]["pullRequest"] or {}
+except Exception:
+    pull = {}
+threads = unresolved_threads(pull)
+partial = bool(((pull.get("reviewThreads") or {}).get("pageInfo") or {})
+               .get("hasNextPage"))
+status = "  ./scripts/fleet/review-status.sh %s" % pr
+pr_author = ((pull.get("author") or {}).get("login") or "").lower()
+# In `local` mode the reviewer and the PR author are ONE GitHub account
+# (merge_gate.review_mode), so nothing in this payload can tell an agent's reply
+# from a reviewer's and the author test below has to be off. Failing open there
+# costs a thread shown twice; failing closed would hide a live finding.
+local = review_mode() == "local"
+
+
+def last_comment(thread):
+    return ((thread.get("latestComment") or {}).get("nodes") or [{}])[0]
+
+
+def newest(thread):
+    return last_comment(thread).get("createdAt") or ""
+
+
+def moved(thread):
+    at = newest(thread)
+    # A thread whose newest comment carries no timestamp is printed. There is
+    # nothing to compare, and between showing a finding twice and hiding one
+    # this picks the first.
+    if not at:
+        return True
+    # ...and so is every thread on a round with nothing to dedupe against: a
+    # recycled worktree, a lost review-rounds file, or simply the first round.
+    # The author test below would otherwise suppress a thread on FIRST sighting
+    # -- hiding a finding this script has never handed back, which is not
+    # deduplication by any reading.
+    if not seen_at:
+        return True
+    if at <= seen_at:
+        return False
+    # THE AGENT'S OWN REPLY IS NOT THE THREAD MOVING. The prose this script
+    # prints tells it to reply on the thread with its reasoning before resolving,
+    # so every thread it answers and leaves open has a comment newer than the
+    # stamp -- and without this test the next round hands the original finding
+    # straight back with the agent's own answer underneath it. That is round two
+    # re-reading round one, reached by a different route from the endpoint this
+    # whole change removed.
+    who = ((last_comment(thread).get("author") or {}).get("login") or "").lower()
+    return local or who != pr_author
+
+
+# Oldest first, and that is what makes the cap safe rather than a second silent
+# truncation. Everything withheld is NEWER than everything printed, so it is
+# newer than the stamp written below and the next round prints it -- a bound,
+# not a loss. Cutting from the other end would bury the withheld ones forever.
+fresh = sorted((t for t in threads if moved(t)), key=newest)
+keep = int(cap)
+shown = fresh[:keep]
+# THE CUT GOES BETWEEN TIMESTAMPS, NEVER INSIDE ONE. Straight slicing looks
+# right and is the same defect as the one this file's `cutoff` already fixes,
+# one step earlier: GitHub stamps every inline comment of a single submitted
+# review with the same `createdAt`, so a review leaving more than `keep` inline
+# findings gives them all ONE timestamp. The cap then falls inside that run,
+# every shown mark equals the oldest withheld one, the stamp cannot advance past
+# it, and the next round computes the identical split -- the same twenty
+# forever, and the rest never. So the tie group at the boundary is dropped
+# whole...
+if len(shown) < len(fresh):
+    edge = newest(fresh[len(shown)])
+    shown = [t for t in fresh if newest(t) < edge]
+    # ...unless dropping it leaves nothing, which is the case where the whole
+    # cap sits inside one instant. Then the group is printed whole, over the
+    # cap: a bound that yields rather than a round that hands back nothing and
+    # cannot ever hand back more.
+    if not shown:
+        first = newest(fresh[0])
+        shown = [t for t in fresh if newest(t) == first]
+withheld = fresh[len(shown):]
+
+print("--- unresolved review threads")
+for t in shown:
+    # The blank goes BEFORE each thread rather than after it, so the summary
+    # lines below and the caller's closing prose each get exactly one -- and a
+    # round that printed no thread at all still gets one, from the very end.
+    print()
+    first = ((t.get("comments") or {}).get("nodes") or [{}])[0]
+    who = ((first.get("author") or {}).get("login")) or "?"
+    stale = "  (outdated -- still open)" if t.get("isOutdated") else ""
+    print("%s:%s  by %s%s" % (t.get("path"), t.get("line"), who, stale))
+    # The id `resolveReviewThread` takes, so nothing has to be looked up twice.
+    print("  thread: %s" % t.get("id"))
+    for line in (first.get("body") or "").splitlines():
+        print("  " + line)
+    # The thread MOVED because somebody answered, and the answer is the part
+    # that is new. Printed only when there is one: on a thread of one comment
+    # `latestComment` is that same comment back again.
+    if ((t.get("comments") or {}).get("totalCount") or 0) > 1:
+        last = ((t.get("latestComment") or {}).get("nodes") or [{}])[0]
+        print("  + newest reply by %s at %s:"
+              % (((last.get("author") or {}).get("login")) or "?", newest(t)))
+        for line in (last.get("body") or "").splitlines():
+            print("    " + line)
+
+if not threads:
+    print("none.")
+else:
+    # Every open thread this round did NOT print, in the two ways it can happen.
+    # Both are counted whatever else was printed: a round that shows one moved
+    # thread and silently omits five open ones is the noise problem solved by
+    # creating a blindness problem, and those five still block the merge.
+    quiet = len(threads) - len(shown) - len(withheld)
+    if withheld:
+        print("...and %d more that moved, withheld rather than cut mid-comment. "
+              "They are the newest, so the next round prints them."
+              % len(withheld))
+    if quiet:
+        # "nothing NEW to read", not "nothing has changed": a thread suppressed
+        # by the author test above did change -- the agent answered it -- and
+        # one whose newest comment is the agent's can be hiding a reviewer
+        # comment behind it, because only the newest is fetched. Rare (the round
+        # that carried the reviewer's comment would have printed it), bounded by
+        # the line below, and not worth a wider query -- but the sentence must
+        # not claim more than the test does.
+        print("%d unresolved thread(s) not printed: nothing new to read on them "
+              "since the round this last handed back. They still block the merge."
+              % quiet)
+    if withheld or quiet:
+        print("Every open thread, with its id:")
+        print(status)
+if partial:
+    print("(this PR has more review threads than one read returns, so that list "
+          "is partial:)")
+    print(status)
+print()
+
+# The third line of the stamp: the newest thread comment this round handed back.
+# Never lower than what an earlier round recorded -- a round that printed
+# nothing must not reopen everything the round before it closed out.
+marks = [seen_at] + [newest(t) for t in shown]
+stamp_at = max(marks)
+if withheld:
+    # ...and never as high as the oldest thing WITHHELD, which is not the same
+    # statement. Every inline comment of one submitted review shares a
+    # `createdAt`, so the newest thread printed and the oldest withheld routinely
+    # carry the SAME timestamp -- the cap falls inside one instant rather than
+    # between two. Stamping it would suppress that withheld thread for good:
+    # `head -200`'s silent cut, moved one layer down and made permanent.
+    cutoff = min(newest(t) for t in withheld)
+    below = [m for m in marks if m < cutoff]
+    stamp_at = max(below) if below else seen_at
+with open(stamp_path, "a") as fh:
+    fh.write("%s\n" % stamp_at)
+PY
+      else
+        echo "--- could not read this PR's review threads. They are what merge-gate"
+        echo "    counts, so do not treat that as none:"
+        echo "  ./scripts/fleet/review-status.sh $pr"
+        echo
+      fi
+
       # The literal `0`, and nothing else. An empty file is a review that did
       # not say -- from a brief that predates the trailer, or one that dropped
       # it -- and reading that as "no Important findings" is the one way this
@@ -587,13 +816,11 @@ PY
         echo "issue for anything worth keeping -- name it in the answer so the next reader"
         echo "can find it."
         echo
-        echo "Where you disagree with an inline finding, reply on the thread with the"
-        echo "reason rather than ignoring it, and RESOLVE EVERY THREAD -- the answer does"
-        echo "not do that for you. merge_gate blocks on an unresolved thread whatever the"
-        echo "counts say, so a nit left as an open thread holds the branch just as an"
-        echo "Important one would:"
-        echo "  ./scripts/fleet/review-status.sh $pr     # prints the open threads and their ids"
-        echo "  ./scripts/fleet/resolve-thread.sh <id>...  # and closes them"
+        echo "Where you disagree with a thread, reply on it with the reason rather than"
+        echo "ignoring it, and RESOLVE EVERY THREAD -- the answer does not do that for you."
+        echo "merge-gate refuses the PR while one is open, whatever the counts say, so a nit"
+        echo "left as an open thread holds the branch just as an Important one would:"
+        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
         echo
         echo "Pushing a nit fix instead is what costs: the push moves the head, a moved"
         echo "head invalidates the review that asked for the fix, and the reviewer runs"
@@ -601,33 +828,20 @@ PY
         echo "way with this script never once run. If something here IS worth a commit,"
         echo "make it -- but make that a decision, not the default."
         echo
-        # The agent taking the sanctioned exception was the one reader here
-        # with no instruction: told a push is available and not what it costs.
-        # The other branch says this and this branch did not. Found by the
-        # independent review.
         echo "If you do push: that ends this round. The review above is invalidated by the"
         echo "new head, the reviewer runs again on what you sent, and there is nothing left"
         echo "to answer here -- come back to this script rather than to answer-review.sh."
+        echo "  ./scripts/fleet/review-status.sh $pr"
       else
-        echo "Fix what is real. Where you disagree, reply on the thread with the reason"
-        echo "rather than ignoring it, and resolve every thread."
-        echo
-        echo "If you CHANGED anything: push, and come back here. The push re-runs the"
-        echo "reviewer, and the review of what you sent is the next round's -- there is no"
-        echo "review on the new head yet, so there is nothing to answer."
-        echo
-        echo "If you changed NOTHING -- nothing needed it, or you disagree -- say so, which"
-        echo "is what keeps the branch from merging out from under the findings:"
+        echo "Fix what is real; where you disagree, reply on the thread with the reason."
+        echo "Then resolve every thread -- merge-gate refuses the PR while one is open:"
+        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
+        echo "Changed something? Push and come back here. Changed nothing? Say so --"
+        echo "it is the one thing standing between these findings and auto-merge:"
         echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
-        # Only here. The nit-only branch above already prints this WITH the gloss
-        # that says what it is for, and printing it again bare read as a second,
-        # different step. Found by the independent review.
         echo "  ./scripts/fleet/review-status.sh $pr"
       fi
-      echo
-      echo "Auto-merge was armed when this PR was opened, so from here the only thing"
-      echo "holding the branch is that answer -- unless the review above said it found"
-      echo "nothing, in which case it merges on its own and there is nothing to answer."
+      echo "Why each of those, in full: ./scripts/fleet/issue-command.sh --after-pr <issue>"
       # The round cap counts rounds of DISAGREEMENT. A review of a head this
       # worktree has already moved past is not one: the agent will push what it
       # has, the reviewer will run again, and that answer is the round. Spending

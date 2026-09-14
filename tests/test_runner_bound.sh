@@ -657,12 +657,21 @@ EOF
   # exit 77 and assert nothing, on a lint that runs for every PR. The rows below
   # cannot see that: they fabricate the filename inside their own trees.
   # Found by the independent review.
-  sentinel="$(sed -n 's/^[A-Z_]* = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh")"
-  [ -n "$sentinel" ] \
-    || fail "evals/lint.sh no longer decides which repository it is in with one os.path.exists"
-  [ -e "$REPO_ROOT/$sentinel" ] \
-    || fail "evals/lint.sh keys on $sentinel, which is not in this tree: the phase check now asserts nothing here"
-  ok "the file evals/lint.sh keys on is the one this repository actually has"
+  # `sort -u`, because there is now more than one block asking the question --
+  # armaatus/autofleet#54's reading ceiling has to know whose CLAUDE.md it is
+  # looking at, for the same hard-rule-1 reason the registry check does. Reading
+  # them as one string made this row fail on a two-line `[ -e ]`, which is the
+  # phase doing its job: the property is not "exactly one block asks" but "every
+  # block that asks gets the same answer". Two different sentinels is two places
+  # the lint can be wrong about which repository it is in.
+  sentinels="$(sed -n 's/^[A-Z_]* = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh" | sort -u)"
+  [ -n "$sentinels" ] \
+    || fail "evals/lint.sh no longer decides which repository it is in with an os.path.exists"
+  [ "$(printf '%s\n' "$sentinels" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "evals/lint.sh decides which repository it is in from more than one file: $(tr '\n' ' ' <<<"$sentinels")"
+  [ -e "$REPO_ROOT/$sentinels" ] \
+    || fail "evals/lint.sh keys on $sentinels, which is not in this tree: the phase check now asserts nothing here"
+  ok "every block of evals/lint.sh that asks which repository this is keys on the same file, and this tree has it"
 
   # A tree that reaches the cross-check itself. Neither tree above does: one
   # exits at the discriminator, the other at the missing registry, so the loop

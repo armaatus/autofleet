@@ -6,6 +6,12 @@
 # guard.py reads. Per worktree, never shared, never committed.
 .autofleet/run/
 
+# What the local review passes write for record-review.sh. The findings belong
+# in the PR body, which is where merge-gate reads them; the file is the working
+# copy on the way there. `git add -A` swept one into a commit on #54, which is
+# why it is named here rather than remembered.
+/findings.md
+
 __pycache__/
 *.pyc
 .DS_Store

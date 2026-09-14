@@ -101,6 +101,47 @@
 #   test_review_mode.sh queue     review_open_prs(): nothing in `github` mode; in
 #                                 `local` mode one reviewer per open non-draft PR
 #                                 of our own, and never two on one PR.
+#   test_review_mode.sh await_threads
+#                                 await-review.sh hands back the PR's UNRESOLVED
+#                                 review threads and not its resolved ones, and
+#                                 never calls `pulls/<n>/comments` -- the
+#                                 endpoint that cannot say which is which, and
+#                                 which used to hand the agent every comment the
+#                                 PR ever had, once per round.
+#   test_review_mode.sh await_quiet
+#                                 ...and on round two, a thread that has not
+#                                 moved since the round that handed it back is
+#                                 not handed back again. It is still open, so
+#                                 the output names review-status.sh.
+#   test_review_mode.sh await_moved
+#                                 ...while a thread that HAS moved -- the agent
+#                                 replied and the reviewer answered -- is. This
+#                                 is the row that goes red if the dedupe above
+#                                 is written as "never twice" rather than
+#                                 "not unless it changed".
+#   test_review_mode.sh await_own_reply
+#                                 ...but the agent's OWN reply is not the thread
+#                                 moving: that is the loop doing what it is told
+#                                 ("reply with the reason"), and counting it as
+#                                 news hands the finding back with the answer
+#                                 under it. Only meaningful in `github` mode --
+#                                 in `local` mode reviewer and author are one
+#                                 account and the wait shows the thread rather
+#                                 than guessing.
+#   test_review_mode.sh await_own_reply_local
+#                                 ...and the other half of that, which is the
+#                                 half this repo runs: in `local` mode the two
+#                                 accounts are one, so the same reply is handed
+#                                 back rather than guessed at. Without this row,
+#                                 deleting the `local` disjunct leaves every
+#                                 other await phase green.
+#   test_review_mode.sh await_cap the cap cuts BETWEEN timestamps, never inside
+#                                 one. A review stamps every inline comment it
+#                                 leaves with the same createdAt, so a cut
+#                                 inside that run leaves the stamp unable to
+#                                 advance past it and the remainder is never
+#                                 handed back by any round. Three threads in one
+#                                 instant against a cap of two.
 #   test_review_mode.sh stubwrite the reviewer stub's heredoc is unquoted, so its
 #                                 body is expanded on the way to the file and a
 #                                 backtick in prose is a command. One named
@@ -160,6 +201,15 @@ case "$*" in
   *"pr view"*"--json state"*) cat "${GH_PR_STATE:-/dev/null}" 2>/dev/null || true
                               [ -s "${GH_PR_STATE:-/dev/null}" ] || echo CLOSED
                               exit 0 ;;
+  # await-review.sh's throttled rollup. Narrow on purpose -- the generic
+  # `pr view` arm below answers with a bare sha, which is not JSON, and the
+  # rollup parse would fall through to "the rollup came back empty" and blind
+  # the red-build, dead-review and conflict checks the phase is not testing.
+  *"--json statusCheckRollup,mergeStateStatus,baseRefName"*)
+    cat "${GH_ROLLUP:-/dev/null}" 2>/dev/null
+    [ -s "${GH_ROLLUP:-/dev/null}" ] \
+      || echo '{"statusCheckRollup":[],"mergeStateStatus":"CLEAN","baseRefName":"main"}'
+    exit 0 ;;
   *"pr view"*)   cat "$GH_HEAD"; exit 0 ;;
   *"api"*"/reviews"*)
     # The count review.sh asks for after the reviewer exits: reviews on the head.
@@ -169,12 +219,24 @@ print(len([r for r in json.load(open(sys.argv[1]))
            if r.get("commit_id") == sys.argv[2]]))' "$GH_REVIEWS" "$(cat "$GH_HEAD")"
     exit 0 ;;
   *graphql*)
-    python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" <<'PY'
+    # One arm for both GraphQL readers: await-review.sh's own reviews query and
+    # the paged one in .github/scripts/pr_payload.sh. They ask for different
+    # fields of the same pull request, so answering both from one document is
+    # the fixture equivalent of the two sharing a query.
+    #
+    # `$GH_THREADS` names a file holding the review-thread list, in the shape
+    # pr_payload.sh emits it, and is empty by default so every phase written
+    # before threads existed here is unaffected. A review record may carry its
+    # own `submitted_at`; without one it gets the fixed date the suite has
+    # always used.
+    python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" "${GH_THREADS:-}" <<'PY'
 import json, sys
 records = json.load(open(sys.argv[1]))
-nodes = [{"state": "COMMENTED", "submittedAt": "2026-09-10T10:00:00Z",
+nodes = [{"state": "COMMENTED",
+          "submittedAt": r.get("submitted_at") or "2026-09-10T10:00:00Z",
           "commit": {"oid": r["commit_id"]}, "author": {"login": r["user"]},
           "body": r["body"], "comments": {"totalCount": 0}} for r in records]
+threads = json.load(open(sys.argv[3])) if sys.argv[3] else []
 print(json.dumps({"data": {"repository": {"pullRequest": {
     "headRefOid": sys.argv[2],
     "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
@@ -182,7 +244,7 @@ print(json.dumps({"data": {"repository": {"pullRequest": {
     "reviews": {"nodes": nodes},
     "comments": {"nodes": []},
     "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None},
-                      "nodes": []}}}}}))
+                      "nodes": threads}}}}}))
 PY
     exit 0 ;;
 esac
@@ -221,6 +283,7 @@ OSTUB
   GH_CALLS="$WORK/calls"; : >"$GH_CALLS"
   GH_HEAD="$WORK/head"; printf '%s' "$PR_HEAD" >"$GH_HEAD"
   GH_REVIEWS="$WORK/reviews"; printf '[]' >"$GH_REVIEWS"
+  GH_THREADS=""; export GH_THREADS
   GH_PRLIST="$WORK/prlist"
   printf '[{"number":42,"isDraft":false,"headRefOid":"%s"}]\n' "$PR_HEAD" >"$GH_PRLIST"
   export GH_CALLS GH_HEAD GH_REVIEWS GH_PRLIST
@@ -349,6 +412,68 @@ await() {
 }
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
+
+# ---------------------------------------------------------------- await-review
+#
+# The three helpers the `await_*` phases share. They plant what a PR carries --
+# a review record and its review THREADS -- and run the wait against it.
+#
+# One blocking call with a three-second deadline, because everything these
+# phases assert happens on the FIRST poll: the review is already there. A phase
+# that reaches the deadline has failed, and does so in three seconds rather than
+# in the script's default forty-five minutes.
+await_it() {
+  (cd "$WORK/repo" \
+     && AWAIT_REVIEW_POLL=1 AWAIT_REVIEW_DEADLINE=3 ./scripts/fleet/await-review.sh 42)
+}
+
+# A review on the current head, submitted at `$1`. Its author is NOT the PR's,
+# so `independent_reviews` counts it whatever the review mode is -- these phases
+# are about what the wait hands back, not about who may review.
+plant_review() {
+  python3 - "$GH_REVIEWS" "$(cat "$GH_HEAD")" "$1" <<'XX'
+import json, sys
+path, oid, at = sys.argv[1:4]
+records = json.load(open(path))
+records.append({"commit_id": oid, "user": "reviewer", "submitted_at": at,
+                "body": "A real review body, long enough to be worth reading "
+                        "and to clear MIN_REVIEW_BODY.\n"
+                        "<!-- review-findings: 1 -->"})
+json.dump(records, open(path, "w"))
+XX
+}
+
+# One review thread, replacing any already planted under the same id:
+#   plant_thread <id> <resolved 0|1> <first comment> <newest comment createdAt>
+#                [<newest comment body> [<newest comment author>]]
+#
+# The fifth argument is what makes a thread MOVE. Without it the thread is one
+# comment and the timestamp is that comment's; with it the thread has gained a
+# reply, which is the shape of a reviewer answering an agent -- and the only
+# thing that separates "still open" from "something new to read".
+#
+# The sixth says WHO replied, defaulting to the reviewer. `armaatus` is the
+# fixture PR's own author, which is how a phase plants the agent replying to
+# itself.
+plant_thread() {
+  GH_THREADS="$WORK/threads"; export GH_THREADS
+  [ -s "$GH_THREADS" ] || printf '[]' >"$GH_THREADS"
+  python3 - "$GH_THREADS" "$@" <<'XX'
+import json, sys
+path, tid, resolved, body, at = sys.argv[1:6]
+reply = sys.argv[6] if len(sys.argv) > 6 else ""
+who = sys.argv[7] if len(sys.argv) > 7 else "reviewer"
+threads = [t for t in json.load(open(path)) if t["id"] != tid]
+threads.append({
+    "id": tid, "isResolved": resolved == "1", "isOutdated": False,
+    "path": "scripts/fleet/await-review.sh", "line": 42,
+    "comments": {"totalCount": 2 if reply else 1,
+                 "nodes": [{"author": {"login": "reviewer"}, "body": body}]},
+    "latestComment": {"nodes": [{"author": {"login": who},
+                                 "body": reply or body, "createdAt": at}]}})
+json.dump(threads, open(path, "w"))
+XX
+}
 
 # `review_open_prs`, with the reason kept rather than piped away.
 #
@@ -1788,7 +1913,196 @@ PY2
   ok "...while the paths the heredoc is unquoted for still expand"
   ;;
 
+# -------------------------------------------------------------- await_threads
+  await_threads)
+  make_fixture
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  plant_thread T_DONE 1 "the finding round one already fixed" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the wait did not end on a review (got $rc)"; }
+
+  grep -qF "the open finding" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the unresolved thread was not handed back"; }
+  ok "an unresolved thread is handed back, with the comment that opened it"
+  grep -qF "T_OPEN" "$WORK/out" \
+    || fail "the thread id resolve-thread.sh takes is not in the output"
+  ok "...and the id resolve-thread.sh takes, so nothing is looked up twice"
+
+  # The whole point. A resolved thread is a finding already dealt with, and
+  # handing it back is what made round two a re-read of round one.
+  grep -qF "round one already fixed" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "a RESOLVED thread was handed back"; }
+  ok "a resolved thread is not handed back at all"
+
+  # Asked of the CALL LOG rather than of the output: the endpoint is what cannot
+  # answer "is this resolved", so the fix is that it is never asked, not that
+  # its answer is filtered afterwards.
+  grep -qF "pulls/42/comments" "$GH_CALLS" \
+    && fail "the wait still calls the endpoint that cannot report isResolved"
+  ok "...and pulls/42/comments, which cannot report isResolved, is never called"
+  ;;
+
+# ---------------------------------------------------------------- await_quiet
+  await_quiet)
+  make_fixture
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+  grep -qF "the open finding" "$WORK/round1" \
+    || fail "round one did not hand the thread back, so round two proves nothing"
+
+  # A SECOND review on the SAME head, which is what `review_requested` produces
+  # -- otherwise the wait stops on "you have already seen this one" and never
+  # reaches the threads at all.
+  plant_review "2026-09-10T11:00:00Z"
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "the open finding" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "round two handed back a thread that has not moved"; }
+  ok "a thread unchanged since the round that handed it back is not handed back again"
+
+  # Not printing it is only half right: the thread is still open and still
+  # blocks the merge, so something has to say where to find it. Asserted on the
+  # sentence that BRANCH emits, not on `review-status.sh`, which the closing
+  # prose prints unconditionally -- a grep for the script name matches on every
+  # run that reaches exit 0 and so cannot fail. Found by round 2 of the
+  # independent review.
+  grep -qF "unresolved thread(s) not printed" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the still-open thread was not counted"; }
+  grep -qF "Every open thread, with its id:" "$WORK/out" \
+    || fail "the count did not say where the rest is"
+  ok "...and it is counted, with review-status.sh named beside the count"
+  ;;
+
+# ---------------------------------------------------------------- await_moved
+  await_moved)
+  make_fixture
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+
+  # The agent replied and the reviewer answered: same thread, still unresolved,
+  # newest comment newer than the round that handed it back. That is the case
+  # the timestamp exists to keep -- suppressing it would be the old bug with the
+  # sign flipped, and a live disagreement lost.
+  plant_review "2026-09-10T11:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T11:00:01Z" \
+    "not convinced -- the guard still fires on the empty case"
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "the guard still fires on the empty case" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "a thread that MOVED was not handed back"; }
+  ok "a thread whose newest comment is newer than the last round is handed back"
+  ;;
+
+# ------------------------------------------------------------ await_own_reply
+  await_own_reply)
+  # The agent replying to a thread is not the thread MOVING. It is the loop this
+  # script prints doing what it says -- "reply on the thread with the reason" --
+  # and counting it as news hands the original finding straight back, with the
+  # agent's own answer under it. That is round two re-reading round one by
+  # another route, which is the whole defect this file is closing.
+  #
+  # `github` mode, because the distinction only exists there: in `local` mode the
+  # reviewer and the PR author are ONE account (merge_gate.review_mode), nothing
+  # in the payload can tell the two apart, and the wait prints the thread rather
+  # than guessing -- showing a finding twice beats hiding one.
+  make_fixture
+  printf 'AUTOFLEET_REVIEW_MODE=github\n' >"$WORK/repo/.autofleet/config"
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+  grep -qF "the open finding" "$WORK/round1" \
+    || fail "round one did not hand the thread back, so round two proves nothing"
+
+  plant_review "2026-09-10T11:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T11:00:01Z" \
+    "disagree -- the guard already covers the empty case" armaatus
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "the open finding" "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "the agent's own reply counted as the thread moving"; }
+  ok "a thread whose newest comment is the agent's own reply has not moved"
+  # The branch's own sentence, for the reason `await_quiet` gives.
+  grep -qF "unresolved thread(s) not printed" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "the still-open thread was not counted"; }
+  ok "...and it is still counted as open, with review-status.sh named beside it"
+  ;;
+
+# ------------------------------------------------------ await_own_reply_local
+  await_own_reply_local)
+  # The other half of `await_own_reply`, and the half this repo itself runs. In
+  # `local` mode the reviewer and the PR author are ONE GitHub account
+  # (merge_gate.review_mode), so an author-authored newest comment is as likely
+  # to be the reviewer answering as the agent replying -- and the wait prints it
+  # rather than guessing, because hiding a live finding is the worse of the two
+  # mistakes. Without this row, deleting `local or` from `moved()` leaves every
+  # other await phase green: they all plant `reviewer` as the replier, so the
+  # author test is never the thing that decides.
+  make_fixture
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T10:00:01Z"
+  await_it >"$WORK/round1" 2>&1 \
+    || { cat "$WORK/round1" >&2; fail "round one did not end on a review"; }
+
+  plant_review "2026-09-10T11:00:00Z"
+  plant_thread T_OPEN 0 "the open finding" "2026-09-10T11:00:01Z" \
+    "and here is the answer, from the account that is also the author" armaatus
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "round two did not end on the new review (got $rc)"; }
+
+  grep -qF "from the account that is also the author" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "local mode suppressed a comment it cannot attribute"; }
+  ok "in local mode an author-authored reply is handed back, not guessed at"
+  ;;
+
+# ------------------------------------------------------------------ await_cap
+  await_cap)
+  # The cap cuts BETWEEN timestamps, never inside one. GitHub stamps every
+  # inline comment of a single submitted review with the same `createdAt`, so a
+  # review leaving more than AWAIT_REVIEW_MAX_THREADS inline findings gives them
+  # all ONE. Cut inside that run and every printed thread carries the oldest
+  # withheld one's timestamp: the stamp cannot advance past it, the next round
+  # computes the identical split, and the remainder is never handed back at all
+  # -- `head -200`'s silent cut, moved one layer down and made permanent.
+  #
+  # Three threads in one instant against a cap of two, so the group can only be
+  # printed whole or cut wrong. Found by round 2 of the independent review, on
+  # the fix for the same defect one step earlier.
+  make_fixture
+  export AWAIT_REVIEW_MAX_THREADS=2
+  plant_review "2026-09-10T10:00:00Z"
+  plant_thread T_ONE   0 "the first finding"  "2026-09-10T10:00:01Z"
+  plant_thread T_TWO   0 "the second finding" "2026-09-10T10:00:01Z"
+  plant_thread T_THREE 0 "the third finding"  "2026-09-10T10:00:01Z"
+  await_it >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the wait did not end on a review (got $rc)"; }
+
+  for finding in "the first finding" "the second finding" "the third finding"; do
+    grep -qF "$finding" "$WORK/out" \
+      || { cat "$WORK/out" >&2
+           fail "the cap cut inside one timestamp and lost: $finding"; }
+  done
+  ok "a tie group larger than the cap is printed whole rather than cut inside"
+
+  # ...and the next round agrees there is nothing new, which is what says the
+  # first round really handed all three back rather than merely printing them.
+  plant_review "2026-09-10T11:00:00Z"
+  await_it >"$WORK/round2" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/round2" >&2; fail "round two did not end on the new review (got $rc)"; }
+  grep -qF "the first finding" "$WORK/round2" \
+    && { cat "$WORK/round2" >&2; fail "round two re-read what round one handed back"; }
+  ok "...and round two treats all three as already handed back"
+  ;;
+
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap" >&2
   exit 2 ;;
 esac

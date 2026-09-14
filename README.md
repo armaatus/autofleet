@@ -89,7 +89,9 @@ thing that makes the rule readable a year later.
 
 ## Docs
 
-- [docs/WORKFLOW.md](docs/WORKFLOW.md) — the loop an agent runs inside a worktree.
+- [docs/WORKFLOW.md](docs/WORKFLOW.md) — the loop, why each rule of it exists,
+  and what it cost to learn. The maintainer's page, read once; an agent's own
+  instructions are the brief `scripts/fleet/issue-command.sh` prints.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every knob, and what it costs.
 - [docs/RUNNERS.md](docs/RUNNERS.md) — the driver contract.
 - [REVIEW.md](REVIEW.md) — the review policy `/code-review` and the workflow follow.
