@@ -54,6 +54,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The `handoff` row of evals/lint.sh's ceilings table, read rather than restated.
+. "$REPO_ROOT/tests/ceiling.sh"
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 WORK=""
@@ -539,6 +542,49 @@ case "${1:-}" in
       && fail "stage 1 carries the after-every-round instruction, which is stage 2's"
     echo "ok: stage 1 asks for the note when the work is put down, stage 2 at the push"
     ;;
+  ceiling)
+    # The span stage 1 prints AHEAD of the brief, in a worktree that has a note.
+    #
+    # It is the one piece of a resumed session's first read that neither word
+    # ceiling sees: both `brief` and `reading` are measured on a fixture with no
+    # note, and the note is printed before the `---` the brief opens with
+    # precisely so they go on measuring the brief. So a resumed session reads
+    # the reading ceiling's figure PLUS this, and until armaatus/autofleet#56
+    # nothing said how much that was. It gets its own row rather than being
+    # folded into `reading`, because its length is set by a knob a HOST project
+    # owns (AUTOFLEET_HANDOFF_MAX_WORDS) and a vendored ceiling that a host's
+    # own config can breach is hard rule 1's trap -- the same one the `brief`
+    # row avoids by never substituting the host's test command.
+    #
+    # Measured at the DEFAULT autofleet ships, for that reason, and read out of
+    # config.sh rather than restated so raising the default moves what is
+    # measured here. The framing around the note is inside the span: it is words
+    # the agent receives, and it is the half that can grow without anybody
+    # noticing, since the cap never applied to it.
+    make_fixture
+    cap="$(sed -n 's/^: "${AUTOFLEET_HANDOFF_MAX_WORDS:=\([0-9]*\)}"$/\1/p' \
+           "$REPO_ROOT/scripts/fleet/config.sh")"
+    case "$cap" in ''|*[!0-9]*) fail "could not read AUTOFLEET_HANDOFF_MAX_WORDS out of config.sh; this phase would measure against nothing" ;; esac
+
+    # A note at exactly the cap: the longest one handoff.sh will accept, which
+    # is the worst case an agent can be handed. Written THROUGH handoff.sh, so a
+    # note this phase measures is one the writer would really have stored.
+    at_cap="$(awk -v n="$cap" 'BEGIN { for (i = 0; i < n; i++) printf "word " }')"
+    printf '%s\n' "$at_cap" | handoff write 42 --stdin >/dev/null 2>&1 \
+      || fail "handoff.sh refused a note of exactly $cap words, so this phase would measure an absent note"
+
+    out="$(brief 42 2>&1)" || fail "issue-command.sh exited non-zero: $out"
+    span="$(sed -n '/^## What the last attempt on this issue left$/,/^---$/p' <<<"$out" | sed '$d')"
+    [ -n "$span" ] \
+      || fail "stage 1 printed no handoff note for a worktree that has one, so this phase is measuring nothing: $out"
+    words="$(wc -w <<<"$span" | tr -d ' ')"
+
+    limit="$(ceiling handoff)" || exit 1
+    [ "$words" -le "$limit" ] \
+      || fail "$(ceiling_over handoff "$words"), or cut the framing around the note"
+    echo "ok: a resumed session is handed $words words of note before the brief, ceiling $limit"
+    ;;
+
   *)
-    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|ships|brief}" >&2; exit 2 ;;
+    echo "usage: $0 {write|print|cap|absent|resumed|relaunch|empty|refs|retry|ships|brief|ceiling}" >&2; exit 2 ;;
 esac

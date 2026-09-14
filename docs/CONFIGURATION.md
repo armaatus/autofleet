@@ -447,6 +447,70 @@ A malformed file is **fatal**, not ignored. A guard that silently falls back to
 "protect nothing" on a typo reports success on every write it was installed to
 stop.
 
+## The ceilings
+
+Some of what the fleet costs is text: the working agreement, the opening brief,
+the review policy, what a test run prints, what a review round hands back. All
+of it is read by an agent whose context has to survive a plan, an implementation
+and three review rounds — and prose grows back one useful paragraph at a time.
+The opening brief reached 1,521 words that way and nothing objected at any
+single step.
+
+So every one of those limits is a row in the **ceilings table at the top of
+[`evals/lint.sh`](../evals/lint.sh)**, and each row carries five fields:
+
+| Field | What |
+|---|---|
+| name | the key `ceiling <name>` is called with |
+| limit | the number, and the only copy of it. The **last allowed** value, on every row |
+| issue | the issue that set it. Every row cites one |
+| what is measured | the membership, so a limit and its contents cannot drift apart |
+| what measures it | a `; `-separated list of `evals/lint.sh` and `tests/test_<suite>.sh <phase>` entries — **every** place that reads the number, not just the first |
+
+The rows are `claude-md` and `reading` and `brief` — the text an agent reads
+before its first edit — `handoff`, the note a resumed session is handed ahead of
+the brief, and `testrun` and `round`, which bound what a green test run and one
+clean review round print back. **No figure is written here, or in any comment.**
+The table holds the limit; the checks print what they measured. A measured
+number written into prose is stale by the next commit.
+
+Three of the rows bound the OUTPUT of a script rather than the contents of a
+file, because a ceiling has to be measured from what the agent *receives* — a
+check that reads the source counts words the agent never sees and misses the
+ones `sed` substitutes in. Those are measured by a test phase that runs the
+script, so a host installation, which does not vendor `tests/`, gets the three
+`evals/lint.sh` measures and the numbers for the rest.
+
+### Raising one
+
+**Raising a ceiling is allowed, and it is the point.** Edit the row's second
+field. That is one line in a diff, reviewed like any other change, rather than a
+paragraph nobody notices — and a lint that cannot be raised is one that gets
+deleted the first time it is inconvenient. Say in the PR body what the room was
+bought for.
+
+Two things to know before you do:
+
+- **A number that moves on the branch alone has not moved.**
+  `.github/workflows/agent-config.yml` re-runs *main's* copy of the lint against
+  the branch, so the old ceiling is still the one in force until the change
+  lands. Paying for the words instead — tightening something else — is usually
+  faster than arguing with that, and it is what the brief did when it tried to
+  buy a sentence at 425 words.
+- **Nothing may restate the number.** A row measured by a test phase reads it
+  through `tests/ceiling.sh`; `evals/lint.sh` reads its own through `ceiling`.
+  The `== the ceilings` check fails the build if a row cites no issue, names a
+  phase the runner never calls, or is a number nothing reads.
+
+Adding a row is the same edit plus the check that measures it — a row with
+nothing behind it is a ceiling that has already stopped holding.
+
+**A ceiling bounds the text and nothing else.** The rest of what a run costs —
+tool output, files read twice, review rounds — is what [`fleet.sh
+cost`](#what-a-run-costs) measures, and [REVIEW.md](../REVIEW.md) asks a fleet
+PR body to carry that figure. The two halves belong together: the table stops
+the prompt growing, the cost report says whether anything actually got cheaper.
+
 ## Checking your work
 
 ```bash

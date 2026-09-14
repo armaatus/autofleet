@@ -104,6 +104,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# The `testrun` row of evals/lint.sh's ceilings table, read rather than restated.
+. "$REPO_ROOT/tests/ceiling.sh"
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Every run of the runner copy IN THE `skips` PHASE, except the three that set
@@ -913,15 +916,17 @@ EOF
   rc=$?
   [ "$rc" = 0 ] || fail "a green run did not pass: $(cat "$WORK/out")"
   green="$(wc -l <"$WORK/out" | tr -d " ")"
-  # FIVE because that is #52's acceptance bar, not because five is the shape:
-  # a green run is two lines, a blank and the summary, and stays two however
-  # many suites are registered (the row below). The slack is what a phase that
-  # DECLINES costs -- its label and its own reason -- which is the one thing
-  # allowed to push a green run past two, and the skip row further down spends
-  # it deliberately.
-  [ "$green" -le 5 ] \
-    || fail "a green run printed $green lines: $(cat "$WORK/out")"
-  ok "a green run is at most five lines"
+  # The bar is #52's, and since armaatus/autofleet#56 it is the `testrun` row of
+  # evals/lint.sh's ceilings table rather than a number spelled here -- one home
+  # for the limit, raised in a diff or not at all. Five is not the shape: a green
+  # run is two lines, a blank and the summary, and stays two however many suites
+  # are registered (the row below). The slack is what a phase that DECLINES costs
+  # -- its label and its own reason -- which is the one thing allowed to push a
+  # green run past two, and the skip row further down spends it deliberately.
+  bar="$(ceiling testrun)" || exit 1
+  [ "$green" -le "$bar" ] \
+    || fail "$(ceiling_over testrun "$green"): $(cat "$WORK/out")"
+  ok "a green run is at most $bar lines, and printed $green"
 
   grep -q "3 passed." "$WORK/out" \
     || fail "the green run printed no summary at all: $(cat "$WORK/out")"
@@ -998,7 +1003,7 @@ EOF
   ok "a phase that declined to judge still says so, and why"
 
   # ...and the bound survives it. This is the only tension in #52's acceptance:
-  # a green run is at most five lines AND a skip prints the phase's whole reason,
+  # a green run is at most `testrun` lines AND a skip prints the phase's whole reason,
   # and the shipped suite has a skippable phase (`teardown/reap`, on a machine
   # with no docker). The reason wins where they disagree -- a silent skip is the
   # failure the SKIPPABLE registry exists to prevent -- so what is asserted is
@@ -1007,8 +1012,8 @@ EOF
   # spec review, which noticed the shipped suite can carry a skip and the row
   # above could not see it.
   skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
-  [ "$skipped_lines" -le 5 ] \
-    || fail "a green run of two passes and one skip printed $skipped_lines lines: $(cat "$WORK/out")"
+  [ "$skipped_lines" -le "$bar" ] \
+    || fail "$(ceiling_over testrun "$skipped_lines") -- two passes and one skip: $(cat "$WORK/out")"
   grep -q "ok   " "$WORK/out" \
     && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
   grep -q "== " "$WORK/out" \
