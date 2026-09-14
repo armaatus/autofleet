@@ -2337,7 +2337,7 @@ JSON
     # a quiet pass cannot see. `launch` changes the list, so the cached copy
     # describes a world one worktree out of date -- and the read after it is what
     # makes `foundation_in_flight` on the next iteration see the worktree this
-    # launch just created. That guarantee is `foundation_cold_start`'s; this
+    # launch just created. That guarantee is `foundation_sees_launch`'s; this
     # phase is the cost half, and it fails in BOTH directions: at 1 the
     # invalidation is gone, at 5 the cache is.
     make_fixture ok
@@ -2382,6 +2382,94 @@ JSON
     [ "${n:-0}" = 2 ] \
       || fail "a pass that removed a worktree read the list $n times; the read after a removal is not optional"
     echo "ok: a removal drops the cached list too, not only the answer read off it"
+    ;;
+
+  poll_list_cache_unreadable)
+    # The cached read fails CLOSED. `[ -e ]` says the entry is an answer, but a
+    # `cat` that cannot read it prints nothing -- and an empty listing is not
+    # "could not tell", it is "no worktrees are running", which the launch gate
+    # reads as three free slots. This function's header opens with that exact
+    # failure: "reading a failed call as zero live worktrees is how one transient
+    # hiccup turns into three duplicate worktrees for issues that already have
+    # one". Found by both local review passes, independently.
+    #
+    # A DIRECTORY where the file should be, rather than `chmod 000`: it is the
+    # same "exists and will not read" to `[ -e ]` and to `cat`, and it stays that
+    # way for root, who ignores the mode bits and would pass this phase for the
+    # wrong reason on any machine that runs the suite as one.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
+      IN_POLL=true; forget_poll_answers
+      live_worktrees >/dev/null || { echo "seed=failed"; exit 0; }
+      rm -f "$POLL_CACHE/worktrees"; mkdir -p "$POLL_CACHE/worktrees"
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]" ) 2>/dev/null )"
+    grep -q "seed=failed" <<<"$out" \
+      && fail "the first read cached nothing, so what follows asserts nothing: $out"
+    grep -q "rc=" <<<"$out" \
+      || fail "the phase never reached the second read: $out"
+    grep -q "rc=0 answer=\[\]" <<<"$out" \
+      && fail "an unreadable cache answered 'no worktrees are running', with success: $out"
+    echo "ok: a cache entry that will not read is a failure, not an empty fleet"
+    ;;
+
+  poll_list_reshape_fails)
+    # ...and so does the reshape. The awk that turns the driver's
+    # `path<TAB>branch<TAB>issue` into the `issue<TAB>path` every caller reads
+    # used to be this function's LAST command, so an awk that died came back as
+    # the function's own non-zero. Caching made it a middle command, with a
+    # `print_listing` after it that always succeeds -- and an empty listing
+    # returned with SUCCESS is three free slots, cached for the rest of the pass.
+    # Found by the local review.
+    #
+    # A shell function shadowing `awk`, because what is being modelled is an awk
+    # that is not there or cannot run -- this file is vendored onto host images
+    # nobody here chose. Emptying `PATH` would take the rest of the dispatcher
+    # with it and prove nothing about this line.
+    make_fixture ok
+    worktree_on_issue 4
+    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
+      IN_POLL=true; forget_poll_answers
+      awk() { return 127; }
+      answer="$(live_worktrees)"; echo "rc=$? answer=[$answer]" ) 2>/dev/null )"
+    grep -q "rc=" <<<"$out" || fail "the phase never reached the read: $out"
+    grep -q "rc=0" <<<"$out" \
+      && fail "a reshape that failed answered 'no worktrees are running', with success: $out"
+    [ -e "$AUTOFLEET_DIR/poll-cache/worktrees" ] \
+      && fail "a reshape that failed cached its empty answer for the rest of the pass"
+    echo "ok: a reshape that fails is a failure, not an empty fleet"
+    ;;
+
+  foundation_sees_launch)
+    # armaatus/autofleet#30's third acceptance, and it did not hold before this
+    # phase existed -- not here and not on main. `launch`'s cache drop is what
+    # makes the NEXT iteration's `foundation_in_flight` see the worktree the
+    # launch just created, and deleting that line failed NOTHING:
+    # `foundation_cold_start`, `foundation_launch_held` and `foundation_holds`
+    # all stayed green. The launch loop breaks on `is_foundation "$labels"` from
+    # the issue it has just launched and never reaches the next iteration, so
+    # every phase that drives `cmd_run` stops one step short of the line.
+    #
+    # That per-iteration check's own comment already says it covers "the
+    # across-passes half". The within-a-pass half had no phase at all, which is
+    # hard rule 3's shape -- and it is why #30's premise, that the drop "is
+    # load-bearing enough to have its own test phase", is stale. #30 is edited
+    # to say so.
+    #
+    # Asserted on the FUNCTION rather than through `cmd_run`, because the launch
+    # loop's own break is exactly what hides this.
+    make_fixture ok
+    issue_labels "ready,foundation"
+    out="$( ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh
+      IN_POLL=true; forget_poll_answers
+      foundation_in_flight; echo "before=$?"
+      launch 44 "the foundation one"
+      foundation_in_flight; echo "after=$?" ) 2>&1 )"
+    grep -q "before=1" <<<"$out" \
+      || fail "it held with nothing in flight, so what follows asserts nothing: $out"
+    grep -q "after=0" <<<"$out" \
+      || fail "the check after a launch did not see the foundation worktree that launch created: $out"
+    echo "ok: the check after a launch sees the worktree the launch created"
     ;;
 
   status_list_uncached)

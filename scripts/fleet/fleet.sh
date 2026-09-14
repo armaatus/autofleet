@@ -173,8 +173,9 @@ forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
 
 # THE POLL CACHE IS THE POLL'S, and this is the line that says so rather than
 # leaving it to the call graph. `cmd_run` sets it once per pass; every other
-# entry point leaves it false and `live_worktrees` then reads the runner
-# directly, writing nothing.
+# entry point -- `status`, `stop`, `reap`, a test sourcing one function -- leaves
+# it false, and `live_worktrees` then reads the runner directly and writes
+# nothing.
 #
 # #35's acceptance -- "fleet.sh status leaves $STATE_DIR byte-identical" -- held
 # until now because no helper `cmd_status` happened to call wrote to the cache.
@@ -661,11 +662,12 @@ count_parked_owned() {
 # one; both go through `forget_worktree_answers`, so the two per-poll answers
 # derived from this list cannot drift onto two different invalidation points.
 #
-# A FAILED read is NOT cached, which is also what keeps `foundation_in_flight`'s
-# "could not read the worktree list" branch reachable. The first read of a pass
-# is the run loop's, and that one skips the whole pass on failure -- but `launch`
-# drops the cache mid-pass, so the next read really is `foundation_in_flight`'s
-# own, and it is the single place that failure is handled after a launch.
+# A FAILED read is NOT cached, so the next caller in the pass asks again rather
+# than inheriting a failure as an answer. It does NOT make
+# `foundation_in_flight`'s "could not read the worktree list" branch reachable
+# from `cmd_run`, which is what an earlier version of this said: the launch loop
+# re-reads at the bottom of the iteration that launched, so the next iteration's
+# `foundation_in_flight` is always a cache hit. See the note there.
 live_worktrees() {
   local cached="$POLL_CACHE/worktrees" list
   # `-e`, not `-s`: no worktrees at all is an ANSWER and caches as an empty file.
@@ -674,12 +676,33 @@ live_worktrees() {
   # `cmd_status` reaches this function twice, once for its own listing and once
   # through `in_flight`, so a reader it could be pointed at would still leave the
   # other callsite writing.
-  $IN_POLL && [ -e "$cached" ] && { cat "$cached"; return 0; }
+  if $IN_POLL && [ -e "$cached" ]; then
+    # `|| return 1`, and NOT a fall-through to a fresh read: a `cat` that died
+    # part-way has already printed half a listing, and reading the runner again
+    # behind it would hand the caller that half twice. Non-zero is the answer
+    # this function's header is about -- "could not be read" is not "nothing is
+    # running" -- and every caller of it skips rather than guesses.
+    cat "$cached" || return 1
+    return 0
+  fi
   list="$(runner_worktree_list)" || return 1
-  list="$(printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }')"
+  # `|| return 1`, for the reason the cache branch above has one. This reshape
+  # used to be the function's LAST command, so an awk that died -- OOM, a
+  # resource limit, a host image this file was vendored onto without one -- came
+  # back as the function's own non-zero. It is a middle command now, and
+  # `print_listing` below always succeeds, so without this the caller gets an
+  # empty listing with success: three free slots, and the empty answer cached
+  # for the rest of the pass.
+  list="$(printf '%s' "$list" | awk -F'\t' 'NF { print $3 "\t" $1 }')" || return 1
   if $IN_POLL; then
     mkdir -p "$POLL_CACHE" 2>/dev/null
-    print_listing "$list" >"$cached" 2>/dev/null || true
+    # Whole or not at all. A half-written file is one `[ -e ]` says is an answer
+    # and every later caller in the pass trusts -- and a short listing reads as a
+    # free slot, which is the duplicate worktree this function's header opens
+    # with. The `rm` is a no-op when the `mv` worked.
+    print_listing "$list" >"$cached.new" 2>/dev/null \
+      && mv -f "$cached.new" "$cached" 2>/dev/null
+    rm -f "$cached.new"
   fi
   print_listing "$list"
 }
@@ -701,10 +724,12 @@ print_listing() { [ -n "$1" ] && printf '%s\n' "$1"; return 0; }
 # Two caches with two invalidation points is the failure armaatus/autofleet#30
 # says not to create, and `launch`'s drop already has its own test phase.
 #
-# $POLL_CACHE is guarded because armaatus/rommsync-nx exercises `remove_worktree`
-# by extracting it with `sed` and sourcing it alone -- see the note there -- so
-# everything the file around it defines arrives empty, and an empty $POLL_CACHE
-# would make this `rm -f /worktrees /foundation`.
+# $POLL_CACHE is guarded HERE and nowhere else because `remove_worktree` is the
+# one function armaatus/rommsync-nx exercises by extracting it with `sed` and
+# sourcing it alone -- see the note there -- so everything the file around it
+# defines arrives empty, and an empty $POLL_CACHE would make this
+# `rm -f /worktrees /foundation`. `live_worktrees` is not extracted and reads it
+# bare; if that ever changes, this is the shape to copy.
 forget_worktree_answers() {
   [ -n "${POLL_CACHE:-}" ] || return 0
   rm -f "$POLL_CACHE/worktrees" "$POLL_CACHE/foundation"
@@ -973,10 +998,18 @@ foundation_in_flight() {
     return 0
   fi
 
-  # STILL REACHABLE, and now the only place this failure is handled in a pass:
-  # the first read is the run loop's, which skips the whole pass rather than
-  # guessing, but `launch` drops the cache mid-pass and the next read is this
-  # one. A failed read is never cached -- see `live_worktrees`.
+  # NOT REACHED FROM `cmd_run` any more, and kept anyway. Both reads the launch
+  # loop makes -- the one at the top of the pass and the one at the bottom of an
+  # iteration that launched -- handle this failure first, one by skipping the
+  # pass and the other by breaking the loop, and both leave a populated cache
+  # behind them, so this call is a cache hit every time the dispatcher makes it.
+  #
+  # It stays because it is this FUNCTION's fail-closed answer, not the launch
+  # loop's: `foundation_blind` calls it directly and asserts exactly this, and a
+  # function whose contract is "an unreadable answer holds, and says so" does not
+  # get to drop the branch that holds. What it must not be read as is the pass's
+  # handler for this failure -- armaatus/autofleet#30 expected it to become that
+  # and it did not. Found by the local review.
   if ! list="$(live_worktrees)"; then
     foundation_hold "$cached" "list-unreadable" \
       "could not read this repository's worktree list, so whether a foundation" \
@@ -3391,8 +3424,15 @@ while that one is up."
 
     forget_poll_answers
     # ...here, once per pass, and nowhere else: see the note beside the
-    # definition. The same line opens the cache for writing -- from here to the
-    # bottom of the pass this process is the poll, which is what $IN_POLL means.
+    # definition.
+    #
+    # AFTER it, not once at startup, and that ordering is the whole of why it is
+    # a line inside the loop. $POLL_CACHE is not cleared when a dispatcher
+    # starts -- it is cleared on the line above -- so a reader that ran between
+    # startup and here would answer from a dead dispatcher's list. Nothing does
+    # today; this costs one assignment a minute to keep it that way. It is never
+    # set back to false, which is right: this process is a dispatcher for as
+    # long as it lives.
     IN_POLL=true
     #
     # The order below is load-bearing in three places. reap_merged first,
