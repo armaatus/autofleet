@@ -136,35 +136,40 @@ orca_cli_resolve() {
     # wrong-machine-named-confidently this branch exists to stop. Its stderr is
     # relayed for the same reason: it is the only thing that knows which.
     # Both found by the local review.
-    # RE-RUN to collect the words, the way `fleet_python_rejections` re-derives
-    # its reasons: capturing them the first time would need somewhere to put
-    # them, which is the thing that just failed. A mktemp that fails is
-    # instant and makes nothing, so the second call costs nothing and leaves
-    # nothing behind. First line only -- this goes inside a three-line relay.
-    # A retry that SUCCEEDS is a transient failure -- a racing or briefly full
-    # TMPDIR -- and it has just handed back a usable temp file. CARRY ON with
-    # it. An earlier version deleted that file, returned 1, and printed "this
-    # machine could not make a temp file" over "the retry did not fail", a
-    # refusal contradicting its own headline; and because setup.sh is fatal, one
-    # TMPDIR race would have abandoned a worktree `launch` had already created.
-    # The wrong machine named confidently, inside the branch that exists to stop
-    # that. Found by the local review.
     #
-    # THE RETRY DISCARDS STDERR, and the words are collected by a THIRD call on
-    # the failure path only. Merging the streams into the same capture -- which
-    # is what the fix above did first -- means a `mktemp` that succeeds while
-    # writing anything at all to stderr comes back as "<path>\n<warning>", fails
-    # `[ -f ]`, and is reported as a machine that cannot make temp files while
-    # leaking the file it just made. That is `runner_worktree_create`'s
-    # merged-stderr bug (see its comment) in a second place. A third call costs
-    # nothing: it only happens once both earlier ones have failed. Found by the
-    # local review.
-    probe_out="$(mktemp 2>/dev/null)" || {
-      ORCA_CLI_UNPROBED="$(mktemp 2>&1 >/dev/null || true)"
-      ORCA_CLI_UNPROBED="${ORCA_CLI_UNPROBED%%$'\n'*}"
+    # ONE RULE, and it is stated as a rule because two attempts at it were
+    # wrong in the same direction: IF ANY CALL RETURNS A PATH, THAT PATH IS THE
+    # PROBE FILE AND THE RESOLVE CARRIES ON. Only a call that genuinely failed
+    # produces the words.
+    #
+    # Round four deleted the file a successful retry handed back and refused
+    # anyway. Round five stopped merging the streams but left the diagnostic
+    # call unchecked, so a `mktemp` that failed twice and worked the third time
+    # leaked that file and printed "this machine could not make a temp file ...
+    # mktemp said: nothing" -- and because setup.sh is fatal, that abandons a
+    # worktree `launch` has already created and owned. Each fix reintroduced the
+    # defect one line below itself, which is why the loop below is written
+    # against the rule rather than against the case that was last reported.
+    #
+    # The diagnostic call keeps BOTH streams, and every line of what comes back
+    # is tested for being a file. A `mktemp` that succeeds while writing to
+    # stderr answers "<path>" and "<warning>" in an order nothing guarantees, so
+    # testing the first line -- which is what merging tempted the last two
+    # rounds into -- reads a working machine as a broken one. That is
+    # `runner_worktree_create`'s merged-stderr bug, twice removed.
+    local said line
+    said="$(mktemp 2>&1)"
+    probe_out=""
+    while IFS= read -r line; do
+      [ -f "$line" ] && { probe_out="$line"; break; }
+    done <<CANDIDATE_TMP
+$said
+CANDIDATE_TMP
+    if [ -z "$probe_out" ]; then
+      ORCA_CLI_UNPROBED="${said%%$'\n'*}"
       [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
       return 1
-    }
+    fi
   }
   # ON FD 3, not stdin. The probe below runs through `fleet_run_with_deadline`,
   # which redirects the command's stdout and stderr and nothing else -- so a
@@ -190,9 +195,12 @@ orca_cli_resolve() {
       # absolute ORCA_CLI_COMMAND -- there was never a PATH lookup to fail, and
       # on the common case of a Mac with no Orca the `tried:` line ended with a
       # sentence about PATH for a path. Both halves found by the local review.
+      # `*/*`, not `/*`: `command -v` skips PATH for ANY name containing a
+      # slash, so a relative `bin/orca` was never a PATH lookup either and was
+      # being reported as one. Found by the local review.
       case "$candidate" in
-        /*) orca_cli_reject "$candidate (no such file, or not executable)" ;;
-        *)  orca_cli_reject "$candidate (not found on PATH, or found and not executable)" ;;
+        */*) orca_cli_reject "$candidate (no such file, or not executable)" ;;
+        *)   orca_cli_reject "$candidate (not found on PATH, or found and not executable)" ;;
       esac
       continue
     fi
