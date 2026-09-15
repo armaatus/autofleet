@@ -99,6 +99,11 @@ orca_cli_candidates() {
 # candidates that all time out would be a hundred seconds of silence to explain
 # the fifty that came before it.
 ORCA_CLI_REJECTS=""
+# ...and the one for the failure that stops the probe before it starts. Declared
+# beside its sibling rather than above `orca_unavailable_says`, where it wedged
+# an assignment between the three-line-ceiling comment and the function that
+# comment documents. Found by the local review.
+ORCA_CLI_UNPROBED=""
 orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1"; }
 
 orca_cli_resolve() {
@@ -138,21 +143,28 @@ orca_cli_resolve() {
     # nothing behind. First line only -- this goes inside a three-line relay.
     # A retry that SUCCEEDS is a transient failure -- a racing or briefly full
     # TMPDIR -- and it has just handed back a usable temp file. CARRY ON with
-    # it. The first version of this deleted that file, returned 1, and printed
-    # "this machine could not make a temp file" followed by "the retry did not
-    # fail", a refusal contradicting its own headline; and because setup.sh is
-    # fatal, one TMPDIR race would have abandoned a worktree `launch` had
-    # already created. The wrong machine named confidently, inside the branch
-    # that exists to stop that. Found by the local review.
-    local retry
-    retry="$(mktemp 2>&1)" || true
-    if [ -f "$retry" ]; then
-      probe_out="$retry"
-    else
-      ORCA_CLI_UNPROBED="${retry%%$'\n'*}"
+    # it. An earlier version deleted that file, returned 1, and printed "this
+    # machine could not make a temp file" over "the retry did not fail", a
+    # refusal contradicting its own headline; and because setup.sh is fatal, one
+    # TMPDIR race would have abandoned a worktree `launch` had already created.
+    # The wrong machine named confidently, inside the branch that exists to stop
+    # that. Found by the local review.
+    #
+    # THE RETRY DISCARDS STDERR, and the words are collected by a THIRD call on
+    # the failure path only. Merging the streams into the same capture -- which
+    # is what the fix above did first -- means a `mktemp` that succeeds while
+    # writing anything at all to stderr comes back as "<path>\n<warning>", fails
+    # `[ -f ]`, and is reported as a machine that cannot make temp files while
+    # leaking the file it just made. That is `runner_worktree_create`'s
+    # merged-stderr bug (see its comment) in a second place. A third call costs
+    # nothing: it only happens once both earlier ones have failed. Found by the
+    # local review.
+    probe_out="$(mktemp 2>/dev/null)" || {
+      ORCA_CLI_UNPROBED="$(mktemp 2>&1 >/dev/null || true)"
+      ORCA_CLI_UNPROBED="${ORCA_CLI_UNPROBED%%$'\n'*}"
       [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
       return 1
-    fi
+    }
   }
   # ON FD 3, not stdin. The probe below runs through `fleet_run_with_deadline`,
   # which redirects the command's stdout and stderr and nothing else -- so a
@@ -244,7 +256,6 @@ orca_json() {
 # and what to do about it. Today's line named the runtime and stopped there, so
 # the answer to "and now what" was a file nobody reads twice.
 # armaatus/autofleet#13.
-ORCA_CLI_UNPROBED=""
 orca_unavailable_says() {
   if [ -n "${ORCA_CLI_UNPROBED:-}" ]; then
     printf 'no orca CLI could be probed here; this machine could not make a temp file\n'

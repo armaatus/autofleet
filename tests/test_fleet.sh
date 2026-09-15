@@ -1229,7 +1229,10 @@ case "${1:-}" in
       && fail "fleet.sh status succeeded with a runner driver that does not exist: $out"
     grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
       || fail "the refusal did not name the file it looked for, which is the only place the remedy is: $out"
-    grep -q "drivers here: orca" <<<"$out" \
+    # ANCHORED LOOSELY: the list is every driver in the directory, so a second
+    # one sorting before `orca` would break a fixed substring. Found by the
+    # local review.
+    grep -qE "drivers here: .*orca" <<<"$out" \
       || fail "it did not say which drivers do ship, so the next step is a guess: $out"
     # ...and it stops THERE. fleet.sh runs `set -uo pipefail` without `-e`, so a
     # lib.sh that only `return 1`s let the script sail on into a shell with no
@@ -1373,6 +1376,24 @@ DRIVER
       || fail "a candidate that is installed and does not answer was not told apart from one that is absent: $refusal"
     grep -q "install Orca" <<<"$refusal" \
       || fail "it named the runtime and not the remedy, which is what #13 calls a line that stops half way: $refusal"
+    # ...and ORCA_CLI_COMMAND is ONE candidate, not a word-split list. The old
+    # loop expanded it unquoted, so a path with spaces became several candidates
+    # and none of them existed; this pins the documented shape, which
+    # docs/CONFIGURATION.md now states because the refusal names the knob.
+    # Found by the local review.
+    mkdir -p "$WORK/bin/two words"
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/two words/orca-spaced"
+    chmod +x "$WORK/bin/two words/orca-spaced"
+    spaced="$( cd "$WORK/repo" && ORCA_CLI_COMMAND="$WORK/bin/two words/orca-spaced" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      orca_cli_candidates
+    ' 2>&1 )"
+    grep -qxF "$WORK/bin/two words/orca-spaced" <<<"$spaced" \
+      || fail "a CLI path containing a space was split into candidates that do not exist: $spaced"
     # THREE LINES, which is the relay bound docs/RUNNERS.md sets and the reason
     # what was tried is one comma-joined line rather than one line per
     # candidate: `runner_worktree_create` prints this on the stream `launch`

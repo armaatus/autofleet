@@ -1546,6 +1546,27 @@ if not guarded:
 for path in sorted(EXEMPT):
     if not glob.glob(path):
         bad.append(path + " is exempted here and does not exist")
+# ...and the PAGE that enumerates them names the same set. Hard rule 4 makes
+# docs/RUNNERS.md the authority, and the count is restated in five places --
+# that page, docs/CONFIGURATION.md, config.sh, lib.sh and this check's own
+# comment -- with nothing asserting any of them. It has already gone stale once
+# inside this branch: the page said "five" while this check exempted one of
+# them. Only the page is checked, because it is the one a later reader is told
+# to trust; the other four are prose pointing at it. Found by the local review.
+doc = open("docs/RUNNERS.md").read()
+para = [p for p in doc.split("\n\n") if "call `fleet_require_runner`" in p]
+if len(para) != 1:
+    sys.exit("docs/RUNNERS.md no longer has exactly one paragraph enumerating the "
+             "guarded callers, so the count it publishes is unchecked")
+named = set(re.findall(r"`([a-z-]+\.sh)`", para[0]))
+want = {p.split("/")[-1] for p in guarded}
+# The paragraph also names the UNGUARDED exception by design, and `lib.sh`,
+# which DEFINES `fleet_require_runner` rather than calling it -- the same file
+# the loop above skips for the same reason. Neither is a mismatch.
+named -= {p.split("/")[-1] for p in EXEMPT} | {"lib.sh"}
+if named != want:
+    bad.append("docs/RUNNERS.md names {%s} as calling fleet_require_runner; the code says {%s}"
+               % (", ".join(sorted(named)), ", ".join(sorted(want))))
 if bad:
     sys.exit("the missing-driver refusal is not acted on where it has to be:\n  "
              + "\n  ".join(bad))

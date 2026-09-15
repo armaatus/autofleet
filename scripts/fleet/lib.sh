@@ -332,9 +332,12 @@ else
     echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
     echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
   } >&2
-  # ONCE, which is the issue's title. `fleet.sh cost` execs `cost.sh` and both
-  # source this file, so the block above had two chances to print for one
-  # command. Exported so it survives the exec; the driver path goes with it so
+  # ONCE PER ENVIRONMENT TREE, which is what the issue's title needs and is
+  # wider than "per command": `fleet.sh cost` execs `cost.sh` and both source
+  # this file, so the block above had two chances to print for one command. A
+  # later descendant of that same environment -- an agent shell running
+  # `board.sh` -- gets `fleet_require_runner`'s line rather than the block, and
+  # that line names the file, which is the part it needs. Exported so it survives the exec; the driver path goes with it so
   # `fleet_require_runner` can still name the file in the process that did not
   # print the block. Found by the local review.
   #
