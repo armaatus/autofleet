@@ -331,6 +331,13 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     # `env -u` for AUTOFLEET_RUNNER. Found by the local review, on the variable
     # this one replaced.
     FLEET_RUNNER_MISSING=0
+    # CLEARED, for the same reason FLEET_RUNNER_MISSING is set on both arms: it
+    # is exported to cross an exec, so an inherited value from a shell that
+    # sourced this file under a different AUTOFLEET_RUNNER would have
+    # `fleet_require_runner` name THAT driver -- a confidently wrong filename,
+    # which is the failure class this issue removes, one branch over. Found by
+    # the self-review, on both axes.
+    unset FLEET_RUNNER_MISSING_SAYS
   else
     [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
       && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
@@ -409,6 +416,12 @@ else
   # again the first time it crossed that spelling boundary. Both found by the
   # local review.
   export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
+  # ...and the other arm's sentence goes with it. `fleet_require_runner` falls
+  # back to "no <driver path>" when this is unset, which is exactly this arm's
+  # case; an inherited "<other driver> defines no runner_available" would
+  # override it with a file that is not the one missing. Found by the
+  # self-review.
+  unset FLEET_RUNNER_MISSING_SAYS
   # SAID here, ACTED ON by `fleet_require_runner` below -- and this file neither
   # `return`s nor `exit`s on it. Three attempts, and each one was worse than the
   # last for a reason worth keeping:

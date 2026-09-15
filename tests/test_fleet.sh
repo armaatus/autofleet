@@ -1325,6 +1325,19 @@ DRIVER
     grep -q "project setup hook" <<<"$out" \
       && fail "the project hook ran for a worktree whose driver never finished sourcing: $out"
 
+    #     ...AND AN INHERITED SENTENCE CANNOT SURVIVE INTO THE OTHER ARM. The
+    #     string is exported so it crosses `fleet.sh`'s exec of `cost.sh`, which
+    #     means a shell that sourced lib.sh under a hollow driver passes it to
+    #     one whose driver is simply absent -- where it would name a file that
+    #     is not the missing one. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope \
+      FLEET_RUNNER_MISSING_SAYS="/somewhere/else.sh defines no runner_available" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"
+    grep -q "somewhere/else.sh" <<<"$out" \
+      && fail "an inherited sentence named a driver that has nothing to do with this failure: $out"
+    grep -qE "no [^ ]*runner/nope\.sh, so it stops here" <<<"$out" \
+      || fail "the missing-file arm did not say the file is missing once an unrelated sentence was in the environment: $out"
+
     # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
     #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
     #     empty -- and the once-per-tree test was `"" = ""`, true, which
