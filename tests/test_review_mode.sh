@@ -864,6 +864,136 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and submits nothing"
   ;;
 
+# -------------------------------------------------------------- refund_paths
+  refund_paths)
+  # THE OTHER FOUR REFUND CALLSITES. `review.sh` refunds an unspent attempt
+  # through two helpers, and which one is right depends on whether `head` has
+  # been resolved yet: `unspent_try` matches on the head, `unspent_try_any`
+  # decrements whatever head the marker names, and the pre-head exits need the
+  # second because there is no head to match against. Three separate review
+  # rounds got one path or another wrong.
+  #
+  # Only two callsites were pinned -- the `stopped` phase above -- and they are
+  # the two that shipped the wrong helper and were caught by it. At the rest,
+  # SWAPPING THE TWO HELPERS LEFT THE SUITE GREEN, because with the marker
+  # naming the run's own head both forms refund identically. So every block here
+  # arms the marker with a head that is NOT the run's, which is the only fixture
+  # that tells them apart: the head-matching form must refund NOTHING and the
+  # blind form must decrement. Each block then re-arms on the right head to show
+  # a refund happens at all.
+  #
+  # What a missing refund costs is quiet and cumulative: an attempt never spent
+  # counts against AUTOFLEET_REVIEW_MAX_TRIES, so a PR reaches the cap early and
+  # stops being reviewed with a line in a log nobody reads.
+  # armaatus/autofleet#71.
+  make_fixture; stub_reviewer marked
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  MARKER="$AUTOFLEET_DIR/reviewing/42"
+  OTHER_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+
+  arm_try()   { printf '%s 2\n' "$1" >"$MARKER.tries"; }
+  # `2>/dev/null` BEFORE the redirection it is there for, per CLAUDE.md: with it
+  # second, a missing marker still prints bash's own open failure.
+  tries_now() { local h n; read -r h n 2>/dev/null <"$MARKER.tries" || n=gone; printf '%s' "${n:-gone}"; }
+  as_dispatcher() { (cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" ./scripts/fleet/review.sh "$@" 2>&1); }
+
+  # ---- 1. the head GitHub holds cannot be read. PRE-head: refund blind.
+  printf '' >"$GH_HEAD"
+  arm_try "$OTHER_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$rc" = 2 ] || fail "an unreadable PR head exited $rc rather than 2: $out"
+  [ "$(tries_now)" = 1 ] \
+    || fail "an unreadable head did not refund blind; \`unspent_try\` there matches a head this run never read, and refunds nothing (tries now $(tries_now))"
+  ok "an unreadable PR head refunds the try the dispatcher spent, whatever head the marker names"
+  printf '%s' "$PR_HEAD" >"$GH_HEAD"
+
+  # ---- 2. merge_gate.py will not import. POST-head: match on the head.
+  cp "$WORK/repo/.github/scripts/merge_gate.py" "$WORK/merge_gate.py.working"
+  printf 'def independent_reviews(  # unbalanced\n' >"$WORK/repo/.github/scripts/merge_gate.py"
+  arm_try "$OTHER_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$rc" = 2 ] || fail "a merge_gate.py that will not import exited $rc rather than 2: $out"
+  [ "$(tries_now)" = 2 ] \
+    || fail "it refunded against a head that is not this run's; \`.tries\` is per head and the blind form does not belong at a post-head exit (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$(tries_now)" = 1 ] \
+    || fail "a broken merge_gate.py spent a try no reviewer ever used: $out (tries now $(tries_now))"
+  ok "a merge_gate.py that will not import refunds this head's try, and only this head's"
+  cp "$WORK/merge_gate.py.working" "$WORK/repo/.github/scripts/merge_gate.py"
+
+  # ---- 3. the reviewer command is not on PATH. POST-head.
+  arm_try "$OTHER_HEAD"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" \
+            AUTOFLEET_REVIEW_CMD=not-a-reviewer-on-this-machine \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$rc" = 6 ] || fail "a missing reviewer command exited $rc rather than 6: $out"
+  [ "$(tries_now)" = 2 ] \
+    || fail "the missing-reviewer exit refunded against another head's count (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" \
+            AUTOFLEET_REVIEW_CMD=not-a-reviewer-on-this-machine \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$(tries_now)" = 1 ] \
+    || fail "no reviewer on PATH spent a try; a host with the knob unset retires the head in three polls: $out (tries now $(tries_now))"
+  ok "a reviewer command that is not on PATH refunds this head's try, and only this head's"
+
+  # ---- 4. a stop that appears MID-review. POST-head, and the one the
+  # dispatcher heals for itself -- `stop_reviewers` deletes the records -- so
+  # only a hand-started run depends on this.
+  stub_reviewer hang
+  # `exec`, for the reason spelled out at the trap below: without it the signal
+  # and the exit code belong to a wrapper that carries no trap.
+  stopped_mid_review() {
+    : >"$REVIEWER_CALLS"
+    rm -f "$AUTOFLEET_DIR/STOP"
+    ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+        AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out" 2>&1 &
+    runner=$!
+    await n_started 1 60 || fail "the reviewer never started, so the mid-review path was never reached"
+    : >"$AUTOFLEET_DIR/STOP"
+    wait "$runner"; rc=$?
+    rm -f "$AUTOFLEET_DIR/STOP"
+    [ "$rc" = 3 ] || { cat "$WORK/out" >&2; fail "a stop mid-review exited $rc rather than 3"; }
+  }
+  arm_try "$OTHER_HEAD"
+  stopped_mid_review
+  [ "$(tries_now)" = 2 ] \
+    || fail "the mid-review stop refunded against a head that is not this run's (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  stopped_mid_review
+  [ "$(tries_now)" = 1 ] \
+    || fail "a reviewer killed by a stop was charged for a run it never finished (tries now $(tries_now))"
+  ok "a stop that lands mid-review refunds this head's try, and only this head's"
+
+  # ---- 5. the TERM/INT trap: a person pressing Ctrl-C at the terminal. Nothing
+  # heals this one -- there is no dispatcher to delete the record.
+  # `exec`, so `$!` IS review.sh and not a subshell wrapping it. Without it the
+  # TERM reached the wrapper, which died at 143 on its own -- the exit code this
+  # phase wanted, from a process that has no trap -- while review.sh carried on
+  # and refunded nothing. The refund assertion is what caught that; the rc alone
+  # passed either way, which is this phase's own subject one level up.
+  termed_mid_review() {
+    : >"$REVIEWER_CALLS"
+    ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+        AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out2" 2>&1 &
+    runner=$!
+    await n_started 1 60 || fail "the reviewer never started, so the trap was never armed"
+    kill -TERM "$runner" 2>/dev/null || true
+    wait "$runner"; rc=$?
+    [ "$rc" = 143 ] || { cat "$WORK/out2" >&2; fail "a TERM mid-review exited $rc rather than 143"; }
+  }
+  arm_try "$OTHER_HEAD"
+  termed_mid_review
+  [ "$(tries_now)" = 2 ] \
+    || fail "the TERM trap refunded against a head that is not this run's (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  termed_mid_review
+  [ "$(tries_now)" = 1 ] \
+    || fail "a reviewer interrupted at the terminal was charged for a run nobody let finish (tries now $(tries_now))"
+  ok "a TERM mid-review refunds this head's try, and only this head's"
+  ;;
+
 # ------------------------------------------------------------------- stopped
   stopped)
   make_fixture; stub_reviewer marked
