@@ -390,6 +390,22 @@ fi
 # pattern that stops matching fails here rather than the day it lets something
 # through.
 echo "== guards actually guard"
+# THE MERGE GATE'S OWN TABLE, first, for the reason the hook's runs here at all:
+# `.github/scripts/merge_gate.py --selftest` was reachable from CI and from
+# CLAUDE.md's environment list and from nothing a person runs before pushing --
+# so `./tests/run.sh` was green on a gate whose rules had stopped holding, and
+# the first reader of the failure was a red check on a pull request. It is the
+# same rule the hook gets (hard rule 3: a rule with no assertion is not
+# shipped); an assertion nothing local runs is most of the way back to not
+# having one.
+if [ -x .github/scripts/merge_gate.py ] || [ -r .github/scripts/merge_gate.py ]; then
+  python3 .github/scripts/merge_gate.py --selftest 2>&1 | sed 's/^/  /'
+  [ "${PIPESTATUS[0]}" = 0 ] || fail "the merge gate's selftest does not hold"
+  ok "the merge gate's own table holds"
+else
+  fail ".github/scripts/merge_gate.py is missing; the gate's rules assert nothing"
+fi
+
 # The exhaustive table lives in the hook itself (`guard.py --selftest`), next to
 # the code it constrains, so a guard and its assertion cannot drift into
 # separate files. It runs here so `ctest -R agent.config` and CI both cover it.

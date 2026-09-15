@@ -2171,6 +2171,148 @@ SELFTEST = [
         "github",
         ("!none of them Important", "!not a commit"),
     ),
+    # ------------------------------------------- two reviews on one head (#64)
+    #
+    # Observed on PR #1, 2026-09-11: two COMMENTED reviews carried the local
+    # marker for ONE head -- 07:13Z with 7 findings and 07:27Z with 10 -- because
+    # two overlapping polls started two reviewers. In `local` mode every reviewer
+    # signs in as the same account, so collapsing the reviews to "the latest one
+    # from that author" threw the first away, and the gate judged the pull
+    # request on a review nobody had answered.
+    #
+    # So the findings/answer condition below is per REVIEW. The
+    # CHANGES_REQUESTED condition above it is still per author, and deliberately:
+    # that one is about a reviewer's STANDING verdict, which a later review from
+    # the same reviewer does supersede -- it is GitHub's own rule for it.
+    (
+        # THE SILENT ONE, and the reason this is a bug rather than a nuisance. A
+        # second reviewer that finds nothing has not answered the first's seven
+        # findings; it merely arrived later. Read as superseding them, the gate
+        # went green with seven findings unread.
+        "a clean second review on one head does not answer the first's findings",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and "
+                         "to clear MIN_REVIEW_BODY.\n"
+                         "<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        # NAMED BY WHEN IT WAS SUBMITTED, because both reviews are from one
+        # account and "the review from claude[bot]" does not say which of them
+        # is still waiting.
+        ("2026-09-11T07:13:00Z", "reports 7 finding(s)"),
+    ),
+    (
+        # The literal shape on PR #1: the author answered the first review by
+        # name in the next commit, and the second -- ten findings, same head --
+        # was never answered by anything.
+        "an answer written between two reviews does not answer the later one",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the retry loop's bound is a magic number.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 10 -->"},
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "armaatus"},
+                 "createdAt": "2026-09-11T07:20:00Z",
+                 "body": "<!-- review-answered abc123 -->\n"
+                         "All seven are nits; filed as #99 rather than spent on a head move."},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("2026-09-11T07:27:00Z", "reports 10 finding(s)"),
+    ),
+    (
+        # ...and the other direction, which is what stops this from being a
+        # deadlock. `answered()` already requires the comment to come AFTER the
+        # review it answers, so one comment written after the last of them
+        # answers every one -- which is what an author answering two reviews at
+        # once actually means. Without this row the fix could be "hold whenever
+        # there are two reviews" and every phase above would stay green.
+        "one answer written after both reviews answers both",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the retry loop's bound is a magic number.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 10 -->"},
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "armaatus"},
+                 "createdAt": "2026-09-11T07:40:00Z",
+                 "body": "<!-- review-answered abc123 -->\n"
+                         "Seventeen nits between the two reviews; filed as #99 rather "
+                         "than spent on a head move."},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+    ),
+    (
+        # THE FAILURE THAT PRODUCED #64, at the other end. The commit answering
+        # review one moved the head; the second review on the head it left
+        # behind was never answered by anything. The gate refused -- for "no
+        # review on the current head" -- and said nothing at all about the ten
+        # findings, so the next round read as an ordinary fresh review and the
+        # branch moved on. A refusal that does not name what was lost is how a
+        # review gets thrown away with a green log beside it.
+        "findings on a head the branch has left behind are reported, not dropped",
+        "def456",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("left behind", "abc123", "10 finding(s)"),
+    ),
 ]
 
 
