@@ -4296,6 +4296,28 @@ JSON
     echo "ok: ...and stays quiet when it could"
     ;;
 
+  budget_pass_signal)
+    # $AUTOFLEET_LOG_PASSES itself: off by default, because a line a minute is
+    # the log volume every say-once marker in fleet.sh exists to prevent.
+    # armaatus/autofleet#69 Design note 7.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "pass complete" <<<"$out" \
+      && fail "the dispatcher logged a line per pass without being asked: $out"
+    echo "ok: the per-pass line is off by default"
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(AUTOFLEET_LOG_PASSES=1 in_fleet cmd_run --auto 2>&1)"
+    grep -q "pass complete" <<<"$out" \
+      || fail "AUTOFLEET_LOG_PASSES=1 said nothing: $out"
+    # ...AFTER the last call a pass makes, which is what makes it usable as the
+    # end-of-pass signal budget_busy_pass waits on rather than a clock.
+    [ "$(grep -c . "$GH_CALLS")" = 2 ] \
+      || fail "the pass line landed before the pass was done: $(cat "$GH_CALLS")"
+    echo "ok: ...and on, it says so once the pass has spent everything it spends"
+    ;;
+
   budget_status_says_backlog_blind)
     # The OTHER listing's failure, which had neither a caveat nor a phase. A
     # `gh` outage printed an empty `next up` table under a header that had
@@ -4414,38 +4436,33 @@ JSON
     # slowed right down: the fixture's default of 1s is what makes every other
     # phase here cheap and is exactly wrong for this one.
     #
-    # FIVE MINUTES, not thirty seconds. This is the number that makes the wait
-    # below an observation rather than a guess -- there is no second pass within
-    # any window this phase could wait, so a count that has stopped moving is
-    # the count of pass one and nothing else. The quiet window was tightened
-    # twice (0.5s, then 2s) before it was clear the poll length was the thing
-    # actually doing the work. Found by the local review, three times.
-    AUTOFLEET_POLL=300 start_dispatcher --auto
+    # ASKED, not guessed. Three rounds of review went into tightening a quiet
+    # window -- 0.5s, then 2s -- that was always a wall-clock stand-in for one
+    # question: has the pass finished? Nothing guarantees two `gh` stub calls
+    # inside a pass are closer together than any chosen window; between them a
+    # pass forks `python3`, the runner stub and, because this fixture points
+    # `reap_merged` at a real repository, `git` three times. Under the parallel
+    # worktrees this repo runs at, a slow gap mid-pass broke the wait early and
+    # failed the phase with a drift report about a partial count.
+    #
+    # $AUTOFLEET_LOG_PASSES makes the dispatcher say so instead, once per pass,
+    # after `count_startable` -- which is the last call any pass makes. That is
+    # armaatus/autofleet#69's own Design note 7 ("count it, so this is not
+    # re-derived by hand") in the smallest form that answers this. The five
+    # minute poll stays as the second guarantee: even if the line were missed,
+    # no second pass exists to contaminate the count.
+    AUTOFLEET_POLL=300 AUTOFLEET_LOG_PASSES=1 start_dispatcher --auto
+    wait_for_log "pass complete"
     # The pass is done when its calls stop arriving. With a 30-second poll behind
     # us there is no second pass to race, so "stable for two reads" is an answer
     # rather than a guess.
-    # The count stops moving when the pass ends, and with a five-minute poll
-    # nothing can restart it. Twenty identical reads is two seconds of quiet:
-    # far more than the gap two stub invocations leave when each forks `gh`,
-    # `python3` or `git`, and far less than the poll. Breaking early would need a
-    # two-second stall INSIDE one pass, and the `% 8` check below is what would
-    # catch it if one ever happened -- a partial count is not a whole pass.
-    i=0; last=-1; n=0; stable=0
-    while [ "$i" -lt 900 ]; do
-      n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
-      if [ "$n" -gt 0 ] && [ "$n" = "$last" ]; then
-        stable=$((stable + 1)); [ "$stable" -ge 20 ] && break
-      else
-        stable=0
-      fi
-      last="$n"; sleep 0.1; i=$((i + 1))
-    done
+    n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
     [ "$n" = 8 ] \
       || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 8: $(cat "$GH_CALLS")"
     # ...and a whole number of passes, which a count taken mid-pass would not be.
-    # Belt to the poll length's braces: if the wait above ever did break early,
-    # this is what says so rather than reporting a drift that did not happen.
+    # Belt to the pass line's braces, and the thing that would say so if the
+    # signal were ever emitted before the last call of a pass rather than after.
     [ $(( n % 8 )) = 0 ] \
       || fail "the count was taken mid-pass ($n is not a whole number of 8s): $(cat "$GH_CALLS")"
     echo "ok: a full fleet of three worktrees costs 8 gh calls a pass"
@@ -4614,6 +4631,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_pass_signal|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
     exit 2 ;;
 esac

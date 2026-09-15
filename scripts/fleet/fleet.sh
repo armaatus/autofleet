@@ -980,35 +980,38 @@ waiting_worktrees() {
 # fixed in five places at once, which is the argument for one copy rather than
 # any amount of reasoning about duplication.
 #
-# `live_worktrees` and `poll_issue` are deliberately NOT converted. They predate
-# this change, they are armaatus/autofleet#30's and #35's respectively, each has
-# its own phases, and neither reshapes its answer the way these two do -- so
-# rewriting them here would put two tested functions in a change that is about
-# something else. They stay as the fourth and fifth copies, and whoever adds a
-# sixth cache should reach for these. Raised three times by the local review.
+# `live_worktrees` and `poll_issue` are deliberately NOT converted. They were
+# added by armaatus/autofleet#30 and #35 -- both since CLOSED, so that is
+# provenance and NOT work parked on an issue that could receive it -- each has
+# its own phases, and neither reshapes its answer the way these two do. Rewriting
+# them here would have put two tested functions in a change about something else.
+# They stay as the fourth and fifth copies; whoever adds a sixth cache should
+# reach for these, and converting those two is a fair change on its own day.
+# Raised three times by the local review, the last time for citing closed issues
+# as though they were somewhere the work could go.
 #
 # $1 is the cache file. Prints the cached answer and returns 0; returns 1 when a
-# failure is cached; returns 2 when there is nothing cached and the caller must
-# read for itself.
+# failure is cached; returns **3** when there is nothing cached and the caller
+# must read for itself.
 #
-# READ THAT 2 CAREFULLY, because it is NOT the 2 its callers deal in. Here 2
-# means "the cache has no answer, go and ask"; in `has_open_pr` and `in_flight`
-# 2 means "could not tell", which is the opposite kind of thing. The two call
-# sites translate with a `case $?` rather than passing the status through for
-# exactly that reason, and the mapping is written out at each. One convention
-# for both would be worse: a cache miss is a fact about the cache and "could not
-# tell" is a fact about GitHub, and a helper that conflated them would hand a
-# caller the one answer it must never guess. Raised by the local review.
+# 3 AND NOT 2, and the odd number is the point. In `has_open_pr` and `in_flight`
+# 2 means "could not tell" -- a fact about GitHub -- where a miss here is a fact
+# about the cache, and the two must never be conflated: one says "ask again" and
+# the other says "do not act". Numbering them apart makes a call site that
+# forgets to translate produce a status nothing matches, instead of one that
+# silently means the wrong thing. This used to be a 2 held apart by a paragraph
+# of comment, which is a worse guard than a different number. Found by the local
+# review.
 #
 # A `cat` that died PART WAY is a 1 and not a 2, for
 # `live_worktrees`' reason: half a listing has already reached the caller, and
 # reading afresh behind it would hand them that half twice.
 poll_cache_get() {
-  poll_cache_open || return 2
+  poll_cache_open || return 3
   [ -e "$1.unreadable" ] && return 1
   # `-e`, not `-s`: an empty answer -- no worktrees, no open PRs, no startable
   # issue -- is an ANSWER, and caches as an empty file.
-  [ -e "$1" ] || return 2
+  [ -e "$1" ] || return 3
   cat "$1" || return 1
   return 0
 }
@@ -1228,8 +1231,8 @@ open_pr_listing() {
   # guard while it equals the limit actually asked for -- the same split, for
   # the same reason, as `review_open_prs`' `pr_page`.
   local cached="$POLL_CACHE/open-prs" listing pr_page=100
-  # `poll_cache_get`'s 2 is "nothing cached, go and ask" -- NOT the "could not
-  # tell" that 2 means to this function's callers. See its header.
+  # 3 is "nothing cached, go and ask", which is deliberately not any status this
+  # function returns. See `poll_cache_get`'s header.
   poll_cache_get "$cached"; case $? in 0) return 0 ;; 1) return 1 ;; esac
   # ...and outside a poll, the process-scoped memo. Same three states, no file.
   if ! poll_cache_open; then
@@ -4711,6 +4714,14 @@ while that one is up."
       # tell" is not "nothing left": it keeps polling.
       queued="$(count_startable)" || queued=1
     fi
+    # THE PASS IS OVER, said only when asked for. See $AUTOFLEET_LOG_PASSES: off
+    # by default because a line a minute is the log volume this file's say-once
+    # markers exist to prevent, and the only thing that can answer "has a pass
+    # finished" without guessing from a clock. Here rather than after the launch
+    # loop, because everything a pass spends has been spent by this line --
+    # `count_startable` above is the last call any pass makes.
+    [ -n "${AUTOFLEET_LOG_PASSES:-}" ] \
+      && say "pass complete: $owned owned, $queued startable"
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
       if [ "${parked:-0}" -gt 0 ]; then
         # Named on the way out, every time, because a worktree nobody mentions

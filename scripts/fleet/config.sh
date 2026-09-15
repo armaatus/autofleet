@@ -257,6 +257,15 @@
 # the fleet reaches between reviews rather than a hard ceiling.
 : "${AUTOFLEET_LOG_MAX_BYTES:=1048576}"
 
+# One line per dispatcher pass, saying the pass ended. OFF by default, because a
+# line a minute is exactly the log volume the say-once markers elsewhere in this
+# file exist to prevent -- and ON it is the only deterministic answer to "has a
+# pass finished", which is a question both an operator watching a quiet fleet and
+# a test asserting what a pass COST have to be able to ask. armaatus/autofleet#69
+# measured the per-pass budget by watching call counts stop moving, which is a
+# wall-clock guess; this is the signal that guess was standing in for.
+: "${AUTOFLEET_LOG_PASSES:=}"
+
 # ------------------------------------------------------------- the handoff
 # How long the note one attempt leaves the next may be, in words.
 #

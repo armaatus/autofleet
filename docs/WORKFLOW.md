@@ -203,7 +203,18 @@ sends the fleet off to open a worktree. The cost of caching is one poll of
 staleness — a PR opened mid-pass is invisible until the next one — which is
 why the listing is taken before the launch loop rather than during it.
 `tests/test_fleet.sh`'s `budget_` phases assert these numbers, so a change that
-puts the slope back fails the suite rather than the rate limit.
+puts the slope back fails the suite rather than the rate limit. To watch it on a
+running fleet rather than in the suite, set `AUTOFLEET_LOG_PASSES=1` and the
+dispatcher writes one line per poll saying the pass ended — off by default,
+because a line a minute is what the say-once markers elsewhere exist to prevent.
+
+One slope is **not** gone: `has_open_pr` still forks `python3` once per candidate
+the launch loop scans, to re-parse the listing it already has. That is a process
+start per `ready` issue per poll, and it is none of the three columns above — no
+API quota, no runner call, no tokens — which is why it is out of this table
+rather than in it. `count_startable` already answers the same question for the
+whole queue in one parse, so the launch loop could read that set instead; it is
+work for a day when the cost being measured is wall-clock rather than money.
 
 **100 open pull requests is a cliff**, and it is the one number here that can
 stop the fleet dead. `gh pr list` is asked for 100 rows, and a listing that
