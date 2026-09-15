@@ -561,6 +561,22 @@ def needs_validation(pull_request, head_sha):
     # no second review by the cap, and blocks forever with nothing saying why.
     if not any((r.get("commit") or {}).get("oid") == head_sha for r in reviews):
         return True
+    # ANYTHING THE GATE IS HOLDING FOR A VALIDATION IS DUE ONE. The refusal that
+    # names abandoned findings says in as many words that the reader they still
+    # have is "the VALIDATION of this head" and that `answer-review.sh` cannot
+    # clear the line -- so if that validation is never started, the sentence
+    # names a remedy nobody can reach and the pull request is held forever.
+    #
+    # That became reachable the moment the report was hoisted out of the "no
+    # review on this head" arm: a review on head A with no findings trailer, a
+    # clean review on head B before any validator is briefed, and the two tests
+    # below both say no. `declared_findings` is `None` there, not 0, which the
+    # loop below skips and `abandoned_findings` deliberately keeps -- so the one
+    # condition that holds the PR and the one that would send it a reader
+    # disagreed about the same review. Found by both self-review passes, which
+    # is what a hold with an unreachable remedy earns.
+    if abandoned_findings(pull_request, head_sha):
+        return True
     # ...and on the reviewed head itself, only findings are worth an agent. A
     # review that found nothing leaves nothing to check, and a PR that merges on
     # a clean review costs one review and no validation at all.
@@ -699,8 +715,17 @@ def awaiting_answer(substantive):
     exactly that way (#114's shape), which is why it is one spelling now. Found
     by the independent review.
 
-    EXACTLY WHAT THE FINDINGS LOOP CAN REPORT, because the count feeds a sentence
-    about it. Every looser definition has been wrong once: an APPROVED asks for
+    WHAT THE FINDINGS LOOP CAN REPORT, ON A HEAD NO VALIDATION HAS PASSED. The
+    loop also skips every review when `verdict == "pass"`, and this does not:
+    the gate's own closing note is gated on `unanswered` so it cannot overstate,
+    but `answer-review.sh` prints the count directly, so on a head whose
+    validation already passed it says "carried N reviews waiting" about reviews
+    the gate has stopped holding. Its sentence disclaims exactly that far -- "when
+    this ran ... the gate is the authority on what is still owed" -- which is why
+    this is a docstring correction and not a third condition. Said plainly
+    because the word it replaces was "EXACTLY". Found by the self-review.
+
+    Every looser definition has been wrong once: an APPROVED asks for
     nothing; a review superseded by that author's own later APPROVED is signed
     off by somebody who saw it; a standing CHANGES_REQUESTED is routed to
     re-review and an answer never clears it, so counting it made the closing note
@@ -3068,6 +3093,22 @@ def selftest():
     # rebase or a CI fix on a pull request whose review found nothing would hold
     # it forever, silently.
     moved = {"reviews": {"nodes": [_review("a clean review\n<!-- review-findings: 0 -->")]}}
+    # THE HOLD AND THE READER HAVE TO AGREE. `evaluate()` refuses this PR --
+    # `abandoned_findings` keeps the untrailered review on `abc123`, because a
+    # reviewer that died mid-write is exactly the one a head move would drop in
+    # silence -- and the refusal says the reader those findings still have is
+    # the validation of this head. Both tests below say no to that validation:
+    # the head DOES carry a review, and nothing anywhere declares findings > 0,
+    # since the abandoned one declared `None` rather than a number. So the gate
+    # held forever on a sentence naming a remedy nothing would ever start.
+    #
+    # Unreachable until the abandoned-findings report was hoisted out of the "no
+    # review on this head" arm in this very change, which is why it arrives with
+    # the hoist. Found by both self-review passes.
+    stranded = {"reviews": {"nodes": [
+        _review("a review whose trailer never got written"),
+        _review("a clean review\n<!-- review-findings: 0 -->", "def456"),
+    ]}}
     checks = [
         ("a clean review needs no validation -- the best case is one agent run",
          needs_validation(clean, "abc123"), False),
@@ -3083,6 +3124,9 @@ def selftest():
          needs_validation(clean, "abc123"), False),
         ("...but once the head moves out from under it, one is the only way out",
          needs_validation(moved, "def456"), True),
+        ("findings the gate is holding for a validation are due one, even where "
+         "the head has its own clean review",
+         needs_validation(stranded, "def456"), True),
     ]
     for what, got, want in checks:
         if got != want:

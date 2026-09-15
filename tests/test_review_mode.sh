@@ -2383,6 +2383,60 @@ PY2
     ok "...and an unreadable marker is cleared rather than signalled"
     ;;
 
+# -------------------------------------------------------------------- reap
+  reap)
+  # THE SWEEP DELETES BY CONTENT, not by path. `live_reviewers` reads the pid,
+  # asks `ps` whether it is alive -- the slow part -- and only then removes the
+  # marker. A hand-run `review.sh` that takes the same stale lock over in that
+  # window recreates the marker under its OWN pid, and a path-keyed `rm -f`
+  # deleted that live claim; the same pass then spawned a second reviewer on the
+  # head, which is armaatus/autofleet#64 through the half of the lock that
+  # stayed unconditional. The window cannot be staged deterministically from
+  # out here, so what is asserted is the primitive that closes it and that the
+  # sweep still reaps what it should. Found by both self-review passes.
+  make_fixture
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+
+  # A marker whose content has MOVED ON since the sweep read it: the pid the
+  # sweep is about to reap is not the pid in the file any more.
+  sleep 120 & taker=$!
+  printf '%s %s\n' "$taker" "deadbeef" >"$AUTOFLEET_DIR/reviewing/77"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/77" 999999 )
+  if [ -e "$AUTOFLEET_DIR/reviewing/77" ]; then
+    ok "a lock taken over since the sweep read it is not reaped"
+  else
+    kill "$taker" 2>/dev/null
+    fail "fleet_lock_reap deleted a marker that names a different pid"
+  fi
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/77" "$taker" )
+  [ -e "$AUTOFLEET_DIR/reviewing/77" ] \
+    && { kill "$taker" 2>/dev/null; fail "the marker it does name was not reaped"; }
+  kill "$taker" 2>/dev/null
+  ok "...and the one it does name is"
+
+  # ...AND THE SWEEPS ACTUALLY CALL IT. `live_reviewers` is nested inside
+  # `review_open_prs` and cannot be invoked on its own, so the wiring is
+  # asserted where it lives: no sweep in fleet.sh may remove a reviewer marker
+  # by path. Without this the primitive above can sit unused and every
+  # assertion here stays green -- which is hard rule 3's case exactly. The
+  # `.done` record at :1710 is not a lock (it holds a head, not a pid) and the
+  # drain at :1716 removes every marker on purpose, so both are named rather
+  # than matched loosely.
+  # Scoped to `review_open_prs`, which is where both sweeps live. The drain in
+  # `stop_reviewers` is deliberately unconditional -- it has just killed
+  # whatever held each marker -- and `$marker` names an unrelated handoff-ask
+  # file elsewhere in this script, so a file-wide grep would report both.
+  bad="$(cd "$WORK/repo" \
+         && awk '/^review_open_prs\(\) \{/,/^\}/' scripts/fleet/fleet.sh \
+          | grep -nE 'rm -f "\$(marker|m)"( |;|$)' || true)"
+  [ -z "$bad" ] \
+    || fail "a sweep in review_open_prs still removes a reviewer marker by path:
+$bad"
+  ok "...and no sweep in review_open_prs removes a marker by path"
+  ;;
+
 # ------------------------------------------------------------------- stale
   stale)
   # The silence detector's blind spot, and the reason review.sh asks

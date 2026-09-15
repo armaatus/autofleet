@@ -2267,7 +2267,11 @@ print(len(json.load(sys.stdin)))
       # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
       # documents as treat-it-as-ours, so it keeps both its marker and its slot.
       # Only a definite 1 clears it.
-      if [ "$is" != 1 ]; then n=$((n + 1)); else rm -f "$m"; fi
+      # REAPED BY CONTENT, not by path: between the read above and this line a
+      # hand-run `review.sh` can have taken the stale lock over under its own
+      # pid, and deleting it here let the same pass spawn a second reviewer on
+      # that head. See `fleet_lock_reap`.
+      if [ "$is" != 1 ]; then n=$((n + 1)); else fleet_lock_reap "$m" "$p"; fi
     done
     printf '%s\n' "$n"
   }
@@ -2380,8 +2384,11 @@ for p in prs:
       reviewer_alive "$held"; local is=$?
       # Said only where it is true: the `2)` branch below declines to restart.
       [ "$is" = 0 ] && say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
+      # ...and both removals here are by content too, for the same reason: the
+      # liveness probe above is a `ps`, and a takeover landing during it turned
+      # this arm into the thing that deleted a live claim.
       case "$is" in
-        0) kill "$held" 2>/dev/null; rm -f "$marker" ;;
+        0) kill "$held" 2>/dev/null; fleet_lock_reap "$marker" "$held" ;;
         # "Alive, but ps would not say." Removing the marker here declined to
         # kill it AND freed its slot, which is an orphan nothing can ever reap --
         # the opposite of the documented contract two lines up. Keep the marker;
@@ -2389,7 +2396,7 @@ for p in prs:
         # killed or reaped normally. Found by the independent review.
         2) say "  (ps would not say what pid $held is; leaving it and its slot alone)"
            continue ;;
-        *) rm -f "$marker" ;;
+        *) fleet_lock_reap "$marker" "$held" ;;
       esac
       # ...and it is no longer running, so it must not keep occupying a slot.
       # Without this, three reviewers whose heads all moved in one pass are all

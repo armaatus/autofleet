@@ -663,8 +663,14 @@ the first's findings were never owed an answer. On PR #1 the author answered the
 went unread with a green log beside them. Two changes: the findings condition is
 **per review** (the `CHANGES_REQUESTED` condition is still per author — that is
 a reviewer's standing verdict, which a later review from the same reviewer does
-supersede), and a refusal for "no review on the current head" now names any
-review on an **abandoned** head whose findings nothing answered. One comment
+supersede), and the gate names any review on an **abandoned** head whose
+findings nothing answered — on **every** path, not only the "no review on the
+current head" refusal it started inside. That arm already refuses, so reporting
+there added detail to a pull request that was blocked anyway and said nothing on
+the two paths a PR merges through: the exact sequence above, where a second
+review lands on the new head, is one of them. A PR held that way is also due a
+validation, because the validation is the reader the refusal names and a hold
+whose remedy never starts is a permanent one. One comment
 still answers every review on the head, because `answered()` only requires it to
 come after the review it answers; what changed is that it can no longer answer
 one and be counted for two.

@@ -805,6 +805,30 @@ fleet_lock_release() {
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Remove the lock $1 only while it still names pid $2 -- for a SWEEPER, which
+# reaps somebody else's marker rather than its own.
+#
+# `fleet_lock_release` above guards on `$$` for a reason that applies just as
+# hard here, and the sweeps in fleet.sh did not have it: they read the pid,
+# asked whether it was alive -- a `ps`, the slow part of the loop -- and then
+# `rm -f`'d by PATH. A hand-run `review.sh` that takes the same stale lock over
+# in that window (`fleet_lock_claim`'s steal path recreates the marker under its
+# own pid) has its live claim deleted by the sweep, and the very same pass then
+# spawns a second reviewer on that head. That is armaatus/autofleet#64, through
+# the half of the lock that stayed unconditional. Found by both self-review
+# passes.
+#
+# The read-then-rm window that is left is the one `fleet_lock_release` already
+# accepts, and it no longer spans the liveness probe, which is where the time
+# went.
+fleet_lock_reap() {
+  local marker="${1:-}" pid="${2:-}" held=""
+  [ -n "$marker" ] && [ -n "$pid" ] || return 0
+  read -r held _ 2>/dev/null <"$marker" || return 0
+  [ "${held:-}" = "$pid" ] || return 0
+  rm -f "$marker" 2>/dev/null || true
+}
+
 # One attempt to create the lock $1 holding `$$ $2`, with the content already
 # in it when it becomes visible.
 #
@@ -950,7 +974,24 @@ fleet_lock_claim() {
   # "42.12345". A run killed inside that window leaks one short dot-file that
   # nothing counts and nothing signals.
   stolen="$(dirname "$marker")/.steal-$$-$(basename "$marker")"
-  mv "$marker" "$stolen" 2>/dev/null || { _fleet_lock_holder "$marker"; return $?; }
+  # A FAILED `mv` IS TWO DIFFERENT ANSWERS, and this used to give the wrong one
+  # to the commoner of them. Another claimant taking the marker first is "it is
+  # held", which `_fleet_lock_holder` says correctly. But the holder's
+  # `fleet_lock_release` -- or `live_reviewers`, which sweeps dead-pid markers
+  # every poll -- can equally have removed it, and then `_fleet_lock_holder`
+  # reads an absent file, returns 3, and `review.sh` tells an operator the lock
+  # "names nothing this can read ... remove that file" about a file that is gone
+  # and a lock that is now free. That is the phantom advice the `return 2` arm
+  # warns against, and the create path twenty lines up was given a one-shot
+  # retry for exactly this; this arm is the same case and gets the same retry.
+  # Found by both self-review passes.
+  if ! mv "$marker" "$stolen" 2>/dev/null; then
+    if [ ! -e "$marker" ]; then
+      _fleet_lock_try "$marker" "$head"; rc=$?
+      [ "$rc" = 1 ] || return "$rc"
+    fi
+    _fleet_lock_holder "$marker"; return $?
+  fi
   read -r moved _ 2>/dev/null <"$stolen" || true
   if [ "${moved:-}" != "${held:-}" ]; then
     # PUT BACK CREATE-OR-FAIL, not `mv`. The marker is absent between the

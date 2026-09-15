@@ -95,8 +95,16 @@ def selftest():
         ("gh api x \\\n  --jq y\n# a comment after the statement", False,
          "a comment BELOW a finished command is fine"),
         ("gh api x \\\n\n  --jq y", False, "a blank continuation line is legal"),
-        ("printf 'a\\\\'\n# a comment", False,
-         "an escaped backslash is not a continuation"),
+        # ENDING IN TWO BACKSLASHES, which is what `continues()`'s parity test
+        # is for. The first version of this row was `printf 'a\\'`, whose last
+        # character is a quote -- so it took the `not continues(raw)` exit on
+        # the trivial test and asserted nothing about parity at all. Replacing
+        # the body with `line.endswith("\\")` kept every row green, which is the
+        # definition of a row that is not a test. Found by the self-review.
+        ("echo x \\\\\n# a comment", False,
+         "an even run of trailing backslashes is a literal, not a continuation"),
+        ("echo x \\\\\\\n  # and an odd one still continues", True,
+         "...and three of them do continue, so it is parity and not a count"),
         ("# a comment\ngh api x", False, "a comment above a command is the right place"),
         ("gh api x \\\n  --jq y # trailing comment", False,
          "a trailing comment ends the statement, which is what it means to"),
