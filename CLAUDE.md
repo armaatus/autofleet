@@ -165,12 +165,12 @@ than the permission does.
 
 ## What is watching you
 
-- **Hooks** ([`.claude/hooks/guard.py`](.claude/hooks/guard.py)) block, with an
-  explanation: merging a PR, force-pushing `main`, editing secrets, editing
-  `unblock.yml`, and whatever `.autofleet/guard.json` adds. Three more apply
-  **only in a worktree the fleet opened**: editing the hooks or settings, pushing
-  before the local review is recorded, and anything outward while the fleet is
-  stopped. A block is a rule you were about to break, not a bug.
+- **Hooks** ([`.claude/hooks/guard.py`](.claude/hooks/guard.py)) block, with a
+  reason: merging a PR, force-pushing `main`, editing secrets or `unblock.yml`,
+  and whatever `.autofleet/guard.json` adds. Three more apply **only in a
+  worktree the fleet opened**: editing the hooks, settings or `.autofleet/`'s
+  rule files, pushing before the review is recorded, and anything outward while
+  the fleet is stopped. A block is a rule you were about to break, not a bug.
 - **Subagents**: [`researcher`](.claude/agents/researcher.md) answers questions
   about the codebase without spending your context on the files it read.
   [`reviewer`](.claude/agents/reviewer.md) and

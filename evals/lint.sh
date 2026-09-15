@@ -425,17 +425,21 @@ if [ -x .claude/hooks/guard.py ]; then
   # any PR that touches it.
   #
   # One thing guard.py still cannot check about itself: that SELF_PROTECTED has
-  # not grown a fourth entry that no assertion covers. That pin stays here.
+  # not grown an entry that no assertion covers. That pin stays here.
   # The list below is literal on purpose: derived from SELF_PROTECTED, removing
   # an entry would remove its own check. That catches a removal but not an
-  # ADDITION -- a fourth marker would get no assertion in guard.py's
+  # ADDITION -- a new marker would get no assertion in guard.py's
   # _stateful_checks and the coverage would quietly narrow -- so pin the set.
+  # The three `.autofleet/` entries joined it with armaatus/autofleet#38: the
+  # merge gate refuses to let a PR touching them merge itself, and this is the
+  # half that stops a fleet worktree disarming them while the PR is still open.
   if sp_drift="$(python3 -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("g", ".claude/hooks/guard.py")
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
-want = {"/.claude/hooks/", "/.claude/settings.json", "/.claude/settings.local.json"}
+want = {"/.claude/hooks/", "/.claude/settings.json", "/.claude/settings.local.json",
+        "/.autofleet/guard.json", "/.autofleet/config", "/.autofleet/review.md"}
 if set(g.SELF_PROTECTED) != want:
     print(repr(sorted(g.SELF_PROTECTED)))
     sys.exit(1)

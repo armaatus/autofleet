@@ -12,6 +12,12 @@ project detail in there is the thing that makes the next repo fork this one
 | `.autofleet/teardown.sh` | `scripts/fleet/archive.sh`, once per removal | no |
 | `.autofleet/guard.json` | `.claude/hooks/guard.py`, on every tool call | no |
 
+Those same three are also **unwritable from a fleet worktree** — `guard.py`
+refuses the edit there, as it does for its own hooks and settings, because it
+re-reads `guard.json` on every tool call and an emptied file disarms every
+project rule long before anything merges. In a worktree you opened yourself they
+stay editable: you are the control there. Reading them is never blocked.
+
 Three files here are **human-merge-only**: `merge-gate` refuses to let a PR
 touching `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md`
 merge itself, the same way it refuses one touching `.claude/` or

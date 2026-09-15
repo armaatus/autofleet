@@ -1165,12 +1165,14 @@ fails if that entry disappears, because the agent brief names those skills.
 | editing secrets, `.env`, `token.dat`, `device.dat` | hard rule 5 |
 | editing `unblock.yml` | it decides what other worktrees may start |
 | editing `.claude/hooks/` and `settings.json` **in a fleet worktree** | an agent rewriting its own guards while nobody is watching has none |
+| editing `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md` **in a fleet worktree** | the same rule for the project's half of the layer. `merge-gate` will not let a PR touching these merge itself, but `guard.py` re-reads `guard.json` on every tool call — so an agent that empties it has disarmed every project rule while the PR is still open. Reading them is untouched: `config.sh` sources the config on the way into every fleet script |
 | `gh api` with `-X POST/PUT/PATCH/DELETE` while stopped | a write is outward; a read is not |
 | pushing or opening a PR from a fleet worktree with no `.autofleet/run/reviewed-<sha>` | a PR arrives reviewed or it does not arrive |
 | anything outward while `~/.autofleet/STOP` exists (a drain sets `DRAIN`, which this does not read) | a stop that depends on cooperation is not a stop |
 
-Two of those apply **only in a worktree the fleet opened**: editing
-`.claude/hooks/` and `settings.json`, and pushing with no recorded review. In
+Three of those apply **only in a worktree the fleet opened**: editing
+`.claude/hooks/` and `settings.json`, editing the `.autofleet/` files that set
+the rules, and pushing with no recorded review. In
 your own worktree you are the control, and a guard that argues with a person
 doing manual work is a guard people route around. The two stop rows apply
 everywhere — a stop that reached only the fleet's own worktrees would not be
