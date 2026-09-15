@@ -942,6 +942,69 @@ waiting_worktrees() {
   done | sort -V | tr '\n' ' ' | sed 's/ $//'
 }
 
+# --------------------------------------------------- the poll cache's shape ---
+# The bookkeeping every per-poll cache does, once. Six steps -- gate on the
+# poll, refuse a cached failure, serve a cached answer, and on a fresh read
+# record either the failure or the answer WHOLE -- and this branch added the
+# third and fourth copies of them before extracting this. The ordering rule
+# inside them (`2>/dev/null` before the redirection, not after) then had to be
+# fixed in five places at once, which is the argument for one copy rather than
+# any amount of reasoning about duplication.
+#
+# `live_worktrees` and `poll_issue` are deliberately NOT converted. They predate
+# this change, they are armaatus/autofleet#30's and #35's respectively, each has
+# its own phases, and neither reshapes its answer the way these two do -- so
+# rewriting them here would put two tested functions in a change that is about
+# something else. They stay as the fourth and fifth copies, and whoever adds a
+# sixth cache should reach for these. Raised three times by the local review.
+#
+# $1 is the cache file. Prints the cached answer and returns 0; returns 1 when a
+# failure is cached; returns 2 when there is nothing cached and the caller must
+# read for itself. A `cat` that died PART WAY is a 1 and not a 2, for
+# `live_worktrees`' reason: half a listing has already reached the caller, and
+# reading afresh behind it would hand them that half twice.
+poll_cache_get() {
+  poll_cache_open || return 2
+  [ -e "$1.unreadable" ] && return 1
+  # `-e`, not `-s`: an empty answer -- no worktrees, no open PRs, no startable
+  # issue -- is an ANSWER, and caches as an empty file.
+  [ -e "$1" ] || return 2
+  cat "$1" || return 1
+  return 0
+}
+
+# "Could not tell", recorded so the rest of the pass does not ask again. Never
+# an empty answer: every caller of every one of these caches reads an empty
+# answer as "nothing found", and that is the reading that opens a duplicate
+# worktree or ends the run on a backlog that is not empty.
+poll_cache_fail() {
+  poll_cache_open || return 0
+  mkdir -p "$POLL_CACHE" 2>/dev/null
+  # `2>/dev/null` BEFORE the redirection it is there for: bash applies them left
+  # to right, so with it second a $STATE_DIR that will not take the file still
+  # prints bash's own diagnostic to the real stderr -- into $LOG, once a poll,
+  # on the one path that is already an outage. `|| true` hides the status, not
+  # the diagnostic. CLAUDE.md, "Code".
+  : 2>/dev/null >"$1.unreadable" || true
+}
+
+# ...and the answer, WHOLE OR NOT AT ALL. A half-written file is one the `[ -e ]`
+# above says is an answer and every later caller in the pass trusts, and a SHORT
+# listing is the worst shape of all: the records that fell off the end read as
+# "this issue is free". Written beside the real file and moved into place, so
+# there is no moment at which a reader can see half of it. The `rm` is a no-op
+# when the `mv` worked.
+#
+# $2 is the value; it goes through `print_listing`, so an empty value writes an
+# empty file rather than a blank line and a non-empty one keeps the single
+# trailing newline `$(...)` ate on the way in.
+poll_cache_put() {
+  poll_cache_open || return 0
+  mkdir -p "$POLL_CACHE" 2>/dev/null
+  print_listing "$2" 2>/dev/null >"$1.new" && mv -f "$1.new" "$1" 2>/dev/null
+  rm -f "$1.new"
+}
+
 # --------------------------------------------------------------- the queue ---
 # Every open issue, with how many other open issues are blocked BY it. That
 # number is the SECOND key, not the ordering: `priority` sorts ahead of it (see
@@ -956,10 +1019,18 @@ waiting_worktrees() {
 # an issue relabelled `ready` mid-pass is seen on the next one -- one poll of
 # staleness, the same contract `poll_issue` takes.
 #
-# `count_startable` reading a list taken BEFORE this pass's launches is not a
-# miscount: it excludes what is running off the worktree listing, which `launch`
-# drops the cache of, so an issue this pass just opened a worktree for is
-# already excluded by the time the count is taken. armaatus/autofleet#69.
+# `count_startable` reading a list taken BEFORE this pass's launches can
+# OVER-count, and that is the harmless direction rather than an accident. It
+# excludes what is running off the worktree listing, whose cache `launch` drops
+# -- but whether a `worktree create` that returned moments ago is already in the
+# runner's next listing is exactly the property the launch loop refuses to rely
+# on further down this file, so this comment must not rely on it either. If the
+# listing has not caught up, `queued` is one too high, `cmd_run` polls once more
+# and counts again. An UNDER-count is what would matter, because `queued == 0`
+# with nothing owned is how the dispatcher decides the backlog is finished, and
+# nothing here can produce one. Found by the local review, which read two
+# comments in this file disagreeing about the same property.
+# armaatus/autofleet#69.
 #
 # A FAILED read is cached as a failure and never as an empty list. "No issue is
 # ready" ends the dispatcher -- `queued` reaches 0, and with nothing owned the
@@ -974,11 +1045,7 @@ ready_issues() {
   # leaving the named function empty, which is the drift that check exists to
   # catch. Found by ./evals/lint.sh.
   local cached="$POLL_CACHE/ready" listing
-  if poll_cache_open; then
-    [ -e "$cached.unreadable" ] && return 1
-    # `-e`, not `-s`: an empty backlog is an ANSWER and caches as an empty file.
-    if [ -e "$cached" ]; then cat "$cached" || return 1; return 0; fi
-  fi
+  poll_cache_get "$cached"; case $? in 0) return 0 ;; 1) return 1 ;; esac
   # NO `[ -z "$listing" ]` HERE, and that is not an oversight -- it is the one
   # place this cache and `open_pr_listing`'s deliberately differ. `gh` hands
   # back `[]` for an empty PR list, so THERE a zero-length body can only be an
@@ -988,6 +1055,13 @@ ready_issues() {
   # instead: `gh` failing leaves python with nothing to parse, `json.load`
   # raises, and `pipefail` brings that back as the assignment's non-zero.
   # Raised by the local review, which read the two as an accident.
+  #
+  # `2>/dev/null` on the python, because that raise is the MECHANISM and its
+  # traceback is not the message: uncaught, a `gh` outage put a JSONDecodeError
+  # on the dispatcher's stderr once a poll, into $LOG, for as long as it lasted.
+  # `gh`'s own stderr was already silenced and python's was not, which is the
+  # same defect this branch fixed in `open_pr_listing`'s probe. Found by the
+  # local review.
   listing="$(GH_PAGER=cat gh issue list --state open --limit 200 \
     --json number,title,body,labels 2>/dev/null \
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
@@ -995,6 +1069,13 @@ import json, sys
 from issue_refs import blocked_by
 human_step, priority = sys.argv[1], sys.argv[2]
 issues = json.load(sys.stdin)
+# ...and it has to BE a listing. A top-level object -- an error envelope `gh`
+# handed back with status 0 -- iterates its keys, so `{}` printed nothing and
+# was cached as "the backlog is empty", which is how the dispatcher decides
+# there is no work left and exits for the night. `open_pr_listing` carries the
+# same guard; found by the local review.
+if not isinstance(issues, list):
+    raise SystemExit("the issue listing is not a list")
 
 
 def has(issue, label):
@@ -1023,29 +1104,8 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
                                       i["number"])):
     labels = ",".join(l["name"] for l in i.get("labels", []))
     print(i["number"], blocks.get(i["number"], 0), labels, i["title"], sep="\t")
-' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL")" || {
-    if poll_cache_open; then
-      mkdir -p "$POLL_CACHE" 2>/dev/null
-      # `2>/dev/null` BEFORE the redirection it is there for, not after it:
-      # bash applies them left to right, so with it second a $STATE_DIR that
-      # will not take the file still printed bash's own diagnostic to the real
-      # stderr -- into $LOG, once a poll, on the one path that is already an
-      # outage. `|| true` hides the status, not the diagnostic. CLAUDE.md,
-      # "Code"; `live_worktrees` above has the corrected form. Found by the
-      # local review.
-      : 2>/dev/null >"$cached.unreadable" || true
-    fi
-    return 1
-  }
-  if poll_cache_open; then
-    mkdir -p "$POLL_CACHE" 2>/dev/null
-    # Whole or not at all, for the reason `live_worktrees`' write has one: a
-    # half-written file is one `[ -e ]` says is an answer, and a short queue is
-    # work this pass silently declines to start.
-    print_listing "$listing" 2>/dev/null >"$cached.new" \
-      && mv -f "$cached.new" "$cached" 2>/dev/null
-    rm -f "$cached.new"
-  fi
+' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL" 2>/dev/null)" || { poll_cache_fail "$cached"; return 1; }
+  poll_cache_put "$cached" "$listing"
   # Through `print_listing` rather than `printf '%s\n'`, because `$(...)` ate
   # the trailing newline: without it the launch loop's `read` drops the LAST
   # candidate, and a one-issue backlog never starts at all.
@@ -1102,14 +1162,7 @@ open_pr_listing() {
   # guard while it equals the limit actually asked for -- the same split, for
   # the same reason, as `review_open_prs`' `pr_page`.
   local cached="$POLL_CACHE/open-prs" listing pr_page=100
-  if poll_cache_open; then
-    [ -e "$cached.unreadable" ] && return 1
-    # `-e`, not `-s`: `[]` is an answer. `|| return 1` and NOT a fall-through to
-    # a fresh read, for `live_worktrees`' reason -- a `cat` that died part-way
-    # has already printed half a listing, and reading `gh` again behind it would
-    # hand the caller that half twice.
-    if [ -e "$cached" ]; then cat "$cached" || return 1; return 0; fi
-  fi
+  poll_cache_get "$cached"; case $? in 0) return 0 ;; 1) return 1 ;; esac
   # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
   # so a zero-length body is a `gh` that printed nothing, which the parsers
   # below would each read as "no PR". Caught here, once, rather than five times.
@@ -1197,30 +1250,9 @@ print(len(loaded) if isinstance(loaded, list) else -1)
   # it only because its fixture never creates the marker. Found by the local
   # review.
   poll_cache_open && [ -n "$listing" ] && rm -f "$PR_PAGE_FULL_SAID"
-  if [ -z "$listing" ]; then
-    if poll_cache_open; then
-      mkdir -p "$POLL_CACHE" 2>/dev/null
-      # `2>/dev/null` BEFORE the redirection it is there for, not after it:
-      # bash applies them left to right, so with it second a $STATE_DIR that
-      # will not take the file still printed bash's own diagnostic to the real
-      # stderr -- into $LOG, once a poll, on the one path that is already an
-      # outage. `|| true` hides the status, not the diagnostic. CLAUDE.md,
-      # "Code"; `live_worktrees` above has the corrected form. Found by the
-      # local review.
-      : 2>/dev/null >"$cached.unreadable" || true
-    fi
-    return 1
-  fi
-  if poll_cache_open; then
-    mkdir -p "$POLL_CACHE" 2>/dev/null
-    # Whole or not at all. A SHORT listing is the bad one: every PR that fell
-    # off the end reads as "this issue is free", which is the duplicate worktree
-    # again.
-    printf '%s\n' "$listing" 2>/dev/null >"$cached.new" \
-      && mv -f "$cached.new" "$cached" 2>/dev/null
-    rm -f "$cached.new"
-  fi
-  printf '%s\n' "$listing"
+  if [ -z "$listing" ]; then poll_cache_fail "$cached"; return 1; fi
+  poll_cache_put "$cached" "$listing"
+  print_listing "$listing"
 }
 
 has_open_pr() {
@@ -2852,7 +2884,8 @@ remove_worktree() {
   while IFS= read -r line; do
     [ -n "$line" ] && say "  the removal refused: $line"
   done <"$out"
-  # The line #122 needed and did not get. Not "the worktree is still usable":
+  # The line armaatus/rommsync-nx#122 needed and did not get. Not "the worktree
+  # is still usable":
   # reap_abandoned interrupts the agent immediately before calling this, so on
   # that path somebody has just been stopped. What is true on both paths is that
   # the removal changed nothing, which is the fact that saves the next test run.
@@ -2909,7 +2942,8 @@ finish_removal() {
 #
 # A parked worktree is NOT disowned. Both reaps iterate OWNED issues only, so an
 # issue dropped on a failed removal is a worktree nothing ever looks at again --
-# #122's stood from 16:49 until a person removed it. It keeps its slot, which is
+# armaatus/rommsync-nx#122's stood from 16:49 until a person removed it. It keeps
+# its slot, which is
 # why both lines say so.
 #
 # The by-hand recovery is TWO commands, and the second is the one that is easy to
@@ -2973,9 +3007,10 @@ reap_merged() {
     # What is in there that a removal would take with it. Two questions, because
     # a merged PR answers neither on its own.
     #
-    # `@{u}..HEAD` is the older one. The WORKING TREE is the half #122 fell
+    # `@{u}..HEAD` is the older one. The WORKING TREE is the half
+    # armaatus/rommsync-nx#122 fell
     # through (#163): auto-merge fires the moment the last check passes, so
-    # review fixes made after it -- #122's became #160 -- sit uncommitted here
+    # review fixes made after it -- that one's became #160 -- sit uncommitted here
     # while `@{u}..HEAD` is empty.
     #
     # Not worktree_holdings, which reap_abandoned uses for the same job: that
@@ -3057,7 +3092,8 @@ reap_merged() {
 # the cap of three -- forever. Two were cleared by hand on 2026-09-07, each
 # holding four containers, two ports and four volumes: #44, which the time-box
 # stopped at three hours for correctly producing nothing, and #148, which the
-# maintainer blocked with its worktree open, keeping #119, #122 and #139 queued
+# maintainer blocked with its worktree open, keeping armaatus/rommsync-nx#119,
+# #122 and #139 there queued
 # behind work that could never start.
 #
 # The guard has to be its own, because "the issue went blocked" carries none of
@@ -3844,9 +3880,14 @@ cmd_status() {
     # records are swept when the dispatcher next sees the PR fall off the open
     # list, so on a machine where nothing is polling -- which is exactly when a
     # person runs this -- a merged PR can still print "AT THE CAP, a person
-    # decides" on the first screen anybody reads. Filtering would cost the
-    # `gh pr list` this screen deliberately does not spend, so the line says
-    # what it is instead. Found by the independent review.
+    # decides" on the first screen anybody reads. Filtering would cost a
+    # `gh pr list` of its own, so the line says what it is instead.
+    #
+    # It used to say this screen "deliberately does not spend" one at all. That
+    # stopped being true when the next-up table above gained its own probe, so
+    # the reason is now the cost of the SECOND listing rather than of the first
+    # -- and the open-PR listing is `--state open`, which would not answer this
+    # question anyway. Found by the local review.
     [ "${found:-0}" = 1 ] \
       && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
   else
@@ -3936,12 +3977,18 @@ cmd_status() {
   # listing could not be read, and the loop below reads 2 as "not running", so
   # every row prints -- and at the page limit that is the whole backlog. Asked
   # once here rather than judged per row, because the loop is a subshell and
-  # could not report back. Found by the local review.
-  if ! open_pr_listing >/dev/null 2>&1; then
+  # could not report back.
+  #
+  # ...and only with rows under it. Printed unconditionally it announced a
+  # caveat about "the rows below" above an empty table, and spent an extra
+  # uncached `gh pr list` on every `status` run against a repository with no
+  # queue at all. Found by the local review, twice.
+  local ready_rows; ready_rows="$(ready_issues)"
+  if [ -n "$ready_rows" ] && ! open_pr_listing >/dev/null 2>&1; then
     echo "  (the open pull request listing could not be read, so the rows below may"
     echo "   already be claimed -- see docs/WORKFLOW.md, \"What one poll costs\")"
   fi
-  ready_issues | while IFS="$(printf '\t')" read -r num unblocks labels title; do
+  print_listing "$ready_rows" | while IFS="$(printf '\t')" read -r num unblocks labels title; do
     in_flight "$num" && continue
     gave_up_on "$num" && continue
     local mark=""

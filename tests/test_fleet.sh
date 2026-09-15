@@ -4345,10 +4345,21 @@ JSON
     # The pass is done when its calls stop arriving. With a 30-second poll behind
     # us there is no second pass to race, so "stable for two reads" is an answer
     # rather than a guess.
-    i=0; last=-1; n=0
-    while [ "$i" -lt 300 ]; do
+    # FIVE consecutive identical reads, and no `>= 8` in the break condition.
+    # With `n >= 8 && n == last` the loop stopped at 8 whenever two stub
+    # invocations happened to be more than 0.1s apart at the eighth call -- each
+    # forks `gh`, `python3` or `git` -- so a future ninth call would have been
+    # missed and the assertion would have passed on exactly the drift this phase
+    # exists to catch. Waiting for the count to stop moving asserts what the
+    # pass actually cost. Found by the local review.
+    i=0; last=-1; n=0; stable=0
+    while [ "$i" -lt 600 ]; do
       n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
-      [ "$n" -ge 8 ] && [ "$n" = "$last" ] && break
+      if [ "$n" -gt 0 ] && [ "$n" = "$last" ]; then
+        stable=$((stable + 1)); [ "$stable" -ge 5 ] && break
+      else
+        stable=0
+      fi
       last="$n"; sleep 0.1; i=$((i + 1))
     done
     stop_dispatcher
@@ -4420,6 +4431,24 @@ JSON
     out="$(in_pass 'count_startable; echo "rc=$?"' 2>&1)"
     grep -q "rc=1" <<<"$out" || fail "count_startable answered a number from a listing it could not read: $out"
     echo "ok: ...and count_startable refuses to answer a number from it"
+    # ...and it does it QUIETLY. `gh`'s stderr was silenced and python's was not,
+    # so the JSONDecodeError this path relies on for its non-zero also put a raw
+    # traceback in $LOG once a poll, for as long as the outage lasted -- which is
+    # the log a person scans in the morning.
+    grep -qi "Traceback" <<<"$out" \
+      && fail "a gh outage put a python traceback in the dispatcher's log: $out"
+    echo "ok: ...and without a traceback in the log"
+    # A body that PARSES and is not a listing is the other shape. `{}` iterates
+    # no keys, prints nothing, and exits 0 -- so it cached as "the backlog is
+    # empty", which is how cmd_run decides there is no work left and stops for
+    # the night.
+    make_fixture ok
+    printf '{}\n' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "rc=$?"' 2>&1)"
+    grep -q "rc=1" <<<"$out" \
+      || fail "a JSON object that is not an issue listing read as an empty backlog: $out"
+    grep -qi "Traceback" <<<"$out" && fail "...and said so with a traceback: $out"
+    echo "ok: ...and well-formed JSON that is not a listing is not an empty backlog"
     ;;
 
   budget_ready_list_once)
