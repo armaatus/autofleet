@@ -122,7 +122,7 @@ if [ -r "$ROUNDS_FILE" ]; then
   # Files written by an older version carry fewer, and `read` leaves the rest
   # empty, which is exactly the "nothing seen yet" state.
   read -r seen_pr seen_round seen_head seen_stamp seen_comment_at \
-    <"$ROUNDS_FILE" 2>/dev/null || true
+    2>/dev/null <"$ROUNDS_FILE" || true
   # A dash is how record_round writes a field it does not have; see there for
   # why an empty one cannot be written literally.
   [ "${seen_head:-}" = "-" ] && seen_head=""
@@ -156,7 +156,7 @@ round=$((round + 1))
 record_round() {
   local stamp_head="" stamp_at="" stamp_comment=""
   { IFS= read -r stamp_head; IFS= read -r stamp_at
-    IFS= read -r stamp_comment; } <"$stamp" 2>/dev/null || true
+    IFS= read -r stamp_comment; } 2>/dev/null <"$stamp" || true
   # A MISSING FIELD IS A DASH, not an empty string, and that is the fifth
   # field's doing. `read` splits on a RUN of whitespace, so `42 1 abc  <at>` --
   # an absent `submittedAt` between two values that are present -- assigns the
@@ -328,7 +328,7 @@ print(doc.get('baseRefName') or '')
     # picture; only the state that makes waiting pointless exits here.
     if [ "$merge_state" = "DIRTY" ]; then
       seen_head=""
-      [ -r "$CONFLICT_FILE" ] && read -r seen_head <"$CONFLICT_FILE" 2>/dev/null
+      [ -r "$CONFLICT_FILE" ] && read -r seen_head 2>/dev/null <"$CONFLICT_FILE"
       printf '%s\n' "$head" >"$CONFLICT_FILE"
       cat <<CONFLICT
 

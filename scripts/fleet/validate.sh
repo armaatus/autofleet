@@ -137,7 +137,7 @@ unspent_try() {
   # unbound-variable bug review.sh records in this function.
   [ -n "${head:-}" ] || { unspent_try_any; return 0; }
   local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
   [ "${h:-}" = "$head" ] || return 0
   n=$(( ${n:-1} - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
@@ -147,7 +147,7 @@ unspent_try() {
 unspent_try_any() {
   [ -n "$TRIES_MARKER" ] || return 0
   local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
   [ -n "${h:-}" ] || return 0
   n=$(( ${n:-1} - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true

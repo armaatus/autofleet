@@ -1428,7 +1428,7 @@ start_validator() {
   # starts it again, because a new head is a new question.
   local tries_head tries_n
   tries_head=""; tries_n=0
-  read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
+  read -r tries_head tries_n 2>/dev/null <"$marker.tries" || true
   [ "${tries_head:-}" = "$head" ] || tries_n=0
   # Assigned, then tested: an EMPTY `.tries` leaves `tries_n` empty, and
   # `[ "" -ge 3 ]` is `integer expression expected` and exit 2 -- which reads as
@@ -1562,7 +1562,7 @@ stop_reviewers() {
     case "$marker" in *.rounds) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
-    read -r held _ <"$marker" 2>/dev/null || true
+    read -r held _ 2>/dev/null <"$marker" || true
     if reviewer_alive "$held"; then
       kill "$held" 2>/dev/null && stopped=$((stopped + 1))
     fi
@@ -1676,7 +1676,7 @@ prune_review_logs() {
     # the reviewer finishes deletes with no grace at all.
     if [ -e "$REVIEWING_DIR/$num_seen" ]; then
       local held_seen=""
-      read -r held_seen _ <"$REVIEWING_DIR/$num_seen" 2>/dev/null || true
+      read -r held_seen _ 2>/dev/null <"$REVIEWING_DIR/$num_seen" || true
       reviewer_alive "$held_seen" && continue
     fi
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
@@ -1746,7 +1746,7 @@ prune_review_logs() {
     # cleared, so blocking on it is permanent. Found by the independent review.
     if [ -e "$REVIEWING_DIR/$num" ]; then
       local held_by=""
-      read -r held_by _ <"$REVIEWING_DIR/$num" 2>/dev/null || true
+      read -r held_by _ 2>/dev/null <"$REVIEWING_DIR/$num" || true
       reviewer_alive "$held_by" && continue
     fi
     case " $open_prs " in
@@ -1853,7 +1853,7 @@ rotate_fleet_log() {
   # then returned without renaming a thing. The real blind rotation, whenever it
   # came, was then silent -- the marker having been spent on a rotation that did
   # not happen. Found by the independent review.
-  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
+  size="$(wc -c 2>/dev/null <"$LOG" | tr -d ' ')"
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   [ "$size" -gt "$max" ] || return 0
   # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
@@ -1883,7 +1883,7 @@ rotate_fleet_log() {
       [ -e "$live" ] || continue
       is_review_record "$live" && continue
       local held=""
-      read -r held _ <"$live" 2>/dev/null || true
+      read -r held _ 2>/dev/null <"$live" || true
       # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
       # 2 alive-but-ps-would-not-say. ONLY 0 BLOCKS.
       #
@@ -2104,7 +2104,7 @@ print(len(json.load(sys.stdin)))
       # reaping it as a dead reviewer would put the re-spawn loop straight back.
       is_review_record "$m" && continue
       p=""
-      read -r p _ <"$m" 2>/dev/null || true
+      read -r p _ 2>/dev/null <"$m" || true
       reviewer_alive "$p"; local is=$?
       # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
       # documents as treat-it-as-ours, so it keeps both its marker and its slot.
@@ -2203,12 +2203,12 @@ for p in prs:
     # attempt and then says a person decides; this says the same thing.
     local tries_head tries_n
     tries_head=""; tries_n=0
-    read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
+    read -r tries_head tries_n 2>/dev/null <"$marker.tries" || true
     [ "${tries_head:-}" = "$head" ] || tries_n=0
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""
-      read -r held for_head <"$marker" 2>/dev/null || true
+      read -r held for_head 2>/dev/null <"$marker" || true
       if [ "${for_head:-}" = "$head" ]; then
         continue                      # one is running, on this very commit
       fi

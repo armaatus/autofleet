@@ -194,7 +194,7 @@ unspent_try() {
   # independent review.
   [ -n "${head:-}" ] || return 0
   local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
   [ "${h:-}" = "$head" ] || return 0
   n=$(( ${n:-1} - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
@@ -208,7 +208,7 @@ unspent_try() {
 unspent_try_any() {
   [ -n "$TRIES_MARKER" ] || return 0
   local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
+  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
   [ -n "${h:-}" ] || return 0
   n=$(( ${n:-1} - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
@@ -686,7 +686,7 @@ PY
   # hundred open threads. `head -c` splits a multi-byte character at the cut and
   # the reviewer reads one replacement glyph; that is the right trade against an
   # unbounded file.
-  if [ "$(wc -c <"$ctx" 2>/dev/null || echo 0)" -gt "$AUTOFLEET_REVIEW_CONTEXT_MAX" ]; then
+  if [ "$(wc -c 2>/dev/null <"$ctx" || echo 0)" -gt "$AUTOFLEET_REVIEW_CONTEXT_MAX" ]; then
     head -c "$AUTOFLEET_REVIEW_CONTEXT_MAX" "$ctx" >"$ctx.cut" 2>/dev/null \
       && printf '\n[...truncated at AUTOFLEET_REVIEW_CONTEXT_MAX bytes]\n' >>"$ctx.cut" \
       && mv "$ctx.cut" "$ctx"
