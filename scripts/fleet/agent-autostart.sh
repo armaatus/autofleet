@@ -83,6 +83,11 @@ if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
   echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
   exit 0
 fi
+# A driver that is not THERE is fatal; a runtime that is not answering is not.
+# The difference is the remedy: one is a name in `.autofleet/config` nobody has
+# written a file for, and the watcher polling on regardless would call a
+# `runner_*` that does not exist every three seconds.
+fleet_require_runner
 runner_available || { echo "==> no runner answers here; nothing to start"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "==> no python3; cannot read the agent's draft"; exit 0; }
 

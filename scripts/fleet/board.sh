@@ -36,6 +36,7 @@ USAGE
   *) status="$1"; comment="${2:-}" ;;
 esac
 
+fleet_require_runner
 runner_available || { echo "board.sh: no runner answers here; the card is unchanged" >&2; exit 1; }
 
 # Status and comment in ONE call, which is why the driver takes pairs: sent

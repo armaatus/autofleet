@@ -48,6 +48,7 @@ set -a; . ./.env; set +a
 # It is FATAL rather than a warning: everything this hook exists to prepare is
 # for an agent the runner is supposed to start, and provisioning a worktree
 # whose agent cannot be reached spends the time and holds the slot for nothing.
+fleet_require_runner
 runner_available || {
   echo "!! the $AUTOFLEET_RUNNER runner is not usable here (why, above)" >&2
   echo "   everything below provisions a worktree for an agent the runner has to start, so setup stops here" >&2

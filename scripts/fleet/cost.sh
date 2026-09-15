@@ -33,13 +33,6 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
-# This report calls no `runner_*` at all, so a driver that is not there is not
-# its problem -- and `lib.sh` `exit`s on one rather than letting a caller run
-# without it. Same reasoning as the dispatch in fleet.sh that routes `cost` here
-# before the runner is ever probed: "what did last night cost" is asked from a
-# CI box and a laptop with the app shut, and answering it with a sentence about
-# the runner is true and about a different question. armaatus/autofleet#13.
-AUTOFLEET_RUNNER_OPTIONAL=1
 . ./scripts/fleet/lib.sh
 
 json=false

@@ -1434,6 +1434,87 @@ else
   fail "scripts/fleet/config.sh would not source, so which runner this repo is configured for cannot be established; run it by hand to see what it refused"
 fi
 
+# 4h. EVERY SCRIPT THAT REACHES FOR THE RUNTIME STOPS ON A DRIVER THAT IS NOT
+#     THERE, and the ones that do not reach for it are left alone.
+#
+#     `lib.sh` says the driver is missing and finishes sourcing; it does not
+#     `exit`, because seven scripts source it and call no `runner_*` at all --
+#     the whole review and validation pipeline, which would otherwise refuse to
+#     answer a review comment for want of a driver none of them uses. The price
+#     of that choice is that the refusal is now the CALLER's to act on, and a
+#     caller that forgets calls a function that does not exist: `command not
+#     found`, rc 127, which fleet.sh's `runner_available || die` reported as
+#     "the runner is not usable here" -- the consequence named as the cause.
+#     That is precisely the failure armaatus/autofleet#13 exists to remove, so
+#     it is asserted rather than remembered. Hard rule 3.
+#
+#     Comments are stripped the same way 4b and 4c strip them, and for the same
+#     reason: a `runner_*` named in prose is not a call.
+if python3 - <<'PYEOF'
+import re, sys, glob
+
+# `issue-command.sh` is exempt BY NAME and for a stated reason: it prints the
+# brief for an issue, which needs no runtime, and it asks `runner_available`
+# only to decide whether it can additionally resolve THIS worktree's issue --
+# behind `if [ -z "$ref" ] && runner_available 2>/dev/null`. With no driver that
+# call is rc 127, the `&&` is false, and the script carries on doing the thing
+# it was run for. Requiring a driver there would refuse an agent its own brief.
+EXEMPT = {"scripts/fleet/issue-command.sh"}
+
+def strip_comment(line):
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+def code_only(text):
+    return "\n".join(strip_comment(line) for line in text.splitlines())
+
+lib = open("scripts/fleet/lib.sh").read()
+if "fleet_require_runner()" not in lib:
+    sys.exit("lib.sh no longer defines fleet_require_runner; this check now asserts nothing")
+provided = set(re.findall(r"^(runner_[a-z_]+)\(\)", lib, re.M))
+
+bad, guarded = [], []
+for path in sorted(glob.glob("scripts/fleet/*.sh")):
+    if path == "scripts/fleet/lib.sh":
+        continue
+    code = code_only(open(path).read())
+    if not (set(re.findall(r"\brunner_[a-z_]+", code)) - provided):
+        # ...and the other direction: a guard in a script that needs none is a
+        # refusal nobody asked for, and it is how `cost` nearly lost the one
+        # property fleet.sh documents at length.
+        if "fleet_require_runner" in code:
+            bad.append(path + " calls fleet_require_runner and reaches for no runtime at all")
+        continue
+    if path in EXEMPT:
+        continue
+    if "fleet_require_runner" in code:
+        guarded.append(path)
+    else:
+        bad.append(path + " calls the driver and never calls fleet_require_runner")
+if not guarded:
+    sys.exit("no script guards its driver calls; this check now asserts nothing")
+for path in sorted(EXEMPT):
+    if not glob.glob(path):
+        bad.append(path + " is exempted here and does not exist")
+if bad:
+    sys.exit("the missing-driver refusal is not acted on where it has to be:\n  "
+             + "\n  ".join(bad))
+PYEOF
+then
+  ok "every script that reaches for the runtime stops on a driver that is not there"
+else
+  fail "a script calls the driver without calling fleet_require_runner (above); without a driver that call is rc 127, and the caller reports the consequence as the cause"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then

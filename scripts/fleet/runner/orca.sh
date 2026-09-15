@@ -76,11 +76,14 @@ ORCA_CLI_PROBE_SECONDS="${ORCA_CLI_PROBE_SECONDS:-10}"
 
 # The candidates, in the order they are tried, one per line.
 #
-# A function rather than a list written out at the one place that walks it,
-# because two places now read it: `orca_cli_resolve` probes them and
-# `orca_unavailable_says` reports what probing them cost. A refusal naming a
-# different set from the one that was tried is worse than a refusal naming
-# none -- it sends a person to install something that was never asked for.
+# A function rather than a list inline in `orca_cli_resolve`, which is its only
+# caller, because the list is what a test has to be able to REPLACE: whether
+# this machine has an orca CLI is a property of the machine, and
+# `tests/test_fleet.sh runner_missing` overrides this to pin the refusal's
+# wording against candidates it controls. The earlier version of this comment
+# claimed `orca_unavailable_says` read it too; it reads $ORCA_CLI_REJECTS, and a
+# why a reader can falsify in one grep costs more than none. Found by the local
+# review.
 orca_cli_candidates() {
   [ -n "${ORCA_CLI_COMMAND:-}" ] && printf '%s\n' "$ORCA_CLI_COMMAND"
   printf '%s\n' orca orca-dev orca-ide \
@@ -112,31 +115,50 @@ orca_cli_resolve() {
   # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
   # nothing else.
   ORCA_CLI_UNPROBED=""
-  probe_out="$(mktemp)" || {
+  probe_out="$(mktemp 2>/dev/null)" || {
     # SAID as its own state, not folded into "the app is not running". The
-    # deadline wrapper writes the probe's output to a file, so a machine with no
-    # `mktemp` turned every candidate down for want of a temp file -- and the
-    # first fix for that only reached the `tried:` line, leaving the headline
-    # and the remedy still saying "install Orca" when nothing is wrong with
-    # Orca. Both of those are what a reader acts on. Seen for real in
+    # deadline wrapper writes the probe's output to a file, so a machine that
+    # cannot make one turns every candidate down for a reason that has nothing
+    # to do with Orca -- and the first fix for that only reached the `tried:`
+    # line, leaving the headline and the remedy still saying "install Orca".
+    # Both of those are what a reader acts on. Seen for real in
     # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
-    # nothing else; the second half found by the local review.
-    ORCA_CLI_UNPROBED=1
+    # nothing else.
+    #
+    # WHAT WAS OBSERVED, not a cause. `mktemp` also fails on a TMPDIR that is
+    # read-only, full, or not there, and "this machine has no mktemp" is
+    # unactionable on a machine where mktemp is sitting on PATH -- the same
+    # wrong-machine-named-confidently this branch exists to stop. Its stderr is
+    # relayed for the same reason: it is the only thing that knows which.
+    # Both found by the local review.
+    # RE-RUN to collect the words, the way `fleet_python_rejections` re-derives
+    # its reasons: capturing them the first time would need somewhere to put
+    # them, which is the thing that just failed. A mktemp that fails is
+    # instant and makes nothing, so the second call costs nothing and leaves
+    # nothing behind. First line only -- this goes inside a three-line relay.
+    ORCA_CLI_UNPROBED="$(mktemp 2>&1 >/dev/null || true)"
+    ORCA_CLI_UNPROBED="${ORCA_CLI_UNPROBED%%$'\n'*}"
+    [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
     return 1
   }
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     if ! where="$(command -v "$candidate" 2>/dev/null)"; then
-      # NOT "not on PATH", which would be a lie on the one install CLAUDE.md
-      # names as the reason this probe exists: a macOS Orca has shipped its
-      # wrapper `0700 root:wheel`, and `command -v` turns down a file that is
+      # NOT "not on PATH", twice over. `command -v` turns down a file that is
       # right there and not executable by this user exactly as it turns down one
-      # that is absent. Telling that person their PATH is wrong sends them to
-      # check something correct and to distrust the rest of the message. The two
-      # are not distinguishable from here for a bare name without walking PATH,
-      # so the line says both rather than picking the wrong one. Found by the
-      # local review.
-      orca_cli_reject "$candidate (not found on PATH, or found and not executable)"
+      # that is absent -- and the 0700-root:wheel wrapper CLAUDE.md names as the
+      # reason this probe exists at all is precisely the first case, so telling
+      # that person their PATH is wrong sends them to check something correct
+      # and to distrust the rest of the message. For a BARE NAME the two are not
+      # distinguishable from here without walking PATH, so the line says both.
+      # For an ABSOLUTE PATH -- the /Applications fallback below, and an
+      # absolute ORCA_CLI_COMMAND -- there was never a PATH lookup to fail, and
+      # on the common case of a Mac with no Orca the `tried:` line ended with a
+      # sentence about PATH for a path. Both halves found by the local review.
+      case "$candidate" in
+        /*) orca_cli_reject "$candidate (no such file, or not executable)" ;;
+        *)  orca_cli_reject "$candidate (not found on PATH, or found and not executable)" ;;
+      esac
       continue
     fi
     if ! fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
@@ -202,9 +224,10 @@ orca_json() {
 ORCA_CLI_UNPROBED=""
 orca_unavailable_says() {
   if [ -n "${ORCA_CLI_UNPROBED:-}" ]; then
-    printf 'no orca CLI could be probed here; this machine has no mktemp\n'
-    printf '     tried: nothing -- the deadline every driver call runs under needs a temp file\n'
-    printf '     put mktemp on PATH; nothing here says anything about Orca yet\n'
+    printf 'no orca CLI could be probed here; this machine could not make a temp file\n'
+    printf '     tried: nothing -- the deadline every driver call runs under needs one. mktemp said: %s\n' \
+      "${ORCA_CLI_UNPROBED}"
+    printf '     check mktemp is on PATH and $TMPDIR is writable; nothing here says anything about Orca yet\n'
     return 0
   fi
   printf 'no orca CLI answers here; is the Orca app running?\n'

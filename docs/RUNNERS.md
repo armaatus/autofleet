@@ -110,19 +110,27 @@ those reasons *during* its resolve rather than re-deriving them afterwards: a
 second pass costs another `--version` timeout per candidate, and this is the
 first call `setup.sh` makes while the runner holds the agent's tab.
 
-**Every hook probes before it spends anything.** `fleet.sh` (at source time),
-`setup.sh` and `agent-autostart.sh` all call it; `setup.sh` is fatal on a no,
-because everything it provisions is for an agent the runner is supposed to
-start — with one exemption, `cost`, which reads transcripts off disk, calls no
-`runner_*` and is asked from exactly the machines where the runtime is not
-there. `setup.sh` probes *after* `env.sh` and before the submodules, the project
-hook and the watcher — env.sh is milliseconds and is where a machine missing its
-basic tools says so, and a probe in front of it answers a missing `shasum` with
-"is the runtime running?", which is the wrong machine named confidently.
-And a driver that is **not there at all** is refused one layer up, by `lib.sh`,
-naming `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the drivers that do ship
-— `evals/lint.sh` check 4g fails a repo whose configured runner names no file,
-so that is red before an agent is opened rather than after.
+**Every caller that reaches for the runtime probes before it spends anything.**
+`fleet.sh` (at source time), `setup.sh` and `agent-autostart.sh` all call it;
+`setup.sh` is fatal on a no, because everything it provisions is for an agent
+the runner is supposed to start. `setup.sh` probes *after* `env.sh` and before
+the submodules, the project hook and the watcher — env.sh is milliseconds and is
+where a machine missing its basic tools says so, and a probe in front of it
+answers a missing `shasum` with "is the runtime running?", which is the wrong
+machine named confidently.
+
+A driver that is **not there at all** is a different question and is answered
+one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
+drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
+it neither returns nor exits, because most of what it defines has nothing to do
+with a runner and the scripts that source it mostly call no `runner_*` at all
+(`cost`, and the whole review and validation pipeline). The five that do reach
+for the runtime call `fleet_require_runner` before their first one, which adds
+the consequence and stops; without it that first call is `command not found`,
+and rc 127 through a `|| die` reports the consequence as the cause.
+`evals/lint.sh` check 4h fails a caller that forgets, and check 4g fails a repo
+whose configured runner names no file at all — red before an agent is opened
+rather than after.
 
 **Which stream a failure's words go on, per function, because the answer is not
 the same for all of them.** An earlier version of this paragraph said "stderr

@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the autofleet hooks. Sourced, never executed -- but not
-# therefore harmless: like `config.sh`, this file `exit`s on something it cannot
-# accept, and in a sourced file that ends the SOURCING shell. The one case is an
-# AUTOFLEET_RUNNER naming a driver that is not there; see the `else` branch at
-# the driver source below for why the alternative was worse, and for the one
-# caller that opts out of it.
+# Shared helpers for the autofleet hooks. Sourced, never executed.
 #
 # Every caller sets REPO_ROOT and cds to it before sourcing this, because the
 # config below is read relative to the repo being driven, not to autofleet.
@@ -306,6 +301,12 @@ runner_agent_terminal() {
 # answered "nothing".
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh" ]; then
   . "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
+  # Set on BOTH arms, never defaulted from the environment. An exported
+  # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
+  # refusal below, which is the same hole `evals/lint.sh` 4g closes with
+  # `env -u` for AUTOFLEET_RUNNER. Found by the local review, on the variable
+  # this one replaced.
+  FLEET_RUNNER_MISSING=0
 else
   # IT NAMES THE FILE, and lists the drivers that do ship.
   #
@@ -324,46 +325,47 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  # The caller that needs no driver says so, and gets one line rather than a
-  # remedy it has no reason to act on. `cost` is the only one: it reads
-  # transcripts off disk, calls no `runner_*` at all, and fleet.sh's own
-  # dispatch says so at length -- "what did last night cost" is asked from
-  # exactly the machines where the runtime is not there. NOT a knob in
-  # `config.sh` on purpose: a host project setting this globally would disarm
-  # the refusal for every command, which is the opposite of the point. It is set
-  # by one script, next to its `. lib.sh`.
-  if [ "${AUTOFLEET_RUNNER_OPTIONAL:-0}" = 1 ]; then
-    # Falls THROUGH rather than returning: everything below this line in lib.sh
-    # -- FLEET_DIR, the stop files, the owned-worktree registry -- is what the
-    # opting-out caller actually came for, and an early `return 0` handed it a
-    # half-sourced library and `FLEET_DIR: unbound variable` two lines into
-    # fleet.sh. Skipping the driver is the whole of the exemption.
-    # ONCE, which is the issue's title and not a detail: `fleet.sh cost` execs
-    # `cost.sh`, both source this file, and both opt out -- so the unguarded
-    # notice printed twice for one command. Exported so it survives the exec.
-    [ "${AUTOFLEET_RUNNER_SAID:-0}" = 1 ] \
-      || echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER; this command needs none, carrying on" >&2
-    export AUTOFLEET_RUNNER_SAID=1
-  else
-    {
-      echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
-      echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
-      echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
-      echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
-    } >&2
-    # EXIT, not `return 1 2>/dev/null || exit 1`. That idiom leaves the decision
-    # to the caller, and most callers here run `set -uo pipefail` WITHOUT `-e`
-    # -- so `. ./scripts/fleet/lib.sh` returned 1 and the script sailed on into
-    # a shell with no driver defined, where the next `runner_*` is `command not
-    # found`. fleet.sh then died on rc 127 with "the nope runner is not usable
-    # here", which is the consequence reported as the cause: the message above
-    # had already scrolled past and the one the reader acts on names the wrong
-    # problem. Nothing that has not opted out above can do anything useful
-    # without a driver, so the choice was
-    # never really the caller's. armaatus/autofleet#13.
-    exit 1
-  fi
+  {
+    echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
+    echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
+    echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
+    echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
+  } >&2
+  # SAID here, ACTED ON by `fleet_require_runner` below -- and this file neither
+  # `return`s nor `exit`s on it. Three attempts, and each one was worse than the
+  # last for a reason worth keeping:
+  #
+  #   `return 1`, which is what shipped before, leaves the library HALF SOURCED:
+  #   FLEET_DIR and the stop files are defined below this line, so fleet.sh's
+  #   first statement after the source died on `FLEET_DIR: unbound variable`.
+  #   Most callers here run `set -uo pipefail` WITHOUT `-e`, so the status was
+  #   discarded and they sailed on into that.
+  #
+  #   `exit 1` fixed the message and took seven scripts with it. `await-review`,
+  #   `answer-review`, `review-status`, `resolve-thread`, `self-review`, `review`
+  #   and `validate` source this file, call no `runner_*` at all, and would have
+  #   refused to answer a review comment for want of a driver none of them uses
+  #   -- printing "write that file against the contract in docs/RUNNERS.md" at
+  #   somebody trying to reply on a pull request. `cost` was the eighth, and
+  #   exempting it by name was the tell that the line was drawn in the wrong
+  #   place. Found by the local review.
+  #
+  # So: say it once at source time, finish sourcing, and let the five scripts
+  # that actually reach for the runtime stop on it. `evals/lint.sh` check 4h
+  # fails one that forgets to. armaatus/autofleet#13.
+  FLEET_RUNNER_MISSING=1
 fi
+
+# The consequence of a missing driver, for the callers that need one. Called
+# before the first `runner_*`, because without a driver that call is
+# `command not found` -- rc 127, which fleet.sh's `runner_available || die`
+# reported as "the tmux runner is not usable here": the consequence named as
+# the cause, with the real message four lines up the screen.
+fleet_require_runner() {
+  [ "${FLEET_RUNNER_MISSING:-0}" = 1 ] || return 0
+  echo "     ${0##*/} needs one to do anything, so it stops here" >&2
+  exit 1
+}
 
 # Whether the daemon is actually answering.
 #

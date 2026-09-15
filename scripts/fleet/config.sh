@@ -59,9 +59,10 @@
 # CLAUDE.md hard rule 4 names as the authority -- fleet/runner/README.md, which
 # this used to point at, is about the seam and lists no `runner_*` at all.
 #
-# A name with no `scripts/fleet/runner/<name>.sh` beside it is refused where
-# lib.sh sources it, naming the file it looked for, and `evals/lint.sh` check 4g
-# goes red on it. `cost` is the one command that carries on regardless.
+# A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
+# lib.sh sources it -- the file it looked for and the drivers that do ship --
+# and stops the five scripts that reach for the runtime. `evals/lint.sh` check
+# 4g goes red on it before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=orca}"
 
 # ---------------------------------------------------------------- the review

@@ -1239,22 +1239,37 @@ case "${1:-}" in
     # the reader acts on named the consequence.
     grep -q "is not usable here" <<<"$out" \
       && fail "it carried on past the missing driver and reported the consequence as the cause: $out"
-    # ...and `cost` is the exception, which is a property fleet.sh already had
-    # and this change nearly took away. It reads transcripts off disk and calls
-    # no runner_* at all, and "what did last night cost" is asked from exactly
-    # the machines where the runner is not there -- a CI box, a laptop with the
-    # app shut. A `lib.sh` that exits for everybody answers that question with a
-    # sentence about the runner, which is true and about something else. Found
-    # by the local review.
+    # ...AND THE SCRIPTS THAT NEED NO DRIVER ARE UNTOUCHED, which is the half
+    # this nearly got wrong. `cost` reads transcripts off disk and calls no
+    # runner_* at all -- "what did last night cost" is asked from exactly the
+    # machines where the runner is not there, a CI box, a laptop with the app
+    # shut -- and behind it sit the seven review and validation scripts, which
+    # would otherwise have refused to answer a review comment for want of a
+    # driver none of them uses. A refusal at source time takes all of them;
+    # `fleet_require_runner` takes only the five that reach for the runtime.
+    # Found by the local review.
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       || fail "the one subcommand that needs no runner died on a driver it never calls: $out"
-    grep -q "looked for:" <<<"$out" \
-      && fail "cost was handed the remedy for a problem it does not have: $out"
-    # ONCE. fleet.sh execs cost.sh and both source lib.sh, so the notice had two
-    # chances to print for one command -- against the title of the issue.
-    [ "$(grep -c "this command needs none" <<<"$out")" = 1 ] \
-      || fail "the notice printed $(grep -c "this command needs none" <<<"$out") times for one command: $out"
+    grep -q "needs one to do anything" <<<"$out" \
+      && fail "cost was given the consequence of a driver it never asks for: $out"
+    # ...and the rest of lib.sh is still there. `return 1` at the driver source
+    # left FLEET_DIR and the stop files undefined, which is how the first
+    # attempt at this died two lines into fleet.sh instead of saying anything.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>/dev/null
+      echo "source rc=$?"
+      echo "dir=${FLEET_DIR:-UNSET}"
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^source rc=0$" <<<"$out" \
+      || fail "sourcing lib.sh without a driver answered non-zero, which every -e caller reads as fatal: $out"
+    grep -q "dir=UNSET" <<<"$out" \
+      && fail "lib.sh stopped at the driver and left the library half sourced: $out"
+    grep -q "^missing=1$" <<<"$out" \
+      || fail "nothing recorded that the driver was missing, so fleet_require_runner has nothing to act on: $out"
 
     # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
     #    the caller's consequence, and nothing provisioned. Written as a driver
@@ -1329,7 +1344,7 @@ DRIVER
       exec 3>&2 2>/dev/null
       . ./scripts/fleet/lib.sh
       exec 2>&3 3>&-
-      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-mute; }
+      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-absent-nowhere orca-mute; }
       runner_available
     ' 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
@@ -1339,8 +1354,16 @@ DRIVER
     # first line gone entirely. Found by the local review.
     grep -q "^no orca CLI" <<<"$refusal" \
       || fail "the refusal's first line did not name the runner: $refusal"
-    grep -q "/nonexistent/orca-not-installed (not found on PATH, or found and not executable)" <<<"$refusal" \
-      || fail "a candidate that cannot be run was not named as tried, or was reported as a PATH problem it may not be: $refusal"
+    # An ABSOLUTE candidate was never a PATH lookup, so it must not be reported
+    # as one -- the /Applications fallback is absolute, which makes this the
+    # common case on a Mac with no Orca. Found by the local review.
+    grep -q "/nonexistent/orca-not-installed (no such file, or not executable)" <<<"$refusal" \
+      || fail "an absolute candidate was reported as a PATH failure, which it cannot be: $refusal"
+    # ...and a BARE name is the case that genuinely cannot be told apart from
+    # here: absent, or right there and mode 0700, which is the Orca install
+    # CLAUDE.md names as the reason this probe exists. It says both.
+    grep -q "orca-absent-nowhere (not found on PATH, or found and not executable)" <<<"$refusal" \
+      || fail "a bare candidate that cannot be run was not named as tried, or claimed a cause it did not check: $refusal"
     grep -q "orca-mute (--version did not answer)" <<<"$refusal" \
       || fail "a candidate that is installed and does not answer was not told apart from one that is absent: $refusal"
     grep -q "install Orca" <<<"$refusal" \
