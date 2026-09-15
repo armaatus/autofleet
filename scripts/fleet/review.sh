@@ -341,7 +341,12 @@ esac
 # what the lock records. The refund is `unspent_try`: this run reached no
 # reviewer, and the try the dispatcher spent for it is not an attempt at a
 # verdict.
-LOCK="${AUTOFLEET_REVIEW_MARKER:-$FLEET_REVIEWING/$pr}"
+# ONE DEFAULT, not two. `$LOCK` was assigned from `AUTOFLEET_REVIEW_MARKER` at
+# the top -- it has to be, the trap is installed above the first exit -- and
+# re-deriving it here with a different fallback was two spellings of one value,
+# directly under a comment insisting its siblings be derived in one place.
+# Found by the independent review.
+LOCK="${LOCK:-$FLEET_REVIEWING/$pr}"
 holder="$(fleet_lock_claim "$LOCK" "$head")"; claimed=$?
 # ...and the lock stays THEIRS on both refusals. `$LOCK` is cleared before the
 # exit so the trap, which drops this run's lock on every path, drops nothing
@@ -450,8 +455,17 @@ held_by() {
   AUTOFLEET_REVIEW_MODE=local python3 - "$payload" "$head" <<'PY'
 import json, sys
 sys.path.insert(0, ".github/scripts")
-from merge_gate import (independent_reviews, is_substantive,
-                        declared_findings, review_name)
+try:
+    from merge_gate import (independent_reviews, is_substantive,
+                            declared_findings, review_name)
+except Exception as exc:
+    # GUARDED LIKE ITS SIBLING, whose comment says a SyntaxError here "is not
+    # exotic" -- merge_gate.py is a file agents in this repo edit. The caller
+    # sends this function's stderr to /dev/null, so a bare import would drop the
+    # "held by" line with nothing anywhere saying why. Found by the independent
+    # review.
+    print(f"(could not name it: merge_gate.py did not load -- {exc})")
+    raise SystemExit(0)
 try:
     pull = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"] or {}
 except Exception:

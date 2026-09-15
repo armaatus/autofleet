@@ -129,16 +129,38 @@ fleet_pr_payload "$pr" "$payload" || {
 if ! reviewed="$(gate_py '
 import json
 pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
-print(sum(1 for r in merge_gate.independent_reviews(pull, sys.argv[3])
-          if merge_gate.is_substantive(r)
-          and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))'\
+on = [r for r in merge_gate.independent_reviews(pull, sys.argv[3])
+      if merge_gate.is_substantive(r)]
+# TWO NUMBERS, and the first is the one that decides. "Is there a review to
+# answer" is `is_substantive` and nothing else, because that is what
+# `await-review.sh` asks: filtered harder here, a head whose only review is
+# DISMISSED had await saying it arrived and this refusing with "wait for it",
+# which is a loop, and the #114 drift in the direction that traps an agent.
+# The second is for the SENTENCE at the end -- how many of them could be
+# waiting on an answer -- and it reads the gate predicate `holds` rather than
+# respelling the states. NO APOSTROPHE anywhere in this block: it is a
+# single-quoted shell string, where nothing escapes one. Found by the independent review.
+print(len(on))
+print(sum(1 for r in on if merge_gate.holds(r) and r.get("state") != "APPROVED"))'\
     "$payload" "$head")"; then
   echo "could not tell whether PR #$pr has a review on ${head:0:8}: the payload did not" >&2
   echo "load, or .github/scripts/merge_gate.py -- which decides which reviews count --" >&2
   echo "did not answer. Nothing here can say what to do until it does." >&2
   exit 2
 fi
-case "$reviewed" in (''|*[!0-9]*) reviewed=0 ;; esac
+waiting="$(printf '%s\n' "$reviewed" | sed -n 2p)"
+reviewed="$(printf '%s\n' "$reviewed" | sed -n 1p)"
+# NOT `=0`, which is a CLAIM. Unparseable output means this could not tell, and
+# reading it as "no review has been submitted yet" sends an agent to wait for
+# one that is already there. Everything else in this file routes that state to
+# exit 2 with a reason; this was the one place that did not. Found by the
+# independent review.
+case "${reviewed:-}" in (''|*[!0-9]*)
+  echo "could not count PR #$pr's reviews on ${head:0:8}: merge_gate.py answered" >&2
+  echo "something this cannot read. Nothing here can say what to do until it does." >&2
+  exit 2 ;;
+esac
+case "${waiting:-}" in (''|*[!0-9]*) waiting=0 ;; esac
 if [ "$reviewed" -lt 1 ]; then
   echo "no independent review has been submitted against ${head:0:8} yet, so there is" >&2
   echo "nothing here to answer -- and an answer written now would be discarded by the" >&2
@@ -166,7 +188,7 @@ if ! GH_PAGER=cat gh pr comment "$pr" --body-file "$body" >/dev/null 2>&1; then
   echo "could not post the answer on PR #$pr" >&2
   exit 1
 fi
-if [ "$reviewed" -gt 1 ]; then
+if [ "$waiting" -gt 1 ]; then
   # WHAT IS ON THE HEAD, not what was discharged, and the distinction is the
   # finding: some of these -- an approval, a review that found nothing -- were
   # never holding the PR in the first place, and claiming to have answered them
@@ -174,8 +196,11 @@ if [ "$reviewed" -gt 1 ]; then
   # gate that counts answers per review and needs to know a second review was
   # there at all. The three states are the gate's own; a DISMISSED review is one
   # somebody cleared and is not on this head for this purpose.
-  echo "answered on ${head:0:8} of PR #$pr, which carries $reviewed reviews --"
-  echo "one comment written after the last of them answers every one that was waiting."
+  # "WHEN THIS RAN", because the count was taken before the comment was posted
+  # and a review can land in between. The gate is the authority on what is still
+  # owed; this sentence is only telling the author a second review was there.
+  echo "answered on ${head:0:8} of PR #$pr, which carried $waiting reviews waiting"
+  echo "when this ran -- one comment written after the last of them answers all of those."
 else
   echo "answered the review on ${head:0:8} of PR #$pr"
 fi

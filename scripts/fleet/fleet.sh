@@ -2453,12 +2453,19 @@ for p in prs:
     # value today and would be a subtle thing to depend on, and the `say` after
     # it wants the same number the marker got.
     local rpid=$!
-    # SAID ONLY IF THE LOCK WAS TAKEN. A failed write means somebody else holds
-    # it -- a hand-run that won the window above -- and the child just spawned
-    # will find that and exit 9. Announcing it anyway put "reviewing PR #42" in
-    # the log for a review that never ran, on the one file a person reads to
-    # find out what the fleet did. Found by the independent review.
-    if ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null; then
+    # SAID FROM WHAT THE LOCK HOLDS, not from whether this write won it. The
+    # write fails for two reasons that mean opposite things: somebody else holds
+    # the marker -- a hand-run that won the window above, and the child just
+    # spawned will exit 9 -- or THE CHILD ITSELF claimed it first, which is the
+    # ordinary case and is a review that is running. The child writes `$$`,
+    # which is this same `$rpid`, so the file says which happened. Announcing
+    # "stands down" on the second put a false line in the one log a person reads
+    # to find out what the fleet did; announcing "reviewing" on the first put a
+    # review in it that never ran. Both found by the independent review.
+    ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null
+    local lockpid=""
+    read -r lockpid _ 2>/dev/null <"$marker" || true
+    if [ "${lockpid:-}" = "$rpid" ]; then
       say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
     else
       say "PR #$pr: a reviewer is already in flight; the one just spawned stands down"

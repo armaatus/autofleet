@@ -652,6 +652,25 @@ def answer_substance(body):
     return ANSWER_RE.sub("", body or "").strip()
 
 
+# The review states this gate reads at all. GitHub also has DISMISSED -- one
+# somebody explicitly cleared, and reading its findings trailer as a live hold
+# takes that action away -- and PENDING, which has not been submitted.
+#
+# ONE TUPLE. It was spelled out in four places by the end of #64's first draft,
+# three of them new, and this branch's own history is why that matters: the
+# filter was added to the on-head condition and forgotten in
+# `abandoned_findings`, then added there and still missing from
+# `answer-review.sh`. That is the #114 shape exactly -- every paraphrase drifted
+# the same way -- so `scripts/fleet/answer-review.sh` imports this rather than
+# respelling it. Found by the independent review.
+HOLDING_STATES = ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")
+
+
+def holds(review):
+    """Whether this record is in a state the gate's conditions read."""
+    return review.get("state") in HOLDING_STATES
+
+
 def review_name(review):
     """How a message names ONE review of possibly several on the same head.
 
@@ -695,24 +714,48 @@ def abandoned_findings(pull_request, head_sha):
     review, these findings have had one, whatever it concluded -- a `fail` is
     its own refusal, further up, and says what is unsettled.
 
-    WHY SUBMITTED-AFTER IS THE RIGHT KEY, because "a validation exists" on its
-    own would not be: a validator's scope is `reviewed_sha()..head`, and
-    `reviewed_sha()` is the commit of the NEWEST substantive review on the pull
-    request. So a validation submitted after a review necessarily had that
-    review inside the range it was given, whichever review triggered it -- and
-    one submitted BEFORE it (a validation of an earlier head, which can land
-    between two reviews of the same head) does not silence it, because the
-    comparison is against this review's own timestamp and not against any. That
-    second case is the sequence in #64's own Scope, and it has a row below.
+    WHICH VALIDATION COUNTS AS THE READER, and "any later one" is not the
+    answer -- an earlier version of this said it was, and justified it with a
+    claim about `reviewed_sha()` that is false. A validator's scope is
+    `reviewed_sha()..head`, and `reviewed_sha()` is the commit of the NEWEST
+    substantive review on the pull request. So a validation reads the findings
+    of the reviews on the head that was newest WHEN IT RAN, and nothing older:
+    with heads A, B, C, an unanswered review on A, a second review on B and a
+    validation after that, the validation's range starts at B and the review on
+    A was never in it. Silenced on its timestamp alone, A's findings are dropped
+    -- which is the whole of #64, in the function written to catch it. Found by
+    the independent review.
+
+    So a validation reads this review only if no review on a DIFFERENT head was
+    submitted between the two: that is exactly the condition under which this
+    review was still `reviewed_sha()`'s when the validator was briefed. A
+    validation submitted BEFORE the review does not read it either, which is the
+    sequence in #64's own Scope -- two reviews on one head with a validation of
+    an earlier head landing between them. Both have a row below.
 
     So this fires in exactly one window: findings written, the head moved out
     from under them, no answer, and no validation yet. That is the window PR #1
     went through silently. Found by both self-review passes, which caught the
     first version firing on every multi-round PR.
     """
-    read_by = [r.get("submittedAt") or ""
-               for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
-               if is_validation(r)]
+    nodes = ((pull_request.get("reviews") or {}).get("nodes") or [])
+    read_by = [r.get("submittedAt") or "" for r in nodes if is_validation(r)]
+
+    def has_reader(review, oid):
+        """Did any validation run while `review` was still the newest one?"""
+        since = review.get("submittedAt") or ""
+        for when in read_by:
+            if when < since:
+                continue          # it cannot have read what did not exist
+            # A review on another head, submitted in between, moved
+            # `reviewed_sha()` past this one before that validator was briefed.
+            if any(is_substantive(o) and not is_validation(o)
+                   and ((o.get("commit") or {}).get("oid") or "") != oid
+                   and since < (o.get("submittedAt") or "") <= when
+                   for o in nodes):
+                continue
+            return True
+        return False
     out = []
     for r in independent_reviews(pull_request, None):
         oid = ((r.get("commit") or {}).get("oid")) or ""
@@ -722,7 +765,7 @@ def abandoned_findings(pull_request, head_sha):
         # landed there and not here, so a review somebody had explicitly
         # cleared was still named in the refusal -- one of the two places that
         # needed it. Found by the independent review of this change.
-        if r.get("state") not in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
+        if not holds(r):
             continue
         if not is_substantive(r):
             continue
@@ -737,8 +780,7 @@ def abandoned_findings(pull_request, head_sha):
             continue
         if answered(pull_request, oid, r):
             continue
-        since = r.get("submittedAt") or ""
-        if any(when >= since for when in read_by):
+        if has_reader(r, oid):
             continue
         out.append((r, oid, found))
     return out
@@ -970,7 +1012,9 @@ def evaluate(head_sha, pull_request, changed_files):
                 "the reader they still have is the VALIDATION of this head, "
                 "which judges whether a review's findings were addressed. Say "
                 "in the PR what was done about them, so it has something to "
-                "judge against."
+                "judge against. `answer-review.sh` cannot clear this line: it "
+                "writes its marker for the head it is run against, and that is "
+                "no longer this review's."
             )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
@@ -1024,9 +1068,16 @@ def evaluate(head_sha, pull_request, changed_files):
         # The reviews this condition can hold on at all: the three states it
         # reads, with a body worth reading. Built once so the loop and the count
         # below it cannot disagree about what "a review on this head" means.
-        holding = [r for r in substantive
-                   if r.get("state") in ("APPROVED", "CHANGES_REQUESTED",
-                                         "COMMENTED")]
+        holding = [r for r in substantive if holds(r)]
+        # ...and of those, the ones that can be WAITING on an answer. An
+        # approval asks for nothing, so it is not a second review the author has
+        # to account for -- and counting it switched the messages below to
+        # timestamps and announced "2 independent reviews were submitted" about
+        # one review and one approval. The first version of this filtered
+        # `substantive` down to `holding`, which excludes DISMISSED and PENDING
+        # and leaves APPROVED in, so the comment describing the fix described
+        # something the code did not do. Found by the independent review.
+        waiting = [r for r in holding if r.get("state") != "APPROVED"]
         unanswered = 0
         for review in holding:
             who = ((review.get("author") or {}).get("login")) or "?"
@@ -1077,13 +1128,10 @@ def evaluate(head_sha, pull_request, changed_files):
             # always said; it stops being a NAME the moment a second review
             # arrives from the same account, which in `local` mode they all do.
             #
-            # COUNTED FROM `holding`, not from `substantive`. One live review
-            # plus a maintainer's APPROVED is two substantive reviews and one
-            # thing waiting -- counted from the wider set, the message switched
-            # to timestamps and announced "2 independent reviews were submitted"
-            # about an approval that was never holding anything. Found by the
-            # independent review of this change.
-            named = (review_name(review) if len(holding) > 1
+            # COUNTED FROM `waiting`: what the name has to tell apart is two
+            # reviews the author still owes something to, not every record on
+            # the head.
+            named = (review_name(review) if len(waiting) > 1
                      else f"the review from {who}")
             # THE AUTHOR'S WORDS CLEAR A SUGGESTION-ONLY REVIEW, AND NOTHING
             # MORE. `answered()` cannot tell "fixed it" from "I disagree" -- it
@@ -1164,9 +1212,9 @@ def evaluate(head_sha, pull_request, changed_files):
         # reader who has just answered one of them and cannot see why the gate
         # is still red -- which on PR #1 nobody did, because the answer went in
         # before the second review existed and the gate never mentioned it.
-        if unanswered and len(holding) > 1:
+        if unanswered and len(waiting) > 1:
             problems.append(
-                f"    ({len(holding)} independent reviews were submitted "
+                f"    ({len(waiting)} independent reviews were submitted "
                 f"against {head_sha[:8]}. One answer written after the LAST of "
                 "them answers them all; one written between two answers only "
                 "the earlier.)"
@@ -2688,6 +2736,101 @@ SELFTEST = [
         False,
         "github",
         ("left behind", "did not say what it found"),
+    ),
+    (
+        # A VALIDATION THAT NEVER SAW THE FINDINGS DOES NOT SILENCE THEM. Heads
+        # A, B, C: ten findings on A that nobody answered, a second review on B,
+        # then a validation. Its scope is `reviewed_sha()..head`, and by then
+        # `reviewed_sha()` is B -- so the review on A was never in the range the
+        # validator was briefed with. Keyed on the timestamp alone, as the first
+        # version was, the findings are dropped: #64's own failure mode, in the
+        # function written to catch it. Found by the independent review.
+        "a validation that never saw an abandoned review does not silence it",
+        "ccc333",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "aaa111"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:40:00Z",
+                 "commit": {"oid": "bbb222"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and "
+                         "to clear MIN_REVIEW_BODY.\n"
+                         "<!-- review-findings: 0 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T08:00:00Z",
+                 "commit": {"oid": "bbb222"}, "author": {"login": "claude[bot]"},
+                 "body": "The commits since the review address everything it found.\n"
+                         "<!-- validated: bbb222 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("left behind", "aaa111", "10 finding(s)"),
+    ),
+    (
+        # ...and one that DID see them still does. Without this row the fix
+        # above could be "never trust a validation" and every row stays green,
+        # which would put the "a push does not answer a review" line back on
+        # every pull request that followed the gate's own Important advice.
+        "a validation of the head the review was newest on does silence it",
+        "bbb222",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "aaa111"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T08:00:00Z",
+                 "commit": {"oid": "bbb222"}, "author": {"login": "claude[bot]"},
+                 "body": "The commits since the review address all ten.\n"
+                         "<!-- validated: bbb222 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
+        "github",
+        "!left behind",
+    ),
+    (
+        # AN APPROVAL IS NOT A SECOND REVIEW WAITING. One COMMENTED review with
+        # findings plus a maintainer's APPROVED on the same head is two records
+        # and one thing owed, and counting both switched the message to
+        # timestamps and announced "2 independent reviews were submitted" about
+        # the approval. Found by the independent review; the only other APPROVED
+        # fixture is a solo one, so nothing asserted this either way.
+        "a maintainer's approval is not counted as a review still waiting",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "APPROVED", "submittedAt": "2026-09-11T07:40:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "amaintainer"},
+                 "body": "Read it end to end; the shape is right and I am happy "
+                         "with where the lock lives."},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("the review from claude[bot] reports 7 finding(s)",
+         "!independent reviews were submitted"),
     ),
 ]
 

@@ -805,16 +805,62 @@ fleet_lock_release() {
   rm -f "$marker" 2>/dev/null || true
 }
 
+# One attempt to create the lock $1 holding `$$ $2`, with the content already
+# in it when it becomes visible.
+#
+#   0  created by us   1  something is already there   2  could not write at all
+#
+# WHY A LINK AND NOT `set -C` ALONE. `printf >file` under noclobber is
+# O_CREAT|O_EXCL and then a write: between the two the file EXISTS AND IS EMPTY.
+# Another claimer reading in that window sees no pid, `fleet_agent_alive ""`
+# says "gone", and the stale-lock takeover fires against a live owner --
+# and `live_reviewers` in fleet.sh, which reads the same file, deletes the
+# marker as dead and lets the next candidate in the same pass spawn a second
+# reviewer on one head. That is the failure this whole lock exists to prevent,
+# reintroduced by the lock. Found by the independent review.
+#
+# `ln` publishes a file that is already complete: one link(2), atomic, EEXIST if
+# the name is taken. The `set -C` fallback is for a filesystem with no hard
+# links, and is reached only when `ln` failed with the marker still absent.
+_fleet_lock_try() {
+  local marker="$1" head="${2:-}" tmp rc
+  tmp="$(dirname "$marker")/.claim-$$-$(basename "$marker")"
+  printf '%s %s\n' "$$" "$head" >"$tmp" 2>/dev/null || return 2
+  if ln "$tmp" "$marker" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
+  rm -f "$tmp" 2>/dev/null
+  [ -e "$marker" ] && return 1
+  # No marker, so `ln` is not the reason -- no hard links here. Fall back.
+  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
+  [ -e "$marker" ] && return 1
+  return 2
+}
+
+# Who holds the lock $1, once a claim has failed. Prints `pid head` and returns
+# 1 for a holder, 0 when the holder turns out to be US, 3 when the file names
+# nothing readable. Three copies of this tail is what the first version had.
+_fleet_lock_holder() {
+  local marker="$1" held="" for_head=""
+  read -r held for_head 2>/dev/null <"$marker" || true
+  [ "${held:-}" = "$$" ] && return 0
+  # A file that exists and names nothing is not a stale lock to take over: one
+  # with a reviewer behind it and one with nothing behind it are the same file,
+  # and guessing wrong puts two reviews on one head. `_fleet_lock_try` publishes
+  # the content with the name, so this is corruption rather than a young lock.
+  [ -n "${held:-}" ] || return 3
+  printf '%s %s\n' "$held" "${for_head:-?}"
+  return 1
+}
+
 # Claim the lock $1 for THIS process, at head $2.
 #
 #   0  claimed, or already ours
 #   1  another live agent holds it; its `pid head` line is printed on stdout
 #   2  the lock could not be written AT ALL -- an unwritable directory, a full
-#      disk. Not contention, and the caller must not report it as such: a
-#      refusal that names a phantom holder sends a person looking for a process
-#      that does not exist, and hides the one thing they could fix.
+#      disk, or no path given. Not contention, and the caller must not report it
+#      as such: a refusal that names a phantom holder sends a person looking for
+#      a process that does not exist, and hides the one thing they could fix.
 #   3  a lock file is there and names nothing this can read. Also not
-#      contention, and NOT a stale lock to take over either -- see below.
+#      contention, and NOT a stale lock to take over either -- see above.
 #
 # CREATE-OR-FAIL, not `[ -e ] || printf >`. The dispatcher's spawn decision and
 # its write of the marker are two syscalls with a window between them, and the
@@ -822,7 +868,6 @@ fleet_lock_release() {
 # beside a running one, which is what a maintainer clearing a backlog does --
 # lands in. Two reviewers then wrote two reviews against one head, and the
 # gate's answer slot could only ever hold one of them: armaatus/autofleet#64.
-# `set -C` makes the creation atomic, so of two racing claims exactly one wins.
 #
 # ALREADY OURS IS SUCCESS, and it has to be. The dispatcher writes this file
 # AFTER the spawn, holding `$!` -- which is the pid of the very process running
@@ -834,33 +879,17 @@ fleet_lock_release() {
 # "one is running" retires that pull request from review for good, silently.
 # "ps would not say" is not gone -- see `fleet_agent_alive` -- and is obeyed.
 fleet_lock_claim() {
-  local marker="$1" head="${2:-}" held="" for_head="" is stolen moved=""
-  [ -n "$marker" ] || return 0
+  local marker="$1" head="${2:-}" held="" for_head="" rc is stolen moved=""
+  # NOT `return 0`. "No path" is not "you hold it": a caller that mis-derived
+  # the path would proceed unlocked with nothing saying so, which is the silent
+  # direction. Found by the independent review.
+  [ -n "$marker" ] || return 2
   mkdir -p "$(dirname "$marker")" 2>/dev/null || true
-  # `set -C` in a subshell, so the caller's own noclobber setting is untouched.
-  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
-  # THE CREATE CAN FAIL FOR A SECOND REASON, and the two must not be one answer.
-  # No file means the write itself failed -- nowhere to put the lock -- and
-  # reporting that as "somebody else holds it" names a holder that does not
-  # exist. Found by the independent review.
-  [ -e "$marker" ] || return 2
+  _fleet_lock_try "$marker" "$head"; rc=$?
+  [ "$rc" = 1 ] || return "$rc"
+  _fleet_lock_holder "$marker"; rc=$?
+  [ "$rc" = 1 ] || return "$rc"
   read -r held for_head 2>/dev/null <"$marker" || true
-  [ "${held:-}" = "$$" ] && return 0
-  # AN EMPTY READ IS NOT A DEAD OWNER. The winner's create and its write are two
-  # syscalls -- `set -C` opens O_CREAT|O_EXCL and the pid arrives a moment later
-  # -- so a loser reading in between sees a file with nothing in it. Read as
-  # "gone" (which is what `fleet_agent_alive ""` says), the takeover below fires
-  # against a live owner and both processes leave holding the lock. One write
-  # wide, and it is the one state the takeover cannot tell from a dead owner.
-  #
-  # Re-read once, because that window closes on its own; if it is still empty
-  # the file is corrupt rather than young, and THAT is not something to steal
-  # either -- a corrupt marker with a reviewer behind it looks exactly like a
-  # corrupt marker with nothing behind it. The caller says which file, and the
-  # dispatcher's own reaper clears it on the next poll. Found by the independent
-  # review of the change that added this.
-  [ -n "${held:-}" ] || read -r held for_head 2>/dev/null <"$marker" || true
-  [ -n "${held:-}" ] || return 3
   fleet_agent_alive "${held:-}"; is=$?
   if [ "$is" != 1 ]; then
     printf '%s %s\n' "${held:-?}" "${for_head:-?}"
@@ -881,6 +910,7 @@ fleet_lock_claim() {
   # hand is the winner's live claim, not the dead one it read. Put it back and
   # stand down; that is the conservative direction, and the alternative is two
   # reviewers on one head, which is the whole of armaatus/autofleet#64.
+  #
   # DOT-PREFIXED, and in the same directory because a rename has to be. The
   # sweeps in fleet.sh walk `$FLEET_REVIEWING/*`, which does not match a leading
   # dot -- so this file, which exists for the microseconds between the rename
@@ -888,7 +918,8 @@ fleet_lock_claim() {
   # "42.12345". A run killed inside that window leaks one short dot-file that
   # nothing counts and nothing signals.
   stolen="$(dirname "$marker")/.steal-$$-$(basename "$marker")"
-  mv "$marker" "$stolen" 2>/dev/null || { printf '%s %s\n' "${held:-?}" "${for_head:-?}"; return 1; }
+  mv "$marker" "$stolen" 2>/dev/null \
+    || { printf '%s %s\n' "${held:-?}" "${for_head:-?}"; return 1; }
   read -r moved _ 2>/dev/null <"$stolen" || true
   if [ "${moved:-}" != "${held:-}" ]; then
     # PUT BACK CREATE-OR-FAIL, not `mv`. The marker is absent between the
@@ -901,18 +932,10 @@ fleet_lock_claim() {
     # review of the change that added it.
     ( set -C; cat "$stolen" >"$marker" ) 2>/dev/null || true
     rm -f "$stolen" 2>/dev/null || true
-    held=""; for_head=""
-    read -r held for_head 2>/dev/null <"$marker" || true
-    [ "${held:-}" = "$$" ] && return 0
-    printf '%s %s\n' "${held:-?}" "${for_head:-?}"
-    return 1
+    _fleet_lock_holder "$marker"; return $?
   fi
   rm -f "$stolen" 2>/dev/null || true
-  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
-  [ -e "$marker" ] || return 2
-  held=""; for_head=""
-  read -r held for_head 2>/dev/null <"$marker" || true
-  [ "${held:-}" = "$$" ] && return 0
-  printf '%s %s\n' "${held:-?}" "${for_head:-?}"
-  return 1
+  _fleet_lock_try "$marker" "$head"; rc=$?
+  [ "$rc" = 1 ] || return "$rc"
+  _fleet_lock_holder "$marker"
 }
