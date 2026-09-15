@@ -169,7 +169,11 @@ ISSUE_REFS="$REPO_ROOT/.github/scripts"
 # the staleness the conditional was protecting against is unobservable. Found by
 # the independent review, which proposed exactly this.
 POLL_CACHE="$STATE_DIR/poll-cache"
-forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
+forget_poll_answers() {
+  rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"
+  # ...and the out-of-poll memo with it. See $OPEN_PR_MEMO below.
+  OPEN_PR_MEMO=""; OPEN_PR_MEMO_STATE=""
+}
 
 # THE POLL CACHE IS THE POLL'S, and this is the line that says so rather than
 # leaving it to the call graph. `cmd_run` sets it once per pass; every other
@@ -186,6 +190,25 @@ forget_poll_answers() { rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"; }
 # and a stale list is a duplicate worktree or a missed foundation hold.
 # armaatus/autofleet#30.
 IN_POLL=false
+# OUTSIDE a poll there is no $POLL_CACHE to read -- that is the $IN_POLL gate's
+# whole point -- and `open_pr_listing` therefore went to `gh` afresh for every
+# caller. `cmd_status` has one caller PER READY ROW (`in_flight`), so one
+# `status` screen against this repository's own queue was ~54 `gh pr list` calls:
+# the same slope armaatus/autofleet#69 removed from the dispatcher, left standing
+# in the command a person actually types.
+#
+# A VARIABLE and not a file, which is what keeps armaatus/autofleet#35's
+# acceptance ("`fleet.sh status` leaves $STATE_DIR byte-identical") true. It
+# lives for one process, which is exactly right for `status`; a dispatcher never
+# reads it, because `poll_cache_open` is true there and the file cache answers
+# first. `forget_poll_answers` clears it anyway, so a long-lived process that
+# ever did fall through here cannot inherit a stale listing across passes.
+#
+# Three states, because two would make "could not tell" indistinguishable from
+# "not asked yet" -- and that is the one distinction every cache in this file
+# exists to keep. Found by the local review.
+OPEN_PR_MEMO=""
+OPEN_PR_MEMO_STATE=""
 # ...read through a test, never as a bare `$IN_POLL`. Bash runs a simple command
 # that expands to no words with status 0, so an EMPTY $IN_POLL would read as
 # true and turn the caching on -- fail-open, in the one function whose every
@@ -960,7 +983,16 @@ waiting_worktrees() {
 #
 # $1 is the cache file. Prints the cached answer and returns 0; returns 1 when a
 # failure is cached; returns 2 when there is nothing cached and the caller must
-# read for itself. A `cat` that died PART WAY is a 1 and not a 2, for
+# read for itself.
+#
+# READ THAT 2 CAREFULLY, because it is NOT the 2 its callers deal in. Here 2
+# means "the cache has no answer, go and ask"; in `has_open_pr` and `in_flight`
+# 2 means "could not tell", which is the opposite kind of thing. The two call
+# sites translate with a `case $?` rather than passing the status through for
+# exactly that reason, and the mapping is written out at each. One convention
+# for both would be worse: a cache miss is a fact about the cache and "could not
+# tell" is a fact about GitHub, and a helper that conflated them would hand a
+# caller the one answer it must never guess. Raised by the local review. A `cat` that died PART WAY is a 1 and not a 2, for
 # `live_worktrees`' reason: half a listing has already reached the caller, and
 # reading afresh behind it would hand them that half twice.
 poll_cache_get() {
@@ -977,9 +1009,14 @@ poll_cache_get() {
 # an empty answer: every caller of every one of these caches reads an empty
 # answer as "nothing found", and that is the reading that opens a duplicate
 # worktree or ends the run on a backlog that is not empty.
+# The one `mkdir`, so the two writers below do not each carry a copy of it --
+# which is the duplication this trio exists to remove, and which it had two of.
+# Found by the local review.
+poll_cache_dir() { mkdir -p "$POLL_CACHE" 2>/dev/null || true; }
+
 poll_cache_fail() {
   poll_cache_open || return 0
-  mkdir -p "$POLL_CACHE" 2>/dev/null
+  poll_cache_dir
   # `2>/dev/null` BEFORE the redirection it is there for: bash applies them left
   # to right, so with it second a $STATE_DIR that will not take the file still
   # prints bash's own diagnostic to the real stderr -- into $LOG, once a poll,
@@ -1000,7 +1037,7 @@ poll_cache_fail() {
 # trailing newline `$(...)` ate on the way in.
 poll_cache_put() {
   poll_cache_open || return 0
-  mkdir -p "$POLL_CACHE" 2>/dev/null
+  poll_cache_dir
   print_listing "$2" 2>/dev/null >"$1.new" && mv -f "$1.new" "$1" 2>/dev/null
   rm -f "$1.new"
 }
@@ -1028,8 +1065,13 @@ poll_cache_put() {
 # listing has not caught up, `queued` is one too high, `cmd_run` polls once more
 # and counts again. An UNDER-count is what would matter, because `queued == 0`
 # with nothing owned is how the dispatcher decides the backlog is finished, and
-# nothing here can produce one. Found by the local review, which read two
-# comments in this file disagreeing about the same property.
+# nothing on THIS path can produce one -- the `ready` cache holds a listing that
+# was read, whole, this pass. The listing being a truncated PAGE is a different
+# question and a real under-count: `--limit 200` has no full-page guard, so a
+# backlog past it reaches `queued == 0` and the dispatcher exits. That is
+# documented in docs/WORKFLOW.md and owned by armaatus/autofleet#122, and this
+# comment used to read as though it denied it. Found by the local review, which
+# read two comments in this file disagreeing about the same property.
 # armaatus/autofleet#69.
 #
 # A FAILED read is cached as a failure and never as an empty list. "No issue is
@@ -1104,7 +1146,17 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
                                       i["number"])):
     labels = ",".join(l["name"] for l in i.get("labels", []))
     print(i["number"], blocks.get(i["number"], 0), labels, i["title"], sep="\t")
-' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL" 2>/dev/null)" || { poll_cache_fail "$cached"; return 1; }
+' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL" 2>/dev/null)" || {
+    poll_cache_fail "$cached"
+    # Once per $AUTOFLEET_HOLD_RESAY, and onto STDERR -- this function's stdout
+    # is the queue, and a line printed onto it would be read as an issue row.
+    # `say` tees to $LOG either way, which is where an overnight run is read.
+    poll_cache_open && hold_say_into "$READY_UNREADABLE_SAID" ready \
+      "could not read the issue listing, so nothing will start this pass." \
+      "The dispatcher keeps polling rather than deciding the backlog is empty." >&2
+    return 1
+  }
+  rm -f "$READY_UNREADABLE_SAID"
   poll_cache_put "$cached" "$listing"
   # Through `print_listing` rather than `printf '%s\n'`, because `$(...)` ate
   # the trailing newline: without it the launch loop's `read` drops the LAST
@@ -1162,7 +1214,16 @@ open_pr_listing() {
   # guard while it equals the limit actually asked for -- the same split, for
   # the same reason, as `review_open_prs`' `pr_page`.
   local cached="$POLL_CACHE/open-prs" listing pr_page=100
+  # `poll_cache_get`'s 2 is "nothing cached, go and ask" -- NOT the "could not
+  # tell" that 2 means to this function's callers. See its header.
   poll_cache_get "$cached"; case $? in 0) return 0 ;; 1) return 1 ;; esac
+  # ...and outside a poll, the process-scoped memo. Same three states, no file.
+  if ! poll_cache_open; then
+    case "$OPEN_PR_MEMO_STATE" in
+      ok)   print_listing "$OPEN_PR_MEMO"; return 0 ;;
+      fail) return 1 ;;
+    esac
+  fi
   # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
   # so a zero-length body is a `gh` that printed nothing, which the parsers
   # below would each read as "no PR". Caught here, once, rather than five times.
@@ -1250,8 +1311,13 @@ print(len(loaded) if isinstance(loaded, list) else -1)
   # it only because its fixture never creates the marker. Found by the local
   # review.
   poll_cache_open && [ -n "$listing" ] && rm -f "$PR_PAGE_FULL_SAID"
-  if [ -z "$listing" ]; then poll_cache_fail "$cached"; return 1; fi
+  if [ -z "$listing" ]; then
+    poll_cache_fail "$cached"
+    poll_cache_open || OPEN_PR_MEMO_STATE=fail
+    return 1
+  fi
   poll_cache_put "$cached" "$listing"
+  if ! poll_cache_open; then OPEN_PR_MEMO="$listing"; OPEN_PR_MEMO_STATE=ok; fi
   print_listing "$listing"
 }
 
@@ -1315,6 +1381,13 @@ ROTATE_BLIND_SAID="$STATE_DIR/rotate-blind"
 # line per outage, not one a minute -- and cleared at dispatcher startup with
 # the other two, so a restart explains itself rather than inheriting silence.
 PR_PAGE_FULL_SAID="$STATE_DIR/pr-page-full"
+# ...and `ready_issues`' own. Its two sibling listings both say something when
+# they cannot be read; this one silently cached the failure, so a persistent one
+# -- expired `gh` auth, a broken $ISSUE_REFS -- left the dispatcher polling
+# forever, launching nothing, with NOTHING IN THE LOG. That got worse, not
+# better, when the python's traceback was silenced: the traceback was ugly and
+# it was also the only signal. Found by the local review.
+READY_UNREADABLE_SAID="$STATE_DIR/ready-unreadable"
 # Its sibling for "the rotation could not happen at all" is a VARIABLE, not a
 # file, and that is the whole point: the condition it reports is a $STATE_DIR
 # nothing can write to, so a marker in $STATE_DIR cannot be created in exactly
@@ -3008,10 +3081,10 @@ reap_merged() {
     # a merged PR answers neither on its own.
     #
     # `@{u}..HEAD` is the older one. The WORKING TREE is the half
-    # armaatus/rommsync-nx#122 fell
-    # through (#163): auto-merge fires the moment the last check passes, so
-    # review fixes made after it -- that one's became #160 -- sit uncommitted here
-    # while `@{u}..HEAD` is empty.
+    # armaatus/rommsync-nx#122 fell through (and armaatus/rommsync-nx#163 caught):
+    # auto-merge fires the moment the last check passes, so review fixes made
+    # after it -- that one's became armaatus/rommsync-nx#160 -- sit uncommitted
+    # here while `@{u}..HEAD` is empty.
     #
     # Not worktree_holdings, which reap_abandoned uses for the same job: that
     # also asks what is absent from origin/main, and a SQUASH merge leaves every
@@ -3090,11 +3163,11 @@ reap_merged() {
 # removes one only when a PR for that branch has MERGED. Every other way an issue
 # can stop being worked left the worktree standing, owned, and counted against
 # the cap of three -- forever. Two were cleared by hand on 2026-09-07, each
-# holding four containers, two ports and four volumes: #44, which the time-box
-# stopped at three hours for correctly producing nothing, and #148, which the
-# maintainer blocked with its worktree open, keeping armaatus/rommsync-nx#119,
-# #122 and #139 there queued
-# behind work that could never start.
+# holding four containers, two ports and four volumes: armaatus/rommsync-nx#44,
+# which the time-box stopped at three hours for correctly producing nothing, and
+# armaatus/rommsync-nx#148, which the maintainer blocked with its worktree open,
+# keeping armaatus/rommsync-nx#119, #122 and #139 there queued behind work that
+# could never start.
 #
 # The guard has to be its own, because "the issue went blocked" carries none of
 # the guarantee "the PR merged and nothing is unpushed" does: a worktree
@@ -3983,8 +4056,18 @@ cmd_status() {
   # caveat about "the rows below" above an empty table, and spent an extra
   # uncached `gh pr list` on every `status` run against a repository with no
   # queue at all. Found by the local review, twice.
-  local ready_rows; ready_rows="$(ready_issues)"
-  if [ -n "$ready_rows" ] && ! open_pr_listing >/dev/null 2>&1; then
+  # THE STATUS, kept. `ready_rows="$(ready_issues)"` on its own DROPPED it, so a
+  # `gh` outage printed an empty `next up` table under a header that had already
+  # gone out -- which reads as "the backlog is finished", the one wrong
+  # conclusion this whole block exists to prevent. The PR listing's identical
+  # failure got a caveat and two phases; this one had neither. Found by the
+  # local review.
+  local ready_rows ready_rc
+  ready_rows="$(ready_issues)"; ready_rc=$?
+  if [ "$ready_rc" != 0 ]; then
+    echo "  (the issue listing could not be read, so this table is EMPTY because"
+    echo "   nothing could be asked -- not because the backlog is finished)"
+  elif [ -n "$ready_rows" ] && ! open_pr_listing >/dev/null 2>&1; then
     echo "  (the open pull request listing could not be read, so the rows below may"
     echo "   already be claimed -- see docs/WORKFLOW.md, \"What one poll costs\")"
   fi
@@ -4296,7 +4379,8 @@ while that one is up."
   # cannot name" was said once per MACHINE -- an operator debugging truncated
   # reviewer output next month got no line at all. Found by the independent
   # review.
-  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID" "$PR_PAGE_FULL_SAID"
+  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID" "$PR_PAGE_FULL_SAID" \
+        "$READY_UNREADABLE_SAID"
 
   record_dispatcher
   echo $$ >"$PIDFILE"

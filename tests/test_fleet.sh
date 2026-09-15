@@ -4141,8 +4141,12 @@ GITSTUB
     ;;
 
   budget_scales)
-    # THE SLOPE, which is the number that matters. 46 `ready` issues at one poll
-    # a minute is 3000 `gh`/hour on the old shape and the same 120 on this one.
+    # THE SLOPE, which is the number that matters. The measured figures live in
+    # docs/WORKFLOW.md, "What one poll costs", and are not restated here: this
+    # file said 46 `ready` and 3000/hour while the docs said 53 and 3400, which
+    # is two records of one measurement disagreeing about which day it was
+    # taken. What this phase asserts is the SHAPE -- the same count at 10 and at
+    # 50 -- which does not go stale when the backlog moves.
     make_fixture ok
     backlog_all_claimed 10
     out="$(in_fleet cmd_run --auto 2>&1)"
@@ -4292,6 +4296,67 @@ JSON
     echo "ok: ...and stays quiet when it could"
     ;;
 
+  budget_status_says_backlog_blind)
+    # The OTHER listing's failure, which had neither a caveat nor a phase. A
+    # `gh` outage printed an empty `next up` table under a header that had
+    # already gone out, and an empty table reads as "the backlog is finished" --
+    # the one wrong conclusion this block exists to prevent. Found by the local
+    # review.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "not because the backlog is finished" <<<"$out" \
+      || fail "an unreadable issue listing printed as an empty queue: $out"
+    echo "ok: status says an empty next-up table is an outage, not an empty backlog"
+    ;;
+
+  budget_status_one_listing)
+    # ...and it costs ONE open-PR listing, not one per row. Outside a poll there
+    # is no $POLL_CACHE to read -- that gate is #35's -- so every `in_flight` in
+    # the next-up loop went to `gh` afresh: ~54 calls for one screen against this
+    # repository's own queue, which is the slope #69 removed from the dispatcher
+    # left standing in the command a person types. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    # Nothing claimed, so every row survives `in_flight` and the loop runs to the
+    # end -- which is the shape that made this expensive.
+    echo '[]' >"$GH_PRS"
+    in_fleet cmd_status >/dev/null 2>&1
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] \
+      || fail "one status screen over 10 ready issues took $n open-PR listings, not 1: $(cat "$GH_CALLS")"
+    echo "ok: one status screen costs one open-PR listing, whatever the queue holds"
+    # ...and it still writes nothing, which is what keeps that memo a variable
+    # rather than a fourth cache file. #35.
+    [ -e "$AUTOFLEET_DIR/poll-cache/open-prs" ] \
+      && fail "status wrote the poll cache; the out-of-poll memo must not be a file"
+    echo "ok: ...and leaves the poll cache alone"
+    ;;
+
+  budget_ready_blind_speaks)
+    # A `ready` listing that could not be read has to SAY so. Its two siblings
+    # both do. This one cached the failure in silence, so a persistent outage --
+    # expired auth, a broken $ISSUE_REFS -- left the dispatcher polling forever,
+    # launching nothing, with nothing in the log at all. Silencing the python's
+    # traceback made that worse: the traceback was ugly and it was also the only
+    # signal. Found by the local review.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues' 2>&1)"
+    grep -q "could not read the issue listing" <<<"$out" \
+      || fail "the dispatcher stopped starting anything and said nothing: $out"
+    [ "$(grep -c "could not read the issue listing" <<<"$out")" = 1 ] \
+      || fail "it said so more than once in one pass: $out"
+    echo "ok: an unreadable ready listing says so, once"
+    # ...and nothing when it reads fine.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_pass 'ready_issues' 2>&1)"
+    grep -q "could not read the issue listing" <<<"$out" \
+      && fail "it warned about a listing it read fine: $out"
+    echo "ok: ...and stays quiet when it could read it"
+    ;;
+
   budget_status_keeps_said)
     # ...and it still writes NOTHING. #35's acceptance is that `status` leaves
     # $STATE_DIR byte-identical, and the say-once marker's removal is a write:
@@ -4352,11 +4417,19 @@ JSON
     # missed and the assertion would have passed on exactly the drift this phase
     # exists to catch. Waiting for the count to stop moving asserts what the
     # pass actually cost. Found by the local review.
+    # TWENTY consecutive identical reads -- a two-second quiet window, against a
+    # thirty-second poll. Five (half a second) was inside the gap two stub
+    # invocations can leave mid-pass when each forks `gh`, `python3` or `git`
+    # under the parallel-worktree contention this repo runs at: the loop would
+    # break on a partial count and assert `n = 8` against it, which is a
+    # spurious drift report rather than a real one. Raised twice by the local
+    # review, tightened twice. Bounded well clear of the poll, so a second pass
+    # still cannot be what ends the wait.
     i=0; last=-1; n=0; stable=0
-    while [ "$i" -lt 600 ]; do
+    while [ "$i" -lt 900 ]; do
       n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
       if [ "$n" -gt 0 ] && [ "$n" = "$last" ]; then
-        stable=$((stable + 1)); [ "$stable" -ge 5 ] && break
+        stable=$((stable + 1)); [ "$stable" -ge 20 ] && break
       else
         stable=0
       fi
@@ -4531,6 +4604,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
     exit 2 ;;
 esac

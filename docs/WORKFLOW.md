@@ -148,9 +148,10 @@ last paragraph says how**.
 | **Runner CLI calls** | 1 `worktree list`, plus 1 `worktree ps` per stall check and per parked-dirty worktree, plus 3 per launch and 2 per release | worktrees | nothing |
 | **Model invocations** | 1 per launch; a handoff turn and an answering brief typed into a live agent, once per owned worktree per issue; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
 
-Only the third row spends anything. **The poll never *starts* a model** — the
-body of `cmd_run` is shell and `gh` from end to end — but it does two different
-things that cost tokens, and only the first is a new session:
+Only the third row spends anything. **No model runs inside `cmd_run`'s own
+process** — its body is shell and `gh` from end to end — but it is what decides
+when one runs somewhere else, in two different ways, and only the first is a new
+session:
 
 *Sessions it spawns*, three of them rather than the two an older reading of this
 counted: `worktree create --agent claude` is the work itself, `review.sh` is the
@@ -225,6 +226,15 @@ truncated page, so a repository with more than 200 open issues whose newest 200
 are all claimed reaches `queued == 0` with nothing owned, and the dispatcher
 **exits** saying "the backlog has nothing startable left" while real startable
 work sits behind the page boundary. Both listings are armaatus/autofleet#122.
+
+**`fleet.sh status` is not a poll**, and the table above does not price it. It
+asks the same questions from outside the dispatcher, where `$POLL_CACHE` is
+deliberately unavailable — #35's rule is that `status` leaves `$STATE_DIR`
+byte-identical — so it keeps its answers in memory for the one process instead.
+That makes a screen one issue listing, one open-PR listing and one worktree
+listing, whatever the queue holds; before this it was one open-PR listing *per
+ready row*. It is still the most expensive single read in the tree, because it
+prints a table the dispatcher never has to.
 
 **List mode still has the slope**, and the table above does not describe it.
 `fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its
