@@ -235,11 +235,23 @@ case "${1:-}" in
   make_fixture "$NIT_ONLY" open
   out="$(run_it)"; rc=$?
   [ "$rc" = 0 ] || { echo "$out" >&2; fail "a review in hand did not exit 0 (got $rc)"; }
+  # ...AND WHO CLOSES THEM IS THE VALIDATOR, NOT THE AUTHOR. This phase used to
+  # assert the opposite -- that this path names `resolve-thread.sh` and says to
+  # RESOLVE EVERY THREAD -- and it was green beside two checks saying the
+  # reverse: `guard.py`'s refusal text and `evals/lint.sh`'s assertion that
+  # stage 2 does NOT name that script. An author that closes its own threads is
+  # holding the per-finding ledger it is judged against, so the branch would
+  # merge on a thread nobody checked. The open thread still has to close; what
+  # changed is that the thing that closes it is the phase after this one.
   grep -q 'resolve-thread.sh' <<<"$out" \
-    || { echo "$out" >&2; fail "the nit-only path does not mention resolving threads, and an open thread holds the branch"; }
+    && { echo "$out" >&2; fail "the nit-only path tells the author to resolve its own threads"; }
   grep -qi 'resolve every thread' <<<"$out" \
-    || { echo "$out" >&2; fail "it names the script without saying every thread has to close"; }
-  ok "the nit-only path still says to resolve the threads the answer does not touch"
+    && { echo "$out" >&2; fail "it still orders the author to close every thread"; }
+  grep -qi 'the validator resolves' <<<"$out" \
+    || { echo "$out" >&2; fail "it does not say who resolves the threads, and an open thread holds the branch"; }
+  grep -qi 'merge-gate holds the branch' <<<"$out" \
+    || { echo "$out" >&2; fail "it does not say an open thread holds the branch at all"; }
+  ok "the nit-only path says the validator resolves the threads, and that they hold the branch"
   # AND THE FIXTURE HAS TO MATTER. The first version of this phase passed
   # identically with and without its open thread, because the wording it greps
   # for is unconditional -- so it guarded the sentence and tested nothing about
