@@ -1278,6 +1278,19 @@ case "${1:-}" in
       && fail "lib.sh stopped at the driver and left the library half sourced: $out"
     grep -q "^missing=1$" <<<"$out" \
       || fail "nothing recorded that the driver was missing, so fleet_require_runner has nothing to act on: $out"
+    # ...AND THE ENVIRONMENT CANNOT DISARM IT. `FLEET_RUNNER_MISSING` is set on
+    # both arms rather than defaulted, and the comment beside it says why; a
+    # later author writing `FLEET_RUNNER_MISSING="${FLEET_RUNNER_MISSING:-0}"`
+    # turns the whole refusal off with the suite green, which is the shape hard
+    # rule 3 exists against. Check 4g closes the sibling hole for
+    # AUTOFLEET_RUNNER with `env -u`; this closes this one. Found by the
+    # self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope FLEET_RUNNER_MISSING=0 \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an exported FLEET_RUNNER_MISSING=0 disarmed the refusal, which is the whole guard: $out"
+    grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
+      || fail "the refusal stopped naming the file once the environment claimed a driver was present: $out"
 
     # 1b. A DRIVER THAT IS THERE AND DEFINES NOTHING -- a host driver with a
     #     syntax error, or one that returns early when a dependency it needs is
@@ -1381,8 +1394,20 @@ runner_available() {
   printf '     install the down runtime and start it\n' >&2
   return 1
 }
+# Everything else the dispatcher could reach records itself instead of doing
+# anything. $ORCA_CALLS cannot answer this question -- runner/orca.sh is never
+# sourced under AUTOFLEET_RUNNER=down, so the Orca stub that writes that file is
+# unreachable for the whole part and the assertion against it passed for a
+# reason other than the behaviour. Found by the self-review.
+runner_worktree_create() { printf 'worktree_create\n' >>"$DOWN_CALLS"; return 1; }
+runner_worktree_list()   { printf 'worktree_list\n'   >>"$DOWN_CALLS"; }
+runner_worktree_set()    { printf 'worktree_set\n'    >>"$DOWN_CALLS"; }
+runner_agent_states()    { printf 'agent_states\n'    >>"$DOWN_CALLS"; }
+runner_set_deadline()    { printf 'set_deadline\n'    >>"$DOWN_CALLS"; }
 DRIVER
-    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down ./scripts/fleet/fleet.sh run --auto --max-prs 1 2>&1 )"; rc=$?
+    : >"$WORK/down-calls"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/fleet.sh run --auto --max-prs 1 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "the dispatcher ran with a runtime that answers nothing: $out"
     grep -q "not answering here" <<<"$out" \
@@ -1391,8 +1416,8 @@ DRIVER
       || fail "what was tried never reached the person reading the log: $out"
     grep -q "nothing to dispatch with" <<<"$out" \
       || fail "the driver's reason arrived without the consequence, which only the caller can add: $out"
-    [ -s "$ORCA_CALLS" ] \
-      && fail "a dispatcher that refused to start still reached for a runtime: $(cat "$ORCA_CALLS")"
+    [ -s "$WORK/down-calls" ] \
+      && fail "a dispatcher that had been told the runner is unusable still called into it: $(cat "$WORK/down-calls")"
     [ -n "$(ls -A "$AUTOFLEET_DIR/worktrees" 2>/dev/null)" ] \
       && fail "a worktree was opened by a dispatcher that had already been told the runner is unusable"
 
@@ -1407,7 +1432,8 @@ DRIVER
     #    costs anything. So what is asserted is that NOTHING BELOW IT RAN: no
     #    project hook, no watcher, no "worktree ready". See the comment on the
     #    probe for why in front of env.sh was wrong.
-    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "setup.sh provisioned a worktree whose agent can never be started: $out"
     grep -q "not answering here" <<<"$out" \
