@@ -175,6 +175,41 @@ REVIEW_MODES = ("github", "local")
 
 HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 
+# The same rule for the project-owned half, and by exact name rather than by
+# prefix. `.autofleet/` holds the two files that decide what the rules ARE --
+# `guard.json` is the whole project half of `guard.py`, and `config` carries
+# AUTOFLEET_REVIEW_MODE -- next to `setup.sh` and `teardown.sh`, which are
+# ordinary project code an agent is meant to change. Taking the directory
+# wholesale would put a person in the loop of routine work, and a rule that
+# costs that gets removed rather than obeyed.
+#
+# Neither file is covered anywhere else. `guard.py --selftest` asserts against
+# its own SELFTEST_PROJECT fixture, not against the real `guard.json`, so a PR
+# emptying that file leaves the selftest and `evals/lint.sh` green -- hard rule
+# 3's "a guard that silently stops guarding". And `review_mode()` reads the
+# config from the BASE ref on purpose, which correctly judges the PR that
+# weakens the mode under the old rule but leaves every LATER PR judged by the
+# weaker one with nobody having looked at the switch. armaatus/autofleet#38.
+HUMAN_ONLY_FILES = (".autofleet/guard.json", ".autofleet/config")
+
+
+def human_only(changed_files):
+    """The paths in this change that a person has to merge, sorted.
+
+    A function rather than two constants the callers combine themselves:
+    `review-status.sh` asks the same question locally, and the whole reason it
+    imports from this file is that a second copy of "which paths are protected"
+    drifts. It drifted the moment `HUMAN_ONLY_FILES` was added -- the prefix
+    test alone was still correct-looking there, and would have reported a
+    `.autofleet/guard.json` PR as a gate failure to chase (#96's cost) instead
+    of the "a person merges this" verdict it is.
+    """
+    return sorted(
+        f for f in changed_files
+        if f.startswith(HUMAN_ONLY_PREFIXES) or f in HUMAN_ONLY_FILES
+    )
+
+
 # What the PR body has to show: the local pass CLAUDE.md requires before anything
 # leaves a worktree. The `.autofleet/run/reviewed-<sha>` marker that gated the
 # push is per-worktree and invisible from CI, so the body is what can actually be
@@ -966,9 +1001,7 @@ def evaluate(head_sha, pull_request, changed_files):
         for t in unresolved[:10]:
             problems.append(f"    {t.get('path')}:{t.get('line')}")
 
-    protected = sorted(
-        f for f in changed_files if f.startswith(HUMAN_ONLY_PREFIXES)
-    )
+    protected = human_only(changed_files)
     if protected:
         problems.append(
             "this PR touches the enforcement layer, which never merges itself:"
@@ -1406,6 +1439,65 @@ SELFTEST = [
         },
         [".github/workflows/ci.yml"],
         False,
+    ),
+    (
+        # The project-owned half of the enforcement layer. `guard.json` IS
+        # `guard.py`'s project rules -- emptying it disarms every one of them,
+        # and `guard.py --selftest` asserts against its own SELFTEST_PROJECT
+        # fixture rather than this file, so the disarming PR stays green
+        # everywhere. Hard rule 3's shape exactly.
+        "...nor the project's own guard rules",
+        "abc123",
+        {
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        [".autofleet/guard.json"],
+        False,
+    ),
+    (
+        # And the config, for the reason the workflows are here: it carries
+        # AUTOFLEET_REVIEW_MODE. `review_mode()` reads it from the BASE ref, so
+        # the PR that weakens the mode is judged under the old one and every
+        # LATER PR under the new -- with nobody having looked at the switch.
+        "...nor the config that says which rules apply",
+        "abc123",
+        {
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        [".autofleet/config"],
+        False,
+    ),
+    (
+        # Two exact files, not the `.autofleet/` prefix. The rest of that
+        # directory is ordinary project code -- the setup and teardown hooks a
+        # host project's agents are meant to change -- and holding those for a
+        # human merge would put a person in the loop of routine work, which is
+        # the cost that makes a rule get removed rather than obeyed.
+        "...but the project hooks beside them are ordinary code",
+        "abc123",
+        {
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        [".autofleet/setup.sh", ".autofleet/teardown.sh"],
+        True,
     ),
     (
         "a review with nothing in it does not count",

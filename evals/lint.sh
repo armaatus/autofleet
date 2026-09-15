@@ -3116,6 +3116,59 @@ else
   fail ".github/scripts/pr_payload.sh is missing or not executable"
 fi
 
+# The protected set has ONE implementation. `merge_gate.py` holds a prefix tuple
+# and, since #38, a pair of exact filenames -- `.autofleet/guard.json` and
+# `.autofleet/config`, which decide what the rules ARE, beside `setup.sh` and
+# `teardown.sh`, which are ordinary project code. A reader testing only the
+# prefixes still looks right and still compiles; what it does is report a
+# guard.json PR as a merge-gate failure to chase, which is the three wasted
+# review rounds #96 was about.
+grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'human_only(' \
+  || fail "review-status.sh no longer asks merge_gate.human_only() which paths a person merges"
+if grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'HUMAN_ONLY_'; then
+  fail "review-status.sh tests merge_gate's protected-path constants itself; ask human_only() instead, or the two drift the next time the set grows a shape"
+else
+  ok "review-status.sh and the gate agree on which paths a person merges"
+fi
+
+# ...and the guard's project half is LOADED, not merely declared. `guard.py`
+# reads every key with `PROJECT.get(...)`, so a `.autofleet/guard.json` key with
+# a typo in it is not an error: it is silently no rule at all, and
+# `guard.py --selftest` asserts against its own SELFTEST_PROJECT fixture rather
+# than this file, so nothing else in the tree notices. Hard rule 3. The read keys
+# are derived from guard.py rather than listed here -- a list would be the second
+# copy this check exists to make unnecessary.
+if guard_drift="$(python3 -c '
+import importlib.util, json, os, re, sys
+source = open(".claude/hooks/guard.py").read()
+read = set(re.findall(r"PROJECT\.get\(\"([A-Za-z_]+)\"", source))
+path = os.path.join(".autofleet", "guard.json")
+declared = json.load(open(path)) if os.path.exists(path) else {}
+# A leading underscore is the comment convention the shipped example uses.
+unread = sorted(k for k in declared if not k.startswith("_") and k not in read)
+if unread:
+    print("keys guard.py never reads: %s" % ", ".join(unread))
+    sys.exit(1)
+spec = importlib.util.spec_from_file_location("g", ".claude/hooks/guard.py")
+g = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(g)
+loaded = {
+    "protected_paths": len(g.PROTECTED_PATHS),
+    "secret_suffixes": len(g.SECRET_SUFFIXES) - 2,  # the universal /.env pair
+    "secret_contains": len(g.SECRET_CONTAINS),
+    "secret_tails": len(g.SECRET_TAILS),
+}
+short = ["%s: declared %d, loaded %d" % (k, len(declared.get(k, [])), loaded[k])
+         for k in loaded if len(declared.get(k, [])) != loaded[k]]
+if short:
+    print("; ".join(short))
+    sys.exit(1)
+')"; then
+  ok "every rule .autofleet/guard.json declares is a rule guard.py loads"
+else
+  fail ".autofleet/guard.json declares rules guard.py does not enforce ($guard_drift)"
+fi
+
 echo "== orca.yaml"
 if [ ! -f orca.yaml ]; then
   fail "orca.yaml is missing; new worktrees would provision nothing"

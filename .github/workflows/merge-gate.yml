@@ -81,6 +81,13 @@ jobs:
       # would let a PR turn on the weaker rule in the very change that rule is
       # judging. A base with no such file at all is `github`, the strong
       # default, which refuses rather than admits.
+      #
+      # Which still left the SWITCH itself merging unwatched: judged correctly
+      # under the old mode, and every later PR under the new one, with no person
+      # in the loop for the change. So `.autofleet/config` and
+      # `.autofleet/guard.json` are human-merge-only too (#38) -- by exact name,
+      # because `.autofleet/setup.sh` and `teardown.sh` beside them are ordinary
+      # project code.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
