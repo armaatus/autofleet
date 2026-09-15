@@ -15,6 +15,12 @@
 # when the page cap below was reached before the list ran out, and merge_gate.py
 # treats that as a refusal to answer rather than as a clean result.
 #
+# A review carries its `url` for one reason: one head can collect more than one
+# review, every one of them from the same account in `local` mode, and "the
+# review from claude[bot]" then names two things. `merge_gate.py` and
+# `review.sh` fall back to the timestamp when it is absent -- every fixture in
+# the selftest table is -- so this widens what can be SAID, never what counts.
+#
 # `reviews(last:50)` needs no paging: it takes the LATEST fifty, which is what
 # the gate reads. Only the thread list is truncated from the wrong end.
 #
@@ -50,7 +56,7 @@ query($owner:String!,$name:String!,$pr:Int!,$after:String){
     pullRequest(number:$pr){
       body
       author{login}
-      reviews(last:50){ nodes{ state submittedAt commit{oid} author{login}
+      reviews(last:50){ nodes{ state submittedAt commit{oid} author{login} url
                                body comments(first:1){ totalCount } } }
       comments(last:50){ nodes{ author{login} createdAt body } }
       reviewThreads(first:100, after:$after){

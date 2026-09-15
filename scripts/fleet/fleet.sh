@@ -1481,7 +1481,7 @@ launch() {
 # arrive and `await-review.sh` waits out its deadline three times.
 #
 # In the default `github` mode this returns immediately and costs nothing.
-REVIEWING_DIR="$STATE_DIR/reviewing"
+REVIEWING_DIR="$FLEET_REVIEWING"
 # WHAT IS IN THIS DIRECTORY, in one place, because a fourth consumer that had to
 # work it out from three use sites is exactly how the third one came to disagree:
 #
@@ -1652,38 +1652,17 @@ start_validator() {
 # here is to leave a possible reviewer running and its slot held, not to signal
 # an unidentified process.
 #
-# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
-# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
-# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
-# the very review this file starts. `stop_reviewers()` SIGTERMs what this
-# matches, and it runs at every dispatcher start, so a recycled pid landing on an
-# agent's wait would have killed the wait: the exact failure this whole change
-# exists to remove, delivered by the machinery that removes it. Found by the
-# independent review.
+# THE PATTERN IS IN lib.sh, anchored, and why it must be is stated there. The
+# short of it: an unanchored `review\.sh` also matches `await-review.sh`, which
+# is where every worktree agent sits waiting for the review this file starts,
+# and `stop_reviewers` SIGTERMs whatever this matches.
 #
-# `dispatcher_alive` anchors for the same reason and was cited as this
-# function's model while not being followed. The pattern matches the path this
-# file actually spawns -- `<repo>/scripts/fleet/review.sh <pr>` -- with the
-# separator required on the left so `await-review.sh` cannot satisfy it.
-reviewer_alive() {
-  local pid="${1:-}" line
-  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  line="$(ps -o command= -p "$pid" 2>/dev/null)"
-  [ -n "$line" ] || return 2
-  # BOTH SCRIPTS, and this matched only the reviewer for one commit. The
-  # validator's lock lives in the same directory under a `v-` prefix and its
-  # pid is a `validate.sh`, so `live_reviewers` read every live validator as
-  # dead: it deleted the lock, the next poll started another, and up to
-  # AUTOFLEET_REVIEW_MAX_TRIES of them ran at once against one head. The same
-  # hole made `stop_reviewers` skip validators, so `stop.sh --now` left one
-  # running with this machine's gh login for the rest of its timeout.
-  #
-  # The separator on the left is still required so `await-review.sh` cannot
-  # satisfy it, and `-\?` is not used: the names are matched whole.
-  printf '%s\n' "$line" \
-    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
-}
+# IN lib.sh SINCE armaatus/autofleet#64, because `review.sh` asks the same
+# question: the lock it may not claim is one a live agent holds. Kept as a name
+# here -- six call sites and the three-way answer they read is this file's
+# vocabulary -- but there is one copy of the pattern, and it is next to the lock
+# helper that depends on it.
+reviewer_alive() { fleet_agent_alive "$@"; }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
 #

@@ -49,6 +49,9 @@
 #   6  the reviewer command is missing, or would not start
 #   7  the reviewer ran past AUTOFLEET_REVIEW_TIMEOUT and was killed
 #   8  a review is already on this head; nothing to do
+#   9  a reviewer is already being WRITTEN for this PR -- a second one
+#      would land a second review on one head, and the gate's answer slot
+#      cannot hold two (armaatus/autofleet#64)
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -84,6 +87,19 @@ LOG_DIR="$FLEET_DIR/reviews"
 # to remove. armaatus/autofleet#33.
 # Both siblings derived in one place, with the same empty-guard: reaching for
 # one of them inline is how the pair drifts apart.
+# THE LOCK FILE THIS RUN OWNS, which is the marker itself and is set here only
+# when the dispatcher named one. A hand-run gets its own, claimed below once the
+# PR number is known -- until then there is nothing to clean up and `on_exit`
+# must remove nothing.
+#
+# SEPARATE FROM `AUTOFLEET_REVIEW_MARKER`, and the distinction is load-bearing
+# twice over. A hand-run claims a LOCK and writes no records: `.done`, `.tries`
+# and `.rounds` are the dispatcher's bookkeeping about spawns it decided on, and
+# a person running this by hand decided differently. And an exit that REFUSED
+# because somebody else holds the lock must not drop it -- that would free the
+# running reviewer's slot and invite the next poll to start the second reviewer
+# this just declined. So the trap removes `$LOCK`, which is empty on that path.
+LOCK="${AUTOFLEET_REVIEW_MARKER:-}"
 DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
 TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
 # A third record, and the one that counts the thing the other two do not.
@@ -224,7 +240,7 @@ drop_placeholder_log() {
   return 0
 }
 on_exit() {
-  rm -f "${AUTOFLEET_REVIEW_MARKER:-}" "$payload" "$raw_err"
+  rm -f "${LOCK:-}" "$payload" "$raw_err"
   drop_placeholder_log
   rm -f "$raw_out"
   drop_review_ref
@@ -296,6 +312,42 @@ case "$head" in
      exit 2 ;;
 esac
 
+# ------------------------------------------------ is one already being written
+#
+# NOT THE SAME QUESTION AS THE ONE BELOW, and the gap between them is
+# armaatus/autofleet#64. Below asks whether a review is already ON this head;
+# this asks whether one is being WRITTEN for it. A reviewer takes minutes, and
+# for every one of them the question below answers "no" -- so a second
+# dispatcher pass, or a hand-run beside a running dispatcher, which is exactly
+# what a maintainer clearing a backlog does, started a second reviewer and
+# landed a second review on one head. Two reviews on one head is the shape the
+# gate's answer could not hold: observed on PR #1, 07:13Z with 7 findings and
+# 07:27Z with 10, and the second was never answered by anything.
+#
+# CLAIMED BY THIS PROCESS, not by the dispatcher. The dispatcher decides from
+# `[ -e "$marker" ]` and writes the marker AFTER the spawn -- two syscalls with
+# the race between them -- so the claim has to be atomic and it has to be made
+# by the thing whose existence it announces. `fleet_lock_claim` is a
+# create-or-fail; of two racing claims exactly one wins. A dispatcher-started
+# run finds either nothing or its OWN pid, and both are success.
+#
+# BEFORE `counting_review`, which is two API calls, and after the head, which is
+# what the lock records. The refund is `unspent_try`: this run reached no
+# reviewer, and the try the dispatcher spent for it is not an attempt at a
+# verdict.
+LOCK="${AUTOFLEET_REVIEW_MARKER:-$FLEET_REVIEWING/$pr}"
+if ! holder="$(fleet_lock_claim "$LOCK" "$head")"; then
+  # ...and the lock stays THEIRS. `$LOCK` is cleared before the exit so the
+  # trap, which drops this run's lock on every path, drops nothing here.
+  echo "PR #$pr already has a reviewer in flight (pid ${holder%% *}) on ${head:0:8}." >&2
+  echo "  Not starting a second: two reviews on one head cannot both be answered," >&2
+  echo "  and the one that loses the answer slot is read by nobody. Wait for it," >&2
+  echo "  or read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log." >&2
+  LOCK=""
+  unspent_try
+  exit 9
+fi
+
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
 # same reason await-review.sh and review-status.sh ask it: three paraphrases of
 # "what counts as a review" drifted apart once already (#114), always in the
@@ -354,10 +406,41 @@ PY
   return $rc
 }
 
+# WHICH review holds the head, for the exit below. "Already reviewed" is a true
+# sentence that tells a person nothing: with two reviewers capable of landing on
+# one head (armaatus/autofleet#64) the next question is always which review this
+# one is standing down for, and the answer is in the payload `counting_review`
+# has just fetched -- no API call. One line each, because the case worth naming
+# is the one where there is more than one.
+held_by() {
+  AUTOFLEET_REVIEW_MODE=local python3 - "$payload" "$head" <<'PY'
+import json, sys
+sys.path.insert(0, ".github/scripts")
+from merge_gate import independent_reviews, is_substantive, declared_findings
+try:
+    pull = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"] or {}
+except Exception:
+    raise SystemExit(0)
+for r in independent_reviews(pull, sys.argv[2]):
+    if not is_substantive(r):
+        continue
+    who = (r.get("author") or {}).get("login") or "?"
+    found = declared_findings(r)
+    print("held by {}'s {} of {}{}{}".format(
+        who, (r.get("state") or "review").lower(), r.get("submittedAt") or "?",
+        "" if found is None else f" ({found} finding(s))",
+        f" -- {r['url']}" if r.get("url") else ""))
+PY
+}
+
 payload="$(mktemp)"
 counting_review
 case $? in
   0) echo "PR #$pr already has a counting review on ${head:0:8}; nothing to do."
+     # `|| true`: a payload this cannot read is not a reason to turn a clean
+     # exit 8 into a failure -- the sentence above is already the decision, and
+     # this only says who else wrote it.
+     held_by 2>/dev/null | sed 's/^/  /' || true
      record_done; exit 8 ;;
   # Refunded: no reviewer ran. `merge_gate.py` is a file agents in this
   # repository edit, so a broken import is not exotic -- and without this the
@@ -997,7 +1080,7 @@ on_exit() {
   # a Ctrl-C -- left `$log` absent, and those are exactly the exits whose
   # message tells a person to go and read it.
   finish_log
-  rm -f "${AUTOFLEET_REVIEW_MARKER:-}" "$payload" "$raw_out" "$raw_err"
+  rm -f "${LOCK:-}" "$payload" "$raw_out" "$raw_err"
   drop_review_ref
 }
 # Refunded, like the stop path below and for the same reason: a reviewer killed

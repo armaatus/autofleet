@@ -859,6 +859,15 @@ GHSTUB
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 8 ] || { cat "$WORK/out" >&2; fail "a second run did not exit 8 (got $rc)"; }
   ok "a head that already has a review exits 8"
+  # ...AND IT SAYS WHICH REVIEW. "Already reviewed" is true and tells a person
+  # nothing: with two reviewers able to land on one head (#64) the next question
+  # is always which review this run is standing down for. The answer is in the
+  # payload the idempotence check has already fetched, so it costs no API call
+  # -- and a message that silently stopped naming it would leave nothing to
+  # read but the exit code.
+  grep -q "held by" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "exit 8 did not name the review that holds the head"; }
+  ok "...and it names the review that holds the head"
   [ "$(n_reviews)" = 1 ] \
     || fail "a second review was submitted on the same head"
   ok "...and no second review is submitted"
@@ -1415,6 +1424,12 @@ PY_FIX
     # branch and the whole suite stays green -- which is the silent-block
     # direction #33 calls "the whole of this issue". Found by the independent
     # review.
+    # ...and let the SECOND reviewer finish first. `n_started` counts the stub,
+    # which runs before review.sh's post-check -- so the count reaches two while
+    # the second run still holds the PR's lock, and the hand-run below then
+    # correctly refuses with exit 9 rather than reaching the deadline it is
+    # about. The phase measured the lock it had left held itself.
+    await lock_held no || fail "the second reviewer never released its lock"
     rm -f "$AUTOFLEET_DIR/reviewing/42.done" "$AUTOFLEET_DIR/reviewing/42.tries"
     stub_reviewer hang
     out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \

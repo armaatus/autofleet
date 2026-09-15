@@ -652,6 +652,59 @@ def answer_substance(body):
     return ANSWER_RE.sub("", body or "").strip()
 
 
+def review_name(review):
+    """How a message names ONE review of possibly several on the same head.
+
+    In `local` mode every reviewer signs in as the PR's own account, so "the
+    review from claude[bot]" names all of them -- and a hold that cannot say
+    which review is still waiting is a hold nobody can answer. The URL is what a
+    person clicks; `submittedAt` is what every payload has, including every
+    fixture in the table below, so it is the one that is always printed.
+    """
+    who = ((review.get("author") or {}).get("login")) or "?"
+    when = review.get("submittedAt") or "?"
+    url = review.get("url")
+    return f"{who}'s review of {when}" + (f" ({url})" if url else "")
+
+
+def abandoned_findings(pull_request, head_sha):
+    """Reviews on a head the branch has LEFT BEHIND whose findings went unread.
+
+    The failure that produced armaatus/autofleet#64. Two reviewers landed on one
+    head, the author answered the first, and the commit carrying that answer
+    moved the head -- so the second review, ten findings, was invalidated by a
+    push that was never about it. The gate then refused for "no independent
+    review on the current head", which is true, says nothing about the ten
+    findings, and reads exactly like an ordinary first round. The branch moved
+    on with them unread.
+
+    So the refusal names them. It does not add a condition: every caller of this
+    is already inside a branch that holds the PR, and nothing here can be
+    satisfied except by answering a review whose head is gone -- which
+    `answered()` still accepts, because it matches the marker against the head
+    the review was ON.
+
+    NOT CALLED where a `pass` validation stands in for the missing review. A
+    validation judges whether the review's findings were addressed, across every
+    head the PR has had, so there the findings have had a reader; the case this
+    exists for is the one where nothing read them at all.
+    """
+    out = []
+    for r in independent_reviews(pull_request, None):
+        oid = ((r.get("commit") or {}).get("oid")) or ""
+        if not oid or oid == head_sha:
+            continue
+        if not is_substantive(r):
+            continue
+        found = declared_findings(r)
+        if not found:      # None ("did not say") and 0 are both "nothing owed"
+            continue
+        if answered(pull_request, oid, r):
+            continue
+        out.append((r, oid, found))
+    return out
+
+
 def answered(pull_request, head_sha, review):
     """Whether the PR's author has answered this review, on this head, since it.
 
@@ -863,6 +916,18 @@ def evaluate(head_sha, pull_request, changed_files):
             f"({head_sha[:8]}). Pushing a fix invalidates the previous one -- "
             "re-request review. " + why
         )
+        # ...AND WHAT THE PUSH LEFT BEHIND. The line above is true of a first
+        # round and of a pull request that just walked away from ten findings,
+        # and until now it read the same in both. armaatus/autofleet#64.
+        for review, oid, found in abandoned_findings(pull_request, head_sha):
+            problems.append(
+                f"    {review_name(review)} reported {found} finding(s) on "
+                f"{oid[:8]}, a head this branch has left behind, and nothing "
+                "answered it. A push does not answer a review. Say what was "
+                "done about them -- `./scripts/fleet/answer-review.sh` answers "
+                "the reviews on the head it is run against -- or the next round "
+                "starts as though they were never written."
+            )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
         # CHANGES_REQUESTED and then, later on the same head, an empty COMMENTED
@@ -896,11 +961,25 @@ def evaluate(head_sha, pull_request, changed_files):
         # COMMENTED review is caught by neither, and it merged four PRs out from
         # under their authors. See the module docstring.
         #
-        # Only the reviews still standing -- one already superseded by a later
-        # review on the same head has been answered by that review's existence,
-        # and requiring an answer to it would deadlock a PR whose second review
-        # was clean.
-        for who, review in sorted(latest.items()):
+        # PER REVIEW, NOT PER AUTHOR, and the difference is armaatus/autofleet#64.
+        # `latest` above is right for the CHANGES_REQUESTED condition: that is a
+        # reviewer's STANDING verdict, and a later review from the same reviewer
+        # supersedes it -- GitHub's own rule. It is wrong for findings. One head
+        # can carry two INDEPENDENT reviews (two overlapping polls used to start
+        # two reviewers, and in `local` mode both sign in as the same account),
+        # and a second reader finding nothing is not an answer to the first
+        # reader's seven findings -- it never saw them. Collapsed to the latest,
+        # PR #1 merged with seven unread, and then with ten.
+        #
+        # This is not the deadlock the old comment feared, and `answered()` is
+        # why: an answer counts only if it was written AFTER the review it
+        # answers, so ONE comment written after the last review answers every
+        # review on the head -- which is what an author answering two of them at
+        # once actually means. What it costs is a comment. What it buys is that
+        # "answered" can no longer be true of one review and reported of two.
+        unanswered = 0
+        for review in substantive:
+            who = ((review.get("author") or {}).get("login")) or "?"
             if review.get("state") == "CHANGES_REQUESTED":
                 continue  # said above, with the remedy that belongs to it
             if review.get("state") == "APPROVED":
@@ -929,6 +1008,13 @@ def evaluate(head_sha, pull_request, changed_files):
             if verdict == "pass":
                 continue
             important = declared_important(review)
+            # NAMED BY WHEN IT WAS SUBMITTED only when there is more than one
+            # review on this head to tell apart. "the review from claude[bot]"
+            # is the clearer sentence and it is what every message here has
+            # always said; it stops being a NAME the moment a second review
+            # arrives from the same account, which in `local` mode they all do.
+            named = (review_name(review) if len(substantive) > 1
+                     else f"the review from {who}")
             # THE AUTHOR'S WORDS CLEAR A SUGGESTION-ONLY REVIEW, AND NOTHING
             # MORE. `answered()` cannot tell "fixed it" from "I disagree" -- it
             # asserts only that somebody read the findings and decided -- and
@@ -947,8 +1033,9 @@ def evaluate(head_sha, pull_request, changed_files):
             # which is what every other reader of this trailer does.
             if answered(pull_request, head_sha, review) and important != 0 \
                     and important is not None:
+                unanswered += 1
                 problems.append(
-                    f"the review from {who} reports {important} finding(s) it "
+                    f"{named} reports {important} finding(s) it "
                     "called Important, and this PR's author has answered in "
                     "words. That clears a Suggestion; it does not clear these. "
                     "An Important finding is fixed, or a validation says why it "
@@ -967,11 +1054,12 @@ def evaluate(head_sha, pull_request, changed_files):
             # so the fix bought a fresh full-diff review, which found one more
             # nit. Answering costs no commit and clears this line, and until
             # now nothing said so.
+            unanswered += 1
             problems.append(
-                (f"the review from {who} reports {found} finding(s)"
+                (f"{named} reports {found} finding(s)"
                  + (", none of them Important" if important == 0 else "")
                  if found is not None else
-                 f"the review from {who} does not say what it found -- no "
+                 f"{named} does not say what it found -- no "
                  "`<!-- review-findings: N -->` trailer, so it is not read as "
                  "clean")
                 + ", and this PR's author has not said what was done about "
@@ -993,6 +1081,20 @@ def evaluate(head_sha, pull_request, changed_files):
                    "Any unresolved thread is a separate line above, and the "
                    "answer does not close those."
                    if important == 0 else "")
+            )
+
+        # SAID ONCE, and only when something above is actually waiting: two
+        # reviews on one head with both answered is a pull request that is fine,
+        # and a line in the refusal list is a refusal. What it is for is the
+        # reader who has just answered one of them and cannot see why the gate
+        # is still red -- which on PR #1 nobody did, because the answer went in
+        # before the second review existed and the gate never mentioned it.
+        if unanswered and len(substantive) > 1:
+            problems.append(
+                f"    ({len(substantive)} independent reviews were submitted "
+                f"against {head_sha[:8]}. One answer written after the LAST of "
+                "them answers them all; one written between two answers only "
+                "the earlier.)"
             )
 
     if not thread_list_is_complete(pull_request):

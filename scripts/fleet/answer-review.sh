@@ -120,18 +120,24 @@ fleet_pr_payload "$pr" "$payload" || {
 # collapsing them sends an agent to wait for a review that already arrived, for
 # a reason the message never names -- the same conflation the substance check
 # above is careful to avoid. Found by the independent review of this PR.
+# HOW MANY, not whether. One head can carry more than one independent review --
+# two overlapping polls used to start two reviewers, and armaatus/autofleet#64 is
+# what that cost -- and the gate requires an answer per review. One comment
+# answers them all, because `answered()` only asks that the comment came after
+# the review; what the count is for is the SENTENCE at the end, so an author who
+# answered two reviews knows they answered two.
 if ! reviewed="$(gate_py '
 import json
 pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
-print("yes" if any(merge_gate.is_substantive(r)
-                   for r in merge_gate.independent_reviews(pull, sys.argv[3]))
-      else "no")' "$payload" "$head")"; then
+print(sum(1 for r in merge_gate.independent_reviews(pull, sys.argv[3])
+          if merge_gate.is_substantive(r)))' "$payload" "$head")"; then
   echo "could not tell whether PR #$pr has a review on ${head:0:8}: the payload did not" >&2
   echo "load, or .github/scripts/merge_gate.py -- which decides which reviews count --" >&2
   echo "did not answer. Nothing here can say what to do until it does." >&2
   exit 2
 fi
-if [ "$reviewed" != yes ]; then
+case "$reviewed" in (''|*[!0-9]*) reviewed=0 ;; esac
+if [ "$reviewed" -lt 1 ]; then
   echo "no independent review has been submitted against ${head:0:8} yet, so there is" >&2
   echo "nothing here to answer -- and an answer written now would be discarded by the" >&2
   echo "review that follows it. Wait for it:  ./scripts/fleet/await-review.sh $pr" >&2
@@ -158,7 +164,16 @@ if ! GH_PAGER=cat gh pr comment "$pr" --body-file "$body" >/dev/null 2>&1; then
   echo "could not post the answer on PR #$pr" >&2
   exit 1
 fi
-echo "answered the review on ${head:0:8} of PR #$pr"
+if [ "$reviewed" -gt 1 ]; then
+  # NAMED, because the gate now counts answers per review and the author has
+  # just discharged more than one with a single comment. Silent, the next thing
+  # they read is a green gate they cannot account for -- or, if a review lands
+  # between this comment and the gate run, a red one they think they answered.
+  echo "answered the $reviewed reviews on ${head:0:8} of PR #$pr -- one comment"
+  echo "written after the last of them answers all of them."
+else
+  echo "answered the review on ${head:0:8} of PR #$pr"
+fi
 
 # An issue comment is not one of merge-gate.yml's triggers and cannot be: an
 # `issue_comment` run attaches its check to the default branch, not to this PR's

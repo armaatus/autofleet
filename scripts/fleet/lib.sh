@@ -345,6 +345,12 @@ FLEET_DIR="${AUTOFLEET_DIR:-$HOME/.autofleet}"
 FLEET_STOP="$FLEET_DIR/STOP"
 FLEET_DRAIN="$FLEET_DIR/DRAIN"
 FLEET_OWNED="$FLEET_DIR/worktrees"
+# ...and where the reviewer and validator locks and records live. Spelled here
+# rather than in `fleet.sh` because `review.sh` claims its own lock now
+# (armaatus/autofleet#64) and two spellings of a lock directory is one lock
+# nobody holds. `fleet.sh`'s REVIEWING_DIR is this, and the comment naming what
+# is in it is there, next to the four consumers that walk it.
+FLEET_REVIEWING="$FLEET_DIR/reviewing"
 # ...and what it HAS run, which is a different question. `own()` writes an
 # issue's worktree path here and `disown_issue` does NOT take it away, so the
 # record outlives the worktree -- `cost.sh` is built on it, and on $FLEET_OWNED
@@ -745,4 +751,85 @@ fleet_record_done() {
   printf '%s\n' "$head" >"$done_marker" 2>/dev/null || true
   [ -n "$tries_marker" ] && rm -f "$tries_marker" 2>/dev/null || true
   return 0
+}
+
+# Is $1 a pid of one of this fleet's agents, still running?
+#
+#   0  alive, and `ps` says it is a review.sh or a validate.sh
+#   1  gone, or alive and something else -- a recycled pid
+#   2  alive, but `ps` would not say what it is
+#
+# THE THIRD ANSWER IS NOT A ROUNDING ERROR. `kill -0` succeeds for a pid this
+# user owns whatever it is running, and a marker outlives its process -- nothing
+# clears $FLEET_REVIEWING across a dispatcher's death -- so the number is reused.
+# A two-way answer has to guess which way, and both guesses cost: read as dead,
+# the lock is stolen from a live reviewer and a second one starts; read as
+# alive, the PR is never reviewed again.
+#
+# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
+# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
+# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
+# the very review the dispatcher starts. `stop_reviewers` SIGTERMs what this
+# matches, so a recycled pid landing on an agent's wait would kill the wait.
+#
+# BOTH SCRIPTS. The validator's lock lives in the same directory under a `v-`
+# prefix and its pid is a `validate.sh`; matching only the reviewer read every
+# live validator as dead, deleted its lock, and started another every poll.
+#
+# Here rather than in fleet.sh because `review.sh` asks it too: a lock it may
+# not claim is one held by a live agent, and that is this question.
+fleet_agent_alive() {
+  local pid="${1:-}" line
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  line="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [ -n "$line" ] || return 2
+  printf '%s\n' "$line" \
+    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
+}
+
+# Claim the lock $1 for THIS process, at head $2.
+#
+#   0  claimed, or already ours
+#   1  another live agent holds it; its `pid head` line is printed on stdout
+#
+# CREATE-OR-FAIL, not `[ -e ] || printf >`. The dispatcher's spawn decision and
+# its write of the marker are two syscalls with a window between them, and the
+# window is exactly what a second dispatcher pass -- or a hand-run `review.sh`
+# beside a running one, which is what a maintainer clearing a backlog does --
+# lands in. Two reviewers then wrote two reviews against one head, and the
+# gate's answer slot could only ever hold one of them: armaatus/autofleet#64.
+# `set -C` makes the creation atomic, so of two racing claims exactly one wins.
+#
+# ALREADY OURS IS SUCCESS, and it has to be. The dispatcher writes this file
+# AFTER the spawn, holding `$!` -- which is the pid of the very process running
+# this. A claim that read its own pid as a competitor would refuse every
+# dispatcher-started review, one time in however many the write lands first.
+#
+# A lock naming a pid that is gone is TAKEN OVER rather than obeyed: nothing
+# clears this directory across a dispatcher's death, and a stale marker read as
+# "one is running" retires that pull request from review for good, silently.
+# "ps would not say" is not gone -- see `fleet_agent_alive` -- and is obeyed.
+fleet_lock_claim() {
+  local marker="$1" head="${2:-}" held="" for_head="" is
+  [ -n "$marker" ] || return 0
+  mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+  # `set -C` in a subshell, so the caller's own noclobber setting is untouched.
+  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
+  read -r held for_head 2>/dev/null <"$marker" || true
+  [ "${held:-}" = "$$" ] && return 0
+  fleet_agent_alive "${held:-}"; is=$?
+  if [ "$is" != 1 ]; then
+    printf '%s %s\n' "${held:-?}" "${for_head:-?}"
+    return 1
+  fi
+  rm -f "$marker" 2>/dev/null || true
+  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
+  # Lost the re-claim to whoever else was clearing the same stale marker. Their
+  # lock, not ours, and the answer is the same one a live holder gets.
+  held=""; for_head=""
+  read -r held for_head 2>/dev/null <"$marker" || true
+  [ "${held:-}" = "$$" ] && return 0
+  printf '%s %s\n' "${held:-?}" "${for_head:-?}"
+  return 1
 }
