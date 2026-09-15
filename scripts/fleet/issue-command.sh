@@ -265,20 +265,26 @@ and fires the moment the last required check passes. Step 6 is only the check
 that you did it.
 
 The body must carry `## Plan` -- what the issue asked for, and where the
-implementation departed from it and why -- the `/mattpocock-skills:code-review`
-findings and what you did about them, any issue you edited and why, and
+implementation departed from it and why -- the findings of BOTH self-review
+passes and what you did about them, any issue you edited and why, and
 `Closes #__ISSUE__`. Departing from the issue is normal; departing silently is
 not, and the review checks that section against the diff.
 
-The `merge-gate` check reads that body: it looks for the words
-`mattpocock-skills:code-review` and a closing line, and without either the PR
-cannot merge. The closing line is the one the PR template leaves as a
+The `merge-gate` check reads that body: it looks for `/code-review`,
+`mattpocock-skills:code-review` and a closing line, and without any of the three
+the PR cannot merge. The closing line is the one the PR template leaves as a
 placeholder -- fill it in. Then tell the board where the work is:
 
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
 
-Then write the handoff, which is what a session restarting in this worktree
-reads instead of working the last hour out again:
+**Then write the handoff, and understand what it is for now: this session ends
+here.** The dispatcher drops the conversation once the PR is up and hands the
+rest of this brief to a new one in the same worktree -- the build is done, and
+every file you read to do it would otherwise be re-billed on every turn of the
+answering work. Sessions were measured past 900,000 tokens that way.
+
+So the note is not a courtesy for an interrupted attempt any more. It is the
+only thing that crosses:
 
     ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
 
@@ -290,7 +296,10 @@ The decisions you took and why, the files you touched, what the review said and
 how you answered it, and what is still open. NOT the plan, which is in the PR
 body, and not the diff. It is capped, and over the cap it refuses and names the
 cap rather than truncating. `issue-command.sh` prints it back at the top of the
-next session here.
+next session here, which is the one that answers the review.
+
+If the dispatcher asks you for it -- "write your handoff note now" -- that is a
+bounded turn before something takes the terminal away. Write it and stop.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/` or
 `.claude/`, this PR will never merge itself, and that is not a failure.**

@@ -275,6 +275,59 @@
 # The check at the foot of this file is what makes that distinction hold.
 : "${AUTOFLEET_HANDOFF_MAX_WORDS:=300}"
 
+# ------------------------------------------------- the context reset at the PR
+# A SESSION PER PHASE, NOT PER ISSUE.
+#
+# One agent session used to span the whole of an issue: build, open the PR, wait
+# for the review, answer it, wait for the validation. Every file it read while
+# building stayed in its context for all of that, and every turn afterwards paid
+# for the whole of it again -- sessions were measured past 900,000 tokens, most
+# of it a build nobody was still reading.
+#
+# The pull request is the seam. Once it is open the build is done, and what the
+# answering work needs is the review, the diff and what the build decided --
+# which is exactly what the handoff note holds. So the dispatcher asks for the
+# note, drops the conversation, and hands the answering half of the brief to a
+# session that starts from it.
+#
+# `off` keeps the one-session shape. Worth it for a host whose agent CLI has no
+# way to drop a conversation from the terminal, which is the same thing as
+# setting AUTOFLEET_AGENT_CLEAR_CMD empty and is spelled out here so a host does
+# not have to discover that equivalence.
+: "${AUTOFLEET_CONTEXT_RESET:=on}"
+
+# WHAT DROPS THE CONVERSATION, typed into the agent's terminal like any other
+# prompt. `/clear` is Claude Code's; a host on another CLI puts its own here.
+#
+# EMPTY TURNS THE RESET OFF, and says so in the log rather than resetting
+# nothing quietly: an unrecognised command typed at an agent is a turn spent on
+# a syntax error, and the next thing that arrives is the answering brief, which
+# the agent would then answer with its whole build still in front of it. That is
+# the one-session shape with an extra turn, which is worse than either.
+#
+# `=` AND NOT `:=`, which it had for one commit. Every other default in this
+# file substitutes on unset OR NULL, which is right when empty has no meaning;
+# here empty IS the off switch, and `:=` handed it straight back `/clear` -- so
+# a host that set it empty to turn the reset off got the reset, with Claude
+# Code's command typed at a CLI that does not have it. The same trap
+# AUTOFLEET_COST_ROOT documents below, and the phase that caught it is
+# `fleet context_reset_off`.
+: "${AUTOFLEET_AGENT_CLEAR_CMD=/clear}"
+
+# How long an agent gets to write its handoff note before the thing that asked
+# for it takes the terminal away.
+#
+# Three callers, all of them about to end a session: the reset above, the
+# time-box, and the reaper. Before this they interrupted first and asked
+# nothing, so an interrupted attempt wrote nothing down -- which is the half of
+# armaatus/autofleet#55 that the note's existence did not fix, because the note
+# needs a TURN to be written in.
+#
+# It is a ceiling, not a wait: the dispatcher stops as soon as the note's
+# timestamp moves. 0 means "do not ask", which is the pre-#106 behaviour and is
+# left reachable for a host that would rather not spend the turn.
+: "${AUTOFLEET_HANDOFF_GRACE_SECONDS:=120}"
+
 # --------------------------------------------------------------- the cost
 # Where the agent CLI writes its session transcripts, and therefore the only
 # place `cost.sh` can find out what a worktree run actually spent.
@@ -426,6 +479,20 @@ config_whole_number AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_
 # Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
 # non-number has to be refused, because only a non-number turns the guard off
 # without saying so.
+# Not a number, so not the helper -- and the same reasoning as
+# AUTOFLEET_REVIEW_SCOPE's: a misspelling fails in the safe direction (anything
+# that is not `on` leaves the one-session shape) but silently, and a host that
+# wrote `true` would keep paying for 900k contexts with no way to find out.
+case "$AUTOFLEET_CONTEXT_RESET" in
+  on|off) ;;
+  *) echo "AUTOFLEET_CONTEXT_RESET must be 'on' or 'off';" \
+          "got '$AUTOFLEET_CONTEXT_RESET'" >&2
+     exit 2 ;;
+esac
+
+config_whole_number AUTOFLEET_HANDOFF_GRACE_SECONDS "$AUTOFLEET_HANDOFF_GRACE_SECONDS" \
+  0 "a whole number of seconds (0 does not ask for a note at all)"
+
 config_whole_number AUTOFLEET_HANDOFF_MAX_WORDS "$AUTOFLEET_HANDOFF_MAX_WORDS" \
   0 "a whole number (0 turns the cap off)"
 

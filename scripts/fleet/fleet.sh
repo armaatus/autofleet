@@ -344,6 +344,149 @@ card() {
   return 0
 }
 
+# Type one prompt at the agent in a worktree and submit it.
+#
+# The same two primitives agent-autostart.sh uses to submit a drafted prompt,
+# in the order that matters: `send` types into the composer, `enter` submits
+# whatever is in it. A `send` that fails must NOT be followed by an `enter` --
+# that submits whatever the agent had half-typed itself.
+#
+# Silent about a worktree with no agent, because two of the three callers run
+# against every owned worktree on every poll and most of them have no agent at
+# that moment. A listing that could not be READ is said once, the way
+# `interrupt_agent_in` says it, because that is the difference between "nobody
+# is in there" and "somebody is and we could not reach them".
+say_to_agent_in() {
+  local path="$1" text="$2" handle
+  if ! handle="$(runner_agent_terminal "$path")"; then
+    say "  the runner would not say whether an agent is in $path -- nothing was sent"
+    return 1
+  fi
+  [ -n "$handle" ] || return 1
+  runner_terminal_send "$handle" "$text" || {
+    say "  the runner would not type into $path -- nothing was sent"
+    return 1
+  }
+  runner_terminal_enter "$handle" || {
+    say "  the runner typed into $path but would not submit it"
+    return 1
+  }
+  return 0
+}
+
+# Ask the agent to write its handoff note, and let it, WITHOUT holding the poll.
+#
+# armaatus/autofleet#106: the note exists, and every path that ended a session
+# interrupted first and asked nothing, so an interrupted attempt wrote nothing
+# down. A note needs a turn to be written in, and this is the turn.
+#
+# ACROSS POLLS, NOT INSIDE ONE. The first version slept up to the grace right
+# here, which is a dispatcher that stops answering for two minutes per issue --
+# with three worktrees, six minutes in which no review is collected and no
+# time-box fires. The fleet already has the shape for "asked, waiting on an
+# answer": a marker, and a decision made on the next pass. So this asks once,
+# writes down when it asked and what the note's timestamp was, and answers
+# "not yet" until either the timestamp moves or the grace runs out.
+#
+# 0 = go ahead: the note was written, the grace is spent, there is no agent to
+#     ask, or asking is turned off.
+# 1 = wait: the request has just gone out, or it is still standing.
+#
+# So every caller reads as `handoff_turn ... || continue` -- the action it was
+# about to take happens on a later poll, which is safe for all three of them:
+# the time-box keeps its `started` marker, the reaper's warning pass is a pass
+# of notice by design, and an unreset context costs one more poll of build
+# tokens rather than a lost session.
+handoff_turn() {
+  local num="$1" path="$2" marker="$STATE_DIR/handoff-asked-$num"
+  local asked_at before now note
+  [ "${AUTOFLEET_HANDOFF_GRACE_SECONDS:-0}" -gt 0 ] || return 0
+  note="$(fleet_handoff_path "$path" "$num")"
+  now="$(date +%s)"
+
+  if [ -e "$marker" ]; then
+    asked_at=""; before=""
+    read -r asked_at before 2>/dev/null <"$marker" || true
+    case "${asked_at:-}" in ''|*[!0-9]*) asked_at=0 ;; esac
+    # WRITTEN is the mtime MOVING, not the file existing: a note left by an
+    # earlier attempt in this worktree is already there, and reading it as this
+    # agent's answer is how a stale note gets treated as a fresh one.
+    if [ "$(file_mtime "$note")" != "${before:-}" ]; then
+      rm -f "$marker"
+      say "#$num: handoff note written -- $(( now - asked_at ))s after it was asked for"
+      return 0
+    fi
+    [ $(( now - asked_at )) -ge "$AUTOFLEET_HANDOFF_GRACE_SECONDS" ] || return 1
+    rm -f "$marker"
+    say "#$num: no handoff note ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s after asking -- going on without one"
+    return 0
+  fi
+
+  # Nobody to ask is not a wait. The agent may have exited already, which is
+  # exactly when the caller wants to get on with it.
+  say_to_agent_in "$path" \
+    "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
+    || return 0
+  printf '%s %s\n' "$now" "$(file_mtime "$note")" >"$marker"
+  say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
+  return 1
+}
+
+# The mtime of a file, or the empty string. `stat` is the one spelling that
+# differs between BSD and GNU and there is no third option that covers both.
+file_mtime() {
+  [ -e "$1" ] || return 0
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+}
+
+# THE PULL REQUEST IS THE SEAM. Once it is open the build is done, and every
+# file the build read is still in the agent's context -- paid for again on every
+# turn of the answering work, which needs none of it.
+#
+# So: ask for the note, drop the conversation, hand over the answering half of
+# the brief. Once per issue, marked, because the second one would drop the
+# answering context this just created.
+#
+# NOT KEYED TO THE REVIEW ARRIVING, deliberately. The agent is inside
+# `await-review.sh` at that moment -- a blocking call -- and text typed at a
+# running turn lands after it, so the reset would arrive in the middle of the
+# answer rather than before it. The PR appearing is the same boundary one step
+# earlier, and the agent is between turns there.
+reset_context_for_answering() {
+  [ "${AUTOFLEET_CONTEXT_RESET:-on}" = on ] || return 0
+  local f num path
+  for f in "$OWNED_DIR"/*; do
+    [ -e "$f" ] || continue
+    num="$(basename "$f")"
+    [ -e "$STATE_DIR/context-reset-$num" ] && continue
+    path="$(owned_path "$num")"
+    [ -d "$path" ] || continue
+    # "Could not tell" is not "yes", the same way enforce_timebox reads it: this
+    # branch ends a session, and a lookup that failed is no basis for that.
+    has_open_pr "$num" || continue
+    # EMPTY IS THE OFF SWITCH, and it is said rather than skipped silently: a
+    # host on a CLI with no clear command has turned the reset off, and the
+    # place to find that out is the log of the first issue it would have hit.
+    if [ -z "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ]; then
+      : >"$STATE_DIR/context-reset-$num"
+      say "#$num: AUTOFLEET_AGENT_CLEAR_CMD is empty, so the build context stays for the answering work"
+      continue
+    fi
+    handoff_turn "$num" "$path" || continue
+    say "#$num: PR is open -- starting the answering work in a clean context"
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue
+    # The marker goes down BEFORE the second prompt: a clear that landed and an
+    # answering brief that did not is recoverable by hand, and is much better
+    # than clearing the same agent again on the next poll because the marker
+    # waited for both.
+    : >"$STATE_DIR/context-reset-$num"
+    say_to_agent_in "$path" \
+      "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr $num\` and follow everything it prints. You are the same worktree and a new session: what the build decided is in its handoff note, which that command prints, and nothing else from it survives." \
+      || say "#$num: the conversation was dropped but the answering brief did not arrive -- send it by hand"
+    card "$path" comment "#$num: PR open; answering in a clean context"
+  done
+}
+
 # Interrupt the agent in one worktree, if it has one. Both callers are about to
 # take something away from it -- the time-box the rest of its hours, the release
 # its whole directory -- and an agent that is not told keeps working against a rig
@@ -407,7 +550,8 @@ clear_issue_markers() {
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1"
+        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
+        "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -2807,6 +2951,13 @@ reap_abandoned() {
       # and said so on the board. Scoped to the poll: this is about not saying one
       # thing twice in one minute, not about never saying it again.
       if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
+        # ITS TURN TO WRITE THE NOTE, before the terminal goes
+        # (armaatus/autofleet#106). The worktree is still standing on this
+        # branch -- it is released NEXT pass, and only if nothing lands in it --
+        # so a note written now is a note the next attempt can read. `continue`
+        # rather than proceeding: this is the warning pass, and a pass of notice
+        # is what it is for.
+        handoff_turn "$num" "$path" || continue
         interrupt_agent_in "$path"
         card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
       fi
@@ -3004,6 +3155,19 @@ enforce_timebox() {
     # the same issue to inherit and be silenced by.
     forget_box_markers "$num"
 
+    # ITS TURN TO WRITE THE NOTE FIRST (armaatus/autofleet#106). This path takes
+    # the rest of an agent's hours away and asked nothing before it, so three
+    # hours of work left nothing behind and `fleet.sh retry` started from the
+    # files. The grace is spent before the interrupt, which is why it is bounded
+    # and why the wait ends the moment the note's timestamp moves.
+    #
+    # Worth spending here even though the worktree may be released below: it is
+    # kept whenever it holds uncommitted work or unmerged commits, which is
+    # exactly the case where the note has something to say.
+    # ...and the `continue` above is why this line is HERE and not before the
+    # turn: said first, it printed once a poll for the whole of the grace, which
+    # is the "once per event" rule this function keeps everywhere else.
+    handoff_turn "$num" "$path" || continue
     say "#$num: $((TIMEBOX_SECONDS / 3600))h with no PR -- stopping it; the worktree goes if it holds nothing"
     interrupt_agent_in "$path"
     # For reap_abandoned, which runs later in THIS pass and would otherwise
@@ -3865,6 +4029,10 @@ while that one is up."
     # is waiting on exactly this, and every pass it waits is a pass of its
     # time-box spent.
     review_open_prs
+    # After review_open_prs and before the timers: this ends the build session
+    # of every worktree whose PR is up, and the answering session it starts is
+    # the one the reviewer's findings arrive into.
+    reset_context_for_answering
     enforce_timebox
     notice_stalled
     reap_abandoned
