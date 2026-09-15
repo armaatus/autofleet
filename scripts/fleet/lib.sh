@@ -822,18 +822,28 @@ fleet_lock_release() {
 # `ln` publishes a file that is already complete: one link(2), atomic, EEXIST if
 # the name is taken. The `set -C` fallback is for a filesystem with no hard
 # links, and is reached only when `ln` failed with the marker still absent.
-_fleet_lock_try() {
-  local marker="$1" head="${2:-}" tmp rc
+fleet_lock_publish() {
+  local marker="$1" pid="${2:-$$}" head="${3:-}" tmp
   tmp="$(dirname "$marker")/.claim-$$-$(basename "$marker")"
-  printf '%s %s\n' "$$" "$head" >"$tmp" 2>/dev/null || return 2
+  # `2>/dev/null` BEFORE the redirection that can fail. The other order prints
+  # the open failure and only then silences the stream, which is the whole of
+  # the rule in CLAUDE.md's Code section -- and this is the exact path `return 2`
+  # exists to report cleanly. `evals/late_stderr_silence.py` scans input
+  # redirections only, so nothing but a reader catches the write form. Found by
+  # the independent review.
+  printf '%s %s\n' "$pid" "$head" 2>/dev/null >"$tmp" || return 2
   if ln "$tmp" "$marker" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   rm -f "$tmp" 2>/dev/null
   [ -e "$marker" ] && return 1
-  # No marker, so `ln` is not the reason -- no hard links here. Fall back.
-  ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
+  # No marker, so `ln` is not the reason -- no hard links here. Fall back, and
+  # accept the window: a filesystem without hard links is not one this fleet
+  # runs two dispatchers on.
+  ( set -C; printf '%s %s\n' "$pid" "$head" >"$marker" ) 2>/dev/null && return 0
   [ -e "$marker" ] && return 1
   return 2
 }
+
+_fleet_lock_try() { fleet_lock_publish "$1" "$$" "${2:-}"; }
 
 # Who holds the lock $1, once a claim has failed. Prints `pid head` and returns
 # 1 for a holder, 0 when the holder turns out to be US, 3 when the file names
@@ -887,12 +897,19 @@ fleet_lock_claim() {
   mkdir -p "$(dirname "$marker")" 2>/dev/null || true
   _fleet_lock_try "$marker" "$head"; rc=$?
   [ "$rc" = 1 ] || return "$rc"
-  _fleet_lock_holder "$marker"; rc=$?
-  [ "$rc" = 1 ] || return "$rc"
+  # ONE PRINT, and only once the answer is "somebody else holds it". The holder
+  # line used to be printed here AND by `_fleet_lock_holder` on each arm below,
+  # so `$holder` was two and three lines where the contract above says one --
+  # invisible only because the single caller writes `${holder%% *}`. Printing it
+  # before the liveness test would be the opposite error: a claim that goes on
+  # to take a stale lock over and succeed would announce a holder on its way.
+  # Found by the independent review.
   read -r held for_head 2>/dev/null <"$marker" || true
-  fleet_agent_alive "${held:-}"; is=$?
+  [ "${held:-}" = "$$" ] && return 0
+  [ -n "${held:-}" ] || return 3
+  fleet_agent_alive "$held"; is=$?
   if [ "$is" != 1 ]; then
-    printf '%s %s\n' "${held:-?}" "${for_head:-?}"
+    printf '%s %s\n' "$held" "${for_head:-?}"
     return 1
   fi
 
@@ -918,8 +935,7 @@ fleet_lock_claim() {
   # "42.12345". A run killed inside that window leaks one short dot-file that
   # nothing counts and nothing signals.
   stolen="$(dirname "$marker")/.steal-$$-$(basename "$marker")"
-  mv "$marker" "$stolen" 2>/dev/null \
-    || { printf '%s %s\n' "${held:-?}" "${for_head:-?}"; return 1; }
+  mv "$marker" "$stolen" 2>/dev/null || { _fleet_lock_holder "$marker"; return $?; }
   read -r moved _ 2>/dev/null <"$stolen" || true
   if [ "${moved:-}" != "${held:-}" ]; then
     # PUT BACK CREATE-OR-FAIL, not `mv`. The marker is absent between the
@@ -930,7 +946,11 @@ fleet_lock_claim() {
     # hand-run), which is narrow, and it is the one way this arm was not the
     # conservative direction its comment claims. Found by the independent
     # review of the change that added it.
-    ( set -C; cat "$stolen" >"$marker" ) 2>/dev/null || true
+    # `ln`, not `set -C; cat >`: the same empty-file window this function opens
+    # with, twenty lines below the comment rejecting it. The stolen file is
+    # already complete, so linking it back publishes content and name together.
+    # Found by the independent review.
+    ln "$stolen" "$marker" 2>/dev/null || true
     rm -f "$stolen" 2>/dev/null || true
     _fleet_lock_holder "$marker"; return $?
   fi

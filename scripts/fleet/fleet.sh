@@ -1620,10 +1620,20 @@ start_validator() {
   # inherits it eats them -- the next PR in the pass then silently gets nothing.
   #
   # The marker is written AFTER the spawn, because the pid is what goes in it.
-  # The race that opens is the same benign one review.sh documents: an exit-8
-  # validator can remove a marker that does not exist yet, and the `printf` then
-  # recreates it holding a dead pid, which `live_reviewers` reaps on its next
-  # call.
+  # The race that opens is benign HERE and is no longer the one review.sh
+  # documents: since armaatus/autofleet#64 the REVIEWER's marker is a lock the
+  # reviewer claims for itself, create-or-fail, and `review.sh` releases it by
+  # content rather than by path. The validator's is still this file's private
+  # bookkeeping, so an exit-5 validator can remove a marker that does not exist
+  # yet and the write below recreates it holding a dead pid, which
+  # `live_reviewers` reaps on its next call.
+  #
+  # THE SAME RACE THAT #64 CLOSED FOR REVIEWS IS STILL OPEN HERE, and the
+  # difference in what it costs is why it was left: two validations on one head
+  # spend a verdict out of a cap of two, where two reviews on one head lost a
+  # review's findings entirely. `fleet_lock_claim` and `fleet_lock_release` are
+  # in lib.sh for whoever converts this half; do not read the paragraph above as
+  # "both halves are locked".
   # Written BEFORE the spawn, because the dispatcher has to decide from
   # something and the decision is made here. `validate.sh` refunds it on every
   # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
@@ -2462,7 +2472,14 @@ for p in prs:
     # "stands down" on the second put a false line in the one log a person reads
     # to find out what the fleet did; announcing "reviewing" on the first put a
     # review in it that never ran. Both found by the independent review.
-    ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null
+    # `fleet_lock_publish`, NOT `set -C` here either. This was the one write
+    # left using the construct lib.sh rejects: create-then-write leaves the file
+    # existing and EMPTY between two syscalls, and a hand-run claiming in that
+    # window reads no pid, gets "the lock names nothing this can read", and is
+    # told to delete a lock that is being written normally -- in exactly the
+    # hand-run-beside-a-dispatcher case #64's Design notes name. Found by the
+    # independent review.
+    fleet_lock_publish "$marker" "$rpid" "$head"
     local lockpid=""
     read -r lockpid _ 2>/dev/null <"$marker" || true
     if [ "${lockpid:-}" = "$rpid" ]; then
