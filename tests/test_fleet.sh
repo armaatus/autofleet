@@ -508,7 +508,11 @@ case "$*" in
   # caches the first as "could not tell" and must never cache it as "no PR".
   *"pr list"*)        [ "$(cat "$GH_PRS")" = FAIL ] && { echo "gh: could not connect" >&2; exit 1; }
                       cat "$GH_PRS"; exit 0 ;;
-  *"issue list"*)     cat "$GH_ISSUES"; exit 0 ;;
+  # ...and the same FAIL shape, for the same reason: `ready_issues` caches its
+  # own failure, and "could not tell" read as "the backlog is empty" ends the
+  # dispatcher for the night on one blip.
+  *"issue list"*)     [ "$(cat "$GH_ISSUES")" = FAIL ] && { echo "gh: could not connect" >&2; exit 1; }
+                      cat "$GH_ISSUES"; exit 0 ;;
   # gh applies --jq itself, so the stub answers what the filter would produce.
   # The literal FAIL stands for a gh that could not answer at all -- the third
   # answer the dispatcher is built around.
@@ -4195,6 +4199,113 @@ GITSTUB
     echo "ok: ...and so is one that came back malformed"
     ;;
 
+  budget_launch_cost)
+    # WHAT ONE LAUNCH ADDS, measured rather than re-derived -- the row in
+    # docs/WORKFLOW.md's budget table is this number. In `--auto` the title and
+    # labels come out of the `ready` listing the pass already has, so a launch
+    # costs no `gh` call at all; what it costs is runner calls.
+    make_fixture ok
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    echo '[]' >"$GH_PRS"
+    start_dispatcher --auto --max-prs 1
+    wait_for_log "opened 1 worktree"
+    stop_dispatcher
+    grep -q "^worktree create" "$ORCA_CALLS" || fail "nothing was launched: $(cat "$WORK/run.log")"
+    # No `gh issue view` for the title or the labels of what it picked.
+    n="$(grep -c "issue view 4" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] \
+      || fail "a launch in --auto still spent $n \`gh issue view\` calls on an issue the ready listing already described: $(cat "$GH_CALLS")"
+    echo "ok: a launch in --auto costs no gh call of its own"
+    ;;
+
+  budget_ready_list_blind)
+    # The `ready` listing's half of the same contract. A `gh` that could not
+    # answer must not come back as an empty queue: `count_startable` reading one
+    # answers 0, and `queued == 0` with nothing owned is how `cmd_run` decides
+    # the backlog is finished and exits. One blip would end an overnight run.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "first=$?"; ready_issues; echo "second=$?"' 2>&1)"
+    grep -q "first=1" <<<"$out" || fail "an unreadable issue listing did not fail: $out"
+    grep -q "second=1" <<<"$out" \
+      || fail "the cached failure came back as an empty backlog rather than as a failure: $out"
+    n="$(grep -c "issue list --state open" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "the failed issue listing was re-asked $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: a ready listing that could not be read fails, is cached as a failure, and is asked once"
+    # ...and the run loop keeps polling on it rather than deciding the queue is
+    # empty. count_startable's documented non-zero is what carries that.
+    out="$(in_pass 'count_startable; echo "rc=$?"' 2>&1)"
+    grep -q "rc=1" <<<"$out" || fail "count_startable answered a number from a listing it could not read: $out"
+    echo "ok: ...and count_startable refuses to answer a number from it"
+    ;;
+
+  budget_ready_list_once)
+    # An empty backlog is an ANSWER and caches as one -- `-e`, not `-s`. Two
+    # readers, one `gh issue list`, and the second still gets the empty answer
+    # rather than a second call.
+    make_fixture ok
+    echo '[]' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "first=$?"; ready_issues; echo "second=$?"' 2>&1)"
+    grep -q "first=0" <<<"$out" || fail "an empty backlog did not read as an answer: $out"
+    grep -q "second=0" <<<"$out" || fail "the cached empty backlog did not read as an answer: $out"
+    n="$(grep -c "issue list --state open" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "an empty backlog was asked for $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: an empty ready listing is an answer, cached as one, asked once"
+    # ...and a real queue still round-trips whole, last record included. `$(...)`
+    # eats the trailing newline, and without `print_listing` putting it back the
+    # launch loop's `read` drops the last candidate -- so a one-issue backlog
+    # would never start at all.
+    make_fixture ok
+    backlog_all_claimed 1
+    out="$(in_pass 'ready_issues | wc -l; ready_issues | wc -l' 2>&1 | tr -d " ")"
+    [ "$out" = "$(printf '1\n1')" ] \
+      || fail "a one-issue ready listing did not survive the cache as one whole record: $out"
+    echo "ok: ...and a one-issue queue survives the cache with its last record intact"
+    ;;
+
+  budget_pr_list_truncated)
+    # A FULL PAGE is not an answer. At `--limit 100` we cannot tell an absent PR
+    # from one on page two, and this listing is the single authority the launch
+    # loop reads -- so a truncated page read as complete makes every issue whose
+    # PR fell past the boundary look free, and the fleet opens a second worktree
+    # for each. "Could not tell" instead, which starts nothing.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
+    grep -q "rc=2" <<<"$out" \
+      || fail "a PR listing at the page limit was read as complete, so an issue past the boundary reads as free: $out"
+    echo "ok: an open-PR listing at its page limit answers 'could not tell', not 'no PR'"
+    # One short of the limit is a whole listing and still answers.
+    make_fixture ok
+    backlog_all_claimed 99
+    out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
+    grep -q "rc=0" <<<"$out" || fail "a listing one short of the page limit stopped answering: $out"
+    echo "ok: ...and one short of it still does"
+    ;;
+
+  budget_listing_before_launch)
+    # THE LINE THE WINDOW RESTS ON. `open_pr_listing`'s header says the listing
+    # is taken no later than the line before the launch loop, because the launch
+    # loop is the one reader that acts on the answer by opening a worktree.
+    # Nothing else in the suite can tell: delete the prefetch and the counts stay
+    # at 2, because the loop's first `in_flight` fetches lazily instead. The
+    # ORDER is what changes -- lazily, `ready_issues` gets there first -- so the
+    # order is what this asserts. Hard rule 3: a guard with no assertion is not
+    # shipped. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the pass did not end: $out"
+    first="$(head -1 "$GH_CALLS")"
+    case "$first" in
+      "pr list --state open --json number,body"*) : ;;
+      *) fail "the pass's first gh call was '$first', not the open-PR listing: the launch loop got there first, and the window named at the cache is no longer the one the code takes" ;;
+    esac
+    echo "ok: the pass takes its open-PR listing before the launch loop scans anything"
+    ;;
+
   budget_pr_list_fresh_per_pass)
     # The cache is the POLL's. A PR opened between passes is seen on the next
     # one -- the window named at the cache is one poll wide, not the run's life.
@@ -4210,6 +4321,6 @@ GITSTUB
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost" >&2
     exit 2 ;;
 esac

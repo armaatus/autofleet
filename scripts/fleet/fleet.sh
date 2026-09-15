@@ -979,6 +979,15 @@ ready_issues() {
     # `-e`, not `-s`: an empty backlog is an ANSWER and caches as an empty file.
     if [ -e "$cached" ]; then cat "$cached" || return 1; return 0; fi
   fi
+  # NO `[ -z "$listing" ]` HERE, and that is not an oversight -- it is the one
+  # place this cache and `open_pr_listing`'s deliberately differ. `gh` hands
+  # back `[]` for an empty PR list, so THERE a zero-length body can only be an
+  # outage. Here the python below prints nothing when no issue is startable,
+  # which is a real and ordinary answer, so emptiness says nothing about
+  # whether the read worked. The failure is caught by the pipeline's status
+  # instead: `gh` failing leaves python with nothing to parse, `json.load`
+  # raises, and `pipefail` brings that back as the assignment's non-zero.
+  # Raised by the local review, which read the two as an accident.
   listing="$(GH_PAGER=cat gh issue list --state open --limit 200 \
     --json number,title,body,labels 2>/dev/null \
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
@@ -1074,7 +1083,10 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
 # answer "no PR closes any issue", and a caller that reads a `gh` outage that
 # way opens a worktree for every issue in the backlog at once.
 open_pr_listing() {
-  local cached="$POLL_CACHE/open-prs" listing
+  # ONE NUMBER for the page size, because the truncation guard below is only a
+  # guard while it equals the limit actually asked for -- the same split, for
+  # the same reason, as `review_open_prs`' `pr_page`.
+  local cached="$POLL_CACHE/open-prs" listing pr_page=100
   if poll_cache_open; then
     [ -e "$cached.unreadable" ] && return 1
     # `-e`, not `-s`: `[]` is an answer. `|| return 1` and NOT a fall-through to
@@ -1086,8 +1098,23 @@ open_pr_listing() {
   # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
   # so a zero-length body is a `gh` that printed nothing, which the parsers
   # below would each read as "no PR". Caught here, once, rather than five times.
-  if ! listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit 100 2>/dev/null)" \
-     || [ -z "$listing" ]; then
+  # AND NEITHER IS A FULL PAGE. At the limit we cannot tell an absent PR from
+  # one on the next page, and this listing is now the single authority the
+  # launch loop reads -- so a repository with 100 open PRs would have every
+  # issue whose PR sits past the page boundary read as free, and the duplicate
+  # worktree this function's header is about would arrive on the first poll
+  # rather than in a one-poll window. `review_open_prs` refuses a listing at its
+  # own limit for exactly this (`prs_answered=no`); so does this one, into
+  # "could not tell" rather than into a wrong answer. It is a hard stop when a
+  # host really does keep 100 PRs open -- nothing launches and the log says
+  # nothing about it -- which is the safe direction, and #31 is where paging
+  # belongs. Found by the local review.
+  if ! listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit "$pr_page" 2>/dev/null)" \
+     || [ -z "$listing" ] \
+     || [ "$(printf '%s' "$listing" | python3 -c '
+import json, sys
+print(len(json.load(sys.stdin)))
+' 2>/dev/null)" = "$pr_page" ]; then
     if poll_cache_open; then
       mkdir -p "$POLL_CACHE" 2>/dev/null
       : >"$cached.unreadable" 2>/dev/null || true
@@ -4195,14 +4222,19 @@ while that one is up."
     # the line it has to be closed before. A cache hit when a watcher above
     # already took it; the fetch itself only when none did.
     #
-    # Not under a drain: nothing launches then, `queued` is forced to 0, and the
-    # watchers that still run take the listing themselves if they need it. A
-    # drain can last hours, and an unconditional fetch here would be one `gh`
-    # call a minute for all of them, answering a question nobody asked.
+    # ONLY WHEN THE LAUNCH LOOP WILL RUN, which is what the condition below
+    # spells: not under a drain, and not with every slot already full. Both are
+    # states in which nothing launches, `queued` is 0 or read from `wanted`, and
+    # the watchers that still run take the listing themselves if they need it. A
+    # drain can last hours and a full fleet a whole time-box, and an
+    # unconditional fetch here would be one `gh` call a minute through either,
+    # answering a question nobody in that pass asks. Found by the local review.
     #
     # Its failure is not handled here and must not be: every caller has its own
     # "could not tell" branch and they do not agree on what to do about it.
-    $drain_mode || open_pr_listing >/dev/null || true
+    if ! $drain_mode && [ "$live" -lt "$MAX_WORKTREES" ]; then
+      open_pr_listing >/dev/null || true
+    fi
 
     while ! $drain_mode && [ "$live" -lt "$MAX_WORKTREES" ]; do
       # `break`, not `break 2`: this is the drain arriving MID-PASS, after the

@@ -137,36 +137,48 @@ not create.
 ### What one poll costs
 
 The dispatcher polls every `AUTOFLEET_POLL` seconds (60 by default) for as long
-as it is up, so its per-pass cost is a per-hour cost multiplied by 60. Three
-different things are being spent, and only one of them is money:
+as it is up, so an hour costs 60 times what one pass costs. Three different
+things are being spent, and only one of them is money. The figures below are
+`--auto`, which is the mode that runs unattended; **list mode differs, and the
+last paragraph says how**.
 
-| | per pass | scales with | costs |
+| | per pass (`--auto`) | scales with | costs |
 |---|---|---|---|
-| **GitHub API calls** | 2 shared listings, plus 2 per owned worktree, plus 2 per launch | worktrees, not the backlog | rate limit |
-| **Runner CLI calls** | 1 `worktree list` + 1 `worktree ps`, plus 3 per launch and 2 per release | worktrees | nothing |
-| **Model invocations** | 1 per launch; plus up to `AUTOFLEET_MAX` reviewers when `AUTOFLEET_REVIEW_MODE=local` | launches and open PRs | **tokens** |
+| **GitHub API calls** | 2 shared listings, plus 2 per owned worktree; a launch adds none | worktrees, not the backlog | rate limit |
+| **Runner CLI calls** | 1 `worktree list`, plus 1 `worktree ps` per stall check and per parked-dirty worktree, plus 3 per launch and 2 per release | worktrees | nothing |
+| **Model invocations** | 1 per launch; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches and open PRs | **tokens** |
 
-Only the third row spends anything. `worktree create --agent claude` is the work
-itself, and `review.sh` is the local reviewer; every other call a pass makes is
-an API or a CLI query and costs no tokens at all. A dispatcher left polling an
-idle fleet overnight is free in the only sense that matters — it is the
-`--auto` runs that *launch* that cost, and `AUTOFLEET_MAX` is the number that
-bounds them.
+Only the third row spends anything, and it has **three** entries rather than
+two: `worktree create --agent claude` is the work itself, `review.sh` is the
+local reviewer, and `validate.sh` — spawned by `start_validator` from inside
+`review_open_prs`' own loop — is the third. Every other call a pass makes is an
+API or a CLI query and costs no tokens at all. **No poll invokes a model**: the
+body of `cmd_run` is shell and `gh`, and a model starts only when one of those
+three scripts is spawned. All three are marker-guarded, so none of them is a
+spawn per PR per poll — `start_validator` returns early on its `v-<pr>` lock and
+on a `v-<pr>.done` holding the current head, and a reviewer is skipped while
+`$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
+polling an idle fleet overnight is free in the only sense that matters; it is
+the runs that *launch* and *review* that cost, and `AUTOFLEET_MAX` is the number
+that bounds both.
 
 Concretely, at the defaults: an **idle** pass — nothing owned, every `ready`
 issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`**,
-whether the backlog holds ten issues or fifty. A **full** fleet of three
-worktrees on `AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared
-listings, one merged-PR check per worktree, and one issue lookup per worktree.
+whether the backlog holds ten issues or fifty. A launch adds no `gh` call at
+all, because the title and labels the card needs come out of the `ready` listing
+the pass already has. A **full** fleet of three worktrees on
+`AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared listings, one
+merged-PR check per worktree, and one issue lookup per worktree.
 `AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
-spawns, and up to `AUTOFLEET_MAX` model agents **on top of** the worktree
-agents — six concurrent sessions at the defaults, which is the number to know
-before leaving one running.
+spawns and two more per validator, and up to `AUTOFLEET_MAX` model agents **on
+top of** the worktree agents — six concurrent sessions at the defaults, which is
+the number to know before leaving one running.
 
 The flat idle figure is the point, and it was not always flat. Each candidate
 the launch loop scanned used to take its own `gh pr list` of every open PR, so a
-pass over a 46-issue `ready` queue made ~50 calls a minute — 3000 an hour, past
-the comfortable half of the 5000/hour primary limit and into the secondary ones.
+pass over this repository's own `ready` queue — 53 of 56 open issues, measured
+2026-09-15 — made ~57 calls a minute: 3400 an hour, past the comfortable half of
+the 5000/hour primary limit and into the secondary ones.
 The open-PR listing, the `ready` listing and the worktree listing are now each
 taken **once per pass** and read from `$STATE_DIR/poll-cache`, which
 `forget_poll_answers` empties at the top of every pass. Everything in that cache
@@ -177,6 +189,15 @@ staleness — a PR opened mid-pass is invisible until the next one — which is
 why the listing is taken before the launch loop rather than during it.
 `tests/test_fleet.sh`'s `budget_` phases assert these numbers, so a change that
 puts the slope back fails the suite rather than the rate limit.
+
+**List mode still has the slope**, and the table above does not describe it.
+`fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its
+command line, every pass, and that is two uncached `gh` calls each — a `gh issue
+view` whose `state` field `poll_issue` already has, and a `gh pr list --state
+merged`. Both are named in armaatus/autofleet#69's own list of what stays
+uncached, and both were left there: list mode is a person driving a named set of
+issues while watching, not the unattended overnight run the flat figure is
+about. It is the mode to keep short.
 
 ## Stop it
 
