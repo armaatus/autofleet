@@ -303,7 +303,18 @@ runner_agent_terminal() {
 # the driver that sources and defines nothing, and the file that is not there.
 FLEET_RUNNER_DRIVER="$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
 if [ -f "$FLEET_RUNNER_DRIVER" ]; then
-  . "$FLEET_RUNNER_DRIVER"
+  # `if !`, because `setup.sh` runs `set -e` and a driver that RETURNS non-zero
+  # -- the documented shape for one that bails when a dependency it needs is
+  # absent -- makes the `.` non-zero too. Errexit then killed the hook before
+  # the check below could say anything, on the one path where the runner is
+  # holding an agent's tab. A condition context is exempt from errexit, so the
+  # status arrives here instead of ending the script. Measured, so the limit is
+  # recorded with it: a driver with a SYNTAX ERROR is not reachable this way at
+  # all -- bash aborts a non-interactive shell on a parse error in a sourced
+  # file, `if !` or not -- and bash's own parser error naming the file and line
+  # is what the reader gets. Found by the self-review, which had the syntax case
+  # as the example; the early return is the half that is actually catchable.
+  if ! . "$FLEET_RUNNER_DRIVER"; then :; fi
   # A DRIVER THAT SOURCED AND DEFINED NOTHING is the same failure as no driver
   # at all, and it was landing as the one this issue exists to remove: a host
   # driver with a syntax error, or one that `return`s early when a dependency it
@@ -321,12 +332,18 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     # this one replaced.
     FLEET_RUNNER_MISSING=0
   else
-    [ -n "${FLEET_RUNNER_REPORTED_FOR:-}" ] \
+    [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
       && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
       echo "autofleet: $FLEET_RUNNER_DRIVER is there and defines no runner_available"
       echo "     a driver implements the runner_* contract in docs/RUNNERS.md; this one sourced and defined none of it"
-      echo "     check it for a syntax error, or for an early return when something it needs is missing"
+      echo "     check it for an early return when something it needs is missing, and for names that match the contract"
     } >&2
+    # WHAT IS WRONG WITH IT, carried to `fleet_require_runner`, because the two
+    # arms are not the same sentence: here the file EXISTS. "no <path>" sent the
+    # reader to create a file that is right there -- and in a descendant shell,
+    # where the block above is suppressed, that line is the only thing printed.
+    # Exported for exactly that case. Found by the self-review, on both axes.
+    export FLEET_RUNNER_MISSING_SAYS="$FLEET_RUNNER_DRIVER defines no runner_available"
     export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
     FLEET_RUNNER_MISSING=1
   fi
@@ -348,14 +365,19 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  # `-n` FIRST, and it is not belt-and-braces: `.autofleet/config` is sourced
-  # after config.sh's `:=orca` default, so `AUTOFLEET_RUNNER=` in that file
-  # reaches here empty -- and on a fresh shell the comparison is then `"" = ""`,
-  # which is TRUE and skipped the whole remedy. What the reader got was
-  # `fleet.sh: no .../runner/.sh, so it stops here`: the consequence with the
-  # cause suppressed, by the line whose job is to print the cause once. Found by
-  # the self-review.
-  [ -n "${FLEET_RUNNER_REPORTED_FOR:-}" ] \
+  # SET-ness FIRST, not emptiness, and neither is belt-and-braces:
+  # `.autofleet/config` is sourced after config.sh's `:=orca` default, so
+  # `AUTOFLEET_RUNNER=` in that file reaches here EMPTY. On a fresh shell the
+  # bare comparison is then `"" = ""` -- true -- and the whole remedy was
+  # skipped, leaving `fleet.sh: no .../runner/.sh, so it stops here`: the
+  # consequence with the cause suppressed, by the line whose job is the cause.
+  # `-n` fixed that and broke the other half, because the sentinel this exports
+  # for an empty name is itself empty and never matched again: `fleet.sh cost`
+  # execs `cost.sh`, both source this file, and the four lines printed TWICE for
+  # one command -- the "once" in the issue's title. `+set` tells unset from
+  # empty, which is the distinction both halves actually need. Both found by the
+  # self-review.
+  [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
     && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
     echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
     echo "     looked for: $FLEET_RUNNER_DRIVER (no such file)"
@@ -421,7 +443,8 @@ else
   FLEET_RUNNER_MISSING=1
 fi
 
-# The consequence of a missing driver, for the callers that need one. Called
+# The consequence of a driver that is missing OR does not implement anything,
+# for the callers that need one. Called
 # before the first `runner_*`, because without a driver that call is
 # `command not found` -- rc 127, which fleet.sh's `runner_available || die`
 # reported as "the tmux runner is not usable here": the consequence named as
@@ -433,7 +456,7 @@ fleet_require_runner() {
   # `setup.sh` runs the whole of env.sh in between -- so an indented
   # continuation with no antecedent lands under unrelated output. Found by the
   # local review.
-  echo "${0##*/}: no $FLEET_RUNNER_DRIVER, so it stops here" >&2
+  echo "${0##*/}: ${FLEET_RUNNER_MISSING_SAYS:-no $FLEET_RUNNER_DRIVER}, so it stops here" >&2
   exit 1
 }
 

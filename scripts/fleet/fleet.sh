@@ -336,6 +336,7 @@ fi
 # run nothing. "It reads transcripts off disk and opens no worktree" is how the
 # dispatch above describes itself. Nothing between here and there reads these
 # directories at source time. Found by the independent review.
+
 # A driver that is not THERE, before anything else: without one the probe below
 # is `command not found`, and `|| die` turned rc 127 into "the runner is not
 # usable here" -- true of a missing file and the wrong sentence to act on.

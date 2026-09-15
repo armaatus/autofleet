@@ -49,13 +49,15 @@ set -a; . ./.env; set +a
 # for an agent the runner is supposed to start, and provisioning a worktree
 # whose agent cannot be reached spends the time and holds the slot for nothing.
 # SAID BEFORE THE PROBE, because the probe is the one thing here that can be
-# slow and silent: the four default candidates, each hitting the default
-# $ORCA_CLI_PROBE_SECONDS of 10s, is 40s with nothing on the terminal -- 50s
-# with ORCA_CLI_COMMAND set, which adds a fifth. At the exact point #13's
-# Design notes name -- the runner holds the agent's tab and nothing has printed
-# a reason yet. It
-# does not fix the wait; it stops the wait from looking like a hang. Raised by
-# the independent review.
+# slow and silent. How slow is the driver's business and not this script's: a
+# driver bounds each candidate it tries, and every candidate that is INSTALLED
+# AND WEDGED costs that bound, while a candidate that is simply absent costs
+# nothing. The expensive case is an app mid-start, not the common Mac with no
+# Orca. That is at the exact point #13's Design notes name -- the runner holds
+# the agent's tab and nothing has printed a reason yet. This does not shorten
+# the wait; it stops the wait from looking like a hang. Raised by the
+# independent review, and narrowed by the self-review, which caught the first
+# wording asserting one driver's candidate count from a driver-agnostic file.
 echo "==> checking the $AUTOFLEET_RUNNER runner"
 fleet_require_runner
 runner_available || {

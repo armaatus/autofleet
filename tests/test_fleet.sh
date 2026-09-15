@@ -1295,6 +1295,35 @@ case "${1:-}" in
       || fail "the refusal did not say the driver sourced and implemented nothing, which is the only thing that separates it from a missing file: $out"
     grep -q "is not usable here" <<<"$out" \
       && fail "the undefined runner_* was reported as an unusable runtime, which is the consequence named as the cause: $out"
+    # ...and the LAST line, which is `fleet_require_runner`'s and is the only
+    # one a descendant shell gets, must not say the file is absent. It is right
+    # there. "no <path>, so it stops here" under a file that exists is the same
+    # confident wrong sentence one layer down, and both self-review axes
+    # converged on it.
+    grep -q "hollow.sh defines no runner_available, so it stops here" <<<"$out" \
+      || fail "the line that stops the script did not say what is wrong with a driver that is present: $out"
+    grep -qE "no [^ ]*hollow\.sh, so it stops here" <<<"$out" \
+      && fail "the refusal told the reader to create a driver file that is already there: $out"
+
+    #     ...AND THE SAME UNDER `set -e`, which is `setup.sh`: a driver that
+    #     `return`s when a dependency it needs is absent makes the `.` non-zero,
+    #     and errexit killed the hook there before anything could be said. The
+    #     driver is written in that documented shape rather than stubbed, since
+    #     what is under test is the source failing, not the file being empty.
+    #     Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/bails.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A host driver that bails when something it needs is not installed.
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_available() { return 0; }
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=bails ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a worktree was provisioned against a driver whose source did not finish: $out"
+    grep -q "bails.sh is there and defines no runner_available" <<<"$out" \
+      || fail "errexit killed the hook on the failed source, so the reason never printed: $out"
+    grep -q "project setup hook" <<<"$out" \
+      && fail "the project hook ran for a worktree whose driver never finished sourcing: $out"
 
     # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
     #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
@@ -1313,6 +1342,14 @@ case "${1:-}" in
       || fail "an empty runner name suppressed the block that names the drivers that do ship: $out"
     grep -qE "drivers here: .*orca" <<<"$out" \
       || fail "the remedy for an empty name did not list the drivers that ship: $out"
+    # ...ONCE for one command, which the first fix for the empty name broke: the
+    # sentinel it exports is itself empty, so an emptiness test never matched it
+    # again and `fleet.sh cost` -- which execs cost.sh, both sourcing lib.sh --
+    # printed the four lines twice. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh cost 2>&1 )"
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "an empty runner name printed the refusal $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
 
     # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
     #    the caller's consequence, and nothing provisioned. Written as a driver

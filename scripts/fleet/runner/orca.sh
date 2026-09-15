@@ -103,7 +103,7 @@ orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1
 
 orca_cli_resolve() {
   [ -n "${ORCA_CLI:-}" ] && return 0
-  local candidate probe_out where probe_rc
+  local candidate where probe_rc
   # Reset per resolve, not per source: a resolve that fails, then succeeds after
   # the app starts, must not leave the first attempt's reasons behind for a
   # later failure to print as if they were its own.
@@ -133,18 +133,19 @@ orca_cli_resolve() {
   # nothing was probed` -- which names no candidate rather than naming the wrong
   # one, so it is still not the confident lie about the machine that #13 exists
   # to remove.
-  probe_out=/dev/null
-  # ON FD 3, and CLOSED for the probe (see the call below). A candidate CLI that
-  # drains the descriptor carrying this heredoc would eat the rest of the list,
-  # `read` would hit EOF, and the loop would end after that one candidate -- with
-  # the refusal then naming it as everything that was tried, while the
-  # /Applications fallback the 0700 install needs sits last and untried.
-  #
-  # Bash points an async command's STDIN at /dev/null with job control off, so
-  # the stdin form this replaced was protected by the shell and fd 3 is not:
-  # moving the list here made that reachable rather than theoretical, and the
-  # `3<&-` on the probe is what actually closes it. Raised by the local review,
-  # which caught the rationale pointing the wrong way.
+  # ON FD 3, and the list is what a candidate CLI must not be able to drain: it
+  # would eat the rest of the heredoc, `read` would hit EOF, and the loop would
+  # end after that one candidate -- the refusal then naming it as everything
+  # that was tried while the /Applications fallback the 0700 install needs sits
+  # last and untried. Fd 3 does NOT give that on its own, which is the whole
+  # point: `fleet_run_with_deadline` forks with `&` and, with job control off,
+  # bash points only STDIN at /dev/null, so the stdin form this replaced was
+  # protected by the shell and fd 3 is inherited untouched. The `3<&-` on the
+  # probe call below is what closes it, and without that line the rewrite was
+  # strictly worse than what it replaced. Raised by the local review, which
+  # caught the rationale pointing the wrong way; stated once here by the
+  # self-review, which found it stated wrongly and then corrected 25 lines
+  # further down.
   while IFS= read -r -u 3 candidate; do
     [ -n "$candidate" ] || continue
     if ! where="$(command -v "$candidate" 2>/dev/null)"; then
@@ -168,12 +169,8 @@ orca_cli_resolve() {
       esac
       continue
     fi
-    # `3<&-` closes the candidate list for the child. The comment above argues
-    # fd 3 protects the loop from a CLI that drains stdin -- and on its own it
-    # does not: `fleet_run_with_deadline` forks with `&`, and with job control
-    # off bash points only STDIN at /dev/null, so fd 3 is inherited untouched.
-    # That made the fd-3 rewrite strictly worse than the stdin version it
-    # replaced until this line. Found by the local review.
+    # `3<&-` closes the candidate list for the child -- see the top of the loop
+    # for why fd 3 needs it and stdin did not.
     # 124 IS THE WRAPPER'S DEADLINE, and the two failures a reader has to tell
     # apart no longer share a sentence: a CLI that
     # HANGS is an app mid-start or wedged and is worth waiting out, while one
@@ -192,7 +189,7 @@ orca_cli_resolve() {
     # which is a change to a function eleven callers share and is not this
     # issue. Found by the self-review.
     probe_rc=0
-    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
+    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" /dev/null \
       "$candidate" --version 3<&- || probe_rc=$?
     if [ "$probe_rc" != 0 ]; then
       case "$probe_rc" in
