@@ -231,10 +231,14 @@ work sits behind the page boundary. Both listings are armaatus/autofleet#122.
 asks the same questions from outside the dispatcher, where `$POLL_CACHE` is
 deliberately unavailable — #35's rule is that `status` leaves `$STATE_DIR`
 byte-identical — so it keeps its answers in memory for the one process instead.
-That makes a screen one issue listing, one open-PR listing and one worktree
-listing, whatever the queue holds; before this it was one open-PR listing *per
-ready row*. It is still the most expensive single read in the tree, because it
-prints a table the dispatcher never has to.
+That makes a screen **one issue listing and one open-PR listing** whatever the
+queue holds, where it used to be one open-PR listing *per ready row*. The
+**worktree listing is still per row** — `live_worktrees` keeps its answers in
+`$POLL_CACHE`, which is exactly what `status` may not touch — so the runner-side
+slope survives there. That is deliberate rather than missed: the table above
+prices runner calls at nothing, and they are local. It is still the most
+expensive read in the tree, because it prints a table the dispatcher never has
+to.
 
 **List mode still has the slope**, and the table above does not describe it.
 `fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its

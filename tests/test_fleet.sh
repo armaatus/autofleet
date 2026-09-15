@@ -4374,6 +4374,14 @@ JSON
     [ "$(cat "$AUTOFLEET_DIR/pr-page-full")" = "$before" ] \
       || fail "status rewrote the say-once marker"
     echo "ok: status does not drop the page-limit marker a dispatcher is holding"
+    # ...nor the OTHER say-once marker, which shipped a round later without the
+    # gate its sibling had. Two markers, one rule, and only one of them was
+    # covered.
+    printf 'ready' >"$AUTOFLEET_DIR/ready-unreadable"
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/ready-unreadable" ] \
+      || fail "status deleted the ready-listing say-once marker, so the dispatcher will repeat itself next poll"
+    echo "ok: ...nor the ready-listing one"
     ;;
 
   budget_busy_pass)
@@ -4404,27 +4412,24 @@ JSON
     # kind would have let the 8 drift, which is the one thing this phase exists
     # to stop. A total needs ONE pass and no second one racing it, so the poll is
     # slowed right down: the fixture's default of 1s is what makes every other
-    # phase here cheap and is exactly wrong for this one. Found by the local
-    # review.
-    AUTOFLEET_POLL=30 start_dispatcher --auto
+    # phase here cheap and is exactly wrong for this one.
+    #
+    # FIVE MINUTES, not thirty seconds. This is the number that makes the wait
+    # below an observation rather than a guess -- there is no second pass within
+    # any window this phase could wait, so a count that has stopped moving is
+    # the count of pass one and nothing else. The quiet window was tightened
+    # twice (0.5s, then 2s) before it was clear the poll length was the thing
+    # actually doing the work. Found by the local review, three times.
+    AUTOFLEET_POLL=300 start_dispatcher --auto
     # The pass is done when its calls stop arriving. With a 30-second poll behind
     # us there is no second pass to race, so "stable for two reads" is an answer
     # rather than a guess.
-    # FIVE consecutive identical reads, and no `>= 8` in the break condition.
-    # With `n >= 8 && n == last` the loop stopped at 8 whenever two stub
-    # invocations happened to be more than 0.1s apart at the eighth call -- each
-    # forks `gh`, `python3` or `git` -- so a future ninth call would have been
-    # missed and the assertion would have passed on exactly the drift this phase
-    # exists to catch. Waiting for the count to stop moving asserts what the
-    # pass actually cost. Found by the local review.
-    # TWENTY consecutive identical reads -- a two-second quiet window, against a
-    # thirty-second poll. Five (half a second) was inside the gap two stub
-    # invocations can leave mid-pass when each forks `gh`, `python3` or `git`
-    # under the parallel-worktree contention this repo runs at: the loop would
-    # break on a partial count and assert `n = 8` against it, which is a
-    # spurious drift report rather than a real one. Raised twice by the local
-    # review, tightened twice. Bounded well clear of the poll, so a second pass
-    # still cannot be what ends the wait.
+    # The count stops moving when the pass ends, and with a five-minute poll
+    # nothing can restart it. Twenty identical reads is two seconds of quiet:
+    # far more than the gap two stub invocations leave when each forks `gh`,
+    # `python3` or `git`, and far less than the poll. Breaking early would need a
+    # two-second stall INSIDE one pass, and the `% 8` check below is what would
+    # catch it if one ever happened -- a partial count is not a whole pass.
     i=0; last=-1; n=0; stable=0
     while [ "$i" -lt 900 ]; do
       n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
@@ -4438,6 +4443,11 @@ JSON
     stop_dispatcher
     [ "$n" = 8 ] \
       || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 8: $(cat "$GH_CALLS")"
+    # ...and a whole number of passes, which a count taken mid-pass would not be.
+    # Belt to the poll length's braces: if the wait above ever did break early,
+    # this is what says so rather than reporting a drift that did not happen.
+    [ $(( n % 8 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 8s): $(cat "$GH_CALLS")"
     echo "ok: a full fleet of three worktrees costs 8 gh calls a pass"
     ;;
 

@@ -207,6 +207,12 @@ IN_POLL=false
 # Three states, because two would make "could not tell" indistinguishable from
 # "not asked yet" -- and that is the one distinction every cache in this file
 # exists to keep. Found by the local review.
+# NOT a fifth caller of `poll_cache_get`/`_fail`/`_put`, and the reason is the
+# one thing those three cannot do: they are FILES. `cmd_status` may not leave a
+# byte behind in $STATE_DIR (armaatus/autofleet#35), which is the whole reason
+# this path exists, so the trio is unusable here by construction rather than by
+# preference. The three states are the same three, deliberately, so that a
+# reader who knows one knows the other. Raised by the local review.
 OPEN_PR_MEMO=""
 OPEN_PR_MEMO_STATE=""
 # ...read through a test, never as a bare `$IN_POLL`. Bash runs a simple command
@@ -992,7 +998,9 @@ waiting_worktrees() {
 # exactly that reason, and the mapping is written out at each. One convention
 # for both would be worse: a cache miss is a fact about the cache and "could not
 # tell" is a fact about GitHub, and a helper that conflated them would hand a
-# caller the one answer it must never guess. Raised by the local review. A `cat` that died PART WAY is a 1 and not a 2, for
+# caller the one answer it must never guess. Raised by the local review.
+#
+# A `cat` that died PART WAY is a 1 and not a 2, for
 # `live_worktrees`' reason: half a listing has already reached the caller, and
 # reading afresh behind it would hand them that half twice.
 poll_cache_get() {
@@ -1156,7 +1164,13 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
       "The dispatcher keeps polling rather than deciding the backlog is empty." >&2
     return 1
   }
-  rm -f "$READY_UNREADABLE_SAID"
+  # `poll_cache_open` on the removal, for the reason `PR_PAGE_FULL_SAID`'s has
+  # one: `cmd_status` reaches this function too, and an ungated `rm` deletes a
+  # live dispatcher's say-once marker -- which re-floods the log AND writes to
+  # $STATE_DIR, against armaatus/autofleet#35's byte-identical acceptance. The
+  # sibling got this gate a round ago and this one shipped without it. Found by
+  # the local review.
+  poll_cache_open && rm -f "$READY_UNREADABLE_SAID"
   poll_cache_put "$cached" "$listing"
   # Through `print_listing` rather than `printf '%s\n'`, because `$(...)` ate
   # the trailing newline: without it the launch loop's `read` drops the LAST
@@ -3166,8 +3180,8 @@ reap_merged() {
 # holding four containers, two ports and four volumes: armaatus/rommsync-nx#44,
 # which the time-box stopped at three hours for correctly producing nothing, and
 # armaatus/rommsync-nx#148, which the maintainer blocked with its worktree open,
-# keeping armaatus/rommsync-nx#119, #122 and #139 there queued behind work that
-# could never start.
+# keeping armaatus/rommsync-nx#119, armaatus/rommsync-nx#122 and
+# armaatus/rommsync-nx#139 queued behind work that could never start.
 #
 # The guard has to be its own, because "the issue went blocked" carries none of
 # the guarantee "the PR merged and nothing is unpushed" does: a worktree
