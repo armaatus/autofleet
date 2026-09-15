@@ -1615,6 +1615,27 @@ else
   fail "the late-stderr scan could not run, so it is asserting nothing"
 fi
 
+# ...and no comment sits INSIDE a `\` line continuation.
+#
+# Third in the same family: a form that parses clean under `bash -n` -- which is
+# all the PostToolUse hook checks -- and silently truncates the command. The `\`
+# joins the comment line, the `#` comments out the rest, and `review-status.sh`
+# ran `gh api` with no `--jq`: 100KB of raw JSON on stdout and exit 2, "could not
+# tell", on the one step of the brief that reports unresolved threads. Shipped in
+# #121 and found while following the brief. Its own selftest first, for the
+# reason the two scans above give.
+python3 "$REPO_ROOT/evals/comment_in_continuation.py" --selftest \
+  || fail "evals/comment_in_continuation.py fails its own selftest, so the scan below means nothing"
+if bad="$(python3 "$REPO_ROOT/evals/comment_in_continuation.py")"; then
+  if [ -n "$bad" ]; then
+    fail "a comment inside a backslash continuation comments out the rest of the command, which still parses -- move it above the command: $bad"
+  else
+    ok "no payload script hides a comment inside a line continuation"
+  fi
+else
+  fail "the comment-in-continuation scan could not run, so it is asserting nothing"
+fi
+
 # ...and the brief must still name them -- across BOTH of its stages.
 #
 # Since armaatus/autofleet#49 the brief arrives in two pieces out of the one

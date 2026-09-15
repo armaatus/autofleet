@@ -94,6 +94,10 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
   a Mac and red in CI. `evals/piped_quiet_grep.py` asserts the payload's *shell*
   has none; the `run:` blocks in `.github/workflows/` are not scanned yet and
   have one (#90).
+- **A comment never goes inside a `\` continuation.** The `\` joins the comment
+  line and the `#` comments out the rest of the command, which still parses --
+  `review-status.sh` ran `gh api` with no `--jq`, printed 100KB of JSON and exit
+  2. Put it above the command. `evals/comment_in_continuation.py` scans.
 
 ## The tracker is the spec
 
