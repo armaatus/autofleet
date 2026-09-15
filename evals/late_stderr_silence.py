@@ -81,15 +81,32 @@ def hazard_lines(text):
         line, pending = pending + raw, ""
         if COMMENT.match(line):
             continue
-        opened = OPEN.search(line)
-        if not opened:
-            continue
-        quiet = QUIET.search(line)
-        # ORDER IS THE WHOLE QUESTION. A `2>/dev/null` before the open is the
-        # correct spelling of exactly this line, so a scan that only asked
-        # whether both appear would fail every fix it asked for.
-        if quiet and quiet.start() > opened.start():
-            hits.append(start)
+        # PER COMMAND, not per line. Comparing the first `<` with the first
+        # `2>` on the whole joined statement reads `cmd 2>/dev/null; read -r h
+        # n <"$f" 2>/dev/null` as clean -- the silencing it finds belongs to the
+        # command before the hazard. Nothing in the tree is written that way
+        # today; the premise of this whole rule is that the shape gets re-typed,
+        # and a compound line is the obvious next spelling. Found by the
+        # self-review.
+        #
+        # `;`, `&&`, `||` and `|` -- and NOT a bare `&`, which would cut
+        # `2>&-` in half and lose the descriptor-closing spelling this scan
+        # already had a row for. A backgrounding `&` at the end of a command is
+        # a miss, not a false positive, and the selftest keeps `2>&-`.
+        #
+        # A `;` inside a quoted string splits a segment that then matches
+        # nothing, which costs a miss in the same safe direction.
+        for seg in re.split(r'(?:;|&&|\|\||\|)', line):
+            opened = OPEN.search(seg)
+            if not opened:
+                continue
+            quiet = QUIET.search(seg)
+            # ORDER IS THE WHOLE QUESTION. A `2>/dev/null` before the open is
+            # the correct spelling of exactly this line, so a scan that only
+            # asked whether both appear would fail every fix it asked for.
+            if quiet and quiet.start() > opened.start():
+                hits.append(start)
+                break
     return hits
 
 
@@ -131,6 +148,10 @@ def selftest():
         ('cmd <"$f" 2>&1', False, "merging is not silencing -- the diagnostic still lands"),
         ('  # read -r h n <"$m" 2>/dev/null', False, "a comment quoting the shape is the record of it"),
         ('printf x >&2 2>/dev/null', False, "no input redirection at all"),
+        ('cmd 2>/dev/null; read -r h n <"$m" 2>/dev/null', True,
+         "a compound line: the silencing before the hazard is another command's"),
+        ('cmd 2>/dev/null && read -r h n 2>/dev/null <"$m"', False,
+         "...and the fix is still the fix on the second command"),
     ]
     bad = 0
     for src, want, why in cases:
