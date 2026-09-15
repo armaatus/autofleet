@@ -476,8 +476,12 @@ fleet_pr_payload() {
 #
 # IT WAITS OUT A RUN IN FLIGHT rather than treating it as nothing to do. A run
 # already going was once read as "it will evaluate with the new state anyway",
-# which holds only if it reads the PR after the change -- and the loop does two
-# of these back to back, `resolve-thread.sh` then `answer-review.sh`. The second
+# which holds only if it reads the PR after the change -- and two of these
+# arrive back to back. They used to be one actor's: the author resolved its own
+# threads and then answered. They are now two actors' -- the author's
+# `answer-review.sh` and, minutes later, the validator's `resolve-thread.sh` --
+# which makes the overlap wider rather than narrower, since nothing sequences
+# the two. The second
 # one's newest run is the rerun the first just queued, which may well have
 # fetched the pull request before the answer was posted: it concludes `failure`
 # on a condition that is now satisfied, nothing asks again, and the PR sits red

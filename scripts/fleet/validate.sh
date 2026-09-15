@@ -357,7 +357,18 @@ tools='Read,Grep,Glob,Skill,Task,Agent'
 tools="$tools,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
 tools="$tools,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
 tools="$tools,Bash(gh pr review:*),Bash(gh api graphql:*)"
-tools="$tools,Bash(${AUTOFLEET_TEST_COMMAND:-./tests/run.sh})"
+# THE SCRIPT, because the validator is what resolves threads now and the raw
+# mutation leaves the gate red with nothing to re-ask it. See validator.md.
+tools="$tools,Bash(./scripts/fleet/resolve-thread.sh:*)"
+# NO FALLBACK. `${AUTOFLEET_TEST_COMMAND:-./tests/run.sh}` was here, which is a
+# hardcoded project detail in the payload (hard rule 2) and worse: the prompt
+# one screen up tells the validator "none configured -- say so, and that is a
+# fail", so on a host with no test command the prompt said there was none while
+# the grant silently handed over autofleet's own. `validate.yml:166` states the
+# rule this broke -- guessing produces a `pass` from a command that was never
+# run -- and claims this file already did it correctly. It did not.
+[ -n "${AUTOFLEET_TEST_COMMAND:-}" ] \
+  && tools="$tools,Bash($AUTOFLEET_TEST_COMMAND)"
 
 set -m
 "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
@@ -373,14 +384,14 @@ set +m
 # that a kill reaches whatever the validator itself spawned. Without it a
 # SIGTERM reaped the wrapper and orphaned an agent holding this machine's `gh`
 # login; review.sh records the two head moves in ten minutes that found it.
-signal_validator() {
-  kill "-$1" -- "-$validator" 2>/dev/null || kill "-$1" "$validator" 2>/dev/null
-}
-kill_validator() {
-  signal_validator TERM
-  sleep 2
-  signal_validator KILL
-}
+# ...and through `lib.sh`, not re-typed. These were a verbatim copy of
+# `fleet_signal_group`/`fleet_kill_group`, bare `sleep 2` included, whose own
+# comment says there is ONE copy because there were two and "two copies is two
+# places for that 2 to drift". `review.sh` and `self-review.sh` both use the
+# lib pair; this file alone did not, which is the same mechanism that produced
+# the `set -e` divergence this branch had to fix.
+signal_validator() { fleet_signal_group "$1" "$validator"; }
+kill_validator()    { fleet_kill_group "$validator"; }
 on_exit() {
   signal_validator TERM
   rm -f "${AUTOFLEET_VALIDATE_MARKER:-}"

@@ -570,8 +570,37 @@ def check_bash(command, cwd=""):
         # Only in a fleet-owned worktree: the DISPATCHER runs both from the repo
         # root, which is not one, and a person running either by hand is the
         # ordinary case this must not argue about.
+        #
+        # POSITIONALLY, like every other rule in this file (`words[:len(prefix)]`
+        # above), and this scanned EVERY word for one commit. A script name is a
+        # command when it is the command and an operand everywhere else, so that
+        # version denied `bash -n scripts/fleet/review.sh` -- the parse check
+        # CLAUDE.md's Code section requires -- plus `git log -- review.sh`,
+        # `git diff validate.sh` and `git add` of either. On the branch that
+        # EDITS both files, which is the branch that needs those most.
+        #
+        # The verb is the first word, or the first non-flag operand of an
+        # interpreter. Nothing deeper: `env FOO=1 bash x.sh` reaching this is a
+        # miss, and a miss here costs one refusal arriving one process deep,
+        # while a false positive costs the agent a check it is told to run.
         if _fleet_owns_this_worktree():
-            for w in words:
+            verbs = [words[0]] if words else []
+            if os.path.basename(verbs[0] if verbs else "") in ("bash", "sh", "zsh"):
+                # `-n` IS THE WHOLE POINT: `bash -n x.sh` reads x.sh and exits.
+                # It is the check CLAUDE.md requires on every script and it runs
+                # nothing, so the operand after it is not a verb. Any bundle
+                # carrying `n` counts (`-nu`, `-en`), because that is how the
+                # flag is actually typed.
+                parse_only = any(
+                    w.startswith("-") and not w.startswith("--") and "n" in w[1:]
+                    for w in words[1:]
+                )
+                if not parse_only:
+                    for w in words[1:]:
+                        if not w.startswith("-"):
+                            verbs.append(w)
+                            break
+            for w in verbs:
                 base = os.path.basename(w)
                 if base in ("validate.sh", "review.sh"):
                     deny(
@@ -1317,6 +1346,24 @@ def _stateful_checks():
                        because="does not start")
                 expect(2, {"command": "./scripts/fleet/review.sh 7"},
                        "...nor its own reviewer, said here rather than one process deep",
+                       because="does not start")
+                # THE OTHER DIRECTION, which this rule did not have and needed:
+                # it scanned every word, so naming either script as an OPERAND
+                # was refused. `bash -n` is the check CLAUDE.md's Code section
+                # requires on every script, and the branch that edits these two
+                # could not run it on them. Hard rule 3 cuts both ways -- a rule
+                # with no assertion on its allowed side is a rule that can
+                # tighten silently.
+                expect(0, {"command": "bash -n scripts/fleet/review.sh"},
+                       "...but the parse check CLAUDE.md requires is not starting one")
+                expect(0, {"command": "bash -n scripts/fleet/validate.sh"},
+                       "...on either of them")
+                expect(0, {"command": "git log --oneline -- scripts/fleet/review.sh"},
+                       "...nor is reading either one's history")
+                expect(0, {"command": "git diff scripts/fleet/validate.sh"},
+                       "...nor diffing it")
+                expect(2, {"command": "bash scripts/fleet/review.sh 7"},
+                       "...while an interpreter RUNNING one is still the same act",
                        because="does not start")
                 expect(0, {"command": "./scripts/fleet/await-review.sh"},
                        "...but WAITING for them is the whole of what it should do")

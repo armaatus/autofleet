@@ -6,10 +6,10 @@ issue to a PR, and the rules — not the agent — decide whether it merges.
 
 **Which document is whose.** Required reading: this file and the brief
 (`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`).
-[REVIEW.md](REVIEW.md) is the review policy, and you do not read it: every pass
-that applies it — both self-reviews, the reviewer, the validator — runs in its
-own process and reads it there. `evals/lint.sh` asserts each enforced rule is
-stated in full in exactly one of the three — not that the others link to it,
+[REVIEW.md](REVIEW.md) is the review policy and you do not read it: the passes
+that apply it — both self-reviews and the reviewer — run in their own processes
+and read it there. The validator reads its own brief instead. `evals/lint.sh`
+asserts each enforced rule is stated in full in exactly one of those three — not that the others link to it,
 which is on you — and holds what is read *before the first edit* — this file,
 the opening brief, and the room it leaves for your issue and a handoff note —
 under a word ceiling. The rest are consulted, never read through:

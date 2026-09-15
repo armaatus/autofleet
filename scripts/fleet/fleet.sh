@@ -403,6 +403,12 @@ handoff_turn() {
   [ "${AUTOFLEET_HANDOFF_GRACE_SECONDS:-0}" -gt 0 ] || return 0
   note="$(fleet_handoff_path "$path" "$num")"
   now="$(date +%s)"
+  # `fleet_mtime`, NOT a local `stat -f %m || stat -c %Y`. That chain was written
+  # here and is wrong on GNU, where `-f` is `--file-system` and SUCCEEDS against
+  # a mount point -- so the fallback never runs, every call returns the same
+  # filesystem field, and the timestamp never appears to move. lib.sh already
+  # had the portable spelling, which validates each answer rather than trusting
+  # the end of an `||` chain.
 
   if [ -e "$marker" ]; then
     asked_at=""; before=""
@@ -411,7 +417,7 @@ handoff_turn() {
     # WRITTEN is the mtime MOVING, not the file existing: a note left by an
     # earlier attempt in this worktree is already there, and reading it as this
     # agent's answer is how a stale note gets treated as a fresh one.
-    if [ "$(file_mtime "$note")" != "${before:-}" ]; then
+    if [ "$(fleet_mtime "$note")" != "${before:-}" ]; then
       rm -f "$marker"
       say "#$num: handoff note written -- $(( now - asked_at ))s after it was asked for"
       return 0
@@ -427,16 +433,9 @@ handoff_turn() {
   say_to_agent_in "$path" \
     "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
     || return 0
-  printf '%s %s\n' "$now" "$(file_mtime "$note")" >"$marker"
+  printf '%s %s\n' "$now" "$(fleet_mtime "$note")" >"$marker"
   say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
   return 1
-}
-
-# The mtime of a file, or the empty string. `stat` is the one spelling that
-# differs between BSD and GNU and there is no third option that covers both.
-file_mtime() {
-  [ -e "$1" ] || return 0
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
 }
 
 # THE PULL REQUEST IS THE SEAM. Once it is open the build is done, and every
@@ -1672,7 +1671,18 @@ reviewer_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -E '(^|[[:space:]/])review\.sh([[:space:]]|$)' >/dev/null
+  # BOTH SCRIPTS, and this matched only the reviewer for one commit. The
+  # validator's lock lives in the same directory under a `v-` prefix and its
+  # pid is a `validate.sh`, so `live_reviewers` read every live validator as
+  # dead: it deleted the lock, the next poll started another, and up to
+  # AUTOFLEET_REVIEW_MAX_TRIES of them ran at once against one head. The same
+  # hole made `stop_reviewers` skip validators, so `stop.sh --now` left one
+  # running with this machine's gh login for the rest of its timeout.
+  #
+  # The separator on the left is still required so `await-review.sh` cannot
+  # satisfy it, and `-\?` is not used: the names are matched whole.
+  printf '%s\n' "$line" \
+    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
 }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
@@ -1776,8 +1786,18 @@ $(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
 EOF
 }
 
+# BOTH TRANSCRIPT STORES, and this swept one. `validate.sh` writes
+# `$FLEET_DIR/validations/pr-<n>-<head>.log` in exactly the shape `reviews/`
+# uses, and nothing ever pruned it: a store that grows for as long as the fleet
+# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. Found by the
+# self-review.
+#
+# $3 is the directory and $4 the prefix its locks carry in $REVIEWING_DIR --
+# empty for the reviewer, `v-` for the validator -- because the "a run is still
+# writing this one" test has to ask about the right lock. Defaulted, so the
+# reviewer call site reads as it did.
 prune_review_logs() {
-  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept orphans=0 ref
+  local open_prs="$1" dir="${3:-$FLEET_DIR/reviews}" lock="${4:-}" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
   # `$2` is whether the caller COULD ANSWER, and it is separate from the list
   # because an empty list has two meanings and they are opposite instructions.
@@ -1814,9 +1834,9 @@ prune_review_logs() {
     # A PR with a reviewer still writing is not eligible for anything: the
     # deleting loop skips it, and granting grace here would mean the pass after
     # the reviewer finishes deletes with no grace at all.
-    if [ -e "$REVIEWING_DIR/$num_seen" ]; then
+    if [ -e "$REVIEWING_DIR/$lock$num_seen" ]; then
       local held_seen=""
-      read -r held_seen _ 2>/dev/null <"$REVIEWING_DIR/$num_seen" || true
+      read -r held_seen _ 2>/dev/null <"$REVIEWING_DIR/$lock$num_seen" || true
       reviewer_alive "$held_seen" && continue
     fi
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
@@ -2210,6 +2230,7 @@ print(len(json.load(sys.stdin)))
   # `yes` only when the parse produced something we can trust: `gh` succeeding
   # is not enough, because the parse below it can fail silently.
   prune_review_logs "$open_prs" "$prs_answered"
+  prune_review_logs "$open_prs" "$prs_answered" "$FLEET_DIR/validations" "v-"
   # Past the keep-reviews gate on purpose -- see the function's own comment.
   prune_review_refs "$open_prs" "$prs_answered"
 
@@ -2945,19 +2966,27 @@ reap_abandoned() {
     # The warning pass. One poll of notice, then the pair is asked again above --
     # so an agent that commits, or writes its plan to a file, keeps its worktree.
     if [ ! -e "$STATE_DIR/warned-$num" ]; then
+      # ITS TURN TO WRITE THE NOTE, before the terminal goes
+      # (armaatus/autofleet#106), and BEFORE `warned-` goes down.
+      #
+      # THE ORDER IS THE WHOLE OF IT. Marked first, this branch was not taken
+      # again: the next poll saw `warned-`, fell through to the release, and the
+      # worktree went with the note still unwritten -- at the shipped 60s poll
+      # and 120s grace, every time. The agent was asked for a note and then had
+      # the directory it writes into deleted.
+      #
+      # So the marker is the record that the WARNING was given, and the warning
+      # is not given until the turn is over. `continue` while the turn stands,
+      # which is what keeps this branch reachable next poll.
+      if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
+        handoff_turn "$num" "$path" || continue
+      fi
       : >"$STATE_DIR/warned-$num"
       say "#$num: $reason, and the worktree holds nothing -- releasing it next pass unless something lands in it"
       # ...unless the time-box, earlier in this same pass, already interrupted it
       # and said so on the board. Scoped to the poll: this is about not saying one
       # thing twice in one minute, not about never saying it again.
       if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
-        # ITS TURN TO WRITE THE NOTE, before the terminal goes
-        # (armaatus/autofleet#106). The worktree is still standing on this
-        # branch -- it is released NEXT pass, and only if nothing lands in it --
-        # so a note written now is a note the next attempt can read. `continue`
-        # rather than proceeding: this is the warning pass, and a pass of notice
-        # is what it is for.
-        handoff_turn "$num" "$path" || continue
         interrupt_agent_in "$path"
         card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
       fi

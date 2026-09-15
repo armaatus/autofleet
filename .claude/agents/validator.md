@@ -88,11 +88,20 @@ request, so whatever an argument can close here, nothing else will catch. A
 Critical finding is security, data loss, a breaking change, or a production
 failure. No reply talks past one.
 
-Where you are satisfied, **resolve the thread**:
+Where you are satisfied, **resolve the thread** — through the script, never the
+mutation:
 
 ```
-gh api graphql -F id=<thread-id> -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ clientMutationId } }'
+./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]
 ```
+
+The raw `resolveReviewThread` mutation was here, and it leaves the branch stuck:
+**no GitHub event re-runs `merge-gate` when a thread is resolved.**
+`pull_request_review_thread` is a webhook event and not a workflow trigger, so
+the gate goes red on the open thread, you close the thread, and nothing asks the
+gate again — `--auto` never fires. `resolve-thread.sh` resolves the threads and,
+once the *last* one is shut, re-runs the gate's own failed run on this head.
+docs/WORKFLOW.md is where that is explained.
 
 Resolve only the threads you are actually satisfied by. An unresolved thread
 holds the pull request on its own, and that is deliberate — it is the per-finding

@@ -154,20 +154,71 @@ jobs:
       # VENDORED into every host repository. `.autofleet/review.md` names a
       # hardcoded test command as the payload breach it is, and `validate.sh`
       # already did this correctly one file over.
+      #
+      # FROM THE BASE REF, and it was read off the HEAD. That is the rule
+      # `merge-gate.yml` states in prose about this exact file -- "it must come
+      # from the SAME base ref ... a head-ref copy would let a PR turn on the
+      # weaker rule in the very change that rule is judging" -- and this step
+      # broke it three ways at once:
+      #
+      #   `.autofleet/` is not in HUMAN_ONLY_PREFIXES and this repo's
+      #   `guard.json` lists nothing, so an agent in a fleet worktree writes
+      #   that file freely. It then reached `--allowed-tools
+      #   "...,Bash(<cmd>)"`, so a branch setting
+      #   AUTOFLEET_TEST_COMMAND='x"),Bash(*' widened what the validator may run
+      #   -- and a validator's `pass` is what releases the merge gate.
+      #
+      #   `. ./.autofleet/config` EXECUTES head-controlled shell, in a job
+      #   holding CLAUDE_CODE_OAUTH_TOKEN and a credential-persisting checkout.
+      #
+      #   `echo "cmd=$cmd" >>"$GITHUB_OUTPUT"` is injectable on a multi-line
+      #   value: a second line reading `foo=bar` becomes another step output.
+      #
+      # So: a second sparse checkout of the base, the value read with `sh -c`
+      # under no token, the result written through a random heredoc delimiter,
+      # and anything that is not one plain line refused. A base with no such
+      # file is a validator with no test tool, which is the same honest `fail`
+      # as a project that never configured one. Found by the self-review.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || format('refs/pull/{0}/base', inputs.pr) }}
+          sparse-checkout: |
+            .autofleet/config
+          sparse-checkout-cone-mode: false
+          path: base-config
       - id: testcmd
         run: |
           set -euo pipefail
           cmd=""
-          if [ -f .autofleet/config ]; then
-            # Sourced in a subshell, not parsed: it is a shell file and a project
-            # may compose the value. Nothing else from it is carried out.
-            cmd="$( . ./.autofleet/config >/dev/null 2>&1; printf '%s' "${AUTOFLEET_TEST_COMMAND:-}" )"
+          if [ -f base-config/.autofleet/config ]; then
+            # Sourced in a subshell of its own, with no secret in the
+            # environment: it is a shell file and a project may compose the
+            # value, so it cannot be parsed -- but nothing it does can reach
+            # this job's token or its checkout.
+            # shellcheck disable=SC2016  # the expansion belongs to the INNER
+            # shell: it has to happen after the config is sourced, in the
+            # subshell that sourced it, and not in this one.
+            cmd="$(env -i sh -c '. ./base-config/.autofleet/config >/dev/null 2>&1; printf "%s" "${AUTOFLEET_TEST_COMMAND:-}"' || true)"
           fi
+          # ONE PLAIN LINE, or nothing. A newline in this value is what turns a
+          # step output into two, and a `"` or `)` in it is what closes the
+          # `Bash(...)` pattern early and opens a wider one. Neither is a
+          # plausible test command, so both are refused rather than escaped.
+          case "$cmd" in
+            *[$'\n\r']*|*'"'*|*')'*|*'('*)
+              echo "::warning::AUTOFLEET_TEST_COMMAND in the base .autofleet/config is not a single plain command; the validator gets no test tool"
+              cmd="" ;;
+          esac
           # No fallback guess. A project that has not said what its tests are
           # gets a validator with no test tool, which reports "I could not run
           # the suite" -- a `fail`, and an honest one. Guessing produces a `pass`
           # from a command that was never run.
-          echo "cmd=$cmd" >>"$GITHUB_OUTPUT"
+          delim="cmd_$(openssl rand -hex 8 2>/dev/null || date +%s%N)"
+          {
+            printf 'cmd<<%s\n' "$delim"
+            printf '%s\n' "$cmd"
+            printf '%s\n' "$delim"
+          } >>"$GITHUB_OUTPUT"
 
       # THE BRIEF, read off the checkout rather than restated in this file.
       # `.claude/agents/validator.md` is the one copy of the scope, and a second
@@ -204,7 +255,7 @@ jobs:
           # resolves the threads this validation is satisfied by, and it is the
           # narrow grant rather than `gh api:*` because `resolveReviewThread` is
           # a mutation with no `gh pr` spelling.
-          claude_args: '--allowed-tools "Read,Grep,Glob,Skill,Task,Agent,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(${{ steps.testcmd.outputs.cmd }})" --max-turns 80'
+          claude_args: '--allowed-tools "Read,Grep,Glob,Skill,Task,Agent,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(./scripts/fleet/resolve-thread.sh:*),Bash(${{ steps.testcmd.outputs.cmd }})" --max-turns 80'
           prompt: |
             ${{ env.VALIDATOR_BRIEF }}
 

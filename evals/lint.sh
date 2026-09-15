@@ -679,10 +679,26 @@ verdicts_missing=""
 for f in .github/scripts/merge_gate.py scripts/fleet/validate.sh \
          .claude/agents/validator.md; do
   [ -f "$f" ] || { verdicts_missing="$verdicts_missing $f(absent)"; continue; }
-  # Both words, each on its own pass: a file naming only `pass` is one where
-  # `fail` has become unreachable, which is the same hole wearing a green face.
-  flat "$f" | qgrep -F 'pass' || verdicts_missing="$verdicts_missing $f(pass)"
-  flat "$f" | qgrep -F 'fail' || verdicts_missing="$verdicts_missing $f(fail)"
+  # THE TRAILER, not the word. `qgrep -F 'pass'` and `qgrep -F 'fail'` were the
+  # test, and those are two of the commonest substrings in this tree: "passed
+  # over", "the pass", "is not a pass", and nineteen spellings of `fail` in
+  # merge_gate.py alone. Deleting every literal verdict token from all three
+  # files left this check green -- a guard that had stopped guarding while
+  # printing ok, which is hard rule 3 exactly. Found by the self-review.
+  #
+  # `validated:` with the verdict after it is the shape all three files actually
+  # have to carry, and it is the shape a deletion would take away. The comment
+  # calling this "POSITIVE AND STRUCTURAL" was right about the intent and the
+  # implementation bought it by asserting nothing.
+  # BOUNDED, because `flat` puts the whole file on one line: an unbounded gap
+  # lets `validated:` on one line pair with a `pass` two paragraphs later, which
+  # is the same vacuousness one step subtler. 40 characters is the trailer plus
+  # a sha and no more. `[^>]*` is not usable -- the documented spelling is
+  # `<head-sha>`, whose own `>` would end the gap before the verdict.
+  flat "$f" | qgrep -E 'validated:.{0,40}pass' \
+    || verdicts_missing="$verdicts_missing $f(pass)"
+  flat "$f" | qgrep -E 'validated:.{0,40}fail' \
+    || verdicts_missing="$verdicts_missing $f(fail)"
 done
 if [ -z "$verdicts_missing" ]; then
   ok "...and each names both verdicts, so an unrecognised one cannot default to consent"
@@ -1876,21 +1892,26 @@ RULES = [
     ("the paths only a person may merge", "the brief, stage 2", triple),
     ("the STOP file", "the brief, stage 1",
      lambda t: ".autofleet/STOP" in t),
-    # All three, because the rule is BOTH halves: the closing line AND the two
-    # pass names `merge_gate.py` greps the body for. Keyed on `Closes #` alone,
+    # ALL THREE, because the rule is all three: the closing line AND both pass
+    # names `merge_gate.py` greps the body for. Keyed on `Closes #` alone,
     # stage 2 could drop the pass names and this still printed ok, on a check
-    # named for a rule it was covering half of. Found by the independent review.
-    # BOTH halves, because the rule is both: the closing line AND the pass name
-    # `merge_gate.py` greps the body for. Keyed on `Closes #` alone, stage 2
-    # could drop the pass name and this still printed ok, on a check named for a
-    # rule it was covering half of.
+    # named for a rule it was covering a third of. Found by the independent
+    # review.
     #
-    # ONE pass name now, not two. `/code-review` left `LOCAL_PASSES` when
-    # `/implement` became the opening prompt -- it runs
-    # `/mattpocock-skills:code-review` itself, and requiring a second overlapping
-    # review before the pull request existed was cost with no reader.
+    # `/code-review` was dropped from this tuple when it was dropped from
+    # `LOCAL_PASSES`, and the gate got it back -- armaatus/autofleet#51 moved
+    # both passes into `self-review.sh`, which runs them outside the agent's
+    # session, so the "a second overlapping pre-PR review is cost with no
+    # reader" argument for cutting one is gone. The commit that restored it to
+    # `merge_gate.py`, its selftest, CLAUDE.md and the brief missed this row, so
+    # the lint that asserts the brief names what the gate greps for was covering
+    # half of what the gate greps for. Found by the self-review.
+    #
+    # The paragraph above this one was, briefly, written twice in mutually
+    # contradicting singular and plural. That is what a merge leaves when both
+    # sides edit the same comment, and it is why the count is stated once.
     ("`Closes #N`, and what merge-gate reads from the body", "the brief, stage 2",
-     lambda t: all(n in t for n in ("Closes #",
+     lambda t: all(n in t for n in ("Closes #", "/code-review",
                                     "mattpocock-skills:code-review"))),
 ]
 

@@ -9,10 +9,17 @@ from a context that has not seen the conversation which produced the diff,
 because an author reviewing its own work shares its blind spots.
 
 **It runs once.** One review per pull request, at PR-open, on the head the PR
-opened with. What follows is at most two **validations** — a different job, with
-a different brief ([`.claude/agents/validator.md`](.claude/agents/validator.md)),
-asking only whether these findings were addressed and whether the commits
-answering them broke anything.
+opened with. What follows is a **validation** — a different job, with a different
+brief ([`.claude/agents/validator.md`](.claude/agents/validator.md)), asking only
+whether these findings were addressed and whether the commits answering them
+broke anything.
+
+How many validations a pull request may have is **not this file's to say** — the
+brief states it, and `AUTOFLEET_VALIDATE_MAX` enforces it, in `local` mode where
+the dispatcher starts them. In the default `github` mode
+`.github/workflows/validate.yml` fires on every push and nothing bounds it. This
+file carried the cap unqualified, which asserted a termination argument the
+venue most hosts run does not have.
 
 That is the shape, and it replaced a loop bounded at four reviews per pull
 request that routinely spent all four. Every answer to a finding was a commit,

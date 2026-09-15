@@ -263,6 +263,12 @@ def review_mode(root=None):
 
 
 def independent_reviews(pull_request, head_sha):
+    # `head_sha=None` means "on any head". Every caller that asks whether THIS
+    # commit has been reviewed passes a sha; the one caller that asks whether the
+    # pull request has ever been reviewed -- the guard that stops a validation
+    # standing in for a review that never happened -- passes None, because the
+    # whole point of the validation is that it merges a head the review did not
+    # see.
     """The reviews on `head_sha` that could be an independent review, oldest first.
 
     Two of the gate's conditions on WHO reviewed, in one place the fleet's own
@@ -307,8 +313,15 @@ def independent_reviews(pull_request, head_sha):
             return True
         if not local:
             return False
-        return any(head_sha.lower().startswith(m.lower())
-                   for m in LOCAL_REVIEW_RE.findall(review.get("body") or ""))
+        markers = LOCAL_REVIEW_RE.findall(review.get("body") or "")
+        # `head_sha=None` asks "has this pull request been independently
+        # reviewed AT ALL", on any head -- see the docstring. The marker still
+        # has to be there, because in `local` mode it is the only thing that
+        # separates the reviewer's verdict from the author's; what is dropped is
+        # WHICH head it names.
+        if head_sha is None:
+            return bool(markers)
+        return any(head_sha.lower().startswith(m.lower()) for m in markers)
 
     # A VALIDATION IS NOT A REVIEW, and it arrives through the same `gh pr review`
     # call -- so without this the validator's own record would satisfy the
@@ -317,16 +330,63 @@ def independent_reviews(pull_request, head_sha):
     # asks; the PR would then be "independently reviewed" by the thing that was
     # only ever meant to check the review had been answered. See VALIDATED_RE.
     #
-    # `validation_verdict()` is None for a trailer this does not recognise, so
-    # that case falls through to being read as an ordinary review -- which is the
-    # safe direction here and the unsafe one is the other: a garbled verdict must
-    # not become a silent second reviewer.
+    # WHAT MAKES A RECORD A VALIDATION IS ITS VERDICT, not a trailer appearing
+    # anywhere in its body. `not VALIDATED_RE.search(...)` was the test, and
+    # `VALIDATED_RE` matches inside a code fence as readily as at the end -- so a
+    # reviewer that QUOTED one of this file's own fixtures had its review
+    # silently dropped, the gate reported "no independent review", and the branch
+    # was held with nothing saying why. A review of the change adding these
+    # fixtures is exactly the review most likely to quote one.
+    #
+    # `validation_verdict()` reads the LAST trailer and returns None for anything
+    # it does not recognise, so a quoted example falls through to being read as
+    # the ordinary review it is -- while a real `pass`/`fail` at the end is still
+    # a validation and still not a second reviewer. The comment here claimed that
+    # fallthrough while the code above never called the function.
     return sorted(
         (r for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
-         if counts(r) and ((r.get("commit") or {}).get("oid") == head_sha)
-         and not VALIDATED_RE.search(r.get("body") or "")),
+         if counts(r)
+         and (head_sha is None
+              or (r.get("commit") or {}).get("oid") == head_sha)
+         and not is_validation(r)),
         key=lambda r: r.get("submittedAt") or "",
     )
+
+
+def is_validation(review):
+    """Is this record a validation rather than a review?
+
+    Both ride in a `gh pr review`, so the body is the only thing that tells them
+    apart, and two readings of it are both wrong:
+
+    `VALIDATED_RE.search(body)` -- a trailer ANYWHERE -- drops a review that
+    merely QUOTES one. `VALIDATED_RE` matches inside a code fence as readily as
+    at the end, so a reviewer citing one of this file's own fixtures had its
+    review silently discarded, the gate reported "no independent review", and
+    the branch was held with nothing saying why. The review most likely to quote
+    a trailer is the review of the change that added it.
+
+    `validation_verdict(review) is not None` -- a RECOGNISED verdict -- lets a
+    record whose whole content is `<!-- validated: <sha> unknown -->` be read as
+    an ordinary review, which is a garbled verdict becoming a silent second
+    reviewer.
+
+    So: POSITION, which is what REVIEW.md already requires of every trailer --
+    "Nothing else follows them." A trailer is a validation when nothing but
+    whitespace and other HTML comments comes after it. Prose after it means it
+    was being quoted.
+    """
+    body = review.get("body") or ""
+    last = None
+    for m in VALIDATED_RE.finditer(body):
+        last = m
+    if last is None:
+        return False
+    rest = body[last.end():]
+    # Other trailers may follow -- a validation body carries its own -- but text
+    # may not.
+    rest = re.sub(r"<!--.*?-->", "", rest, flags=re.S)
+    return not rest.strip()
 
 
 def validation_verdict(review):
@@ -364,11 +424,25 @@ def validation(pull_request, head_sha):
     for r in ((pull_request.get("reviews") or {}).get("nodes") or []):
         if (r.get("commit") or {}).get("oid") != head_sha:
             continue
+        # A QUOTED TRAILER IS NOT A VERDICT, and this read one as a `pass`: a
+        # reviewer citing `<!-- validated: <head> pass -->` in its prose handed
+        # the gate a passing validation of the head it was reviewing, which
+        # discharged the answer requirement its own findings had just created.
+        # Same defect as in `independent_reviews`, one function over, and found
+        # by the fixture added for that one.
+        if not is_validation(r):
+            continue
         verdict = validation_verdict(r)
         if verdict is None:
             continue
-        if not any(head_sha.lower().startswith(m[0].lower())
-                   for m in VALIDATED_RE.findall(r.get("body") or "")):
+        # THE SAME TRAILER THE VERDICT CAME FROM, which is the last one. `any(...)`
+        # over every match was the test, so a body whose last trailer said `pass`
+        # on an older sha, with the current head named in some earlier quoted
+        # example, satisfied both halves -- and the docstring above promises the
+        # opposite ("a body copied forward satisfies the first and fails the
+        # second"). One trailer answers both questions or neither does.
+        matches = VALIDATED_RE.findall(r.get("body") or "")
+        if not head_sha.lower().startswith(matches[-1][0].lower()):
             continue
         if newest is None or (r.get("submittedAt") or "") >= (newest[0].get("submittedAt") or ""):
             newest = (r, verdict)
@@ -384,7 +458,7 @@ def reviews_on_pr(pull_request):
     verdict counts, which is the drift this function exists to stop.
     """
     return [r for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
-            if not VALIDATED_RE.search(r.get("body") or "")]
+            if not is_validation(r)]
 
 
 def reviewed_sha(pull_request):
@@ -680,10 +754,19 @@ def evaluate(head_sha, pull_request, changed_files):
     #
     # Checked HERE rather than only in the drivers, because this is the condition
     # the merge actually turns on and a driver-side gate is one a second driver
-    # can forget. `validate.yml` has no equivalent of `needs_validation` today,
-    # which is exactly the case this catches.
-    if verdict == "pass" and not any(is_substantive(r)
-                                     for r in reviews_on_pr(pull_request)):
+    # can forget. `validate.yml` grew a `needs_validation` step of its own after
+    # this comment was written and the comment still said it had none -- the
+    # reason for a safety check must not misstate the system it guards, so it now
+    # says what is actually true: two drivers, and this is the one place both of
+    # them pass through.
+    #
+    # `independent_reviews`, NOT `reviews_on_pr`. The latter is every review
+    # record including the author's own, and in `local` mode the author IS the
+    # account that submits -- so a self-`--comment` plus a `pass` satisfied the
+    # independence requirement this paragraph exists to state. The former applies
+    # the mode's own independence test and the head check with it.
+    if verdict == "pass" and not any(
+            is_substantive(r) for r in independent_reviews(pull_request, None)):
         verdict = None
         problems.append(
             f"there is a validation of {head_sha[:8]} but no review for it to "
@@ -1042,6 +1125,31 @@ SELFTEST = [
         },
         ["src/app.c"],
         False,
+    ),
+    (
+        # THE OTHER DIRECTION, and it shipped broken: a reviewer that QUOTES a
+        # validation trailer -- reviewing the change that added the format, which
+        # is the likeliest reviewer of all -- had its review discarded, and the
+        # PR was held reporting no review at all. The trailer here is inside
+        # prose, which is what tells it from the row below.
+        "a review that quotes a validation trailer is still a review",
+        "def456",
+        {
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
+                 "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the fixture `<!-- validated: def456 pass -->` is matched "
+                 "inside a code fence, so this review would be dropped. Long enough for "
+                 "MIN_REVIEW_BODY either way."
+                 "\n<!-- review-important: 1 -->\n<!-- review-findings: 1 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "has not said what was done about them",
     ),
     (
         # A validation is not a review. In github mode it arrives from an account
