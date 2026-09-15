@@ -792,6 +792,10 @@ fleet_agent_alive() {
 #
 #   0  claimed, or already ours
 #   1  another live agent holds it; its `pid head` line is printed on stdout
+#   2  the lock could not be written AT ALL -- an unwritable directory, a full
+#      disk. Not contention, and the caller must not report it as such: a
+#      refusal that names a phantom holder sends a person looking for a process
+#      that does not exist, and hides the one thing they could fix.
 #
 # CREATE-OR-FAIL, not `[ -e ] || printf >`. The dispatcher's spawn decision and
 # its write of the marker are two syscalls with a window between them, and the
@@ -811,11 +815,16 @@ fleet_agent_alive() {
 # "one is running" retires that pull request from review for good, silently.
 # "ps would not say" is not gone -- see `fleet_agent_alive` -- and is obeyed.
 fleet_lock_claim() {
-  local marker="$1" head="${2:-}" held="" for_head="" is
+  local marker="$1" head="${2:-}" held="" for_head="" is stolen moved=""
   [ -n "$marker" ] || return 0
   mkdir -p "$(dirname "$marker")" 2>/dev/null || true
   # `set -C` in a subshell, so the caller's own noclobber setting is untouched.
   ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
+  # THE CREATE CAN FAIL FOR A SECOND REASON, and the two must not be one answer.
+  # No file means the write itself failed -- nowhere to put the lock -- and
+  # reporting that as "somebody else holds it" names a holder that does not
+  # exist. Found by the independent review.
+  [ -e "$marker" ] || return 2
   read -r held for_head 2>/dev/null <"$marker" || true
   [ "${held:-}" = "$$" ] && return 0
   fleet_agent_alive "${held:-}"; is=$?
@@ -823,10 +832,41 @@ fleet_lock_claim() {
     printf '%s %s\n' "${held:-?}" "${for_head:-?}"
     return 1
   fi
-  rm -f "$marker" 2>/dev/null || true
+
+  # TAKING OVER A STALE LOCK, and this is the delicate half. `rm` then create is
+  # not a takeover, it is a second race: two claimers that both read the same
+  # dead pid both remove and both create, the second removing the FIRST's fresh
+  # lock, so two processes leave believing they hold it -- and the first's exit
+  # trap then deletes the second's. Found by the independent review.
+  #
+  # So the stale file is RENAMED out of the way instead. `mv` is one rename(2):
+  # of two claimers racing on the same path exactly one moves that file, and the
+  # loser's `mv` fails or moves something else. Which is why the content is
+  # checked after the move rather than trusted -- the loser's `mv` can land
+  # AFTER the winner has already recreated the marker, and what it then has in
+  # hand is the winner's live claim, not the dead one it read. Put it back and
+  # stand down; that is the conservative direction, and the alternative is two
+  # reviewers on one head, which is the whole of armaatus/autofleet#64.
+  # DOT-PREFIXED, and in the same directory because a rename has to be. The
+  # sweeps in fleet.sh walk `$FLEET_REVIEWING/*`, which does not match a leading
+  # dot -- so this file, which exists for the microseconds between the rename
+  # and the recreate, is never read as a lock for a pull request called
+  # "42.12345". A run killed inside that window leaks one short dot-file that
+  # nothing counts and nothing signals.
+  stolen="$(dirname "$marker")/.steal-$$-$(basename "$marker")"
+  mv "$marker" "$stolen" 2>/dev/null || { printf '%s %s\n' "${held:-?}" "${for_head:-?}"; return 1; }
+  read -r moved _ 2>/dev/null <"$stolen" || true
+  if [ "${moved:-}" != "${held:-}" ]; then
+    mv "$stolen" "$marker" 2>/dev/null || rm -f "$stolen" 2>/dev/null
+    held=""; for_head=""
+    read -r held for_head 2>/dev/null <"$marker" || true
+    [ "${held:-}" = "$$" ] && return 0
+    printf '%s %s\n' "${held:-?}" "${for_head:-?}"
+    return 1
+  fi
+  rm -f "$stolen" 2>/dev/null || true
   ( set -C; printf '%s %s\n' "$$" "$head" >"$marker" ) 2>/dev/null && return 0
-  # Lost the re-claim to whoever else was clearing the same stale marker. Their
-  # lock, not ours, and the answer is the same one a live holder gets.
+  [ -e "$marker" ] || return 2
   held=""; for_head=""
   read -r held for_head 2>/dev/null <"$marker" || true
   [ "${held:-}" = "$$" ] && return 0

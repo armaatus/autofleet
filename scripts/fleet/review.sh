@@ -336,17 +336,30 @@ esac
 # reviewer, and the try the dispatcher spent for it is not an attempt at a
 # verdict.
 LOCK="${AUTOFLEET_REVIEW_MARKER:-$FLEET_REVIEWING/$pr}"
-if ! holder="$(fleet_lock_claim "$LOCK" "$head")"; then
-  # ...and the lock stays THEIRS. `$LOCK` is cleared before the exit so the
-  # trap, which drops this run's lock on every path, drops nothing here.
-  echo "PR #$pr already has a reviewer in flight (pid ${holder%% *}) on ${head:0:8}." >&2
-  echo "  Not starting a second: two reviews on one head cannot both be answered," >&2
-  echo "  and the one that loses the answer slot is read by nobody. Wait for it," >&2
-  echo "  or read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log." >&2
-  LOCK=""
-  unspent_try
-  exit 9
-fi
+holder="$(fleet_lock_claim "$LOCK" "$head")"; claimed=$?
+# ...and the lock stays THEIRS on both refusals. `$LOCK` is cleared before the
+# exit so the trap, which drops this run's lock on every path, drops nothing
+# here -- dropping it would free the running reviewer's slot and invite the next
+# poll to start the second reviewer this just declined.
+case "$claimed" in
+  1) echo "PR #$pr already has a reviewer in flight (pid ${holder%% *}) on ${head:0:8}." >&2
+     echo "  Not starting a second: two reviews on one head cannot both be answered," >&2
+     echo "  and the one that loses the answer slot is read by nobody. Wait for it," >&2
+     echo "  or read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log." >&2
+     LOCK=""; unspent_try; exit 9 ;;
+  # NOT EXIT 9, and the difference is the whole of this arm. "Could not write
+  # the lock" is not "somebody holds it": reported as contention it names a
+  # holder that does not exist, and the one thing a person could fix -- the
+  # directory -- is the thing the message does not mention. Exit 2 is this
+  # script's "could not tell", and like every other 2 it refunds the try and
+  # writes no `.done`, so the next poll asks again once the disk is not full.
+  # Found by the independent review.
+  2) echo "could not write the reviewer lock at $LOCK." >&2
+     echo "  Nothing here can guarantee a second reviewer will not start on the same" >&2
+     echo "  head, and two reviews on one head cannot both be answered, so this" >&2
+     echo "  declines rather than reviewing. Check the directory is writable." >&2
+     LOCK=""; unspent_try; exit 2 ;;
+esac
 
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
 # same reason await-review.sh and review-status.sh ask it: three paraphrases of

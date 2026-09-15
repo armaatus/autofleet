@@ -684,11 +684,25 @@ def abandoned_findings(pull_request, head_sha):
     `answered()` still accepts, because it matches the marker against the head
     the review was ON.
 
-    NOT CALLED where a `pass` validation stands in for the missing review. A
-    validation judges whether the review's findings were addressed, across every
-    head the PR has had, so there the findings have had a reader; the case this
-    exists for is the one where nothing read them at all.
+    NOTHING HAS READ THEM is the whole predicate, and the second half of it is
+    the validation. The gate's own instruction for an Important finding is "push
+    the fix, and the validator judges the new head" -- so a head this branch has
+    left behind is the ORDINARY state of every pull request that followed that
+    advice, and a line saying "a push does not answer a review" on all of them
+    would be this file contradicting itself two conditions apart. A validation
+    is the reader: it judges whether the review's findings were addressed,
+    across every head the PR has had. Once one has been submitted since the
+    review, these findings have had one, whatever it concluded -- a `fail` is
+    its own refusal, further up, and says what is unsettled.
+
+    So this fires in exactly one window: findings written, the head moved out
+    from under them, no answer, and no validation yet. That is the window PR #1
+    went through silently. Found by both self-review passes, which caught the
+    first version firing on every multi-round PR.
     """
+    read_by = [r.get("submittedAt") or ""
+               for r in ((pull_request.get("reviews") or {}).get("nodes") or [])
+               if is_validation(r)]
     out = []
     for r in independent_reviews(pull_request, None):
         oid = ((r.get("commit") or {}).get("oid")) or ""
@@ -700,6 +714,9 @@ def abandoned_findings(pull_request, head_sha):
         if not found:      # None ("did not say") and 0 are both "nothing owed"
             continue
         if answered(pull_request, oid, r):
+            continue
+        since = r.get("submittedAt") or ""
+        if any(when >= since for when in read_by):
             continue
         out.append((r, oid, found))
     return out
@@ -922,11 +939,12 @@ def evaluate(head_sha, pull_request, changed_files):
         for review, oid, found in abandoned_findings(pull_request, head_sha):
             problems.append(
                 f"    {review_name(review)} reported {found} finding(s) on "
-                f"{oid[:8]}, a head this branch has left behind, and nothing "
-                "answered it. A push does not answer a review. Say what was "
-                "done about them -- `./scripts/fleet/answer-review.sh` answers "
-                "the reviews on the head it is run against -- or the next round "
-                "starts as though they were never written."
+                f"{oid[:8]}, a head this branch has left behind. Nothing has "
+                "answered or validated them, and no review of them is coming -- "
+                "the reader they still have is the VALIDATION of this head, "
+                "which judges whether a review's findings were addressed. Say "
+                "in the PR what was done about them, so it has something to "
+                "judge against."
             )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
@@ -979,6 +997,16 @@ def evaluate(head_sha, pull_request, changed_files):
         # "answered" can no longer be true of one review and reported of two.
         unanswered = 0
         for review in substantive:
+            # THE SAME THREE STATES `latest` ABOVE IS BUILT FROM, and dropping
+            # them was the one thing this move got wrong. GitHub's review states
+            # also include DISMISSED and PENDING: a DISMISSED review is one
+            # somebody explicitly cleared, and reading its findings trailer as a
+            # live hold takes GitHub's own dismiss action away -- on a
+            # repository where that action is part of how a person unblocks a
+            # PR. Found by both self-review passes.
+            if review.get("state") not in ("APPROVED", "CHANGES_REQUESTED",
+                                           "COMMENTED"):
+                continue
             who = ((review.get("author") or {}).get("login")) or "?"
             if review.get("state") == "CHANGES_REQUESTED":
                 continue  # said above, with the remedy that belongs to it
@@ -1033,7 +1061,12 @@ def evaluate(head_sha, pull_request, changed_files):
             # which is what every other reader of this trailer does.
             if answered(pull_request, head_sha, review) and important != 0 \
                     and important is not None:
-                unanswered += 1
+                # NOT COUNTED AS UNANSWERED. It HAS been answered; what holds
+                # it is that an answer is not enough for an Important finding.
+                # Counted, it fired the closing note below -- "one answer
+                # written after the LAST of them answers them all" -- which is
+                # precisely the remedy this branch exists to say does not apply.
+                # Found by both self-review passes.
                 problems.append(
                     f"{named} reports {important} finding(s) it "
                     "called Important, and this PR's author has answered in "
@@ -2414,6 +2447,73 @@ SELFTEST = [
         False,
         "github",
         ("left behind", "abc123", "10 finding(s)"),
+    ),
+    (
+        # ...AND NOT ONCE SOMETHING HAS READ THEM. The gate's own instruction
+        # for an Important finding is "push the fix, and the validator judges
+        # the new head" -- so a review on an abandoned head is the ORDINARY
+        # state of every pull request that followed it, and the first version of
+        # the line above fired on all of them, telling an author who did exactly
+        # what this file told them to that "a push does not answer a review".
+        # Two messages one file apart giving opposite advice about one action.
+        # A validation is the reader; once one has been submitted since the
+        # review, these findings have had one. Found by both self-review passes.
+        "...but not once a validation has read them",
+        "def456",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T08:00:00Z",
+                 "commit": {"oid": "bbb111"}, "author": {"login": "claude[bot]"},
+                 "body": "The commits since the review address all ten.\n"
+                         "<!-- validated: bbb111 pass -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        # STILL FALSE, and on the line above this one: there is no review on
+        # def456 and no validation of it either, so the PR is held either way.
+        # What this row is about is the SENTENCE -- asserting the verdict alone
+        # would pass against the code that fires it, which is the version both
+        # self-review passes objected to.
+        False,
+        "github",
+        "!left behind",
+    ),
+    (
+        # A DISMISSED review is one somebody explicitly cleared, and GitHub's
+        # dismiss action is part of how a person unblocks a pull request here.
+        # Read as a live hold because it carries a findings trailer, that action
+        # stops working -- which is what moving the loop below from `latest`
+        # (built from three named states) to every substantive review did, until
+        # the whitelist came with it. Found by both self-review passes.
+        "a dismissed review does not hold the PR on its findings trailer",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "DISMISSED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the comment above sync_tick() says what, not why.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and "
+                         "to clear MIN_REVIEW_BODY.\n"
+                         "<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        True,
     ),
 ]
 

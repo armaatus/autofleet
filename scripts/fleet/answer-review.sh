@@ -165,12 +165,14 @@ if ! GH_PAGER=cat gh pr comment "$pr" --body-file "$body" >/dev/null 2>&1; then
   exit 1
 fi
 if [ "$reviewed" -gt 1 ]; then
-  # NAMED, because the gate now counts answers per review and the author has
-  # just discharged more than one with a single comment. Silent, the next thing
-  # they read is a green gate they cannot account for -- or, if a review lands
-  # between this comment and the gate run, a red one they think they answered.
-  echo "answered the $reviewed reviews on ${head:0:8} of PR #$pr -- one comment"
-  echo "written after the last of them answers all of them."
+  # WHAT IS ON THE HEAD, not what was discharged, and the distinction is the
+  # finding: this count is every substantive review on the head, and some of
+  # them -- an approval, a review that found nothing -- were never holding the
+  # PR in the first place. Claiming to have answered them overstates it. What
+  # the sentence is for is the author who is about to read a gate that counts
+  # answers per review and needs to know a second one was there at all.
+  echo "answered on ${head:0:8} of PR #$pr, which carries $reviewed reviews --"
+  echo "one comment written after the last of them answers every one that was waiting."
 else
   echo "answered the review on ${head:0:8} of PR #$pr"
 fi

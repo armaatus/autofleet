@@ -2425,19 +2425,36 @@ for p in prs:
     # file is its own.
     #
     # WRITTEN AFTER THE SPAWN, because the pid is what goes in it and there is no
-    # pid until the job exists. The race that opens is benign, and it is named
-    # here so the next reader need not work it out: a `review.sh` that exits
-    # before this `printf` runs -- the exit-8 path is two API calls -- removes a
-    # marker that does not exist yet, and the `printf` then recreates it holding
-    # a dead pid. `live_reviewers` reaps that on its next call, which is the very
-    # next candidate in this loop, so the slot is held for one iteration rather
-    # than leaked. An earlier version of this comment claimed the marker was
-    # written first; found by the independent review.
+    # pid until the job exists -- and CREATE-OR-FAIL, because since
+    # armaatus/autofleet#64 this file is a LOCK that `review.sh` claims for
+    # itself, not this loop's private bookkeeping.
+    #
+    # An unconditional write here undid that claim. A hand-run `review.sh` that
+    # wins the lock in the window between the `[ -e "$marker" ]` above and this
+    # line had its pid overwritten with the pid of the reviewer THIS pass
+    # spawned -- which then lost `fleet_lock_claim`, printed its exit-9 refusal
+    # and died, leaving the marker naming a dead process while the hand-run was
+    # still reviewing. `live_reviewers` reaps that on the next poll and starts a
+    # third, and two reviews land on one head: the failure this whole change
+    # exists to prevent, delivered by the half of it that was not converted.
+    # Found by both self-review passes.
+    #
+    # So it writes only when nothing holds the file. The child writes `$$ $head`
+    # and `$!` here IS that pid, so the two agree whenever both run; whichever
+    # lands first is right and the other is a no-op. The old benign race stays
+    # benign and is now smaller: a `review.sh` that exits before this line --
+    # the exit-8 path is two API calls -- leaves no marker, this recreates one
+    # holding a pid that has just died, and `live_reviewers` reaps it on the
+    # very next candidate in this loop.
     printf '%s %s\n' "$head" "$(( ${tries_n:-0} + 1 ))" >"$marker.tries"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
-    printf '%s %s\n' "$!" "$head" >"$marker"
-    say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+    # CAPTURED, not read twice: `$!` inside the subshell below is the parent's
+    # value today and would be a subtle thing to depend on, and the `say` after
+    # it wants the same number the marker got.
+    local rpid=$!
+    ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null || true
+    say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
   done
 
   # ...and the records of pull requests that are no longer open. They were
