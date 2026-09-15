@@ -146,17 +146,29 @@ last paragraph says how**.
 |---|---|---|---|
 | **GitHub API calls** | 2 shared listings, plus 2 per owned worktree; a launch adds none | worktrees, not the backlog | rate limit |
 | **Runner CLI calls** | 1 `worktree list`, plus 1 `worktree ps` per stall check and per parked-dirty worktree, plus 3 per launch and 2 per release | worktrees | nothing |
-| **Model invocations** | 1 per launch; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches and open PRs | **tokens** |
+| **Model invocations** | 1 per launch; a handoff turn and an answering brief typed into a live agent, once per owned worktree per issue; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
 
-Only the third row spends anything, and it has **three** entries rather than
-two: `worktree create --agent claude` is the work itself, `review.sh` is the
+Only the third row spends anything. **The poll never *starts* a model** — the
+body of `cmd_run` is shell and `gh` from end to end — but it does two different
+things that cost tokens, and only the first is a new session:
+
+*Sessions it spawns*, three of them rather than the two an older reading of this
+counted: `worktree create --agent claude` is the work itself, `review.sh` is the
 local reviewer, and `validate.sh` — spawned by `start_validator` from inside
-`review_open_prs`' own loop — is the third. Every other call a pass makes is an
-API or a CLI query and costs no tokens at all. **The poll itself never runs a
-model**: the body of `cmd_run` is shell and `gh` from end to end, and a model
-starts only inside one of those three scripts once the dispatcher has spawned
-it — which is a decision the pass makes, not something every pass does. All
-three are marker-guarded, so none of them is a spawn per PR per poll —
+`review_open_prs`' own loop — is the third.
+
+*Turns it types into a session already running*, which is the half easily missed
+because it goes out over the runner CLI and so looks free in the row above it.
+`reset_context_for_answering` asks a worktree agent for its handoff note and
+then hands it the `--after-pr` brief, which is the opening turn of a fresh
+session; `enforce_timebox`'s give-up path and `reap_abandoned` reach the same
+seam. Each of those is a model turn, priced in the third row and not the second.
+Bounded by the work rather than by the clock: once per owned worktree per issue,
+not once per poll.
+
+Every other call a pass makes is an API or a CLI query and costs no tokens at
+all. All three spawned sessions are marker-guarded, so none is a spawn per PR
+per poll —
 `start_validator` returns early on its `v-<pr>` lock and on a `v-<pr>.done`
 holding the current head, and a reviewer is skipped while
 `$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
@@ -202,10 +214,17 @@ nothing is time-boxed, no build context is reset for the answering work, and the
 run loop keeps polling because it cannot tell whether the backlog is empty. It
 says so in `fleet.log` once per outage rather than once a minute. The way out is
 to close or merge PRs until the count drops; paging past the limit is
-armaatus/autofleet#31. The `ready` listing's own `--limit 200` has **no** such
-guard, deliberately — a repository with 200 open issues would then never start
-anything, and losing the tail of a 200-issue queue delays work rather than
-duplicating it.
+armaatus/autofleet#122, filed for it — not #31, which earlier drafts of this
+paragraph cited and which is closed and about worktree scoping.
+
+The `ready` listing's own `--limit 200` has **no** such guard, and that is a
+trade rather than a free pass. Guarding it would stop a repository with exactly
+200 open issues from starting anything at all, which is the worse cliff. What it
+costs instead is not merely late work: `count_startable` counts off the same
+truncated page, so a repository with more than 200 open issues whose newest 200
+are all claimed reaches `queued == 0` with nothing owned, and the dispatcher
+**exits** saying "the backlog has nothing startable left" while real startable
+work sits behind the page boundary. Both listings are armaatus/autofleet#122.
 
 **List mode still has the slope**, and the table above does not describe it.
 `fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its

@@ -1121,9 +1121,14 @@ open_pr_listing() {
   # rather than in a one-poll window. `review_open_prs` refuses a listing at its
   # own limit for exactly this (`prs_answered=no`); so does this one, into
   # "could not tell" rather than into a wrong answer. It is a hard stop when a
-  # host really does keep 100 PRs open -- nothing launches and the log says
-  # nothing about it -- which is the safe direction, and #31 is where paging
-  # belongs. Found by the local review.
+  # host really does keep 100 PRs open, and a wider one than "nothing launches":
+  # `enforce_timebox` stops no runaway agent, `reset_context_for_answering` hands
+  # nothing over, and `count_startable`'s non-zero keeps `cmd_run` polling
+  # forever. That is still the SAFE direction -- guessing opens a duplicate
+  # worktree per issue past the boundary -- and armaatus/autofleet#122, filed
+  # for it, owns removing the cliff. NOT #31, which this comment cited first and
+  # which is closed and about `live_worktrees` seeing another repository's
+  # worktrees. Found by the local review.
   # `row_count`, and it carries a third state in the empty string: "the body was
   # not a listing at all". The `case` below reads all three.
   local row_count=""
@@ -1177,14 +1182,21 @@ print(len(loaded) if isinstance(loaded, list) else -1)
          "$pr_page open pull requests is this listing's page limit, so a PR on the next page" \
          "cannot be told from one that does not exist. Nothing will launch, nothing will be" \
          "time-boxed and the run loop will not exit until the count drops. See docs/WORKFLOW.md," \
-         "\"What one poll costs\"; armaatus/autofleet#31 is where paging belongs." >&2 ;;
+         "\"What one poll costs\"; armaatus/autofleet#122 is where paging belongs." >&2 ;;
   esac
   # ...and DROPPED the moment a whole listing comes back, so a wedge that clears
   # and recurs inside $AUTOFLEET_HOLD_RESAY is announced again rather than
   # swallowed by an hour-old marker. `launch` drops `FOUNDATION_HOLD_SAID` for
   # the same reason: a say-once marker must not outlive the condition it is
   # about. Found by the local review.
-  [ -n "$listing" ] && rm -f "$PR_PAGE_FULL_SAID"
+  # `poll_cache_open` on the REMOVAL too, not only on the writes. `cmd_status`
+  # reaches this function through `in_flight` -> `has_open_pr`, and #35's
+  # acceptance is that `status` leaves $STATE_DIR byte-identical; an ungated `rm`
+  # made it delete a live dispatcher's say-once marker, which is the same class
+  # of bug as the `IN_POLL` gate on the cache itself. `status_keeps_cache` missed
+  # it only because its fixture never creates the marker. Found by the local
+  # review.
+  poll_cache_open && [ -n "$listing" ] && rm -f "$PR_PAGE_FULL_SAID"
   if [ -z "$listing" ]; then
     if poll_cache_open; then
       mkdir -p "$POLL_CACHE" 2>/dev/null
@@ -1289,7 +1301,10 @@ ROTATE_STUCK_SAID=""
 # "nothing in flight", which three phases caught at once.
 foundation_hold() {
   local cached="$1" what="$2"; shift 2
-  printf 'hold' >"$cached" 2>/dev/null || true
+  # `2>/dev/null` BEFORE the redirection, per CLAUDE.md "Code": with it second a
+  # $STATE_DIR that will not take the file still prints bash's own diagnostic to
+  # the real stderr. Found by the local review.
+  printf 'hold' 2>/dev/null >"$cached" || true
   foundation_hold_say "$what" "$@"
 }
 
@@ -1326,7 +1341,13 @@ hold_say_into() {
     *) [ "$(( now - said_at ))" -ge "$AUTOFLEET_HOLD_RESAY" ] && stale=true ;;
   esac
   if $stale || [ "$(cat "$where" 2>/dev/null)" != "$what" ]; then
-    printf '%s' "$what" >"$where" 2>/dev/null || true
+    # ...and here it costs more than a stray line. A marker that never lands
+    # leaves `said_at` unreadable, so `stale` is true on the next poll and this
+    # says its lines AGAIN -- once a minute, which is the flood the marker exists
+    # to prevent, with bash's own diagnostic beside each one. New callers arrive
+    # here (`PR_PAGE_FULL_SAID`), so the order is fixed rather than inherited.
+    # CLAUDE.md, "Code"; found by the local review.
+    printf '%s' "$what" 2>/dev/null >"$where" || true
     local line
     for line in "$@"; do say "$line"; done
   fi
@@ -1456,7 +1477,8 @@ foundation_in_flight() {
     fi
   done <<<"$list"
 
-  printf 'no' >"$cached" 2>/dev/null || true
+  # See `foundation_hold` above for why the order is this way round.
+  printf 'no' 2>/dev/null >"$cached" || true
   # NOT cleared here, and that is the fix rather than an omission.
   #
   # This function runs first on every iteration, so the only way the OTHER hold
@@ -3908,6 +3930,17 @@ cmd_status() {
   # ahead of the queue: a `next up` list reordered with nothing on screen saying
   # why reads as a bug in the ordering, which is the report this marker exists
   # to prevent.
+  # THE ONE COMMAND A PERSON RUNS WHEN NOTHING IS LAUNCHING, so it has to be able
+  # to say "the fleet cannot tell" rather than printing a full queue beside a
+  # dispatcher that will start none of it. `in_flight` answers 2 when the open-PR
+  # listing could not be read, and the loop below reads 2 as "not running", so
+  # every row prints -- and at the page limit that is the whole backlog. Asked
+  # once here rather than judged per row, because the loop is a subshell and
+  # could not report back. Found by the local review.
+  if ! open_pr_listing >/dev/null 2>&1; then
+    echo "  (the open pull request listing could not be read, so the rows below may"
+    echo "   already be claimed -- see docs/WORKFLOW.md, \"What one poll costs\")"
+  fi
   ready_issues | while IFS="$(printf '\t')" read -r num unblocks labels title; do
     in_flight "$num" && continue
     gave_up_on "$num" && continue

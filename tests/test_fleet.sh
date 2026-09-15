@@ -4272,6 +4272,45 @@ JSON
     echo "ok: ...and says it again when the wedge clears and recurs"
     ;;
 
+  budget_status_says_blind)
+    # `fleet.sh status` is what a person runs when nothing is launching, and at
+    # the page limit it was the most misleading thing in the tree: `in_flight`
+    # answers 2, the next-up loop reads 2 as "not running", and every `ready`
+    # issue printed as startable beside a dispatcher that would start none of
+    # them. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "could not be read" <<<"$out" \
+      || fail "status printed a full startable queue without saying the fleet cannot tell: $out"
+    echo "ok: status says so when the open-PR listing could not be read"
+    # ...and says nothing when it could.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "could not be read" <<<"$out" && fail "status warned about a listing it read fine: $out"
+    echo "ok: ...and stays quiet when it could"
+    ;;
+
+  budget_status_keeps_said)
+    # ...and it still writes NOTHING. #35's acceptance is that `status` leaves
+    # $STATE_DIR byte-identical, and the say-once marker's removal is a write:
+    # ungated, a `status` run beside a wedged dispatcher deleted the marker and
+    # the dispatcher said its lines again on the next poll. The same class of
+    # bug as the IN_POLL gate on the cache itself. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 3
+    mkdir -p "$AUTOFLEET_DIR"
+    printf '100' >"$AUTOFLEET_DIR/pr-page-full"
+    before="$(cat "$AUTOFLEET_DIR/pr-page-full")"
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/pr-page-full" ] \
+      || fail "status deleted a live dispatcher's say-once marker, so it will repeat itself next poll"
+    [ "$(cat "$AUTOFLEET_DIR/pr-page-full")" = "$before" ] \
+      || fail "status rewrote the say-once marker"
+    echo "ok: status does not drop the page-limit marker a dispatcher is holding"
+    ;;
+
   budget_busy_pass)
     # THE OTHER ROW OF docs/WORKFLOW.md's table. The section claims the `budget_`
     # phases assert its numbers; without this one it asserted the idle row and
@@ -4463,6 +4502,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_list_mode_no_listing|budget_drain_no_listing" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
     exit 2 ;;
 esac
