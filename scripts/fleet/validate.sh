@@ -94,17 +94,12 @@ TRIES_MARKER="${AUTOFLEET_VALIDATE_MARKER:+${AUTOFLEET_VALIDATE_MARKER}.tries}"
 # second validation is reached rather than a reason to start the count again.
 ROUNDS_MARKER="${AUTOFLEET_VALIDATE_MARKER:+${AUTOFLEET_VALIDATE_MARKER}.rounds}"
 
-validate_round() {
-  local n=0
-  # `[ -f ]` first, and NOT `read ... 2>/dev/null`: bash opens the redirection
-  # before it applies `2>`, so the error from a missing file goes to the REAL
-  # stderr and the suppression does nothing. review.sh carries the same comment
-  # because the same bug was found there.
-  [ -n "$ROUNDS_MARKER" ] && [ -f "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER"
-  n="${n:-0}"
-  case "$n" in (*[!0-9]*) n=0 ;; esac
-  printf '%s\n' "$(( n + 1 ))"
-}
+# NOTHING DERIVED, unlike review.sh's round: a validation is counted only when
+# this script submits one, because there is no other producer of them -- the
+# workflow's validator writes the same trailer through the same gate, and a
+# `github`-mode repository never reaches this file at all. So the second
+# argument is empty.
+validate_round() { fleet_round_next "$ROUNDS_MARKER"; }
 
 record_round() {
   [ -n "$ROUNDS_MARKER" ] || return 0
@@ -129,37 +124,19 @@ record_round() {
 # review.sh's cap governs whether to keep *asking for an opinion*, and this one
 # governs whether the branch may ever merge. A cap that fires early on the
 # second is strictly worse than one that fires late.
-unspent_try() {
-  [ -n "$TRIES_MARKER" ] || return 0
-  # `${head:-}`, because this is called from paths that run BEFORE `head` is
-  # assigned -- the stop check is the one it exists for -- and `set -u` would
-  # otherwise terminate the script instead of refunding the try. The same
-  # unbound-variable bug review.sh records in this function.
-  [ -n "${head:-}" ] || { unspent_try_any; return 0; }
-  local h n
-  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
-  [ "${h:-}" = "$head" ] || return 0
-  n=$(( ${n:-1} - 1 ))
-  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
-  else printf '%s %s\n' "$head" "$n" >"$TRIES_MARKER" 2>/dev/null || true
-  fi
-}
-unspent_try_any() {
-  [ -n "$TRIES_MARKER" ] || return 0
-  local h n
-  read -r h n 2>/dev/null <"$TRIES_MARKER" || return 0
-  [ -n "${h:-}" ] || return 0
-  n=$(( ${n:-1} - 1 ))
-  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
-  else printf '%s %s\n' "$h" "$n" >"$TRIES_MARKER" 2>/dev/null || true
-  fi
-}
+# `${head:-}`, because this is called from paths that run BEFORE `head` is
+# assigned -- the stop check is the one it exists for -- and `set -u` would
+# otherwise terminate the script instead of refunding the try. An empty head
+# refunds whatever head the marker names, which is what those exits want: the
+# dispatcher spent the try for this run and this run reached no validator.
+#
+# That is where this differs from review.sh, which refuses to refund with no
+# head and calls the any-head form explicitly at those exits. Both end up
+# refunding the same attempts; the wrappers differ, the arithmetic does not.
+unspent_try()     { fleet_try_refund "$TRIES_MARKER" "${head:-}"; }
+unspent_try_any() { fleet_try_refund "$TRIES_MARKER"; }
 
-record_done() {
-  [ -n "$DONE_MARKER" ] || return 0
-  printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
-  rm -f "$TRIES_MARKER" 2>/dev/null || true
-}
+record_done() { fleet_record_done "$DONE_MARKER" "$head" "$TRIES_MARKER"; }
 
 # ONE exit trap, installed here and REDEFINED once the validator has a pid -- a
 # second `trap ... EXIT` replaces the first rather than adding to it, and the

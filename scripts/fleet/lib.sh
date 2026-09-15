@@ -655,3 +655,90 @@ EOF
 fleet_venv_is_usable() {
   fleet_python_is_usable "$1/bin/python" 2>/dev/null
 }
+
+# ---------------------------------------------- the reviewing phases' markers
+#
+# THREE FILES BESIDE A LOCK, and two scripts that keep them: `review.sh` for the
+# independent review, `validate.sh` for the validation that follows it. Both
+# hold a `.tries` (attempts on one head that produced nothing), a `.rounds`
+# (verdicts this pull request has had) and a `.done` (the head that has been
+# handled), and the dispatcher reads `.tries` again before either spawn.
+#
+# The arithmetic lives here because it did not, once. `validate.sh` arrived as
+# ~150 lines of `review.sh` re-typed, and what came with the copy was a bug:
+# `read -r h n <"$marker" 2>/dev/null` silences stderr after the open that fails
+# (armaatus/autofleet#87), which had to be fixed in seventeen places because it
+# had been re-typed seventeen times. Every one of those was a line somebody had
+# already written correctly somewhere else.
+#
+# The WRAPPERS stay in each script, thin, because the two phases genuinely
+# differ about when a try is refunded and about what a round is derived from --
+# see the comments on their own `unspent_try` and round functions. What is
+# shared is the file format and the arithmetic, which is what drifted.
+
+# Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty
+# means "whatever head the marker names", which is the right refund for an exit
+# that failed before the head was known: the dispatcher spent that try for this
+# run and this run reached no agent.
+#
+# Silent about a missing marker on purpose: a person running either script by
+# hand has no marker at all, and a refund with nothing to refund is a no-op, not
+# an error.
+fleet_try_refund() {
+  local marker="$1" want="${2:-}" h n
+  [ -n "$marker" ] || return 0
+  read -r h n 2>/dev/null <"$marker" || return 0
+  [ -n "${h:-}" ] || return 0
+  [ -z "$want" ] || [ "$h" = "$want" ] || return 0
+  n=$(( ${n:-1} - 1 ))
+  if [ "$n" -le 0 ]; then rm -f "$marker" 2>/dev/null || true
+  else printf '%s %s\n' "$h" "$n" >"$marker" 2>/dev/null || true
+  fi
+}
+
+# How many attempts stand against $2 on the `.tries` marker $1. Zero when the
+# marker names another head -- a new head is a new question -- and zero for an
+# empty or corrupt one.
+#
+# `[ -f ]` FIRST, and the count assigned before it is tested: an empty marker
+# leaves `n` empty, and `[ "" -ge 3 ]` is `integer expression expected` and exit
+# 2, which a caller reads as FALSE. That is a cap that silently does not exist,
+# and it is the reason this is one function rather than a shape each caller
+# remembers.
+fleet_tries_count() {
+  local marker="$1" want="${2:-}" h n
+  h=""; n=0
+  [ -n "$marker" ] && [ -f "$marker" ] && read -r h n <"$marker"
+  [ "${h:-}" = "$want" ] || n=0
+  n="${n:-0}"
+  case "$n" in (*[!0-9]*) n=0 ;; esac
+  printf '%s\n' "$n"
+}
+
+# The round this run is: what the marker $1 holds, or $2 if that is larger,
+# plus one. $2 is the count DERIVED from the pull request itself, which sees
+# rounds this fleet never recorded; the larger of the two is taken because the
+# marker is monotonic and a count that went backwards would hand a pull request
+# rounds it has already spent. Empty $2 means nothing was derived.
+#
+# An absent marker is round 1, which is the safe direction: a person running the
+# script by hand gets the first round's rules, and those suppress nothing.
+fleet_round_next() {
+  local marker="$1" derived="${2:-}" n=0
+  [ -n "$marker" ] && [ -f "$marker" ] && read -r n <"$marker"
+  n="${n:-0}"
+  case "$n" in (*[!0-9]*) n=0 ;; esac
+  if [ -n "$derived" ] && [ "$derived" -gt "$n" ]; then n="$derived"; fi
+  printf '%s\n' "$(( n + 1 ))"
+}
+
+# This head has been handled: write it to the `.done` marker $1 and drop the
+# `.tries` marker $3. The attempt count belongs to heads that got NO verdict,
+# and this one got one.
+fleet_record_done() {
+  local done_marker="$1" head="$2" tries_marker="${3:-}"
+  [ -n "$done_marker" ] || return 0
+  printf '%s\n' "$head" >"$done_marker" 2>/dev/null || true
+  [ -n "$tries_marker" ] && rm -f "$tries_marker" 2>/dev/null || true
+  return 0
+}

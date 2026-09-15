@@ -1426,16 +1426,12 @@ start_validator() {
   # pull request has HAD -- verdicts, on any head -- and past it a person
   # decides. This counts attempts on ONE head that produced NOTHING, and a push
   # starts it again, because a new head is a new question.
-  local tries_head tries_n
-  tries_head=""; tries_n=0
-  read -r tries_head tries_n 2>/dev/null <"$marker.tries" || true
-  [ "${tries_head:-}" = "$head" ] || tries_n=0
-  # Assigned, then tested: an EMPTY `.tries` leaves `tries_n` empty, and
-  # `[ "" -ge 3 ]` is `integer expression expected` and exit 2 -- which reads as
-  # FALSE, so the cap silently does not exist. fleet.sh runs without `-e` to
-  # notice. The reviewer's copy of this carries the same comment.
-  tries_n="${tries_n:-0}"
-  case "$tries_n" in (*[!0-9]*) tries_n=0 ;; esac
+  # An EMPTY or corrupt `.tries` must read as 0 and not as nothing: `[ "" -ge 3 ]`
+  # is `integer expression expected` and exit 2, which reads as FALSE, so the cap
+  # silently does not exist -- and fleet.sh runs without `-e` to notice. That
+  # normalisation is `fleet_tries_count`'s, in lib.sh, because this function and
+  # the reviewer's twin below both needed it and only one of them had it.
+  local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
 
   # Already running one for this PR -- on any head. Unlike the reviewer's lock,
   # which is per head and restarts when the head moves, a validator whose head
@@ -2201,10 +2197,13 @@ for p in prs:
     # is a full-budget reviewer started every poll against a head that will
     # never get a verdict. claude-review.yml bounds the same case at one more
     # attempt and then says a person decides; this says the same thing.
-    local tries_head tries_n
-    tries_head=""; tries_n=0
-    read -r tries_head tries_n 2>/dev/null <"$marker.tries" || true
-    [ "${tries_head:-}" = "$head" ] || tries_n=0
+    # THE SAME COUNT AS THE VALIDATOR'S, from the same helper. This site had
+    # the head comparison and not the normalisation: a `.tries` holding
+    # anything non-numeric left the comparison below at exit 2, which `if`
+    # reads as false, so the reviewer cap was off for that head with a green
+    # log beside it. The validator's copy already normalised; deduplicating
+    # them is what made the difference visible.
+    local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""

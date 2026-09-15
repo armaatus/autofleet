@@ -1055,6 +1055,32 @@ GHSTUB
     done
     ok "...and a cap that is not a positive number is refused, not ignored"
 
+    # ...AND THE SHARED READER OF THAT FILE HAS ITS OWN ASSERTIONS. The knob is
+    # validated above; `<pr>.tries` is a file on disk and nothing validates it,
+    # so `fleet_tries_count` is where "what if it is junk" is answered -- once,
+    # for the dispatcher's two spawn paths, review.sh and validate.sh. It
+    # replaced four hand-written copies of the read, two of which normalised a
+    # non-numeric count and two of which compared it directly. Whether that
+    # difference was ever reachable is not asserted here and was not
+    # reproduced; what is asserted is that the one reader left cannot hand a
+    # caller anything but a number.
+    m="$AUTOFLEET_DIR/reviewing/tries-probe"
+    printf 'abc123 two\n' >"$m"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 0 ] \
+      || fail "a non-numeric count did not read as zero: $(in_fleet_fn fleet_tries_count "$m" abc123)"
+    printf 'abc123 3\n' >"$m"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 3 ] \
+      || fail "the count for the head the marker names was not read back"
+    [ "$(in_fleet_fn fleet_tries_count "$m" deadbee)" = 0 ] \
+      || fail "a count was charged to a head the marker does not name"
+    : >"$m"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 0 ] \
+      || fail "an empty marker did not read as zero, so the cap compares against nothing"
+    [ "$(in_fleet_fn fleet_tries_count "$m.absent" abc123)" = 0 ] \
+      || fail "an absent marker did not read as zero"
+    rm -f "$m"
+    ok "...and fleet_tries_count answers with a number for junk, empty, absent and another head"
+
     # THE KNOB THAT WAS REPLACED IS AN ERROR, NOT AN ALIAS. A host project that
     # tuned `AUTOFLEET_REVIEW_MAX_ROUNDS` meant "give this repository more
     # rounds", which maps onto neither of the two knobs that replaced it --
