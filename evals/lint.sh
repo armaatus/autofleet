@@ -1401,15 +1401,27 @@ fi
 #
 #    The name is READ FROM config.sh rather than assumed to be `orca`, because
 #    `.autofleet/config` is sourced from inside it and is exactly where a host
-#    project overrides it -- and because an `AUTOFLEET_RUNNER` in the
-#    environment beats both, which is the layering config.sh documents. A
-#    config.sh that will not source at all is its own failure and is reported as
-#    one: reading the empty answer as "no driver configured" would name the
-#    wrong problem.
-if runner="$(bash -c '
+#    project overrides it.
+#
+#    `env -u AUTOFLEET_RUNNER`, because the question is which driver THIS REPO
+#    is configured for, not which one the maintainer happens to have exported in
+#    the shell they ran the lint from. `bash -c` inherits the environment, so a
+#    `AUTOFLEET_RUNNER=stub` left over from a test run would fail the lint on a
+#    repo that is correctly configured -- and config.sh's own layering note says
+#    a config file that assigns outright overrides even the environment, so the
+#    ambient value is not authoritative here either way. Found by the local
+#    review.
+#
+#    `|| exit 1` after the source, because without it the "would not source"
+#    branch below was unreachable: `.` returning non-zero is discarded under
+#    `set -uo pipefail` with no `-e`, `printf` then exits 0, and a config.sh
+#    with a syntax error was reported as one that "leaves AUTOFLEET_RUNNER
+#    empty" -- the misattribution this comment claims to avoid, in the check
+#    that makes the claim. Found by the local review.
+if runner="$(env -u AUTOFLEET_RUNNER bash -c '
     set -uo pipefail
     REPO_ROOT="$PWD"
-    . ./scripts/fleet/config.sh
+    . ./scripts/fleet/config.sh || exit 1
     printf "%s" "${AUTOFLEET_RUNNER:-}"' 2>/dev/null)"; then
   if [ -z "$runner" ]; then
     fail "scripts/fleet/config.sh leaves AUTOFLEET_RUNNER empty, so lib.sh sources scripts/fleet/runner/.sh and every fleet command dies at source time"

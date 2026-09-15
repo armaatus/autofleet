@@ -109,6 +109,13 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+# Said BEFORE the source, acted on a hundred and eighty lines below it.
+# `lib.sh` `exit`s when AUTOFLEET_RUNNER names a driver that is not there, so
+# the `cost` dispatch under "the runner" further down never ran at all on a
+# misconfigured repo -- the one command that could still have answered. The
+# dispatch itself stays where it is, because `mkdir -p` of the state dirs has to
+# stay below it. armaatus/autofleet#13.
+[ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ] && AUTOFLEET_RUNNER_OPTIONAL=1
 . ./scripts/fleet/lib.sh
 
 # The state dir, the stop file and the owned-worktree registry come from
@@ -318,7 +325,9 @@ check_drain() {
 # green on the laptop where the runtime answers.
 #
 # Guarded on BASH_SOURCE so sourcing this file for tests still defines
-# everything below rather than exec-ing away mid-source.
+# everything below rather than exec-ing away mid-source. The same guard runs
+# once more above the `. lib.sh` at the top, setting AUTOFLEET_RUNNER_OPTIONAL:
+# a driver that is not THERE is refused at source time, which is before this.
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ]; then
   # A separate script rather than a cmd_* in here: it knows nothing about
   # dispatching, and this file is 3.5k lines already. `exec` so its exit status

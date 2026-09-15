@@ -113,7 +113,9 @@ first call `setup.sh` makes while the runner holds the agent's tab.
 **Every hook probes before it spends anything.** `fleet.sh` (at source time),
 `setup.sh` and `agent-autostart.sh` all call it; `setup.sh` is fatal on a no,
 because everything it provisions is for an agent the runner is supposed to
-start. `setup.sh` probes *after* `env.sh` and before the submodules, the project
+start — with one exemption, `cost`, which reads transcripts off disk, calls no
+`runner_*` and is asked from exactly the machines where the runtime is not
+there. `setup.sh` probes *after* `env.sh` and before the submodules, the project
 hook and the watcher — env.sh is milliseconds and is where a machine missing its
 basic tools says so, and a probe in front of it answers a missing `shasum` with
 "is the runtime running?", which is the wrong machine named confidently.

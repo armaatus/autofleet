@@ -111,14 +111,32 @@ orca_cli_resolve() {
   # sentence pointing at the wrong machine. Seen for real in
   # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
   # nothing else.
+  ORCA_CLI_UNPROBED=""
   probe_out="$(mktemp)" || {
-    orca_cli_reject "nothing: no mktemp on PATH, so no candidate could be probed"
+    # SAID as its own state, not folded into "the app is not running". The
+    # deadline wrapper writes the probe's output to a file, so a machine with no
+    # `mktemp` turned every candidate down for want of a temp file -- and the
+    # first fix for that only reached the `tried:` line, leaving the headline
+    # and the remedy still saying "install Orca" when nothing is wrong with
+    # Orca. Both of those are what a reader acts on. Seen for real in
+    # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
+    # nothing else; the second half found by the local review.
+    ORCA_CLI_UNPROBED=1
     return 1
   }
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
     if ! where="$(command -v "$candidate" 2>/dev/null)"; then
-      orca_cli_reject "$candidate (not on PATH)"
+      # NOT "not on PATH", which would be a lie on the one install CLAUDE.md
+      # names as the reason this probe exists: a macOS Orca has shipped its
+      # wrapper `0700 root:wheel`, and `command -v` turns down a file that is
+      # right there and not executable by this user exactly as it turns down one
+      # that is absent. Telling that person their PATH is wrong sends them to
+      # check something correct and to distrust the rest of the message. The two
+      # are not distinguishable from here for a bare name without walking PATH,
+      # so the line says both rather than picking the wrong one. Found by the
+      # local review.
+      orca_cli_reject "$candidate (not found on PATH, or found and not executable)"
       continue
     fi
     if ! fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
@@ -181,7 +199,14 @@ orca_json() {
 # and what to do about it. Today's line named the runtime and stopped there, so
 # the answer to "and now what" was a file nobody reads twice.
 # armaatus/autofleet#13.
+ORCA_CLI_UNPROBED=""
 orca_unavailable_says() {
+  if [ -n "${ORCA_CLI_UNPROBED:-}" ]; then
+    printf 'no orca CLI could be probed here; this machine has no mktemp\n'
+    printf '     tried: nothing -- the deadline every driver call runs under needs a temp file\n'
+    printf '     put mktemp on PATH; nothing here says anything about Orca yet\n'
+    return 0
+  fi
   printf 'no orca CLI answers here; is the Orca app running?\n'
   printf '     tried: %s\n' "${ORCA_CLI_REJECTS:-nothing was probed}"
   printf '     install Orca (https://orca.computer) and start it, or set ORCA_CLI_COMMAND to a CLI that answers --version\n'

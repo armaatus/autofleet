@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Shared helpers for the autofleet hooks. Sourced, never executed.
+# Shared helpers for the autofleet hooks. Sourced, never executed -- but not
+# therefore harmless: like `config.sh`, this file `exit`s on something it cannot
+# accept, and in a sourced file that ends the SOURCING shell. The one case is an
+# AUTOFLEET_RUNNER naming a driver that is not there; see the `else` branch at
+# the driver source below for why the alternative was worse, and for the one
+# caller that opts out of it.
 #
 # Every caller sets REPO_ROOT and cds to it before sourcing this, because the
 # config below is read relative to the repo being driven, not to autofleet.
@@ -319,22 +324,45 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  {
-    echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
-    echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
-    echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
-    echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
-  } >&2
-  # EXIT, not `return 1 2>/dev/null || exit 1`. That idiom leaves the decision to
-  # the caller, and most callers here run `set -uo pipefail` WITHOUT `-e` -- so
-  # `. ./scripts/fleet/lib.sh` returned 1 and the script sailed on into a shell
-  # with no driver defined, where the next `runner_*` is `command not found`.
-  # fleet.sh then died on rc 127 with "the nope runner is not usable here", which
-  # is the consequence reported as the cause: the message above had already
-  # scrolled past and the one the reader acts on names the wrong problem. There
-  # is no caller that can do anything useful without a driver, so the choice was
-  # never really the caller's. armaatus/autofleet#13.
-  exit 1
+  # The caller that needs no driver says so, and gets one line rather than a
+  # remedy it has no reason to act on. `cost` is the only one: it reads
+  # transcripts off disk, calls no `runner_*` at all, and fleet.sh's own
+  # dispatch says so at length -- "what did last night cost" is asked from
+  # exactly the machines where the runtime is not there. NOT a knob in
+  # `config.sh` on purpose: a host project setting this globally would disarm
+  # the refusal for every command, which is the opposite of the point. It is set
+  # by one script, next to its `. lib.sh`.
+  if [ "${AUTOFLEET_RUNNER_OPTIONAL:-0}" = 1 ]; then
+    # Falls THROUGH rather than returning: everything below this line in lib.sh
+    # -- FLEET_DIR, the stop files, the owned-worktree registry -- is what the
+    # opting-out caller actually came for, and an early `return 0` handed it a
+    # half-sourced library and `FLEET_DIR: unbound variable` two lines into
+    # fleet.sh. Skipping the driver is the whole of the exemption.
+    # ONCE, which is the issue's title and not a detail: `fleet.sh cost` execs
+    # `cost.sh`, both source this file, and both opt out -- so the unguarded
+    # notice printed twice for one command. Exported so it survives the exec.
+    [ "${AUTOFLEET_RUNNER_SAID:-0}" = 1 ] \
+      || echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER; this command needs none, carrying on" >&2
+    export AUTOFLEET_RUNNER_SAID=1
+  else
+    {
+      echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
+      echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
+      echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
+      echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
+    } >&2
+    # EXIT, not `return 1 2>/dev/null || exit 1`. That idiom leaves the decision
+    # to the caller, and most callers here run `set -uo pipefail` WITHOUT `-e`
+    # -- so `. ./scripts/fleet/lib.sh` returned 1 and the script sailed on into
+    # a shell with no driver defined, where the next `runner_*` is `command not
+    # found`. fleet.sh then died on rc 127 with "the nope runner is not usable
+    # here", which is the consequence reported as the cause: the message above
+    # had already scrolled past and the one the reader acts on names the wrong
+    # problem. Nothing that has not opted out above can do anything useful
+    # without a driver, so the choice was
+    # never really the caller's. armaatus/autofleet#13.
+    exit 1
+  fi
 fi
 
 # Whether the daemon is actually answering.

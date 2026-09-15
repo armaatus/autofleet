@@ -55,8 +55,13 @@
 
 # ---------------------------------------------------------------- the runner
 # Which driver creates worktrees and terminals. `orca` is the only one that
-# ships today; see fleet/runner/README.md for the contract a second one has to
-# meet.
+# ships today; the contract a second one has to meet is docs/RUNNERS.md, which
+# CLAUDE.md hard rule 4 names as the authority -- fleet/runner/README.md, which
+# this used to point at, is about the seam and lists no `runner_*` at all.
+#
+# A name with no `scripts/fleet/runner/<name>.sh` beside it is refused where
+# lib.sh sources it, naming the file it looked for, and `evals/lint.sh` check 4g
+# goes red on it. `cost` is the one command that carries on regardless.
 : "${AUTOFLEET_RUNNER:=orca}"
 
 # ---------------------------------------------------------------- the review

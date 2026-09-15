@@ -1239,6 +1239,22 @@ case "${1:-}" in
     # the reader acts on named the consequence.
     grep -q "is not usable here" <<<"$out" \
       && fail "it carried on past the missing driver and reported the consequence as the cause: $out"
+    # ...and `cost` is the exception, which is a property fleet.sh already had
+    # and this change nearly took away. It reads transcripts off disk and calls
+    # no runner_* at all, and "what did last night cost" is asked from exactly
+    # the machines where the runner is not there -- a CI box, a laptop with the
+    # app shut. A `lib.sh` that exits for everybody answers that question with a
+    # sentence about the runner, which is true and about something else. Found
+    # by the local review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the one subcommand that needs no runner died on a driver it never calls: $out"
+    grep -q "looked for:" <<<"$out" \
+      && fail "cost was handed the remedy for a problem it does not have: $out"
+    # ONCE. fleet.sh execs cost.sh and both source lib.sh, so the notice had two
+    # chances to print for one command -- against the title of the issue.
+    [ "$(grep -c "this command needs none" <<<"$out")" = 1 ] \
+      || fail "the notice printed $(grep -c "this command needs none" <<<"$out") times for one command: $out"
 
     # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
     #    the caller's consequence, and nothing provisioned. Written as a driver
@@ -1302,19 +1318,29 @@ DRIVER
     #    which is the line this half of #13 adds.
     printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/orca-mute"
     chmod +x "$WORK/bin/orca-mute"
+    # stderr is closed over the SOURCE and reopened after it, so what is counted
+    # below is the refusal and only the refusal. `. lib.sh` can write to stderr
+    # itself -- config.sh relays a deprecated knob there -- and a three-line
+    # ceiling that includes the sourcing chatter is measuring the wrong thing.
+    # Found by the local review.
     refusal="$( cd "$WORK/repo" && bash -c '
       set -uo pipefail
       REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
       . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
       orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-mute; }
       runner_available
     ' 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "the driver said it was available with nothing on PATH that answers: $refusal"
-    grep -q "orca" <<<"$refusal" \
-      || fail "the refusal did not name the runner: $refusal"
-    grep -q "/nonexistent/orca-not-installed (not on PATH)" <<<"$refusal" \
-      || fail "a candidate that is not installed was not named as tried: $refusal"
+    # The HEADLINE, not just the word somewhere: the candidate names this phase
+    # injects both contain `orca`, so a grep for that alone passes with the
+    # first line gone entirely. Found by the local review.
+    grep -q "^no orca CLI" <<<"$refusal" \
+      || fail "the refusal's first line did not name the runner: $refusal"
+    grep -q "/nonexistent/orca-not-installed (not found on PATH, or found and not executable)" <<<"$refusal" \
+      || fail "a candidate that cannot be run was not named as tried, or was reported as a PATH problem it may not be: $refusal"
     grep -q "orca-mute (--version did not answer)" <<<"$refusal" \
       || fail "a candidate that is installed and does not answer was not told apart from one that is absent: $refusal"
     grep -q "install Orca" <<<"$refusal" \
@@ -1326,6 +1352,31 @@ DRIVER
     lines="$(printf '%s\n' "$refusal" | wc -l)"
     [ "$((lines))" -le 3 ] \
       || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
+
+    # 5. ...AND THE MACHINE WITH NO mktemp IS NOT TOLD TO INSTALL ORCA. Every
+    #    driver call runs under a deadline that writes to a temp file, so
+    #    without `mktemp` no candidate can be probed at all -- and the first fix
+    #    for that said so on the `tried:` line while the headline and the remedy
+    #    still pointed at an app that is fine. Those two are what a reader acts
+    #    on. `mktemp` is shadowed rather than the PATH starved, because a PATH
+    #    with no `python3` never gets as far as sourcing lib.sh.
+    refusal="$( cd "$WORK/repo" && bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      mktemp() { return 1; }
+      runner_available
+    ' 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "the driver said it was available without probing anything: $refusal"
+    grep -qi "mktemp" <<<"$refusal" \
+      || fail "a machine that cannot make a temp file was not told that is what is wrong: $refusal"
+    grep -q "install Orca" <<<"$refusal" \
+      && fail "it told a person to install Orca for a missing mktemp, which is the wrong machine named confidently: $refusal"
+    grep -q "is the Orca app running" <<<"$refusal" \
+      && fail "the headline still asked about the app on a failure that never reached it: $refusal"
 
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
