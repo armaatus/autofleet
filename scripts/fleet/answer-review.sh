@@ -130,7 +130,9 @@ if ! reviewed="$(gate_py '
 import json
 pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
 print(sum(1 for r in merge_gate.independent_reviews(pull, sys.argv[3])
-          if merge_gate.is_substantive(r)))' "$payload" "$head")"; then
+          if merge_gate.is_substantive(r)
+          and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")))'\
+    "$payload" "$head")"; then
   echo "could not tell whether PR #$pr has a review on ${head:0:8}: the payload did not" >&2
   echo "load, or .github/scripts/merge_gate.py -- which decides which reviews count --" >&2
   echo "did not answer. Nothing here can say what to do until it does." >&2
@@ -166,11 +168,12 @@ if ! GH_PAGER=cat gh pr comment "$pr" --body-file "$body" >/dev/null 2>&1; then
 fi
 if [ "$reviewed" -gt 1 ]; then
   # WHAT IS ON THE HEAD, not what was discharged, and the distinction is the
-  # finding: this count is every substantive review on the head, and some of
-  # them -- an approval, a review that found nothing -- were never holding the
-  # PR in the first place. Claiming to have answered them overstates it. What
-  # the sentence is for is the author who is about to read a gate that counts
-  # answers per review and needs to know a second one was there at all.
+  # finding: some of these -- an approval, a review that found nothing -- were
+  # never holding the PR in the first place, and claiming to have answered them
+  # overstates it. What the sentence is for is the author who is about to read a
+  # gate that counts answers per review and needs to know a second review was
+  # there at all. The three states are the gate's own; a DISMISSED review is one
+  # somebody cleared and is not on this head for this purpose.
   echo "answered on ${head:0:8} of PR #$pr, which carries $reviewed reviews --"
   echo "one comment written after the last of them answers every one that was waiting."
 else

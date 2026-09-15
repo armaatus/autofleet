@@ -788,6 +788,23 @@ fleet_agent_alive() {
     | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
 }
 
+# Drop the lock $1, but ONLY if it still names this process.
+#
+# An unconditional `rm` is how a refusal undoes itself. `review.sh` drops its
+# lock on every exit path, and some of those exits happen BEFORE it has claimed
+# anything -- a `gh` that will not answer, a STOP that appeared. A hand-run that
+# won the lock in that window then had it deleted by the very run that stood
+# down, the dispatcher recreated the marker holding a pid that had just died,
+# `live_reviewers` reaped it, and a second reviewer started beside the first.
+# Found by the independent review of the change that added the lock.
+fleet_lock_release() {
+  local marker="${1:-}" held=""
+  [ -n "$marker" ] || return 0
+  read -r held _ 2>/dev/null <"$marker" || return 0
+  [ "${held:-}" = "$$" ] || return 0
+  rm -f "$marker" 2>/dev/null || true
+}
+
 # Claim the lock $1 for THIS process, at head $2.
 #
 #   0  claimed, or already ours
@@ -796,6 +813,8 @@ fleet_agent_alive() {
 #      disk. Not contention, and the caller must not report it as such: a
 #      refusal that names a phantom holder sends a person looking for a process
 #      that does not exist, and hides the one thing they could fix.
+#   3  a lock file is there and names nothing this can read. Also not
+#      contention, and NOT a stale lock to take over either -- see below.
 #
 # CREATE-OR-FAIL, not `[ -e ] || printf >`. The dispatcher's spawn decision and
 # its write of the marker are two syscalls with a window between them, and the
@@ -827,6 +846,21 @@ fleet_lock_claim() {
   [ -e "$marker" ] || return 2
   read -r held for_head 2>/dev/null <"$marker" || true
   [ "${held:-}" = "$$" ] && return 0
+  # AN EMPTY READ IS NOT A DEAD OWNER. The winner's create and its write are two
+  # syscalls -- `set -C` opens O_CREAT|O_EXCL and the pid arrives a moment later
+  # -- so a loser reading in between sees a file with nothing in it. Read as
+  # "gone" (which is what `fleet_agent_alive ""` says), the takeover below fires
+  # against a live owner and both processes leave holding the lock. One write
+  # wide, and it is the one state the takeover cannot tell from a dead owner.
+  #
+  # Re-read once, because that window closes on its own; if it is still empty
+  # the file is corrupt rather than young, and THAT is not something to steal
+  # either -- a corrupt marker with a reviewer behind it looks exactly like a
+  # corrupt marker with nothing behind it. The caller says which file, and the
+  # dispatcher's own reaper clears it on the next poll. Found by the independent
+  # review of the change that added this.
+  [ -n "${held:-}" ] || read -r held for_head 2>/dev/null <"$marker" || true
+  [ -n "${held:-}" ] || return 3
   fleet_agent_alive "${held:-}"; is=$?
   if [ "$is" != 1 ]; then
     printf '%s %s\n' "${held:-?}" "${for_head:-?}"
@@ -857,7 +891,16 @@ fleet_lock_claim() {
   mv "$marker" "$stolen" 2>/dev/null || { printf '%s %s\n' "${held:-?}" "${for_head:-?}"; return 1; }
   read -r moved _ 2>/dev/null <"$stolen" || true
   if [ "${moved:-}" != "${held:-}" ]; then
-    mv "$stolen" "$marker" 2>/dev/null || rm -f "$stolen" 2>/dev/null
+    # PUT BACK CREATE-OR-FAIL, not `mv`. The marker is absent between the
+    # rename above and this line, and a third claimant whose create lands in
+    # that window holds the lock -- a plain `mv` would overwrite its claim with
+    # the content read out of the moved file, and two processes would again both
+    # believe they hold it. It needs three claimants at once (two polls and a
+    # hand-run), which is narrow, and it is the one way this arm was not the
+    # conservative direction its comment claims. Found by the independent
+    # review of the change that added it.
+    ( set -C; cat "$stolen" >"$marker" ) 2>/dev/null || true
+    rm -f "$stolen" 2>/dev/null || true
     held=""; for_head=""
     read -r held for_head 2>/dev/null <"$marker" || true
     [ "${held:-}" = "$$" ] && return 0

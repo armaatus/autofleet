@@ -92,13 +92,18 @@ LOG_DIR="$FLEET_DIR/reviews"
 # PR number is known -- until then there is nothing to clean up and `on_exit`
 # must remove nothing.
 #
-# SEPARATE FROM `AUTOFLEET_REVIEW_MARKER`, and the distinction is load-bearing
-# twice over. A hand-run claims a LOCK and writes no records: `.done`, `.tries`
-# and `.rounds` are the dispatcher's bookkeeping about spawns it decided on, and
-# a person running this by hand decided differently. And an exit that REFUSED
-# because somebody else holds the lock must not drop it -- that would free the
-# running reviewer's slot and invite the next poll to start the second reviewer
-# this just declined. So the trap removes `$LOCK`, which is empty on that path.
+# SEPARATE FROM `AUTOFLEET_REVIEW_MARKER`, because a hand-run claims a LOCK and
+# writes no records: `.done`, `.tries` and `.rounds` are the dispatcher's
+# bookkeeping about spawns it decided on, and a person running this by hand
+# decided differently.
+#
+# THE TRAP RELEASES IT BY CONTENT, never by path. This variable is set before
+# the claim -- it has to be, the trap is installed above the first exit that can
+# take it -- so on every path between here and the claim it names a file this
+# run may not own. `fleet_lock_release` drops it only when it still holds THIS
+# pid; an unconditional `rm` deleted a lock a hand-run had won in that window,
+# and the second reviewer that followed is the whole of armaatus/autofleet#64.
+# Found by the independent review of the change that added this.
 LOCK="${AUTOFLEET_REVIEW_MARKER:-}"
 DONE_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.done}"
 TRIES_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.tries}"
@@ -240,7 +245,8 @@ drop_placeholder_log() {
   return 0
 }
 on_exit() {
-  rm -f "${LOCK:-}" "$payload" "$raw_err"
+  fleet_lock_release "${LOCK:-}"
+  rm -f "$payload" "$raw_err"
   drop_placeholder_log
   rm -f "$raw_out"
   drop_review_ref
@@ -341,12 +347,17 @@ holder="$(fleet_lock_claim "$LOCK" "$head")"; claimed=$?
 # exit so the trap, which drops this run's lock on every path, drops nothing
 # here -- dropping it would free the running reviewer's slot and invite the next
 # poll to start the second reviewer this just declined.
+#
+# NO `LOCK=""` ON THESE ARMS. `fleet_lock_release` drops the file only when it
+# names this pid, and on every one of them it names somebody else or nothing --
+# so the trap is already correct, and clearing the variable would be a second
+# mechanism for one rule.
 case "$claimed" in
   1) echo "PR #$pr already has a reviewer in flight (pid ${holder%% *}) on ${head:0:8}." >&2
      echo "  Not starting a second: two reviews on one head cannot both be answered," >&2
      echo "  and the one that loses the answer slot is read by nobody. Wait for it," >&2
      echo "  or read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log." >&2
-     LOCK=""; unspent_try; exit 9 ;;
+     unspent_try; exit 9 ;;
   # NOT EXIT 9, and the difference is the whole of this arm. "Could not write
   # the lock" is not "somebody holds it": reported as contention it names a
   # holder that does not exist, and the one thing a person could fix -- the
@@ -358,7 +369,17 @@ case "$claimed" in
      echo "  Nothing here can guarantee a second reviewer will not start on the same" >&2
      echo "  head, and two reviews on one head cannot both be answered, so this" >&2
      echo "  declines rather than reviewing. Check the directory is writable." >&2
-     LOCK=""; unspent_try; exit 2 ;;
+     unspent_try; exit 2 ;;
+  # A marker naming nothing readable. NOT stolen -- one with a reviewer behind
+  # it and one with nothing behind it look identical -- and not reported as a
+  # holder either, because there is no pid to wait for. The dispatcher's reaper
+  # clears it on the next poll; a person with no dispatcher running removes it.
+  3) echo "the reviewer lock at $LOCK names nothing this can read." >&2
+     echo "  Not reviewing: a corrupt lock with a reviewer behind it looks exactly" >&2
+     echo "  like a corrupt lock with nothing behind it, and guessing wrong puts two" >&2
+     echo "  reviews on one head. The dispatcher clears it on its next poll; with no" >&2
+     echo "  dispatcher running, remove that file." >&2
+     unspent_try; exit 2 ;;
 esac
 
 # Already reviewed? Asked of merge_gate.py rather than answered here, for the
@@ -429,7 +450,8 @@ held_by() {
   AUTOFLEET_REVIEW_MODE=local python3 - "$payload" "$head" <<'PY'
 import json, sys
 sys.path.insert(0, ".github/scripts")
-from merge_gate import independent_reviews, is_substantive, declared_findings
+from merge_gate import (independent_reviews, is_substantive,
+                        declared_findings, review_name)
 try:
     pull = json.load(open(sys.argv[1]))["data"]["repository"]["pullRequest"] or {}
 except Exception:
@@ -437,12 +459,15 @@ except Exception:
 for r in independent_reviews(pull, sys.argv[2]):
     if not is_substantive(r):
         continue
-    who = (r.get("author") or {}).get("login") or "?"
     found = declared_findings(r)
-    print("held by {}'s {} of {}{}{}".format(
-        who, (r.get("state") or "review").lower(), r.get("submittedAt") or "?",
-        "" if found is None else f" ({found} finding(s))",
-        f" -- {r['url']}" if r.get("url") else ""))
+    # `review_name` AND NOT A SECOND SPELLING OF IT. This file states the rule
+    # three times over `independent_reviews`: a paraphrase of what the gate
+    # means drifts, and the drift is silent. The formatting of a review's NAME
+    # is the same kind of fact, and merge_gate is where the messages that use it
+    # live. Found by the independent review of the change that added this.
+    print("held by {}{}".format(
+        review_name(r),
+        "" if found is None else f", {found} finding(s)"))
 PY
 }
 
@@ -1093,7 +1118,8 @@ on_exit() {
   # a Ctrl-C -- left `$log` absent, and those are exactly the exits whose
   # message tells a person to go and read it.
   finish_log
-  rm -f "${LOCK:-}" "$payload" "$raw_out" "$raw_err"
+  fleet_lock_release "${LOCK:-}"
+  rm -f "$payload" "$raw_out" "$raw_err"
   drop_review_ref
 }
 # Refunded, like the stop path below and for the same reason: a reviewer killed

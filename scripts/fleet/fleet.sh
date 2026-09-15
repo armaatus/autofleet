@@ -2453,8 +2453,16 @@ for p in prs:
     # value today and would be a subtle thing to depend on, and the `say` after
     # it wants the same number the marker got.
     local rpid=$!
-    ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null || true
-    say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
+    # SAID ONLY IF THE LOCK WAS TAKEN. A failed write means somebody else holds
+    # it -- a hand-run that won the window above -- and the child just spawned
+    # will find that and exit 9. Announcing it anyway put "reviewing PR #42" in
+    # the log for a review that never ran, on the one file a person reads to
+    # find out what the fleet did. Found by the independent review.
+    if ( set -C; printf '%s %s\n' "$rpid" "$head" >"$marker" ) 2>/dev/null; then
+      say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
+    else
+      say "PR #$pr: a reviewer is already in flight; the one just spawned stands down"
+    fi
   done
 
   # ...and the records of pull requests that are no longer open. They were

@@ -695,6 +695,16 @@ def abandoned_findings(pull_request, head_sha):
     review, these findings have had one, whatever it concluded -- a `fail` is
     its own refusal, further up, and says what is unsettled.
 
+    WHY SUBMITTED-AFTER IS THE RIGHT KEY, because "a validation exists" on its
+    own would not be: a validator's scope is `reviewed_sha()..head`, and
+    `reviewed_sha()` is the commit of the NEWEST substantive review on the pull
+    request. So a validation submitted after a review necessarily had that
+    review inside the range it was given, whichever review triggered it -- and
+    one submitted BEFORE it (a validation of an earlier head, which can land
+    between two reviews of the same head) does not silence it, because the
+    comparison is against this review's own timestamp and not against any. That
+    second case is the sequence in #64's own Scope, and it has a row below.
+
     So this fires in exactly one window: findings written, the head moved out
     from under them, no answer, and no validation yet. That is the window PR #1
     went through silently. Found by both self-review passes, which caught the
@@ -708,10 +718,22 @@ def abandoned_findings(pull_request, head_sha):
         oid = ((r.get("commit") or {}).get("oid")) or ""
         if not oid or oid == head_sha:
             continue
+        # THE SAME THREE STATES the on-head condition reads. The DISMISSED fix
+        # landed there and not here, so a review somebody had explicitly
+        # cleared was still named in the refusal -- one of the two places that
+        # needed it. Found by the independent review of this change.
+        if r.get("state") not in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
+            continue
         if not is_substantive(r):
             continue
         found = declared_findings(r)
-        if not found:      # None ("did not say") and 0 are both "nothing owed"
+        # `None` IS NOT ZERO, and reading it as zero here disagreed with the
+        # on-head condition, which holds the PR for a review that "does not say
+        # what it found ... so it is not read as clean". The reviews most likely
+        # to have lost their trailer -- one written before it existed, one whose
+        # reviewer died mid-write -- are exactly the ones a head move would then
+        # drop in silence. Found by the independent review of this change.
+        if found == 0:
             continue
         if answered(pull_request, oid, r):
             continue
@@ -937,8 +959,12 @@ def evaluate(head_sha, pull_request, changed_files):
         # round and of a pull request that just walked away from ten findings,
         # and until now it read the same in both. armaatus/autofleet#64.
         for review, oid, found in abandoned_findings(pull_request, head_sha):
+            what = (f"reported {found} finding(s)" if found is not None else
+                    "did not say what it found -- no "
+                    "`<!-- review-findings: N -->` trailer, so it is not read "
+                    "as clean --")
             problems.append(
-                f"    {review_name(review)} reported {found} finding(s) on "
+                f"    {review_name(review)} {what} on "
                 f"{oid[:8]}, a head this branch has left behind. Nothing has "
                 "answered or validated them, and no review of them is coming -- "
                 "the reader they still have is the VALIDATION of this head, "
@@ -995,21 +1021,30 @@ def evaluate(head_sha, pull_request, changed_files):
         # review on the head -- which is what an author answering two of them at
         # once actually means. What it costs is a comment. What it buys is that
         # "answered" can no longer be true of one review and reported of two.
+        # The reviews this condition can hold on at all: the three states it
+        # reads, with a body worth reading. Built once so the loop and the count
+        # below it cannot disagree about what "a review on this head" means.
+        holding = [r for r in substantive
+                   if r.get("state") in ("APPROVED", "CHANGES_REQUESTED",
+                                         "COMMENTED")]
         unanswered = 0
-        for review in substantive:
-            # THE SAME THREE STATES `latest` ABOVE IS BUILT FROM, and dropping
-            # them was the one thing this move got wrong. GitHub's review states
-            # also include DISMISSED and PENDING: a DISMISSED review is one
-            # somebody explicitly cleared, and reading its findings trailer as a
-            # live hold takes GitHub's own dismiss action away -- on a
-            # repository where that action is part of how a person unblocks a
-            # PR. Found by both self-review passes.
-            if review.get("state") not in ("APPROVED", "CHANGES_REQUESTED",
-                                           "COMMENTED"):
-                continue
+        for review in holding:
             who = ((review.get("author") or {}).get("login")) or "?"
             if review.get("state") == "CHANGES_REQUESTED":
-                continue  # said above, with the remedy that belongs to it
+                # ONLY THE ONE `blocking` NAMES. That list is built from
+                # `latest`, which is per author -- so a CHANGES_REQUESTED
+                # superseded on the same head by a later review from the same
+                # account is in neither: not in `blocking`, because it is not
+                # that author's latest, and not here, because this used to skip
+                # every CHANGES_REQUESTED on the strength of `blocking` naming
+                # it. Seven findings, gone. And it is the state the reviewer's
+                # brief tells it to use for anything Critical or Important, so
+                # it is the FIRST shape #64 takes, not an exotic one. Found by
+                # the independent review of this change.
+                if latest.get(who) is review:
+                    continue  # said above, with the remedy that belongs to it
+                # ...otherwise it falls through and is answered like any other
+                # review whose findings nobody has read.
             if review.get("state") == "APPROVED":
                 # An approval asks for nothing, so there is nothing to answer.
                 #
@@ -1041,7 +1076,14 @@ def evaluate(head_sha, pull_request, changed_files):
             # is the clearer sentence and it is what every message here has
             # always said; it stops being a NAME the moment a second review
             # arrives from the same account, which in `local` mode they all do.
-            named = (review_name(review) if len(substantive) > 1
+            #
+            # COUNTED FROM `holding`, not from `substantive`. One live review
+            # plus a maintainer's APPROVED is two substantive reviews and one
+            # thing waiting -- counted from the wider set, the message switched
+            # to timestamps and announced "2 independent reviews were submitted"
+            # about an approval that was never holding anything. Found by the
+            # independent review of this change.
+            named = (review_name(review) if len(holding) > 1
                      else f"the review from {who}")
             # THE AUTHOR'S WORDS CLEAR A SUGGESTION-ONLY REVIEW, AND NOTHING
             # MORE. `answered()` cannot tell "fixed it" from "I disagree" -- it
@@ -1122,9 +1164,9 @@ def evaluate(head_sha, pull_request, changed_files):
         # reader who has just answered one of them and cannot see why the gate
         # is still red -- which on PR #1 nobody did, because the answer went in
         # before the second review existed and the gate never mentioned it.
-        if unanswered and len(substantive) > 1:
+        if unanswered and len(holding) > 1:
             problems.append(
-                f"    ({len(substantive)} independent reviews were submitted "
+                f"    ({len(holding)} independent reviews were submitted "
                 f"against {head_sha[:8]}. One answer written after the LAST of "
                 "them answers them all; one written between two answers only "
                 "the earlier.)"
@@ -2514,6 +2556,138 @@ SELFTEST = [
         },
         ["src/app.c"],
         True,
+    ),
+    (
+        # THE FIRST SHAPE #64 TAKES, not an exotic one: REVIEW.md tells the
+        # reviewer to use CHANGES_REQUESTED for anything Critical or Important.
+        # `blocking` is built from `latest`, which is per author, so a
+        # CHANGES_REQUESTED superseded on the same head by a later review from
+        # the same account is not in it -- and the findings loop used to skip
+        # every CHANGES_REQUESTED on the strength of `blocking` naming it. Held
+        # by neither condition, seven findings unread, gate green.
+        "a superseded CHANGES_REQUESTED is still owed an answer",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "CHANGES_REQUESTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 7 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and "
+                         "to clear MIN_REVIEW_BODY.\n"
+                         "<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("2026-09-11T07:13:00Z", "reports 7 finding(s)"),
+    ),
+    (
+        # ...and the one `blocking` DOES name keeps its own remedy rather than
+        # collecting a second, differently-worded hold. Without this row the fix
+        # above could be "answer every CHANGES_REQUESTED" and stay green.
+        "a standing CHANGES_REQUESTED still gets the re-review remedy, not an answer",
+        "abc123",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "CHANGES_REQUESTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 7 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("still requests changes", "!has not said what was done about"),
+    ),
+    (
+        # A VALIDATION BETWEEN TWO REVIEWS OF ONE HEAD does not silence the
+        # later one. The escape hatch in `abandoned_findings` is keyed on the
+        # review's own timestamp for exactly this: a validation of an earlier
+        # head can land between 07:13 and 07:27, and it cannot have read a
+        # review that did not exist when it ran. This is #64's Scope replayed.
+        "a validation submitted before a review does not read it",
+        "def456",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:20:00Z",
+                 "commit": {"oid": "bbb111"}, "author": {"login": "claude[bot]"},
+                 "body": "The commits since the review address all seven.\n"
+                         "<!-- validated: bbb111 pass -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("left behind", "abc123", "10 finding(s)"),
+    ),
+    (
+        # ...and a DISMISSED one on an abandoned head is not named either. The
+        # whitelist landed in the on-head condition first and not here, and the
+        # row that covers the on-head case puts both reviews on the current
+        # head, so nothing asserted this half.
+        "a dismissed review on an abandoned head is not named as lost",
+        "def456",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "DISMISSED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the review.\n"
+                         "<!-- review-important: 2 -->\n"
+                         "<!-- review-findings: 10 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        "!left behind",
+    ),
+    (
+        # AN ABANDONED REVIEW WITH NO TRAILER is not read as clean, for the same
+        # reason the on-head condition does not read one as clean: the reviews
+        # most likely to have lost it are one written before the trailer existed
+        # and one whose reviewer died mid-write, and a head move would drop both
+        # in silence.
+        "an untrailered review on an abandoned head is reported too",
+        "def456",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:27:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
+                 "body": "Important: the answer slot keys on the head, not the "
+                         "review, and this body carries no findings trailer at all."},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("left behind", "did not say what it found"),
     ),
 ]
 

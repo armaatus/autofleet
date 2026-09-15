@@ -913,7 +913,34 @@ HOLDER
   [ -e "$AUTOFLEET_DIR/reviewing/42" ] \
     || { kill "$holder" 2>/dev/null; fail "the refusal removed the other reviewer's lock"; }
   ok "...and the lock it refused on is still the other reviewer's"
+  # ...and a run that stands down BEFORE it ever claims must not drop a lock it
+  # does not own either. `LOCK` is set from the dispatcher's marker at the top
+  # of the file -- it has to be, the trap is installed above the first exit that
+  # can take it -- so every path between there and the claim names a file this
+  # run may not own. The stop path is one of them, and an unconditional `rm`
+  # there deleted the hand-run's lock and let a second reviewer follow.
+  : >"$AUTOFLEET_DIR/STOP"
+  ( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+      ./scripts/fleet/review.sh 42 ) >"$WORK/out3" 2>&1; rc=$?
+  rm -f "$AUTOFLEET_DIR/STOP"
+  [ "$rc" = 3 ] || { cat "$WORK/out3" >&2; kill "$holder" 2>/dev/null; \
+    fail "the stopped run exited $rc rather than 3"; }
+  [ -e "$AUTOFLEET_DIR/reviewing/42" ] \
+    || { kill "$holder" 2>/dev/null; fail "a run that exited before claiming deleted somebody else's lock"; }
+  ok "...and a run that exits before it claims drops no lock it does not hold"
   kill "$holder" 2>/dev/null
+
+  # A LOCK NAMING NOTHING READABLE is neither contention nor a stale lock. One
+  # with a reviewer behind it and one with nothing behind it are the same file,
+  # so this declines and says which file rather than guessing -- guessing wrong
+  # is two reviews on one head, which is the whole of #64.
+  : >"$AUTOFLEET_DIR/reviewing/42"
+  run_it 42 >"$WORK/out4" 2>&1; rc=$?
+  [ "$rc" = 2 ] || { cat "$WORK/out4" >&2; fail "an unreadable lock exited $rc rather than 2"; }
+  grep -q "names nothing this can read" "$WORK/out4" \
+    || { cat "$WORK/out4" >&2; fail "it did not say the lock was unreadable"; }
+  ok "...and a lock naming nothing readable is declined, not stolen"
+  [ "$(n_started)" = 0 ] || fail "a reviewer ran against an unreadable lock"
 
   # ...and a lock whose process is GONE is not a permanent refusal. Nothing
   # clears $REVIEWING_DIR across a dispatcher's death, so a stale marker
