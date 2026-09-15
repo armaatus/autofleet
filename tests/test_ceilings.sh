@@ -127,9 +127,15 @@ case "${1:-}" in
 
   # The `reading` row: a required document grows, and the sum of what an agent
   # is told to read before its first edit goes over. This is the exact shape the
-  # whole issue is about -- REVIEW.md is 1,300-odd words and every one of them
-  # arrived as a useful paragraph -- so it is the row driven with real text
-  # rather than with a synthetic file.
+  # whole issue is about -- every word of the load arrived as a useful paragraph
+  # -- so it is the row driven with real text rather than with a synthetic file.
+  #
+  # CLAUDE.md is that document, and REVIEW.md was until the two self-review
+  # passes moved into processes of their own (armaatus/autofleet#51): its words
+  # are in the reviewing contexts now, so the reading table carries it as `map`
+  # and padding it proves nothing. Padded as words on ONE line, because the
+  # `claude-md` row below bounds this same file's LINES and two ceilings
+  # breaking at once would let this phase pass on the other one's failure.
   limit="$(ceiling reading)" || exit 1
   # The total the green run reported, so the figure this expects afterwards is
   # the lint's own arithmetic plus the words this phase added -- not a second
@@ -146,9 +152,9 @@ case "${1:-}" in
   pad=$((limit + 1 - before))
   [ "$pad" -gt 0 ] \
     || fail "the fixture tree already reads $before words against a ceiling of $limit, so there is nothing to drive over"
-  rm -f "$WORK/tree/REVIEW.md"
-  cp "$REPO_ROOT/REVIEW.md" "$WORK/tree/REVIEW.md"
-  awk -v n="$pad" 'BEGIN { for (i = 0; i < n; i++) printf "word " }' >>"$WORK/tree/REVIEW.md"
+  rm -f "$WORK/tree/CLAUDE.md"
+  cp "$REPO_ROOT/CLAUDE.md" "$WORK/tree/CLAUDE.md"
+  awk -v n="$pad" 'BEGIN { for (i = 0; i < n; i++) printf "word " }' >>"$WORK/tree/CLAUDE.md"
   out="$(lint_in "$WORK/tree")"; rc=$?
   [ "$rc" = 0 ] && { echo "$out" >&2; fail "$pad words added to a required document did not fail the lint; the reading ceiling is not holding"; }
   says_all_four "the reading ceiling's failure" "$out" \

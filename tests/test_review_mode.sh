@@ -2884,20 +2884,33 @@ XX
   # not appear on it -- and the count itself undercounts, by its own comment:
   # three kinds of review it cannot see, each a real review a real PR had.
   make_fixture; stub_reviewer marked; make_origin
-  export AUTOFLEET_REVIEW_MAX_ROUNDS=4
+  # The knob is AUTOFLEET_REVIEW_MAX, and set to 4 here rather than left at the
+  # shipped 1: at a cap of one there is no "below the cap" to show, so the
+  # phase could not tell a screen that names the cap from one that names it
+  # always. The number is the old default on purpose -- it is what this phase
+  # measured while reviews were the thing being counted.
+  export AUTOFLEET_REVIEW_MAX=4
   mkdir -p "$AUTOFLEET_DIR/reviewing"
   printf '4\n' >"$AUTOFLEET_DIR/reviewing/42.rounds"
   printf '2\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
+  # A VALIDATOR'S RECORD, in the same directory, which is the shape that made
+  # this screen print `PR #v-44` at the reviewer's cap.
+  printf '2\n' >"$AUTOFLEET_DIR/reviewing/v-44.rounds"
   out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
-  grep -q "PR #42: 4/4 rounds" <<<"$out" \
-    || fail "fleet.sh status does not show the round count: $out"
+  grep -q "PR #42: 4/4 reviews" <<<"$out" \
+    || fail "fleet.sh status does not show the review count: $out"
   grep -q "AT THE CAP" <<<"$out" || fail "status does not say PR #42 is held: $out"
-  ok "fleet.sh status shows each PR's round count and names the cap"
-  grep -q "PR #43: 2/4 rounds" <<<"$out" \
+  ok "fleet.sh status shows each PR's review count and names the cap"
+  grep -q "PR #43: 2/4 reviews" <<<"$out" \
     || fail "status showed only the capped PR: $out"
   grep -q "#43.*AT THE CAP" <<<"$out" \
     && fail "a PR below the cap was reported as held: $out"
   ok "...and a PR below it is shown without the hold"
+  grep -q "PR #v-44" <<<"$out" \
+    && fail "a validator's record was printed as a pull request number: $out"
+  grep -q "PR #44: 2/2 validations -- AT THE CAP" <<<"$out" \
+    || fail "the validator's count is not shown against its own cap: $out"
+  ok "...and a validation count is its own line, at its own cap"
   # `.rounds` is a RECORD, not a lock. Counted as a reviewer it would read as a
   # slot taken for as long as the PR is open -- the exact miscount `.done`,
   # `.tries` and `.said` each caused in turn.

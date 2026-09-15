@@ -4,12 +4,15 @@ A fleet of coding agents that turns a GitHub backlog into merged pull requests,
 unattended. A deterministic shell dispatcher opens worktrees, an agent works each
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
-**Which document is whose.** Required reading: this file, the brief
-(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`), and
-[REVIEW.md](REVIEW.md) at the review passes. `evals/lint.sh` asserts each
-enforced rule is stated in full in exactly one of them — not that the others link
-to it, which is on you — and holds what is read *before the first edit* — this
-file, REVIEW.md and the opening brief — under a word ceiling. The rest are consulted, never read through:
+**Which document is whose.** Required reading: this file and the brief
+(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`).
+[REVIEW.md](REVIEW.md) is the review policy, and you do not read it: every pass
+that applies it — both self-reviews, the reviewer, the validator — runs in its
+own process and reads it there. `evals/lint.sh` asserts each enforced rule is
+stated in full in exactly one of the three — not that the others link to it,
+which is on you — and holds what is read *before the first edit* — this file,
+the opening brief, and the room it leaves for your issue and a handoff note —
+under a word ceiling. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
 page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 for a host project's knobs, [docs/RUNNERS.md](docs/RUNNERS.md) for the runner

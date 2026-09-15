@@ -99,7 +99,8 @@ qgrep() { grep "$@" >/dev/null; }
 CEILINGS="$(cat <<'CEILINGS'
 claude-md|200|armaatus/autofleet#56|lines of CLAUDE.md, which every session reads in full|evals/lint.sh
 brief|400|armaatus/autofleet#49|words of the opening brief's stage 1, the issue spec and any handoff note excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
-reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, plus every "count" row of the reading table below|evals/lint.sh; tests/test_brief.sh reading
+reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, every "count" row of the reading table below, and the two texts autofleet does not write but the agent still reads -- the issue spec at the `spec` allowance and a handoff note at the `handoff` ceiling|evals/lint.sh; tests/test_brief.sh reading
+spec|500|armaatus/autofleet#98|words of an issue body the reading ceiling budgets for. NOT a limit on a tracker a maintainer writes -- it is the allowance the payload leaves for one, because the spec is injected into stage 1 and read before the first edit like everything else|evals/lint.sh
 handoff|350|armaatus/autofleet#55|words of the handoff note stage 1 prints ahead of the brief: the framing, plus a note at the AUTOFLEET_HANDOFF_MAX_WORDS default autofleet ships|tests/test_handoff.sh ceiling
 testrun|5|armaatus/autofleet#52|lines a fully green ./tests/run.sh prints|tests/test_runner_bound.sh quiet
 round|45|armaatus/autofleet#53|lines of one WHOLE clean round of ./scripts/fleet/await-review.sh, the review it hands back included, not the trailing prose alone|tests/test_await_review.sh quiet
@@ -1737,10 +1738,20 @@ echo "== the rule of one home"
 # are pointers has no copy-pasteable fence for a step of the loop.
 if [ -n "$stage1" ] && [ -n "$stage2" ]; then
   reading_ceiling="$(ceiling reading)" || exit 2
+  # WHAT AUTOFLEET DOES NOT WRITE, AND THE AGENT STILL READS. Stage 1 injects
+  # the issue body and, on a restart, a handoff note; both are in the context
+  # before the first edit and neither was in this sum. The number said 3,402
+  # while a real run on a 468-word issue read 3,870, which is a ceiling
+  # measuring the part of the load that happens to be ours. Charged as
+  # allowances rather than as measurements because their text is not in the
+  # tree: what the payload gets is whatever is left.
+  spec_allowance="$(ceiling spec)" || exit 2
+  handoff_allowance="$(ceiling handoff)" || exit 2
   reading_what="$(ceiling_what reading)" || exit 2
   reading_issue="$(ceiling_issue reading)" || exit 2
   if stage1="$stage1" stage2="$stage2" rendered="$rendered" \
      reading_ceiling="$reading_ceiling" reading_what="$reading_what" \
+     spec_allowance="$spec_allowance" handoff_allowance="$handoff_allowance" \
      reading_issue="$reading_issue" python3 - <<'PYEOF'; then
 import os, re, sys
 
@@ -1890,7 +1901,7 @@ for rule, home, states in RULES:
 #   written  a file the agent WRITES. Not reading at all.
 DOCS = {
     "CLAUDE.md":                    ("count", "read in full at the start of every session"),
-    "REVIEW.md":                    ("count", "the policy the brief names at step 3; a ceiling that left it out would just move words here"),
+    "REVIEW.md":                    ("map",   "the policy the REVIEWING processes apply, each in its own context: self-review.sh hands it to both self-review passes (armaatus/autofleet#51), reviewer.md reads it in full, claude-review.yml points at it. It was a `count` row while step 3 ran inside the agent's session, and charging it after that moved out made the ceiling bound 1,352 words nothing in that context holds. Stage 1 naming it is still a failure, by the `map` rule below -- that is what stops it moving back"),
     "docs/WORKFLOW.md":             ("map",   "the maintainer's explanation, and the reference an agent consults when it needs one; not per-issue reading"),
     "docs/CONFIGURATION.md":        ("map",   "read when wiring a host project"),
     "docs/RUNNERS.md":              ("map",   "read when touching the runner seam (hard rule 4)"),
@@ -1938,14 +1949,13 @@ for where, text, may_name in scanned:
             if kind[0] == "map":
                 required.add(path)
 
-# ...and REVIEW.md is named where the passes are run, not in the preamble. An
-# agent reads the brief top to bottom; a policy named before step 1 is read
-# before step 1.
-s1 = texts["the brief, stage 1"]
-if "REVIEW.md" in s1 and "/code-review" in s1 \
-        and s1.index("REVIEW.md") < s1.index("/code-review"):
-    bad.append("the brief names REVIEW.md before it names /code-review, so it is "
-               "read in the preamble rather than at the step it is the policy for")
+# The ordering check this replaced asked only that stage 1 name REVIEW.md AFTER
+# `/code-review`, so it was read at the step rather than in the preamble. Once
+# the passes moved out of the agent's session there is no step left that reads
+# it here at all: `self-review.sh` names the policy to the processes it starts.
+# So stage 1 may not name it in either position, which the `map` rule above
+# already enforces -- and unlike the ordering test, it also charges the words
+# back if someone puts it there anyway.
 
 # The reading ceiling is the acceptance of armaatus/autofleet#54: CLAUDE.md, the
 # OPENING brief, and anything either names as required reading, before the first
@@ -1981,6 +1991,11 @@ if not IN_AUTOFLEET:
     required.discard("CLAUDE.md")
 parts = [(p, len(read(p).split())) for p in sorted(required)]
 parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
+# The two the tree does not hold. An allowance, not a measurement: a host
+# project's issues are not autofleet's to bound, and a handoff note is bounded
+# where it is written. What this does is stop the payload spending their room.
+parts.append(("the issue spec (allowance)", int(os.environ["spec_allowance"])))
+parts.append(("a handoff note (allowance)", int(os.environ["handoff_allowance"])))
 total = sum(n for _, n in parts)
 if total > CEILING:
     # The four things armaatus/autofleet#56 asks every ceiling failure to name:

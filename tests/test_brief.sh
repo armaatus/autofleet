@@ -140,7 +140,12 @@ case "${1:-}" in
     # PR body is now "what the issue asked, and where the implementation
     # departed" -- so a brief that grew a plan-mode step back would be spending
     # a phase before the first edit that nothing downstream reads.
-    lacks "stage 1" "$out" 'plan mode' '/code-review high' 'verifier'
+    #
+    # `/code-review high` is NOT in this list, and was for one commit: the two
+    # self-review passes are named in stage 1 because step 2 runs them there,
+    # before the push. What left stage 1 is the PLAN step and the `verifier`
+    # subagent, not the review.
+    lacks "stage 1" "$out" 'plan mode' 'verifier'
 
     # ...and NONE of the post-PR contract. This is the whole issue: these words
     # ride in the prompt prefix of every request made before the PR exists.

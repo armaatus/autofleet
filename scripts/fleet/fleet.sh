@@ -3373,16 +3373,29 @@ cmd_status() {
     # The rule the comment above states is about counting records as reviewers,
     # which is what a `find ! -name` got wrong; naming one suffix to read one
     # file is not that.
-    local r rn rpr found=0
+    #
+    # THE PREFIX IS STRIPPED AND THE CAP IS CHOSEN BY IT. Both phases keep a
+    # `.rounds` record in this one directory -- `<pr>.rounds` for reviews,
+    # `v-<pr>.rounds` for validations -- so a glob that reads the number and
+    # not the prefix prints `PR #v-42: 2/1 rounds`: a pull request that does not
+    # exist, at a cap that is not its own, on the first screen anybody looks at.
+    # The two counts are bounded by two different knobs for the reason
+    # docs/CONFIGURATION.md gives, and a screen that shows one cap for both is
+    # the "three paraphrases of what counts" failure in display form.
+    local r rn rpr rwhat rcap found=0
     for r in "$REVIEWING_DIR"/*.rounds; do
       [ -e "$r" ] || continue
       rn="$(cat "$r" 2>/dev/null)"
       case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
       rpr="$(basename "$r")"; rpr="${rpr%.rounds}"
-      if [ "$rn" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
-        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds -- AT THE CAP, a person decides"
+      case "$rpr" in
+        v-*) rpr="${rpr#v-}"; rwhat=validations; rcap="$AUTOFLEET_VALIDATE_MAX" ;;
+        *)   rwhat=reviews;   rcap="$AUTOFLEET_REVIEW_MAX" ;;
+      esac
+      if [ "$rn" -ge "$rcap" ]; then
+        echo "             PR #$rpr: $rn/$rcap $rwhat -- AT THE CAP, a person decides"
       else
-        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds"
+        echo "             PR #$rpr: $rn/$rcap $rwhat"
       fi
       found=1
     done
