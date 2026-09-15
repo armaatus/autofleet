@@ -483,7 +483,11 @@ and a port nothing can re-derive is a port nothing can release.
 
 ### The rest
 
-`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md).
+`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
+`scripts/fleet/runner/<name>.sh` beside it is refused where `lib.sh` sources it,
+naming the file it looked for, and `evals/lint.sh` goes red on it — so a typo
+here is caught before a worktree is opened rather than by an agent sitting on a
+prompt that never sends.
 `AUTOFLEET_SETUP_HOOK` / `AUTOFLEET_TEARDOWN_HOOK` — paths to the two hooks.
 `AUTOFLEET_TEST_COMMAND` — quoted into the agent's opening prompt, so it names
 the command your project actually runs rather than one autofleet guessed.

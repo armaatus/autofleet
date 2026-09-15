@@ -1389,6 +1389,39 @@ else
   fail "the slug rule in the docs is not the slug rule in cost.sh (above); config.sh ships to every host repo, and a wrong rule reports zeros rather than an error"
 fi
 
+# 4g. THE DRIVER THIS REPO IS CONFIGURED TO USE IS ONE THAT EXISTS.
+#
+#    4b asks whether every driver PRESENT implements the contract; nothing asked
+#    whether the name in `.autofleet/config` resolves to a file at all. A host
+#    project that sets AUTOFLEET_RUNNER to a driver it has not written yet -- or
+#    keeps one past a rename -- is green here and discovers it when the
+#    dispatcher opens its first worktree, which is after a person walked away
+#    expecting PRs. Red before an agent is opened is the whole point of this
+#    file. armaatus/autofleet#13.
+#
+#    The name is READ FROM config.sh rather than assumed to be `orca`, because
+#    `.autofleet/config` is sourced from inside it and is exactly where a host
+#    project overrides it -- and because an `AUTOFLEET_RUNNER` in the
+#    environment beats both, which is the layering config.sh documents. A
+#    config.sh that will not source at all is its own failure and is reported as
+#    one: reading the empty answer as "no driver configured" would name the
+#    wrong problem.
+if runner="$(bash -c '
+    set -uo pipefail
+    REPO_ROOT="$PWD"
+    . ./scripts/fleet/config.sh
+    printf "%s" "${AUTOFLEET_RUNNER:-}"' 2>/dev/null)"; then
+  if [ -z "$runner" ]; then
+    fail "scripts/fleet/config.sh leaves AUTOFLEET_RUNNER empty, so lib.sh sources scripts/fleet/runner/.sh and every fleet command dies at source time"
+  elif [ -f "scripts/fleet/runner/$runner.sh" ]; then
+    ok "AUTOFLEET_RUNNER=$runner resolves to scripts/fleet/runner/$runner.sh"
+  else
+    fail "AUTOFLEET_RUNNER=$runner names no driver: scripts/fleet/runner/$runner.sh does not exist, so every fleet command here dies at source time. Set it in .autofleet/config to one that ships, or write that file against docs/RUNNERS.md"
+  fi
+else
+  fail "scripts/fleet/config.sh would not source, so which runner this repo is configured for cannot be established; run it by hand to see what it refused"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then

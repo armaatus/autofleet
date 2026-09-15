@@ -73,19 +73,65 @@ runner_set_deadline() {
 # Returns non-zero when nothing answers, so a caller can say so in one line
 # instead of making its first real call and reading the silence as data.
 ORCA_CLI_PROBE_SECONDS="${ORCA_CLI_PROBE_SECONDS:-10}"
+
+# The candidates, in the order they are tried, one per line.
+#
+# A function rather than a list written out at the one place that walks it,
+# because two places now read it: `orca_cli_resolve` probes them and
+# `orca_unavailable_says` reports what probing them cost. A refusal naming a
+# different set from the one that was tried is worse than a refusal naming
+# none -- it sends a person to install something that was never asked for.
+orca_cli_candidates() {
+  [ -n "${ORCA_CLI_COMMAND:-}" ] && printf '%s\n' "$ORCA_CLI_COMMAND"
+  printf '%s\n' orca orca-dev orca-ide \
+    /Applications/Orca.app/Contents/Resources/bin/orca
+}
+
+# What was tried and why each was turned down, as one comma-joined line.
+#
+# Collected DURING the resolve rather than re-derived after it, which is where
+# this departs from `fleet_python_rejections`: re-probing costs a second
+# `--version` per candidate, each with its own $ORCA_CLI_PROBE_SECONDS, and this
+# is the first call `setup.sh` makes while the runner holds the agent's tab. Five
+# candidates that all time out would be a hundred seconds of silence to explain
+# the fifty that came before it.
+ORCA_CLI_REJECTS=""
+orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1"; }
+
 orca_cli_resolve() {
   [ -n "${ORCA_CLI:-}" ] && return 0
-  local candidate probe_out
-  probe_out="$(mktemp)"
-  for candidate in ${ORCA_CLI_COMMAND:-} orca orca-dev orca-ide \
-      /Applications/Orca.app/Contents/Resources/bin/orca; do
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
-      "$candidate" --version || continue
+  local candidate probe_out where
+  # Reset per resolve, not per source: a resolve that fails, then succeeds after
+  # the app starts, must not leave the first attempt's reasons behind for a
+  # later failure to print as if they were its own.
+  ORCA_CLI_REJECTS=""
+  # SAID, not assumed. The deadline wrapper writes the probe's output to a file,
+  # so a machine with no `mktemp` on PATH turned every candidate down for want of
+  # a temp file and reported it as "is the Orca app running?" -- a true-looking
+  # sentence pointing at the wrong machine. Seen for real in
+  # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
+  # nothing else.
+  probe_out="$(mktemp)" || {
+    orca_cli_reject "nothing: no mktemp on PATH, so no candidate could be probed"
+    return 1
+  }
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if ! where="$(command -v "$candidate" 2>/dev/null)"; then
+      orca_cli_reject "$candidate (not on PATH)"
+      continue
+    fi
+    if ! fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
+        "$candidate" --version; then
+      orca_cli_reject "$where (--version did not answer)"
+      continue
+    fi
     ORCA_CLI="$candidate"
     rm -f "$probe_out"
     return 0
-  done
+  done <<EOF
+$(orca_cli_candidates)
+EOF
   rm -f "$probe_out"
   return 1
 }
@@ -126,7 +172,20 @@ orca_json() {
 # `runner_available` is a probe nobody captures, while `runner_worktree_create`
 # and `runner_worktree_set` print where their callers read. Found by the
 # independent review.
-orca_unavailable_says() { printf 'no orca CLI answers here; is the Orca app running?\n'; }
+#
+# THREE LINES, and that is a ceiling rather than a coincidence: docs/RUNNERS.md
+# caps a relay at three, `runner_worktree_create` prints this one on the stream
+# `launch` logs, and `launch` retries every pass. So what was tried is one
+# comma-joined line however many candidates there were, not one line each.
+# The three carry the three things a person needs: which runner, what was tried,
+# and what to do about it. Today's line named the runtime and stopped there, so
+# the answer to "and now what" was a file nobody reads twice.
+# armaatus/autofleet#13.
+orca_unavailable_says() {
+  printf 'no orca CLI answers here; is the Orca app running?\n'
+  printf '     tried: %s\n' "${ORCA_CLI_REJECTS:-nothing was probed}"
+  printf '     install Orca (https://orca.computer) and start it, or set ORCA_CLI_COMMAND to a CLI that answers --version\n'
+}
 
 runner_available() {
   orca_cli_resolve && return 0

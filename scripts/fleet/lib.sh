@@ -302,8 +302,39 @@ runner_agent_terminal() {
 if [ -f "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh" ]; then
   . "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
 else
-  echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER" >&2
-  return 1 2>/dev/null || exit 1
+  # IT NAMES THE FILE, and lists the drivers that do ship.
+  #
+  # "no runner driver for AUTOFLEET_RUNNER=tmux" alone sends the reader to
+  # `.autofleet/config`, where the name is the one thing that is not wrong --
+  # what is wrong is that nothing implements it, and the remedy is either a
+  # different name or a new file at a path only this line knows. The shape is
+  # `fleet_python_rejections`: what was looked for, where, and what to do
+  # instead. armaatus/autofleet#13.
+  fleet_runner_dir="$(dirname "${BASH_SOURCE[0]}")/runner"
+  fleet_runner_ships=""
+  for fleet_runner_f in "$fleet_runner_dir"/*.sh; do
+    # The glob is unquoted so it expands, which means it stays literal when it
+    # matches nothing -- hence the test rather than trusting the loop.
+    [ -f "$fleet_runner_f" ] || continue
+    fleet_runner_f="${fleet_runner_f##*/}"
+    fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
+  done
+  {
+    echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
+    echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
+    echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
+    echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
+  } >&2
+  # EXIT, not `return 1 2>/dev/null || exit 1`. That idiom leaves the decision to
+  # the caller, and most callers here run `set -uo pipefail` WITHOUT `-e` -- so
+  # `. ./scripts/fleet/lib.sh` returned 1 and the script sailed on into a shell
+  # with no driver defined, where the next `runner_*` is `command not found`.
+  # fleet.sh then died on rc 127 with "the nope runner is not usable here", which
+  # is the consequence reported as the cause: the message above had already
+  # scrolled past and the one the reader acts on names the wrong problem. There
+  # is no caller that can do anything useful without a driver, so the choice was
+  # never really the caller's. armaatus/autofleet#13.
+  exit 1
 fi
 
 # Whether the daemon is actually answering.

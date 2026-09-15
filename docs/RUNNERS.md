@@ -100,6 +100,28 @@ runner_set_deadline <secs> # for calls from this process
 what to check next, and "is the Orca app running?" is not a sentence the
 dispatcher can write for an arbitrary runner. The caller adds the consequence.
 
+What it says is **the runtime, what was tried, and what to install**, within the
+same three-line bound every relay has. Naming the runtime and stopping there
+leaves the reader with a true sentence and no next step, and this is the one
+message a person sees on a machine that has never worked — so a driver lists the
+candidates it probed and how each was turned down, one comma-joined line rather
+than one line each, and ends with the install or start. The Orca driver collects
+those reasons *during* its resolve rather than re-deriving them afterwards: a
+second pass costs another `--version` timeout per candidate, and this is the
+first call `setup.sh` makes while the runner holds the agent's tab.
+
+**Every hook probes before it spends anything.** `fleet.sh` (at source time),
+`setup.sh` and `agent-autostart.sh` all call it; `setup.sh` is fatal on a no,
+because everything it provisions is for an agent the runner is supposed to
+start. `setup.sh` probes *after* `env.sh` and before the submodules, the project
+hook and the watcher — env.sh is milliseconds and is where a machine missing its
+basic tools says so, and a probe in front of it answers a missing `shasum` with
+"is the runtime running?", which is the wrong machine named confidently.
+And a driver that is **not there at all** is refused one layer up, by `lib.sh`,
+naming `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the drivers that do ship
+— `evals/lint.sh` check 4g fails a repo whose configured runner names no file,
+so that is red before an agent is opened rather than after.
+
 **Which stream a failure's words go on, per function, because the answer is not
 the same for all of them.** An earlier version of this paragraph said "stderr
 for `runner_available`, stdout for everything else" — an absolute rule that the
