@@ -1615,6 +1615,28 @@ else
   fail "the late-stderr scan could not run, so it is asserting nothing"
 fi
 
+# ...and no comment sits between a `\` and the line it continues.
+#
+# The third scan of the same tree, and the one with the worst failure mode: the
+# shell joins the comment onto the command, which comments out the rest of it,
+# and the continued line runs as a command of its own. `bash -n` passes.
+# `scripts/fleet/review-status.sh` carried one from armaatus/autofleet#121 and
+# answered every invocation with 97 KB of unfiltered JSON and exit 2 -- "could
+# not read" -- at the step of the brief where an agent learns whether its review
+# threads are resolved. Its own selftest first, for the reason the scans above
+# give.
+python3 "$REPO_ROOT/evals/continuation_comment.py" --selftest \
+  || fail "evals/continuation_comment.py fails its own selftest, so the scan below means nothing"
+if bad="$(python3 "$REPO_ROOT/evals/continuation_comment.py")"; then
+  if [ -n "$bad" ]; then
+    fail "these put a comment between a \\ and the line it continues, so the shell swallows the rest of the command -- move the comment above it: $bad"
+  else
+    ok "no payload script comments out the line it is continuing"
+  fi
+else
+  fail "the continuation-comment scan could not run, so it is asserting nothing"
+fi
+
 # ...and the brief must still name them -- across BOTH of its stages.
 #
 # Since armaatus/autofleet#49 the brief arrives in two pieces out of the one

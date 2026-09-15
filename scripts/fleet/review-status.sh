@@ -78,11 +78,20 @@ GH_PAGER=cat gh pr view "$pr" \
 # Gather step paginates. A PR whose only enforcement-layer path sorts past the
 # 100th file would otherwise be told to fix a merge-gate failure that is the gate
 # working as designed.
+# ...and `previous_filename` as well, for the reason merge-gate.yml gives at its
+# own copy of this call: a rename reports only the new path, so moving a
+# protected file out of the set would read as an ordinary change here and as a
+# human merge in CI -- the two disagreeing is what this file exists not to do.
+#
+# THE COMMENT GOES ABOVE THE COMMAND, not between a `\` and the line it
+# continues. Written there, the continuation joins the `#` onto the `gh` line,
+# which comments out the rest of it: `gh api` ran with no `--jq`, printed the
+# whole 97 KB payload on stdout, and the `--jq ...` line below it became a
+# command of its own -- not found, rc 127, `|| exit 2`. So this script reported
+# "could not read" on every PR and dumped a JSON blob where its verdict goes,
+# which is the one thing an agent at step 6 of the brief cannot work around.
+# `evals/continuation_comment.py` now fails the build on the shape.
 GH_PAGER=cat gh api --paginate "repos/$owner/$name/pulls/$pr/files" \
-# `previous_filename` as well, for the reason merge-gate.yml gives at its own
-# copy of this call: a rename reports only the new path, so moving a protected
-# file out of the set would read as an ordinary change here and as a human merge
-# in CI -- the two disagreeing is what this file exists not to do.
   --jq '.[] | .filename, (.previous_filename // empty)' >"$files" 2>/dev/null || exit 2
 
 python3 - "$pr" "$payload" "$checks" "$files" <<'PY'
