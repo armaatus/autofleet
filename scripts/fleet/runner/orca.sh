@@ -174,14 +174,23 @@ orca_cli_resolve() {
     # off bash points only STDIN at /dev/null, so fd 3 is inherited untouched.
     # That made the fd-3 rewrite strictly worse than the stdin version it
     # replaced until this line. Found by the local review.
-    # 124 IS THE WRAPPER'S OWN STATUS and nothing else returns it, so the two
-    # failures a reader has to tell apart do not share a sentence: a CLI that
+    # 124 IS THE WRAPPER'S DEADLINE, and the two failures a reader has to tell
+    # apart no longer share a sentence: a CLI that
     # HANGS is an app mid-start or wedged and is worth waiting out, while one
     # that is there and exits non-zero has already answered. "did not answer"
     # for an instant `exit 3` sent the reader to look for a wedged app. Captured
     # into a variable because `if ! cmd` sets `$?` to the negation, so the
     # branch that wants the status cannot read it. Raised by the independent
     # review.
+    #
+    # It is not a status only the wrapper can produce: `fleet_run_with_deadline`
+    # ends in `wait "$child"`, so a candidate that is itself a `timeout` wrapper
+    # propagating 124 reads here as a hang. That misreads a CLI which did answer
+    # as one that did not -- the same class as before, one candidate wide
+    # instead of all of them, and the remedy line is the same either way.
+    # Distinguishing them needs the wrapper to report the deadline out of band,
+    # which is a change to a function eleven callers share and is not this
+    # issue. Found by the self-review.
     probe_rc=0
     fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
       "$candidate" --version 3<&- || probe_rc=$?

@@ -299,14 +299,37 @@ runner_agent_terminal() {
 # Sourced here rather than by each script because every hook needs it and a
 # hook that silently has no driver looks exactly like a hook whose driver
 # answered "nothing".
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh" ]; then
-  . "$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
-  # Set on BOTH arms, never defaulted from the environment. An exported
-  # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
-  # refusal below, which is the same hole `evals/lint.sh` 4g closes with
-  # `env -u` for AUTOFLEET_RUNNER. Found by the local review, on the variable
-  # this one replaced.
-  FLEET_RUNNER_MISSING=0
+# The path once, above the branch, because THREE arms now need it: the source,
+# the driver that sources and defines nothing, and the file that is not there.
+FLEET_RUNNER_DRIVER="$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
+if [ -f "$FLEET_RUNNER_DRIVER" ]; then
+  . "$FLEET_RUNNER_DRIVER"
+  # A DRIVER THAT SOURCED AND DEFINED NOTHING is the same failure as no driver
+  # at all, and it was landing as the one this issue exists to remove: a host
+  # driver with a syntax error, or one that `return`s early when a dependency it
+  # needs is absent, leaves every `runner_*` undefined, and the first call is
+  # `command not found` -- rc 127 through `runner_available ||`, which reports
+  # "the <name> runner is not usable here". The name is the one thing that is
+  # right. `runner_available` is the probe every guarded caller reaches first
+  # and the function docs/RUNNERS.md requires first, so it is the one tested
+  # for. Found by the self-review.
+  if command -v runner_available >/dev/null 2>&1; then
+    # Set on BOTH arms, never defaulted from the environment. An exported
+    # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
+    # refusal below, which is the same hole `evals/lint.sh` 4g closes with
+    # `env -u` for AUTOFLEET_RUNNER. Found by the local review, on the variable
+    # this one replaced.
+    FLEET_RUNNER_MISSING=0
+  else
+    [ -n "${FLEET_RUNNER_REPORTED_FOR:-}" ] \
+      && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
+      echo "autofleet: $FLEET_RUNNER_DRIVER is there and defines no runner_available"
+      echo "     a driver implements the runner_* contract in docs/RUNNERS.md; this one sourced and defined none of it"
+      echo "     check it for a syntax error, or for an early return when something it needs is missing"
+    } >&2
+    export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
+    FLEET_RUNNER_MISSING=1
+  fi
 else
   # IT NAMES THE FILE, and lists the drivers that do ship.
   #
@@ -317,7 +340,6 @@ else
   # `fleet_python_rejections`: what was looked for, where, and what to do
   # instead. armaatus/autofleet#13.
   fleet_runner_dir="$(dirname "${BASH_SOURCE[0]}")/runner"
-  FLEET_RUNNER_DRIVER="$fleet_runner_dir/${AUTOFLEET_RUNNER}.sh"
   fleet_runner_ships=""
   for fleet_runner_f in "$fleet_runner_dir"/*.sh; do
     # The glob is unquoted so it expands, which means it stays literal when it
@@ -326,7 +348,15 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  [ "${FLEET_RUNNER_REPORTED_FOR:-}" = "$AUTOFLEET_RUNNER" ] || {
+  # `-n` FIRST, and it is not belt-and-braces: `.autofleet/config` is sourced
+  # after config.sh's `:=orca` default, so `AUTOFLEET_RUNNER=` in that file
+  # reaches here empty -- and on a fresh shell the comparison is then `"" = ""`,
+  # which is TRUE and skipped the whole remedy. What the reader got was
+  # `fleet.sh: no .../runner/.sh, so it stops here`: the consequence with the
+  # cause suppressed, by the line whose job is to print the cause once. Found by
+  # the self-review.
+  [ -n "${FLEET_RUNNER_REPORTED_FOR:-}" ] \
+    && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
     echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
     echo "     looked for: $FLEET_RUNNER_DRIVER (no such file)"
     echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
@@ -337,14 +367,18 @@ else
   # this file, so the block above had two chances to print for one command. A
   # later descendant of that same environment -- an agent shell running
   # `board.sh` -- gets `fleet_require_runner`'s line rather than the block, and
-  # that line names the file, which is the part it needs. Exported so it survives the exec; the driver path goes with it so
-  # `fleet_require_runner` can still name the file in the process that did not
-  # print the block. Found by the local review.
+  # that line names the file, which is the part it needs. Exported so it
+  # survives the exec; the driver path goes with it so `fleet_require_runner`
+  # can still name the file in the process that did not print the block. Found
+  # by the local review.
   #
-  # Named for what it holds, so nothing has to say it is not a boolean: an
-  # unrelated `FLEET_RUNNER_REPORTED_FOR=1` in the environment would have swallowed the
-  # four lines the remedy lives in. Same hole FLEET_RUNNER_MISSING closes by
-  # being set on both arms. Renamed by the independent review.
+  # Named for what it holds, so nothing has to say it is not a boolean. The
+  # hazard is the environment, not the name: this is compared against the runner
+  # it reports, so only a stray value EQUAL TO that name can swallow the four
+  # lines the remedy lives in -- which is why the empty case above is tested
+  # separately. The boolean this replaced could be swallowed by any `=1`. Renamed
+  # by the independent review; the claim corrected by the self-review, which
+  # caught it surviving the rename with the old variable's hazard attached.
   #
   # The runner NAME, not the driver path: the path is built from
   # `dirname "${BASH_SOURCE[0]}"`, and this file is sourced as
@@ -379,6 +413,7 @@ else
   # needs no runtime, and asks `runner_available` only behind an `&&` that rc
   # 127 makes false. docs/RUNNERS.md carries the reason. `evals/lint.sh` check 4h
   # fails one that forgets to. armaatus/autofleet#13.
+  #
   # ...and the scratch is cleared. These are the only lowercase globals this
   # file would leave in a caller's shell, and every other global it sets is
   # FLEET_*. Found by the local review.

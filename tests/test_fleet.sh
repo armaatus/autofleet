@@ -1279,6 +1279,41 @@ case "${1:-}" in
     grep -q "^missing=1$" <<<"$out" \
       || fail "nothing recorded that the driver was missing, so fleet_require_runner has nothing to act on: $out"
 
+    # 1b. A DRIVER THAT IS THERE AND DEFINES NOTHING -- a host driver with a
+    #     syntax error, or one that returns early when a dependency it needs is
+    #     absent. The file test alone called that a working driver, every
+    #     `runner_*` was then `command not found`, and rc 127 through
+    #     `runner_available ||` printed "the <name> runner is not usable here":
+    #     #13's own failure, arriving through the code that fixes it. Found by
+    #     the self-review.
+    printf '#!/usr/bin/env bash\n# defines nothing\nreturn 0 2>/dev/null || true\n' \
+      >"$WORK/repo/scripts/fleet/runner/hollow.sh"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=hollow ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that defines no runner_* was accepted as working: $out"
+    grep -q "runner/hollow.sh is there and defines no runner_available" <<<"$out" \
+      || fail "the refusal did not say the driver sourced and implemented nothing, which is the only thing that separates it from a missing file: $out"
+    grep -q "is not usable here" <<<"$out" \
+      && fail "the undefined runner_* was reported as an unusable runtime, which is the consequence named as the cause: $out"
+
+    # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
+    #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
+    #     empty -- and the once-per-tree test was `"" = ""`, true, which
+    #     suppressed the four lines carrying the remedy. Found by the
+    #     self-review.
+    #     Through a config FILE, which is the only way it is reachable: an empty
+    #     AUTOFLEET_RUNNER in the environment is replaced by config.sh's
+    #     `:=orca` default, and the host config is sourced after it.
+    printf 'AUTOFLEET_RUNNER=""\n' >"$WORK/empty-runner-config"
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an empty AUTOFLEET_RUNNER was accepted: $out"
+    grep -q "no runner driver for AUTOFLEET_RUNNER=" <<<"$out" \
+      || fail "an empty runner name suppressed the block that names the drivers that do ship: $out"
+    grep -qE "drivers here: .*orca" <<<"$out" \
+      || fail "the remedy for an empty name did not list the drivers that ship: $out"
+
     # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
     #    the caller's consequence, and nothing provisioned. Written as a driver
     #    of its own rather than by starving the Orca one: whether THIS machine
