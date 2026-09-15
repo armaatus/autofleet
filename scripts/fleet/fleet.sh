@@ -977,17 +977,18 @@ forget_worktree_answers() {
   rm -f "$POLL_CACHE/worktrees" "$POLL_CACHE/foundation"
 }
 
-# Prints the count, or fails. A caller that cannot tell how many are running
-# must not launch anything.
-live_count() {
-  local list
-  list="$(live_worktrees)" || return 1
-  count_worktrees "$list"
-}
-
 # How many worktrees a listing holds. Split out because the launch loop needs
 # the count AND the names from ONE listing: two calls would let the count that
 # shut the gate and the names printed beside it disagree.
+#
+# There used to be a `live_count` wrapper here -- one `live_worktrees` and one
+# `count_worktrees`, the pair below -- and after the poll learned to keep the
+# listing it counted, nothing in this file called it. Three test phases still
+# did, so the count the suite asserted was a route the dispatcher no longer
+# took: the same listing, reached through a function only the tests ran. A
+# guard aimed one function to the left of the one that runs is the shape
+# armaatus/autofleet#71 is about, so the wrapper is gone and those phases call
+# this pair the way `cmd_run` does.
 count_worktrees() { printf '%s\n' "$1" | grep -c . || true; }
 
 # What a held foundation issue is actually waiting for, as `#N` where the
@@ -1006,8 +1007,25 @@ count_worktrees() { printf '%s\n' "$1" | grep -c . || true; }
 waiting_worktrees() {
   printf '%s\n' "$1" | while IFS="$(printf '\t')" read -r num path; do
     [ -n "$path" ] || continue
-    if [ "$num" = "-" ]; then printf '%s\n' "$(basename "$path")"; else printf '#%s\n' "$num"; fi
+    worktree_label "$num" "$path"
   done | sort -V | tr '\n' ' ' | sed 's/ $//'
+}
+
+# HOW A WORKTREE IS NAMED in a line a person reads: `#N` where `live_worktrees`
+# gave it a linked issue, and its directory's basename where it gave `-`.
+#
+# ONE function because there are two readers of the same listing and they
+# disagreed: the hold printed the basename and `cmd_status` printed `#-`, so the
+# worktree a person most needs to recognise -- the hand-opened or foreign one,
+# the one nobody in this repository can close -- appeared under two names, one
+# of which names nothing. The basename is the one that survives, because a
+# person can act on a directory and cannot act on a dash.
+# armaatus/autofleet#71.
+worktree_label() {
+  case "$1" in
+    ''|-) basename "$2" ;;
+    *)    printf '%s\n' "#$1" ;;
+  esac
 }
 
 # --------------------------------------------------- the poll cache's shape ---
@@ -4178,12 +4196,16 @@ cmd_status() {
     # caller that makes it matter. `status` answers from $STATE_DIR and writes
     # nothing back to it; see the note on `parked_for_person`. #35.
     why="$(parked_for_person "$num" quiet)" && why="waiting for you -- $why" || why=""
+    # `worktree_label`, not `#$num`: an unlinked worktree printed here as `#-`
+    # named nothing, and the hold in the poll printed the same directory by its
+    # basename. Two readers of one listing, two names. #71.
+    label="$(worktree_label "$num" "$path")"
     if [ -n "$why" ]; then
-      printf '  #%-5s %s\n' "$num" "$path"
+      printf '  %-6s %s\n' "$label" "$path"
       printf '         %s\n' "$why"
       printf '         %s\n' "$(how_to_release "$num" "$path")"
     else
-      printf '  #%-5s %s\n' "$num" "$path"
+      printf '  %-6s %s\n' "$label" "$path"
     fi
   done
   echo

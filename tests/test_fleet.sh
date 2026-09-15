@@ -763,6 +763,18 @@ in_fleet() {
   in_fleet_keeping_cache "$@"
 }
 
+# THE LAUNCH GATE'S OWN COUNT, spelled the way `cmd_run` spells it: one
+# `live_worktrees`, counted by `count_worktrees`. These phases used to call a
+# `live_count` wrapper in fleet.sh that no production caller had left, so they
+# asserted a route the dispatcher does not take -- armaatus/autofleet#71. The
+# pair runs inside ONE source of fleet.sh, because the point is that the count
+# comes from the listing the gate already holds and not from a second read.
+gate_count() {
+  rm -rf "$AUTOFLEET_DIR/poll-cache"
+  (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh \
+    && { list="$(live_worktrees)" || exit 1; count_worktrees "$list"; })
+}
+
 # ...and the raw form, for the one phase whose subject IS the cache's survival.
 # `status_keeps_cache` asserts that `cmd_status` leaves the poll cache alone, so
 # running it through a helper that empties the cache first would assert nothing
@@ -1630,7 +1642,7 @@ DRIVER
     printf '42' >"$STUB_DIR/issue"
     printf 'read the issue and get to work' >"$STUB_DIR/draft"
 
-    [ "$(in_fleet live_count)" = 1 ] \
+    [ "$(gate_count)" = 1 ] \
       || fail "the dispatcher could not count its own worktrees through a non-Orca driver"
 
     # The stall watcher: the agent state and the board, one poll of each.
@@ -2902,6 +2914,40 @@ JSON
     echo "ok: ...and says itself again once the interval has passed"
     ;;
 
+  waiting_names_foreign)
+    make_fixture ok
+    # THE DASH BRANCH, which is the branch the hold is about. `live_worktrees`
+    # writes `-` for a worktree with no linked issue -- hand-opened, or another
+    # repository's -- and that is precisely the one a person most needs named,
+    # because it is the one nobody in this repository can close. #31/#46 were
+    # holds that could not say which kind they were waiting on; nothing passed a
+    # `-` through `waiting_worktrees` until now.
+    #
+    # And the two readers of one listing have to agree. `cmd_status` printed
+    # `#-` for such a worktree while the hold printed its basename, so the line
+    # a person reads on screen and the line in the log named the same directory
+    # two ways. armaatus/autofleet#71.
+    worktree_list "42:wt" "-:handmade"
+    named="$(in_fleet waiting_worktrees "$(in_fleet live_worktrees)")"
+    grep -q "handmade" <<<"$named" \
+      || fail "the hold does not name the worktree nobody here can close: [$named]"
+    grep -q -- "#-" <<<"$named" \
+      && fail "the hold printed a dash where a person needs a name: [$named]"
+    grep -q -- "#42" <<<"$named" \
+      || fail "the linked worktree stopped being named by its issue: [$named]"
+
+    dispatcher_running
+    in_fleet record_dispatcher
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q -- "#-" <<<"$out" \
+      && fail "status prints a bare dash for a worktree the hold names by its directory: $out"
+    grep -q "handmade" <<<"$out" \
+      || fail "status does not name the unlinked worktree the way the hold does: $out"
+    grep -q -- "#42" <<<"$out" \
+      || fail "status stopped naming the linked worktree by its issue: $out"
+    echo "ok: an unlinked worktree is named by its directory, in the hold and on screen"
+    ;;
+
   foundation_waiting_once)
     # THE OTHER HOLD: a foundation CANDIDATE declining to join ordinary
     # worktrees. It is the older of the two and it had no phase at all, which is
@@ -3349,8 +3395,8 @@ JSON
   foundation_cli_blind)
     # ...and the same when the worktree list itself will not answer. There is
     # then nothing to reason from at all -- not even the count -- so holding is
-    # the only honest answer. `live_count` already refuses to guess from this
-    # shape; this is the same refusal one question later.
+    # the only honest answer. `live_worktrees` already refuses to guess from
+    # this shape; this is the same refusal one question later.
     make_fixture ok
     # A list that comes back in a shape nothing can read, which is what the
     # dispatcher actually sees when the CLI half-answers -- the stub's
@@ -4512,7 +4558,7 @@ JSON
     # One worktree of ours, one belonging to a different repository entirely --
     # which is the ordinary state of a machine running more than one fleet.
     worktree_list "42:wt" "7:foreign:other"
-    n="$(in_fleet live_count 2>&1)"
+    n="$(gate_count 2>&1)"
     [ "$n" = 1 ] \
       || fail "counted $n live worktree(s); another repo's worktree is taking a slot from MAX_WORKTREES"
     grep -q -- "--repo path:$WORK/repo" "$ORCA_CALLS" \
@@ -4542,7 +4588,7 @@ JSON
 [{"number":196,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
 JSON
     worktree_list "198:foreign:other"
-    n="$(in_fleet live_count 2>&1)"
+    n="$(gate_count 2>&1)"
     [ "$n" = 0 ] \
       || fail "counted $n live worktree(s) with only another repo's open, so the foundation gate never opens"
     out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
@@ -4590,6 +4636,38 @@ GITSTUB
     [ "$sel" = "path:$WORK/repo" ] \
       || fail "an unusable answer from git was passed to the CLI as a selector: [$sel]"
     echo "ok: git answering unusably falls back to this checkout, not to a selector the CLI refuses"
+    ;;
+
+  selector_relative_common)
+    make_fixture ok
+    # THE RULE, not one way to break it. `--repo path:` needs an ABSOLUTE root,
+    # and the guard used to be a denylist -- empty, or a leading dash -- which
+    # reaches the fallback only because the local `dirname` happens to refuse
+    # `--path-format=absolute`. A git that answers the common dir RELATIVELY --
+    # which is what `--git-common-dir` prints without `--path-format`, the very
+    # option the pre-2.31 case above is about not having -- makes `dirname`
+    # answer `.`: non-empty, no leading dash, and `path:.` goes to the CLI,
+    # which is the same permanent `repo_not_found` stall the selector exists to
+    # prevent. Matching a leading slash states the requirement instead.
+    # armaatus/autofleet#71.
+    real_git="$(command -v git)"
+    cat >"$WORK/bin/git" <<GITSTUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in --git-common-dir) printf '.git\n'; exit 0 ;; esac
+done
+exec "$real_git" "\$@"
+GITSTUB
+    chmod +x "$WORK/bin/git"
+    sel="$( cd "$WORK/repo" && PATH="$WORK/bin:$PATH" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh >/dev/null 2>&1
+      orca_resolve_repo_selector
+    ' 2>&1 )"
+    [ "$sel" = "path:$WORK/repo" ] \
+      || fail "a relative common dir became a selector the CLI refuses: [$sel]"
+    echo "ok: a selector that is not an absolute root reaches the fallback"
     ;;
 
   create_scoped)
