@@ -1026,7 +1026,14 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
 ' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL")" || {
     if poll_cache_open; then
       mkdir -p "$POLL_CACHE" 2>/dev/null
-      : >"$cached.unreadable" 2>/dev/null || true
+      # `2>/dev/null` BEFORE the redirection it is there for, not after it:
+      # bash applies them left to right, so with it second a $STATE_DIR that
+      # will not take the file still printed bash's own diagnostic to the real
+      # stderr -- into $LOG, once a poll, on the one path that is already an
+      # outage. `|| true` hides the status, not the diagnostic. CLAUDE.md,
+      # "Code"; `live_worktrees` above has the corrected form. Found by the
+      # local review.
+      : 2>/dev/null >"$cached.unreadable" || true
     fi
     return 1
   }
@@ -1117,7 +1124,9 @@ open_pr_listing() {
   # host really does keep 100 PRs open -- nothing launches and the log says
   # nothing about it -- which is the safe direction, and #31 is where paging
   # belongs. Found by the local review.
-  local rows=""
+  # `row_count`, and it carries a third state in the empty string: "the body was
+  # not a listing at all". The `case` below reads all three.
+  local row_count=""
   if listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit "$pr_page" 2>/dev/null)" \
      && [ -n "$listing" ]; then
     # THE SAME PARSE DECIDES BOTH QUESTIONS, and its failure is the third
@@ -1130,20 +1139,29 @@ open_pr_listing() {
     # a minute for as long as `gh` misbehaved. The header above promises this
     # function never caches "could not tell" as a listing; this is the line that
     # makes that true. Found by the local review.
-    rows="$(printf '%s' "$listing" | python3 -c '
+    # `isinstance(..., list)`, because `len()` alone is TYPE-BLIND: a top-level
+    # JSON object -- an error envelope `gh` handed back with status 0 -- has a
+    # length too, so it passed this probe and was cached as an answer. Every
+    # caller then rediscovered it was not a listing, and `count_startable`'s
+    # `json.loads` has no `try` around it, which is the once-a-minute traceback
+    # this guard is supposed to close. `-1` fails the digits-only test below.
+    # Found by the local review.
+    row_count="$(printf '%s' "$listing" | python3 -c '
 import json, sys
-print(len(json.load(sys.stdin)))
-' 2>/dev/null)" || rows=""
+loaded = json.load(sys.stdin)
+print(len(loaded) if isinstance(loaded, list) else -1)
+' 2>/dev/null)" || row_count=""
   fi
-  case "$rows" in
+  case "$row_count" in
     ''|*[!0-9]*) listing="" ;;
     # A FULL PAGE, and the cliff it is: at the limit nothing distinguishes an
     # absent PR from one on page two, so `in_flight` answers 2 for every issue,
     # nothing launches, nothing is time-boxed, no build context is reset, and
     # `count_startable`'s non-zero keeps the run loop polling for work it will
     # never start. All of that in total silence, which is the worst property a
-    # stop can have -- so it is SAID, through `hold_say_into` so it is once per
-    # outage rather than once a minute, and said only from inside a poll because
+    # stop can have -- so it is SAID, through `hold_say_into`, which re-says on
+    # staleness: once per $AUTOFLEET_HOLD_RESAY (an hour by default) rather than
+    # once a minute. Said only from inside a poll, because
     # `cmd_status` reaches this function too and does not write to the log.
     "$pr_page")
        listing=""
@@ -1161,10 +1179,23 @@ print(len(json.load(sys.stdin)))
          "time-boxed and the run loop will not exit until the count drops. See docs/WORKFLOW.md," \
          "\"What one poll costs\"; armaatus/autofleet#31 is where paging belongs." >&2 ;;
   esac
+  # ...and DROPPED the moment a whole listing comes back, so a wedge that clears
+  # and recurs inside $AUTOFLEET_HOLD_RESAY is announced again rather than
+  # swallowed by an hour-old marker. `launch` drops `FOUNDATION_HOLD_SAID` for
+  # the same reason: a say-once marker must not outlive the condition it is
+  # about. Found by the local review.
+  [ -n "$listing" ] && rm -f "$PR_PAGE_FULL_SAID"
   if [ -z "$listing" ]; then
     if poll_cache_open; then
       mkdir -p "$POLL_CACHE" 2>/dev/null
-      : >"$cached.unreadable" 2>/dev/null || true
+      # `2>/dev/null` BEFORE the redirection it is there for, not after it:
+      # bash applies them left to right, so with it second a $STATE_DIR that
+      # will not take the file still printed bash's own diagnostic to the real
+      # stderr -- into $LOG, once a poll, on the one path that is already an
+      # outage. `|| true` hides the status, not the diagnostic. CLAUDE.md,
+      # "Code"; `live_worktrees` above has the corrected form. Found by the
+      # local review.
+      : 2>/dev/null >"$cached.unreadable" || true
     fi
     return 1
   fi
@@ -1466,11 +1497,13 @@ poll_issue() {
   [ -e "$cached" ] && { cat "$cached"; return 0; }
   if answer="$(GH_PAGER=cat gh issue view "$1" --json state,labels \
                  --jq '.state + "\t" + ([.labels[].name]|join(","))' 2>/dev/null)"; then
-    printf '%s' "$answer" >"$cached" 2>/dev/null || true
+    # ...and the same ordering here, in the copy this rule predates. See the
+    # note in `ready_issues` above.
+    printf '%s' "$answer" 2>/dev/null >"$cached" || true
     printf '%s' "$answer"
     return 0
   fi
-  : >"$cached.unreadable" 2>/dev/null || true
+  : 2>/dev/null >"$cached.unreadable" || true
   return 2
 }
 
@@ -4274,13 +4307,16 @@ while that one is up."
     # the line it has to be closed before. A cache hit when a watcher above
     # already took it; the fetch itself only when none did.
     #
-    # ONLY WHEN THE LAUNCH LOOP WILL RUN, which is what the condition below
-    # spells: not under a drain, and not with every slot already full. Both are
-    # states in which nothing launches, `queued` is 0 or read from `wanted`, and
-    # the watchers that still run take the listing themselves if they need it. A
-    # drain can last hours and a full fleet a whole time-box, and an
-    # unconditional fetch here would be one `gh` call a minute through either,
-    # answering a question nobody in that pass asks. Found by the local review.
+    # ONLY WHEN THE LAUNCH LOOP WILL RUN: not under a drain, and not with every
+    # slot already full. Read the saving narrowly, because an earlier version of
+    # this comment claimed more than it buys. Under a DRAIN nothing else in the
+    # pass reads the listing, so the gate saves a call a minute for however long
+    # the drain lasts -- hours, waiting on three PRs to merge. On a full fleet it
+    # saves one only in LIST mode, where `count_startable` is unreachable
+    # (`queued` comes from `wanted`); in `--auto` `count_startable` runs a few
+    # lines below and takes the listing anyway, which is why the busy row in
+    # docs/WORKFLOW.md counts it. Both halves are still worth having and both
+    # have a phase; neither is worth overstating. Found by the local review.
     #
     # Its failure is not handled here and must not be: every caller has its own
     # "could not tell" branch and they do not agree on what to do about it.

@@ -156,8 +156,9 @@ API or a CLI query and costs no tokens at all. **The poll itself never runs a
 model**: the body of `cmd_run` is shell and `gh` from end to end, and a model
 starts only inside one of those three scripts once the dispatcher has spawned
 it — which is a decision the pass makes, not something every pass does. All
-three are marker-guarded, so none of them is a spawn per PR per poll — `start_validator` returns early on its `v-<pr>` lock and
-on a `v-<pr>.done` holding the current head, and a reviewer is skipped while
+three are marker-guarded, so none of them is a spawn per PR per poll —
+`start_validator` returns early on its `v-<pr>` lock and on a `v-<pr>.done`
+holding the current head, and a reviewer is skipped while
 `$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
 polling an idle fleet overnight is free in the only sense that matters; it is
 the runs that *launch* and *review* that cost, and `AUTOFLEET_MAX` is the number
