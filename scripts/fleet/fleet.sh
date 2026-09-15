@@ -336,17 +336,23 @@ fi
 # run nothing. "It reads transcripts off disk and opens no worktree" is how the
 # dispatch above describes itself. Nothing between here and there reads these
 # directories at source time. Found by the independent review.
+# BEFORE the mkdir below, for the same reason the mkdir is below the `cost`
+# dispatch: a command that is about to be refused should not leave three
+# directories under ~/.autofleet on a machine that has never run the fleet.
+# Found by the local review.
+#
+# A driver that is not THERE first: without one the probe below is
+# `command not found`, and `|| die` turned rc 127 into "the runner is not usable
+# here" -- true of a missing file and the wrong sentence to act on. lib.sh has
+# already named the file it looked for.
+fleet_require_runner
+
 mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep
 # reports the consequence instead of the cause. The driver has already said why
 # on stderr; this is the consequence.
-# A driver that is not THERE first: without one the call below is
-# `command not found`, and `|| die` turned rc 127 into "the runner is not usable
-# here" -- true of a missing file and the wrong sentence to act on. lib.sh has
-# already named the file it looked for.
-fleet_require_runner
 runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so there is nothing to dispatch with"
 
 # The runner's board is the status surface: `in-progress` while it builds,

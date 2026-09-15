@@ -1246,7 +1246,7 @@ case "${1:-}" in
     # shut -- and behind it sit the seven review and validation scripts, which
     # would otherwise have refused to answer a review comment for want of a
     # driver none of them uses. A refusal at source time takes all of them;
-    # `fleet_require_runner` takes only the five that reach for the runtime.
+    # `fleet_require_runner` takes only the four that call it.
     # Found by the local review.
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \

@@ -61,8 +61,9 @@
 #
 # A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
 # lib.sh sources it -- the file it looked for and the drivers that do ship --
-# and stops the five scripts that reach for the runtime. `evals/lint.sh` check
-# 4g goes red on it before an agent is ever opened.
+# and stops the four scripts that call `fleet_require_runner`: the dispatcher,
+# the setup hook, the board and the autostart watcher. `evals/lint.sh` check 4g
+# goes red on it before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=orca}"
 
 # ---------------------------------------------------------------- the review

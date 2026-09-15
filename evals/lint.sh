@@ -1486,26 +1486,38 @@ lib_code = code_only(lib)
 defined_in_lib = set(re.findall(r"^(runner_[a-z_]+)\(\)", lib_code, re.M))
 
 # A lib-defined `runner_*` counts as "not reaching for the runtime" ONLY if it
-# does not itself call one the driver provides. `runner_agent_terminal` is a
-# filter over the DRIVER's `runner_agent_terminals`, so a script whose only
+# does not itself reach, DIRECTLY OR THROUGH ANOTHER ONE. `runner_agent_terminal`
+# is a filter over the DRIVER's `runner_agent_terminals`, so a script whose only
 # reach is that wrapper does reach the driver, and without one gets rc 127 from
 # inside lib.sh. The first version of this check called every lib-defined name
 # safe -- which passed such a script unguarded and, worse, FAILED the build if
 # its author added the guard anyway, arguing for the removal of a correct one.
-# Found by the local review.
-provided = set()
-for name in defined_in_lib:
-    body = re.search(r"^%s\(\)\s*\{(.*?)^\}" % re.escape(name), lib_code, re.M | re.S)
-    calls = set(re.findall(r"\brunner_[a-z_]+", body.group(1))) if body else set()
-    if not (calls - defined_in_lib):
-        provided.add(name)
+#
+# TRANSITIVE, by shrinking to a fixpoint rather than looking one level down: a
+# lib `runner_a` calling a lib `runner_b` that calls the driver is a reach, and
+# the one-level version called it safe. That set is empty today -- lib.sh
+# defines exactly one of these and it reaches -- which is precisely why the
+# arithmetic has to be right before a second one is written. Named `lib_safe`
+# rather than `provided`, because check 4b above already binds `provided` in
+# this file to the whole set and two spellings of one word is a reader looking
+# at the wrong thing. Both found by the local review.
+lib_safe = set(defined_in_lib)
+while True:
+    body_of = {}
+    for name in lib_safe:
+        m = re.search(r"^%s\(\)\s*\{(.*?)^\}" % re.escape(name), lib_code, re.M | re.S)
+        body_of[name] = set(re.findall(r"\brunner_[a-z_]+", m.group(1))) if m else {"runner_unknown"}
+    shrunk = {n for n in lib_safe if not (body_of[n] - lib_safe)}
+    if shrunk == lib_safe:
+        break
+    lib_safe = shrunk
 
 bad, guarded = [], []
 for path in sorted(glob.glob("scripts/fleet/*.sh")):
     if path == "scripts/fleet/lib.sh":
         continue
     code = code_only(open(path).read())
-    reaches = [m for m in re.finditer(r"\brunner_[a-z_]+", code) if m.group(0) not in provided]
+    reaches = [m for m in re.finditer(r"\brunner_[a-z_]+", code) if m.group(0) not in lib_safe]
     if not reaches:
         # ...and the other direction: a guard in a script that needs none is a
         # refusal nobody asked for, and it is how `cost` nearly lost the one

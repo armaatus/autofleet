@@ -326,7 +326,7 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  [ "${FLEET_RUNNER_SAID:-0}" = 1 ] || {
+  [ "${FLEET_RUNNER_SAID:-}" = "$FLEET_RUNNER_DRIVER" ] || {
     echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
     echo "     looked for: $FLEET_RUNNER_DRIVER (no such file)"
     echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
@@ -337,7 +337,12 @@ else
   # command. Exported so it survives the exec; the driver path goes with it so
   # `fleet_require_runner` can still name the file in the process that did not
   # print the block. Found by the local review.
-  export FLEET_RUNNER_SAID=1 FLEET_RUNNER_DRIVER
+  #
+  # It carries WHICH driver was reported rather than a boolean, so a value
+  # exported from anywhere else cannot swallow the four lines the remedy lives
+  # in. Same hole FLEET_RUNNER_MISSING closes by being set on both arms. Found
+  # by the local review.
+  export FLEET_RUNNER_SAID="$FLEET_RUNNER_DRIVER" FLEET_RUNNER_DRIVER
   # SAID here, ACTED ON by `fleet_require_runner` below -- and this file neither
   # `return`s nor `exit`s on it. Three attempts, and each one was worse than the
   # last for a reason worth keeping:
@@ -358,8 +363,16 @@ else
   #   place. Found by the local review.
   #
   # So: say it once at source time, finish sourcing, and let the four scripts
-  # that actually reach for the runtime stop on it. `evals/lint.sh` check 4h
+  # that call `fleet_require_runner` stop on it -- the dispatcher, the setup
+  # hook, the board and the autostart watcher. A fifth NAMES a `runner_*` and is
+  # deliberately unguarded: `issue-command.sh` prints an agent's brief, which
+  # needs no runtime, and asks `runner_available` only behind an `&&` that rc
+  # 127 makes false. docs/RUNNERS.md carries the reason. `evals/lint.sh` check 4h
   # fails one that forgets to. armaatus/autofleet#13.
+  # ...and the scratch is cleared. These are the only lowercase globals this
+  # file would leave in a caller's shell, and every other global it sets is
+  # FLEET_*. Found by the local review.
+  unset fleet_runner_dir fleet_runner_ships fleet_runner_f
   FLEET_RUNNER_MISSING=1
 fi
 

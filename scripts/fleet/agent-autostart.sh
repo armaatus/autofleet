@@ -49,6 +49,17 @@ case "${1:-}" in
   *) echo "usage: $0 [--watch]" >&2; exit 2 ;;
 esac
 
+# ABOVE everything about the runner, because a person who turned this watcher
+# off is not asking about drivers. It used to sit below, which was harmless
+# while the first `runner_*` was also below it -- moving the guard up to precede
+# that call put a fatal refusal in front of the documented opt-out, so
+# AUTOFLEET_AGENT_AUTOSTART=0 exited 1 on a misconfigured repo instead of 0.
+# Found by the local review.
+if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
+  echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
+  exit 0
+fi
+
 # The driver's deadline, for this process only, ASKED FOR through the contract
 # rather than set by a variable this script happens to know the driver reads. A
 # watcher polls, so it wants a shorter one than the dispatcher's: waiting 30s for
@@ -88,10 +99,6 @@ release() {
 trap 'release' EXIT
 trap 'release; exit 0' TERM INT
 
-if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
-  echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
-  exit 0
-fi
 # A driver that is not THERE is fatal and was dealt with above; a runtime that
 # is not answering is not. The difference is the remedy: one is a name in
 # `.autofleet/config` nobody has written a file for, the other is an app to

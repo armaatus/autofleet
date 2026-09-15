@@ -136,21 +136,23 @@ orca_cli_resolve() {
     # them, which is the thing that just failed. A mktemp that fails is
     # instant and makes nothing, so the second call costs nothing and leaves
     # nothing behind. First line only -- this goes inside a three-line relay.
+    # A retry that SUCCEEDS is a transient failure -- a racing or briefly full
+    # TMPDIR -- and it has just handed back a usable temp file. CARRY ON with
+    # it. The first version of this deleted that file, returned 1, and printed
+    # "this machine could not make a temp file" followed by "the retry did not
+    # fail", a refusal contradicting its own headline; and because setup.sh is
+    # fatal, one TMPDIR race would have abandoned a worktree `launch` had
+    # already created. The wrong machine named confidently, inside the branch
+    # that exists to stop that. Found by the local review.
     local retry
     retry="$(mktemp 2>&1)" || true
-    if [ -e "$retry" ]; then
-      # It worked the second time, so the first failure was transient -- a full
-      # or racing TMPDIR rather than a machine that cannot make files. Say that
-      # instead of quoting an error there was none of, and REMOVE the file:
-      # leaking one temp file per probe is what the unconditional
-      # `>/dev/null` form did. Found by the local review.
-      rm -f "$retry"
-      ORCA_CLI_UNPROBED="nothing the second time -- the first call failed and the retry did not"
+    if [ -f "$retry" ]; then
+      probe_out="$retry"
     else
       ORCA_CLI_UNPROBED="${retry%%$'\n'*}"
       [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
+      return 1
     fi
-    return 1
   }
   # ON FD 3, not stdin. The probe below runs through `fleet_run_with_deadline`,
   # which redirects the command's stdout and stderr and nothing else -- so a
