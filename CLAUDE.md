@@ -84,20 +84,16 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
   failure is the only thing that makes the rule readable a year later. Match it.
 - A path that came from the project this was extracted from cites it as
   `armaatus/rommsync-nx#N`, so the trail survives the move.
-- **Silence stderr before the redirection that can fail, not after it.**
-  `read -r h n <"$f" 2>/dev/null` prints the open failure and *then* silences
-  the stream; `|| true` hides the status, not the diagnostic. Write
-  `2>/dev/null <"$f"`. `evals/late_stderr_silence.py` scans the payload's shell.
-- **Never pipe an assertion into `grep -q`** in a file with `pipefail`. `-q`
-  exits on the first match, the producer dies of EPIPE, the pipeline is 141, and
-  a check that held reports as failed -- on large input only, so it is green on
-  a Mac and red in CI. `evals/piped_quiet_grep.py` asserts the payload's *shell*
-  has none; the `run:` blocks in `.github/workflows/` are not scanned yet and
-  have one (#90).
-- **A comment never goes inside a `\` continuation.** The `\` joins the comment
-  line and the `#` comments out the rest of the command, which still parses --
-  `review-status.sh` ran `gh api` with no `--jq`, printed 100KB of JSON and exit
-  2. Put it above the command. `evals/comment_in_continuation.py` scans.
+- Three shell rules that all read fine at the call site, each with its own eval:
+  - **Silence stderr before the redirection that can fail.** `read -r h n <"$f"
+    2>/dev/null` prints the open failure and *then* silences it, and `|| true`
+    hides the status not the diagnostic. Write `2>/dev/null <"$f"`.
+  - **Never pipe an assertion into `grep -q`** under `pipefail`: `-q` exits on
+    the first match, the producer dies of EPIPE, the pipeline is 141, and a
+    check that HELD reports as failed -- on large input only, so green on a Mac
+    and red in CI. `.github/workflows/`'s `run:` blocks are unscanned (#90).
+  - **No comment inside a `\` continuation** -- the `\` joins it, the `#` eats
+    the rest of the command, and it still parses. Put it above the command.
 
 ## The tracker is the spec
 

@@ -137,11 +137,15 @@ on = [r for r in merge_gate.independent_reviews(pull, sys.argv[3])
 # DISMISSED had await saying it arrived and this refusing with "wait for it",
 # which is a loop, and the #114 drift in the direction that traps an agent.
 # The second is for the SENTENCE at the end -- how many of them could be
-# waiting on an answer -- and it reads the gate predicate `holds` rather than
-# respelling the states. NO APOSTROPHE anywhere in this block: it is a
+# waiting on an answer -- and it CALLS the gate predicate rather than
+# respelling it. It used to read `holds` and then respell the other half,
+# `!= "APPROVED"`, under a comment claiming it respelt nothing: that is half of
+# `awaiting_answer`, and the half it left out has since grown three cases the
+# sentence would have been wrong about. One spelling, in the file that decides.
+# NO APOSTROPHE anywhere in this block: it is a
 # single-quoted shell string, where nothing escapes one. Found by the independent review.
 print(len(on))
-print(sum(1 for r in on if merge_gate.holds(r) and r.get("state") != "APPROVED"))'\
+print(len(merge_gate.awaiting_answer(on)))'\
     "$payload" "$head")"; then
   echo "could not tell whether PR #$pr has a review on ${head:0:8}: the payload did not" >&2
   echo "load, or .github/scripts/merge_gate.py -- which decides which reviews count --" >&2

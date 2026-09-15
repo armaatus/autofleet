@@ -672,6 +672,57 @@ def holds(review):
     return review.get("state") in HOLDING_STATES
 
 
+def latest_per_author(substantive):
+    """The newest holding record per account, oldest-first order assumed.
+
+    `independent_reviews()` returns oldest first and every filter over it
+    preserves that, so the last write per author wins -- which is GitHub's own
+    rule for whose verdict is standing.
+    """
+    out = {}
+    for r in substantive:
+        if holds(r):
+            out[((r.get("author") or {}).get("login")) or "?"] = r
+    return out
+
+
+def awaiting_answer(substantive):
+    """The reviews on one head that could be WAITING on an answer from the author.
+
+    Module-level, and taking the whole list, because it is not the gate's alone:
+    `scripts/fleet/answer-review.sh` counts the same thing for the sentence it
+    prints after posting. That file used to spell it `holds(r) and r["state"] !=
+    "APPROVED"` under a comment saying it read the gate's predicate rather than
+    respelling the states -- which read `holds` and then respelt the other half,
+    so the comment claimed more than the code did and the two could drift on the
+    three cases below. This branch has already lost the state tuple twice in
+    exactly that way (#114's shape), which is why it is one spelling now. Found
+    by the independent review.
+
+    EXACTLY WHAT THE FINDINGS LOOP CAN REPORT, because the count feeds a sentence
+    about it. Every looser definition has been wrong once: an APPROVED asks for
+    nothing; a review superseded by that author's own later APPROVED is signed
+    off by somebody who saw it; a standing CHANGES_REQUESTED is routed to
+    re-review and an answer never clears it, so counting it made the closing note
+    promise a remedy the same refusal list denies; and a review declaring zero
+    findings owes nothing at all. Found by the independent review, twice.
+    """
+    latest = latest_per_author(substantive)
+
+    def owed(r):
+        who = ((r.get("author") or {}).get("login")) or "?"
+        if r.get("state") == "APPROVED":
+            return False
+        if latest.get(who) is not r \
+                and (latest.get(who) or {}).get("state") == "APPROVED":
+            return False
+        if r.get("state") == "CHANGES_REQUESTED" and latest.get(who) is r:
+            return False
+        return declared_findings(r) != 0
+
+    return [r for r in substantive if holds(r) and owed(r)]
+
+
 def review_name(review):
     """How a message names ONE review of possibly several on the same head.
 
@@ -698,11 +749,14 @@ def abandoned_findings(pull_request, head_sha):
     findings, and reads exactly like an ordinary first round. The branch moved
     on with them unread.
 
-    So the refusal names them. It does not add a condition: every caller of this
-    is already inside a branch that holds the PR, and nothing here can be
-    satisfied except by answering a review whose head is gone -- which
-    `answered()` still accepts, because it matches the marker against the head
-    the review was ON.
+    So the refusal names them. IT IS ITS OWN CONDITION, and the first version
+    was not: the caller sat inside `elif not on_head:`, the one arm that already
+    refuses, so it added detail to PRs that were blocked anyway and said nothing
+    on the two arms a PR actually merges through. The findings it exists to name
+    were visible only where they could change nothing. It is now called once,
+    after all three arms, and what it can be satisfied by is unchanged --
+    answering a review whose head is gone, which `answered()` still accepts,
+    because it matches the marker against the head the review was ON.
 
     NOTHING HAS READ THEM is the whole predicate, and the second half of it is
     the validation. The gate's own instruction for an Important finding is "push
@@ -998,25 +1052,6 @@ def evaluate(head_sha, pull_request, changed_files):
             f"({head_sha[:8]}). Pushing a fix invalidates the previous one -- "
             "re-request review. " + why
         )
-        # ...AND WHAT THE PUSH LEFT BEHIND. The line above is true of a first
-        # round and of a pull request that just walked away from ten findings,
-        # and until now it read the same in both. armaatus/autofleet#64.
-        for review, oid, found in abandoned_findings(pull_request, head_sha):
-            what = (f"reported {found} finding(s)" if found is not None else
-                    "did not say what it found -- no "
-                    "`<!-- review-findings: N -->` trailer, so it is not read "
-                    "as clean --")
-            problems.append(
-                f"    {review_name(review)} {what} on "
-                f"{oid[:8]}, a head this branch has left behind. Nothing has "
-                "answered or validated them, and no review of them is coming -- "
-                "the reader they still have is the VALIDATION of this head, "
-                "which judges whether a review's findings were addressed. Say "
-                "in the PR what was done about them, so it has something to "
-                "judge against. `answer-review.sh` cannot clear this line: it "
-                "writes its marker for the head it is run against, and that is "
-                "no longer this review's."
-            )
     else:
         # From `substantive`, NOT from `on_head`. The same reviewer filing a real
         # CHANGES_REQUESTED and then, later on the same head, an empty COMMENTED
@@ -1031,10 +1066,7 @@ def evaluate(head_sha, pull_request, changed_files):
         # independent_reviews() already returns and `substantive` preserves,
         # being a filter over it. Sorting again here would be a second pass over
         # the same data for the same order.
-        latest = {}
-        for r in substantive:
-            if holds(r):
-                latest[(r.get("author") or {}).get("login") or "?"] = r
+        latest = latest_per_author(substantive)
         blocking = sorted(w for w, r in latest.items()
                           if r.get("state") == "CHANGES_REQUESTED")
         if blocking:
@@ -1078,28 +1110,7 @@ def evaluate(head_sha, pull_request, changed_files):
         # `substantive` down to `holding`, which excludes DISMISSED and PENDING
         # and leaves APPROVED in, so the comment describing the fix described
         # something the code did not do. Found by the independent review.
-        def owed(r):
-            """Could this review be waiting on an answer from the author?
-
-            EXACTLY WHAT THE LOOP BELOW CAN REPORT, because the count feeds a
-            sentence about it. Every looser definition has been wrong once: an
-            APPROVED asks for nothing; a standing CHANGES_REQUESTED is routed to
-            re-review two conditions above and an answer never clears it, so
-            counting it made the closing note promise a remedy the same refusal
-            list denies; and a review declaring zero findings owes nothing at
-            all. Found by the independent review, twice.
-            """
-            who_r = ((r.get("author") or {}).get("login")) or "?"
-            if r.get("state") == "APPROVED":
-                return False
-            if latest.get(who_r) is not r \
-                    and (latest.get(who_r) or {}).get("state") == "APPROVED":
-                return False
-            if r.get("state") == "CHANGES_REQUESTED" and latest.get(who_r) is r:
-                return False
-            return declared_findings(r) != 0
-
-        waiting = [r for r in holding if owed(r)]
+        waiting = awaiting_answer(substantive)
         # HOW MANY RECORDS ON THIS HEAD CARRY EACH ACCOUNT'S NAME. What the
         # messages below have to tell apart is two reviews "the review from
         # claude[bot]" names equally -- which is what `local` mode produces,
@@ -1274,6 +1285,48 @@ def evaluate(head_sha, pull_request, changed_files):
                 "them answers them all; one written between two answers only "
                 "the earlier.)"
             )
+
+    # WHAT THE PUSH LEFT BEHIND, on EVERY path above and not just the one where
+    # the current head has no review.
+    #
+    # It lived inside `elif not on_head:`, which is the one arm that already
+    # refuses: there it could only ever add detail to a PR that was blocked
+    # anyway, and on the two arms that let a PR through -- a validated head, and
+    # a head carrying its own review -- the findings it exists to name were
+    # invisible. Those are the merging paths, so the report never once fired on
+    # a pull request it could have saved. Worse, the shape it was written for
+    # reaches the `else` arm: two reviews on one head, the author answers the
+    # later one, the answering commit moves the head, the next reviewer reviews
+    # THAT head -- and the first review's findings are abandoned under a PR that
+    # now has a perfectly good review of its own. That is armaatus/autofleet#64
+    # in the function written to catch it, reported by the independent review.
+    #
+    # The window is `abandoned_findings`'s own, and unchanged: findings written,
+    # the head moved out from under them, no answer, and no validation since. So
+    # on the `verdict == "pass"` arm this stays silent whenever the validation
+    # read them, which is the ordinary case, and speaks only where it did not.
+    #
+    # NO LEADING INDENT ANY MORE. The four spaces made it a detail line under
+    # "no independent review has been submitted against the current head",
+    # which was the only line it could ever follow. Hoisted, it is frequently
+    # the FIRST thing in the list -- and an indented first line reads as the
+    # continuation of a refusal that is not there.
+    for review, oid, found in abandoned_findings(pull_request, head_sha):
+        what = (f"reported {found} finding(s)" if found is not None else
+                "did not say what it found -- no "
+                "`<!-- review-findings: N -->` trailer, so it is not read "
+                "as clean --")
+        problems.append(
+            f"{review_name(review)} {what} on "
+            f"{oid[:8]}, a head this branch has left behind. Nothing has "
+            "answered or validated them, and no review of them is coming -- "
+            "the reader they still have is the VALIDATION of this head, "
+            "which judges whether a review's findings were addressed. Say "
+            "in the PR what was done about them, so it has something to "
+            "judge against. `answer-review.sh` cannot clear this line: it "
+            "writes its marker for the head it is run against, and that is "
+            "no longer this review's."
+        )
 
     if not thread_list_is_complete(pull_request):
         problems.append(
@@ -2528,7 +2581,18 @@ SELFTEST = [
         ["src/app.c"],
         False,
         "github",
-        ("2026-09-11T07:27:00Z", "reports 10 finding(s)"),
+        # ...AND THE CLOSING NOTE, asserted positively and by its count. It is
+        # the only line in the file that tells an author a SECOND review exists
+        # at all, and so the entire remedy for the confusion #64 produced on
+        # PR #1 -- and the only assertion touching it was the negative one on
+        # the approval row, so deleting the `if` left the selftest and
+        # `evals/lint.sh` green. Two reviews, both owed an answer, so the count
+        # is 2: a `waiting` filter that let the approval or a zero-findings
+        # review back in would print 3 here and fail this row rather than
+        # reaching a live PR. Found by the independent review.
+        ("2026-09-11T07:27:00Z", "reports 10 finding(s)",
+         "2 independent reviews were submitted against abc123",
+         "One answer written after the LAST of them answers them all"),
     ),
     (
         # ...and the other direction, which is what stops this from being a
@@ -2855,6 +2919,45 @@ SELFTEST = [
         True,
         "github",
         "!left behind",
+    ),
+    (
+        # ...AND THE HEAD HAVING ITS OWN REVIEW DOES NOT. The exact sequence
+        # #64's Scope describes, and the one the report could not see: two
+        # reviews on `aaa111`, the author answers the later one, the answering
+        # commit moves the head to `bbb222`, and the next reviewer reviews THAT
+        # head. The first review's ten findings are now abandoned under a pull
+        # request carrying a perfectly good review of its own.
+        #
+        # The report used to live inside `elif not on_head:`, so this PR -- which
+        # takes the `else` arm -- heard nothing about them. That arm is a MERGING
+        # path once the on-head review is answered, which is what makes this the
+        # silent direction rather than a missing detail line. Hoisting the loop
+        # out of the arm is the fix; without it this row is green on "!left
+        # behind" and the ten findings are gone. Asked for by the independent
+        # review.
+        "findings abandoned under a head that has its own review are reported",
+        "bbb222",
+        {
+            "author": {"login": "armaatus"},
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T07:13:00Z",
+                 "commit": {"oid": "aaa111"}, "author": {"login": "claude[bot]"},
+                 "body": "Nit: the retry loop's bound is a magic number.\n"
+                         "<!-- review-important: 0 -->\n"
+                         "<!-- review-findings: 10 -->"},
+                {"state": "COMMENTED", "submittedAt": "2026-09-11T08:00:00Z",
+                 "commit": {"oid": "bbb222"}, "author": {"login": "claude[bot]"},
+                 "body": "A real review body, long enough to be worth reading and "
+                         "to clear MIN_REVIEW_BODY.\n"
+                         "<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        ["src/app.c"],
+        False,
+        "github",
+        ("left behind", "aaa111", "reported 10 finding(s)"),
     ),
     (
         # AN APPROVAL IS NOT A SECOND REVIEW WAITING. One COMMENTED review with

@@ -2501,8 +2501,20 @@ for p in prs:
       # by the independent review.
       say "PR #$pr: could not write $marker, so nothing here can stop a second"
       say "  reviewer starting on this head. Check that directory is writable."
+    elif [ -z "${lockpid:-}" ]; then
+      # EMPTY IS NOT SOMEBODY ELSE'S PID, and the `else` below claimed it was.
+      # `validate.sh`'s exit 8 -- "this head wants no validation" -- is two API
+      # calls, and `review.sh` has a fast path of its own: the child can claim,
+      # decide, and `fleet_lock_release` before the parent reaches this read. The
+      # marker is then gone, `lockpid` is empty, and the log said "a reviewer is
+      # already in flight; the one just spawned stands down" about a child that
+      # ran to completion perfectly normally. A false line in the one log a
+      # person reads to find out what the fleet did -- the third case the comment
+      # above does not enumerate. Found by the independent review.
+      say "PR #$pr: the reviewer (pid $rpid) finished or stood down before this"
+      say "  poll could record it; its own exit is what says which"
     else
-      say "PR #$pr: a reviewer is already in flight; the one just spawned stands down"
+      say "PR #$pr: a reviewer is already in flight (pid $lockpid); the one just spawned stands down"
     fi
   done
 
