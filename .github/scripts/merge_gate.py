@@ -176,9 +176,11 @@ REVIEW_MODES = ("github", "local")
 HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 
 # The same rule for the project-owned half, and by exact name rather than by
-# prefix. `.autofleet/` holds the two files that decide what the rules ARE --
-# `guard.json` is the whole project half of `guard.py`, and `config` carries
-# AUTOFLEET_REVIEW_MODE -- next to `setup.sh` and `teardown.sh`, which are
+# prefix. `.autofleet/` holds the three files that decide what the rules ARE --
+# `guard.json` is the whole project half of `guard.py`, `config` carries
+# AUTOFLEET_REVIEW_MODE, and `review.md` is the host's own correctness rules,
+# which REVIEW.md declares "part of this policy wherever that file exists" and
+# the reviewer reads second. Next to them are `setup.sh` and `teardown.sh`,
 # ordinary project code an agent is meant to change. Taking the directory
 # wholesale would put a person in the loop of routine work, and a rule that
 # costs that gets removed rather than obeyed.
@@ -189,8 +191,13 @@ HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 # 3's "a guard that silently stops guarding". And `review_mode()` reads the
 # config from the BASE ref on purpose, which correctly judges the PR that
 # weakens the mode under the old rule but leaves every LATER PR judged by the
-# weaker one with nobody having looked at the switch. armaatus/autofleet#38.
-HUMAN_ONLY_FILES = (".autofleet/guard.json", ".autofleet/config")
+# weaker one with nobody having looked at the switch. And `review.md` is the
+# policy that JUDGES the pull request: an agent that can weaken it and merge
+# that change itself is #38's threat model one file over. Found by the local
+# self-review. armaatus/autofleet#38.
+HUMAN_ONLY_FILES = (
+    ".autofleet/guard.json", ".autofleet/config", ".autofleet/review.md",
+)
 
 
 def human_only(changed_files):
@@ -1477,6 +1484,25 @@ SELFTEST = [
             "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
         },
         [".autofleet/config"],
+        False,
+    ),
+    (
+        # ...nor the host's half of the review policy. REVIEW.md: the rules in
+        # `.autofleet/review.md` "are part of this policy wherever that file
+        # exists", and `reviewer.md` reads it second -- so a PR weakening it is
+        # a PR rewriting the standard it is about to be judged against.
+        "...nor the host's own correctness rules",
+        "abc123",
+        {
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review",
+            "reviews": {"nodes": [
+                {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
+                 "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"}, "body": "A real review body, long enough to be worth reading and to clear MIN_REVIEW_BODY."
+                 "\n<!-- review-findings: 0 -->"},
+            ]},
+            "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+        },
+        [".autofleet/review.md"],
         False,
     ),
     (

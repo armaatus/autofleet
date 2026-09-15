@@ -84,10 +84,12 @@ jobs:
       #
       # Which still left the SWITCH itself merging unwatched: judged correctly
       # under the old mode, and every later PR under the new one, with no person
-      # in the loop for the change. So `.autofleet/config` and
-      # `.autofleet/guard.json` are human-merge-only too (#38) -- by exact name,
-      # because `.autofleet/setup.sh` and `teardown.sh` beside them are ordinary
-      # project code.
+      # in the loop for the change. So `.autofleet/config`,
+      # `.autofleet/guard.json` and `.autofleet/review.md` -- the host's own
+      # correctness rules, which REVIEW.md makes part of the policy judging this
+      # PR -- are human-merge-only too (#38), by exact name, because
+      # `.autofleet/setup.sh` and `teardown.sh` beside them are ordinary project
+      # code.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -118,7 +120,15 @@ jobs:
         run: |
           set -euo pipefail
           owner="${NWO%%/*}"; name="${NWO##*/}"
-          gh api --paginate "repos/$NWO/pulls/$PR/files" --jq '.[].filename' >files.txt
+          # `previous_filename` TOO, so a RENAME cannot walk a file out of the
+          # protected set. The API reports a moved file under its new path only;
+          # `git mv .autofleet/guard.json .autofleet/guard.json.bak` therefore
+          # looked like an ordinary new file to merge_gate, while guard.py reads
+          # an absent config as `{}` and enforces nothing. Exact-name matching
+          # makes that a one-command escape; the prefix half has the same hole
+          # (move a file out of `.claude/`). Found by the local self-review.
+          gh api --paginate "repos/$NWO/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' >files.txt
           # The query itself is in .github/scripts/pr_payload.sh, next to the
           # script that judges what it returns and checked out with it. It PAGES
           # the review threads: `reviewThreads(first:100)` inline here was the

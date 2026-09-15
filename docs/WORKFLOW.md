@@ -906,11 +906,13 @@ is older than this condition; taking it away here would wedge the PRs it exists
 to unwedge.
 
 Exit 4 is the same verdict on a PR that touches `.claude/`, `.github/workflows/`,
-`.github/scripts/`, `.autofleet/guard.json` or `.autofleet/config`: nothing left
-to fix, and a person merges it. The last two are the project-owned half of the
-same layer — `guard.json` *is* `guard.py`'s project rules, and `config` carries
-`AUTOFLEET_REVIEW_MODE` — while `.autofleet/setup.sh` and `teardown.sh` beside
-them are ordinary project code the fleet merges for itself. Exit 1 prints
+`.github/scripts/`, `.autofleet/guard.json`, `.autofleet/config` or
+`.autofleet/review.md`: nothing left to fix, and a person merges it. The last
+three are the project-owned half of the same layer — `guard.json` *is*
+`guard.py`'s project rules, `config` carries `AUTOFLEET_REVIEW_MODE`, and
+`review.md` is the host's own correctness rules, which the reviewer applies —
+while `.autofleet/setup.sh` and `teardown.sh` beside them are ordinary project
+code the fleet merges for itself. Exit 1 prints
 the reasons, and three of them are not waiting on a review — GitHub answering
 `BLOCKED` while every check is green is [#84](https://github.com/armaatus/rommsync-nx/issues/84),
 a stale run still counted by branch protection, and the script prints the

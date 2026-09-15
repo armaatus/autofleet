@@ -12,12 +12,13 @@ project detail in there is the thing that makes the next repo fork this one
 | `.autofleet/teardown.sh` | `scripts/fleet/archive.sh`, once per removal | no |
 | `.autofleet/guard.json` | `.claude/hooks/guard.py`, on every tool call | no |
 
-Two of those four are **human-merge-only**: `merge-gate` refuses to let a PR
-touching `.autofleet/guard.json` or `.autofleet/config` merge itself, the same
-way it refuses one touching `.claude/` or `.github/workflows/`. Those two decide
-what the rules *are* — the guard's project rules, and `AUTOFLEET_REVIEW_MODE` —
-so a person merges the change. `setup.sh` and `teardown.sh` are ordinary project
-code and merge like anything else.
+Three files here are **human-merge-only**: `merge-gate` refuses to let a PR
+touching `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md`
+merge itself, the same way it refuses one touching `.claude/` or
+`.github/workflows/`. Those three decide what the rules *are* — the guard's
+project rules, `AUTOFLEET_REVIEW_MODE`, and the correctness rules the reviewer
+applies — so a person merges the change. `setup.sh` and `teardown.sh` are
+ordinary project code and merge like anything else.
 
 ## `.autofleet/config`
 
