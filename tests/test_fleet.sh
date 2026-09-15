@@ -2006,6 +2006,62 @@ DRIVER
       && fail "a second dispatcher was refused after a drain that ended with a parked worktree: $out"
     echo "ok: ...and a second dispatcher is not refused afterwards"
     ;;
+  parked_since_swept_at_start)
+    make_fixture ok
+    # `parked-since-$n` is the survive-a-pass marker: a keep-marker counts only
+    # once it has been seen on two consecutive passes, which is what stops one
+    # transient `blocked` label from ending a drain with an agent still writing.
+    # It lives in $STATE_DIR rather than the poll cache, and nothing at startup
+    # cleared it -- `release_dispatcher_files` is on the EXIT trap, so a
+    # `kill -9`'d dispatcher leaves its markers behind and the NEXT dispatcher
+    # counts those worktrees as parked on its FIRST pass. That is precisely the
+    # case the rule exists to rule out, arriving through the rule's own
+    # bookkeeping. It self-heals from the second poll onward, and the window is
+    # the one pass where a wrong `parked` signs the dispatcher off on top of an
+    # agent. armaatus/autofleet#71.
+    mkdir -p "$AUTOFLEET_DIR"
+    : >"$AUTOFLEET_DIR/parked-since-42"
+    : >"$AUTOFLEET_DIR/parked-since-99"
+    # An empty backlog, so the run reaches its own exit rather than launching.
+    echo '[]' >"$GH_ISSUES"
+    in_fleet cmd_run --auto >"$WORK/run.log" 2>&1
+    [ -e "$AUTOFLEET_DIR/parked-since-42" ] \
+      && fail "a marker left by a dead dispatcher survived into this one, which counts that worktree as parked on its first pass: $(cat "$WORK/run.log")"
+    [ -e "$AUTOFLEET_DIR/parked-since-99" ] \
+      && fail "the sweep cleared one marker and not the rest"
+    echo "ok: a dispatcher starting clears the survive-a-pass markers a dead one left"
+    ;;
+
+  queued_blind_keeps_polling)
+    make_fixture ok
+    # `count_startable`'s DOCUMENTED NON-ZERO, driven through the run loop.
+    # `queued="$(count_startable)"` used to discard it: `queued` came back empty,
+    # `[ "" -eq 0 ]` wrote `integer expression expected` to stderr every poll for
+    # as long as the outage lasted -- into the log a person scans in the morning,
+    # at exactly the moment it most needs to be readable -- and the fix shipped
+    # with nothing driving it. `budget_ready_list_blind` asserts the non-zero at
+    # the FUNCTION; the behaviour it buys is one level up, in the loop that
+    # decides whether the backlog is finished. armaatus/autofleet#71.
+    #
+    # `FAIL` makes `ready_issues` fail, which is one of count_startable's three
+    # `|| return 1`s -- and the one an outage actually produces.
+    printf 'FAIL\n' >"$GH_ISSUES"
+    start_dispatcher --auto
+    wait_for_log "fleet up"
+    # Three passes at a 1s poll, which is enough for the empty-queue exit to
+    # have fired several times if it were going to.
+    sleep 3
+    grep -q "integer expression expected" "$WORK/run.log" \
+      && fail "a gh outage wrote a bash error into the dispatcher's log once a poll: $(cat "$WORK/run.log")"
+    echo "ok: an unreadable backlog does not put a shell error in the log every poll"
+    grep -q "fleet down" "$WORK/run.log" \
+      && fail "a backlog that could not be READ was taken for a backlog that is EMPTY, and the run signed off: $(cat "$WORK/run.log")"
+    kill -0 "$HELD_PID" 2>/dev/null \
+      || fail "the dispatcher exited during a gh outage: $(cat "$WORK/run.log")"
+    echo "ok: ...and the run keeps polling rather than deciding the backlog is finished"
+    stop_dispatcher
+    ;;
+
   status_parked_beside_working)
     make_fixture ok
     # THE SEPARATION, which is the state a person actually meets: a drain that
@@ -2146,6 +2202,31 @@ print(json.dumps({"result": {"worktrees": [
       || fail "a runner that would not say what its agents are doing left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
     echo "ok: ...and says so rather than stalling in silence"
 
+    # ...AND ON THE SCREEN, which is the channel #37 asks for. This function
+    # returns its count on STDOUT and the poll reads it through
+    # `parked="$(count_parked_owned)"`, so a `say` here would land inside
+    # `$parked` -- which is why the callsite is `>/dev/null` and why the one
+    # message the issue asks for reached `fleet.log` alone, never the terminal
+    # running `fleet.sh run --auto`, while every other line in the poll body
+    # appeared on screen. The phase asserting it against the log was green on the
+    # wrong channel. armaatus/autofleet#71.
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    : >"$AUTOFLEET_DIR/held-42"
+    printf 'not json' >"$ORCA_PS"
+    # `2>&1 >/dev/null` in that ORDER: stderr onto the capture, then stdout away.
+    onscreen="$(in_fleet count_parked_owned 2>&1 >/dev/null)"
+    grep -q "could not read the agent states" <<<"$onscreen" \
+      || fail "the warning about an unbounded drain goes to the log and nowhere a person watching the dispatcher can see it: [$onscreen]"
+    echo "ok: ...on the operator's screen and not only in the log"
+    # ...and STDOUT still carries nothing but the count, or the poll's next line
+    # is arithmetic on a sentence.
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    n="$(in_fleet count_parked_owned 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) fail "the count the poll reads is not a number: [$n]" ;; esac
+    echo "ok: ...and the count the poll reads is still a bare number"
+    agent_state idle
+    rm -f "$AUTOFLEET_DIR/held-42" "$AUTOFLEET_DIR/ps-blind-42"
+
     # MERGE-HELD AND MERGE-BLIND ARE GATED TOO. They were reached only when a
     # `held-`/`git-blind-` marker was also on disk, so they were counted with no
     # agent check -- and `reap_merged`'s own comment says why that tree is dirty:
@@ -2210,6 +2291,31 @@ print(json.dumps({"result": {"worktrees": [
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever:: $out"
     echo "ok: ...and all five keep-markers count"
+
+    # ...AND THE TWO BLIND MARKERS ARE GATED ON A WORKING AGENT TOO, which
+    # nothing armed. `held-` and `merge-held-` were pinned with `agent_state
+    # working`; `git-blind-` and `merge-blind-` never were, so the gate they
+    # shared could have stopped applying to them and the suite would have said
+    # nothing. It could, and it nearly did: the gate matched the human sentence
+    # `why_parked` prints, so rewording the blind line took the check off BOTH of
+    # these at once. `merge-blind-` is the marker `reap_merged` writes in the
+    # window its own comment says an agent is making review fixes.
+    # armaatus/autofleet#71.
+    for marker in git-blind merge-blind; do
+      rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+            "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+            "$AUTOFLEET_DIR"/stuck-*
+      agent_state working
+      : >"$AUTOFLEET_DIR/$marker-42"
+      in_fleet count_parked_owned >/dev/null 2>&1
+      [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+        || fail "$marker-42 counted as waiting for a person while its agent is WORKING, and the dispatcher would sign off on top of it"
+      agent_state idle
+      in_fleet count_parked_owned >/dev/null 2>&1
+      [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+        || fail "$marker-42 with an idle agent did not count, so the drain waits forever"
+    done
+    echo "ok: ...and both blind markers are gated on the agent, in each direction"
 
     # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
     # worktree as waiting for someone and then never naming it is worse than not
@@ -2333,6 +2439,21 @@ print(json.dumps({"result": {"worktrees": [
       || fail "it ended without naming what is parked: $(cat "$WORK/run.log")"
     grep -q "#42" "$WORK/run.log" || fail "it did not name which: $(cat "$WORK/run.log")"
     echo "ok: ...and names it on the way out"
+    # ...AS ITS LAST LINES, which is what #37's third acceptance bullet asks and
+    # what it got one line short of. The naming block ran inside the loop and
+    # `fleet down: $reason` printed after it -- and `$reason` carries a COUNT
+    # ("and 1 worktree(s) are waiting for you"), not which issue and not the
+    # command that releases it. A reader stops at the last line. Nothing pinned
+    # the ordering, because this phase greps the whole log.
+    # armaatus/autofleet#71.
+    down="$(grep -n "fleet down" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    named="$(grep -n -- "#42 --" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    freed="$(grep -n "worktree remove --force" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    [ -n "$down" ] && [ -n "$named" ] && [ -n "$freed" ] \
+      || fail "the farewell, the name or the release command is missing: $(cat "$WORK/run.log")"
+    [ "$named" -gt "$down" ] && [ "$freed" -gt "$named" ] \
+      || fail "\`fleet down\` is the last line a person reads, and it carries a count rather than which issue or how to free it (down=$down named=$named freed=$freed): $(cat "$WORK/run.log")"
+    echo "ok: ...as its LAST lines, naming the issue and the command that frees it"
     [ -d "$WORK/wt" ] \
       || fail "it released the parked worktree, which is what parking exists to prevent"
     echo "ok: ...and leaves it alone"

@@ -270,6 +270,19 @@ ANSWER_SEP="$(printf '\t')"
 # the note above the dispatch at the end of this file. armaatus/autofleet#35.
 
 say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
+# THE SAME LINE, ON STDERR, for the one caller whose stdout is captured.
+#
+# `count_parked_owned` returns its count on stdout and the poll reads it through
+# a command substitution, so a `say` underneath it lands inside `$parked` and
+# breaks the arithmetic on the next line -- which is why that callsite is
+# `parked_for_person "$n" say >/dev/null`. The three-line "could not read the
+# agent states ... a drain will not end while that stays true" warning therefore
+# reached `fleet.log` only, and never the terminal running `fleet.sh run --auto`,
+# while every other `say` in the poll body appears on screen. That is #37's
+# opening complaint -- "nothing says the drain has become unbounded" -- answered
+# on the wrong channel. `$( )` captures stdout and not stderr, so this reaches
+# both the log and the operator. armaatus/autofleet#71.
+say_err() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
 # The two cases you would otherwise not learn about until morning: the fleet
@@ -790,33 +803,48 @@ parked_for_person() {
   # dispatcher having already ASKED and been told no, and gating it on a stale
   # marker beside it is how the drain hung two rounds ago. Found by the
   # independent review.
-  case "$reason" in
-    *"holds uncommitted work"|*"git could not say what it holds")
-      if ! listing="$(runner_agent_states)"; then
-        # SAID, once per pass. Taking the safe direction silently is #37's own
-        # complaint -- "nothing says the drain has become unbounded". One
-        # unreadable `worktree ps` is a hiccup; a persistent one means this
-        # worktree never counts, `owned` never reaches 0 and the drain never
-        # ends, and the operator has no way to know why. `live_worktrees`
-        # already says the equivalent for its own call. Found by the independent
-        # review.
-        # The `*-blind-` family idiom: one marker per issue, said once, and
-        # swept with the rest when the issue is released.
-        if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
-          : >"$STATE_DIR/ps-blind-$n"
-          say "  could not read the agent states, so whether #$n is still being"
-          say "  worked in cannot be answered -- it is NOT counted as waiting for"
-          say "  you, and a drain will not end while that stays true"
-        fi
-        return 1
+  #
+  # KEYED ON THE MARKER, not on the sentence. This `case` used to match `$reason`
+  # -- the human line `why_parked` prints -- against `*"holds uncommitted work"`
+  # and `*"git could not say what it holds"`. Reword either line and the gate
+  # silently stops applying: the worktree counts as waiting for a person while
+  # its agent is writing, `owned` drops to 0 and the dispatcher signs off
+  # mid-work. Worse, only two of the four gated reasons were pinned with a
+  # working agent, so rewording the blind sentence took the check off
+  # `git-blind-` and `merge-blind-` with the suite still green.
+  #
+  # `why_parked` returns the FIRST marker it finds and `stuck-` is first, so
+  # "the reason is not a refused removal" is exactly "no `stuck-` marker" -- one
+  # test, and it states the rule the paragraph above is about rather than
+  # enumerating the prose that happens to express it. armaatus/autofleet#71.
+  if [ ! -e "$STATE_DIR/stuck-$n" ]; then
+    if ! listing="$(runner_agent_states)"; then
+      # SAID, once per pass. Taking the safe direction silently is #37's own
+      # complaint -- "nothing says the drain has become unbounded". One
+      # unreadable `worktree ps` is a hiccup; a persistent one means this
+      # worktree never counts, `owned` never reaches 0 and the drain never
+      # ends, and the operator has no way to know why. `live_worktrees`
+      # already says the equivalent for its own call. Found by the independent
+      # review.
+      # The `*-blind-` family idiom: one marker per issue, said once, and
+      # swept with the rest when the issue is released.
+      # `say_err`, NOT `say`: this function's stdout is inside the poll's
+      # `$(count_parked_owned)` substitution. See say_err.
+      if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
+        : >"$STATE_DIR/ps-blind-$n"
+        say_err "  could not read the agent states, so whether #$n is still being"
+        say_err "  worked in cannot be answered -- it is NOT counted as waiting for"
+        say_err "  you, and a drain will not end while that stays true"
       fi
-      # Releasing the latch is the milder half of the same write -- it makes the
-      # dispatcher re-say a line it already said -- but it is still a write, so
-      # it is the poll's to make too.
-      if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
-      state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
-      case "$state" in working) return 1 ;; esac ;;
-  esac
+      return 1
+    fi
+    # Releasing the latch is the milder half of the same write -- it makes the
+    # dispatcher re-say a line it already said -- but it is still a write, so
+    # it is the poll's to make too.
+    if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
+    state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
+    case "$state" in working) return 1 ;; esac
+  fi
   printf '%s\n' "$reason"
 }
 
@@ -4563,6 +4591,16 @@ while that one is up."
   # review.
   rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID" "$PR_PAGE_FULL_SAID" \
         "$READY_UNREADABLE_SAID"
+  # ...and the survive-a-pass markers. `parked-since-$n` lives in $STATE_DIR
+  # rather than the poll cache, and the only thing that removes it is the pass
+  # that finds the worktree no longer parked -- `release_dispatcher_files` is on
+  # the EXIT trap and does not touch it. So after a `kill -9` a marker left by
+  # the dead dispatcher made the next one count that worktree as parked on its
+  # FIRST pass, which is the transient-marker case the survive-a-pass rule exists
+  # to rule out: it self-heals from the next poll onward, and the window is
+  # exactly the pass where a wrong `parked` ends a drain with an agent still
+  # writing. armaatus/autofleet#71.
+  rm -f "$STATE_DIR"/parked-since-*
 
   record_dispatcher
   echo $$ >"$PIDFILE"
@@ -4888,16 +4926,6 @@ while that one is up."
     [ "${AUTOFLEET_LOG_PASSES:-off}" = on ] \
       && say "pass complete: $owned owned, $queued startable"
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
-      if [ "${parked:-0}" -gt 0 ]; then
-        # Named on the way out, every time, because a worktree nobody mentions
-        # is one nobody releases.
-        say "$parked worktree(s) are waiting for you rather than for an agent:"
-        for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-          why="$(why_parked "$n")" || continue
-          say "  #$n -- $why"
-          say "    $(how_to_release "$n" "$(owned_path "$n")")"
-        done
-      fi
       if $drain_mode; then
         # NOT "everything in flight has landed" when something has not: the
         # parked worktrees named just above are exactly the work that did not
@@ -4924,6 +4952,23 @@ while that one is up."
   done
 
   say "fleet down: $reason"
+  # ...AND THE LAST LINE NAMES WHAT IS PARKED AND HOW TO RELEASE IT, which is
+  # what armaatus/autofleet#37's third acceptance bullet asks for and what it
+  # got one line short of. The naming block ran INSIDE the loop, so the last
+  # thing on the screen was `fleet down: $reason` -- and `$reason` carries a
+  # count ("and 1 worktree(s) are waiting for you"), not which issue and not the
+  # command that releases it. A reader stops at the last line. Moved here, and
+  # out of the `queued == 0 && owned == 0` branch as well: a run that ends on
+  # `--until` or its time-box leaves the same parked worktrees behind, and a
+  # worktree nobody mentions is one nobody releases. armaatus/autofleet#71.
+  if [ "${parked:-0}" -gt 0 ]; then
+    say "$parked worktree(s) are waiting for you rather than for an agent:"
+    for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+      why="$(why_parked "$n")" || continue
+      say "  #$n -- $why"
+      say "    $(how_to_release "$n" "$(owned_path "$n")")"
+    done
+  fi
   notify "fleet down" "$reason. $opened worktree(s) opened."
 }
 
