@@ -540,18 +540,23 @@ So every one of those limits is a row in the **ceilings table at the top of
 | what measures it | a `; `-separated list of `evals/lint.sh` and `tests/test_<suite>.sh <phase>` entries — **every** place that reads the number, not just the first |
 
 The rows are `claude-md` and `reading` and `brief` — the text an agent reads
-before its first edit — `handoff`, the note a resumed session is handed ahead of
-the brief, and `testrun` and `round`, which bound what a green test run and one
-clean review round print back. **No figure is written here, or in any comment.**
+before its first edit — `spec`, the room `reading` leaves for the issue body it
+is handed, `handoff`, the note a resumed session is handed ahead of the brief,
+and `testrun` and `round`, which bound what a green test run and one clean
+review round print back. `spec` is the one that is not a limit on autofleet's
+own text: an issue body is the maintainer's, and the row is the allowance the
+payload leaves for one. **No figure is written here, or in any comment.**
 The table holds the limit; the checks print what they measured. A measured
 number written into prose is stale by the next commit.
 
-Three of the rows bound the OUTPUT of a script rather than the contents of a
-file, because a ceiling has to be measured from what the agent *receives* — a
-check that reads the source counts words the agent never sees and misses the
-ones `sed` substitutes in. Those are measured by a test phase that runs the
-script, so a host installation, which does not vendor `tests/`, gets the three
-`evals/lint.sh` measures and the numbers for the rest.
+Some rows bound the OUTPUT of a script rather than the contents of a file,
+because a ceiling has to be measured from what the agent *receives* — a check
+that reads the source counts words the agent never sees and misses the ones
+`sed` substitutes in. Those are measured by a test phase that runs the script,
+so a host installation, which does not vendor `tests/`, gets the rows
+`evals/lint.sh` measures and the numbers for the rest. Which is which is the
+table's fifth field, and is not counted in prose here: "three of the rows" was
+written when there were six and stayed after there were seven.
 
 ### Raising one
 

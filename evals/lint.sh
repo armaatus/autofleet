@@ -147,7 +147,9 @@ under_ceiling() {
 # cost paid on every task in every worktree. The cap is a smell test, not a
 # formatting rule: past it, the file has stopped being what a new joiner needs on
 # day one and started being documentation, which belongs in docs/. The number
-# lives in the ceilings table above, with the other five.
+# lives in the ceilings table above, with the others. How many rows there are
+# is not written anywhere: it was "the other five" while there were six, and
+# the row that made it seven did not come with an edit here.
 echo "== the ceilings"
 # The table itself, before anything reads it.
 #
@@ -158,8 +160,10 @@ echo "== the ceilings"
 # reads its number from HERE rather than restating it.
 #
 # The `tests/` half runs in autofleet only: tests/ is not vendored, so in a host
-# installation those rows are three numbers with no local enforcement, which is
-# the same trade `== every test phase actually runs` already makes.
+# installation those rows are numbers with no local enforcement, which is the
+# same trade `== every test phase actually runs` already makes. Which rows fall
+# on which side is read off the table's fifth field rather than counted here --
+# the counts that were written down went stale the first time a row was added.
 if CEILINGS="$CEILINGS" python3 - <<'PYEOF'; then
 import glob, os, re, sys
 

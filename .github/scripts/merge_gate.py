@@ -180,13 +180,19 @@ HUMAN_ONLY_PREFIXES = (".claude/", ".github/workflows/", ".github/scripts/")
 # push is per-worktree and invisible from CI, so the body is what can actually be
 # checked here.
 #
-# ONE pass, not two. `/code-review` used to be required alongside this and is
-# not any more: the opening prompt is `/implement`, which runs
-# `/mattpocock-skills:code-review` itself at the end of the build, and that pass
-# covers both axes -- standards, and spec-vs-diff. Requiring a second overlapping
-# review before a pull request even exists was cost with no reader. A body that
-# names `/code-review` as well is still fine; nothing here forbids it.
+# BOTH passes, because both RUN. This was cut to one on the branch that replaced
+# the four-review loop, on the reasoning that `/implement` ran the mattpocock
+# pass itself and a second overlapping review before the PR existed was cost
+# with no reader. armaatus/autofleet#51 then moved both passes OUT of the
+# agent's session and into `scripts/fleet/self-review.sh`, which runs them in
+# processes of their own -- so the cost argument no longer applies and the second
+# pass is one a person may read findings from.
+#
+# The two must agree or the gate is a lie: CLAUDE.md's finishing step says a body
+# naming only one is refused, `self-review.sh` runs both, and for one commit this
+# tuple required one. A body can then carry half the findings and merge.
 LOCAL_PASSES = (
+    ("/code-review", "a local /code-review pass"),
     ("mattpocock-skills:code-review",
      "a local /mattpocock-skills:code-review pass (standards, and spec-vs-diff)"),
 )
@@ -908,7 +914,7 @@ SELFTEST = [
         "a validation does not stand in for a review that never happened",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
                  "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
@@ -930,7 +936,7 @@ SELFTEST = [
         "an Important finding is not cleared by the author's words alone",
         "abc123",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "author": {"login": "armaatus"},
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
@@ -956,7 +962,7 @@ SELFTEST = [
         "...and a pass validation does clear it",
         "abc123",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "author": {"login": "armaatus"},
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
@@ -985,7 +991,7 @@ SELFTEST = [
         "a validation pass on the head merges with no review on that head",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T10:00:00Z",
                  "commit": {"oid": "abc123"}, "author": {"login": "claude[bot]"},
@@ -1005,7 +1011,7 @@ SELFTEST = [
         "a validation fail on the head blocks",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
                  "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
@@ -1025,7 +1031,7 @@ SELFTEST = [
         "a validation naming an older commit does not count",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
                  "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
@@ -1044,7 +1050,7 @@ SELFTEST = [
         "a validation alone is not an independent review",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
                  "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
@@ -1065,7 +1071,7 @@ SELFTEST = [
         "a validation pass does not clear an unresolved thread",
         "def456",
         {
-            "body": "Closes #7\nmattpocock-skills:code-review\n",
+            "body": "Closes #7\n/code-review\nmattpocock-skills:code-review\n",
             "reviews": {"nodes": [
                 {"state": "COMMENTED", "submittedAt": "2026-09-05T11:00:00Z",
                  "commit": {"oid": "def456"}, "author": {"login": "claude[bot]"},
@@ -1082,9 +1088,11 @@ SELFTEST = [
         "unresolved",
     ),
     (
-        # /code-review is no longer one of the required local passes: /implement
-        # runs /mattpocock-skills:code-review and that is the pre-PR pass now.
-        "the body needs only the mattpocock pass",
+        # BOTH local passes are required again: armaatus/autofleet#51 moved them
+        # into `self-review.sh`, which runs both outside the agent's session, so
+        # a body naming one carries half the findings. The row below is its
+        # mirror -- one pass named, the other missing, either way round.
+        "the body naming only the mattpocock pass is refused",
         "abc123",
         {
             "body": "Closes #7\n## Review findings\nmattpocock-skills:code-review\n",
@@ -1096,7 +1104,9 @@ SELFTEST = [
             "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": []},
         },
         ["src/app.c"],
-        True,
+        False,
+        "github",
+        "/code-review",
     ),
     (
         "the body still needs the mattpocock pass",
