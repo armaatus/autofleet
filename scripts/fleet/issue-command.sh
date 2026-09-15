@@ -301,8 +301,10 @@ next session here, which is the one that answers the review.
 If the dispatcher asks you for it -- "write your handoff note now" -- that is a
 bounded turn before something takes the terminal away. Write it and stop.
 
-**If your issue's scope is `.github/workflows/`, `.github/scripts/` or
-`.claude/`, this PR will never merge itself, and that is not a failure.**
+**If your issue's scope is `.github/workflows/`, `.github/scripts/`,
+`.claude/`, or the files in `.autofleet/` that set the rules -- `guard.json`,
+`config`, and the host's review policy beside them, though not `setup.sh` or
+`teardown.sh` -- this PR will never merge itself, and that is not a failure.**
 `merge-gate` refuses those paths on purpose: a PR that could rewrite the rules
 judging PRs is not merged by the machinery those rules govern. Take it to a
 reviewed, green PR with every thread resolved, set the board comment to

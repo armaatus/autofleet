@@ -200,9 +200,12 @@ jobs:
       # weaker rule in the very change that rule is judging" -- and this step
       # broke it three ways at once:
       #
-      #   `.autofleet/` is not in HUMAN_ONLY_PREFIXES and this repo's
-      #   `guard.json` lists nothing, so an agent in a fleet worktree writes
-      #   that file freely. It then reached `--allowed-tools
+      #   `.autofleet/config` was in neither HUMAN_ONLY_PREFIXES nor
+      #   `guard.json` (which lists nothing in this repo), so an agent in a
+      #   fleet worktree wrote that file freely. #38 put it and `guard.json`
+      #   behind a human merge; the rest of this stands regardless, because a
+      #   head-ref read is wrong even for a file a person has to merge -- the
+      #   damage lands in THIS job, before any merge. It then reached `--allowed-tools
       #   "...,Bash(<cmd>)"`, so a branch setting
       #   AUTOFLEET_TEST_COMMAND='x"),Bash(*' widened what the validator may run
       #   -- and a validator's `pass` is what releases the merge gate.

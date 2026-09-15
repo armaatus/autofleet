@@ -79,14 +79,18 @@ GH_PAGER=cat gh pr view "$pr" \
 # 100th file would otherwise be told to fix a merge-gate failure that is the gate
 # working as designed.
 GH_PAGER=cat gh api --paginate "repos/$owner/$name/pulls/$pr/files" \
-  --jq '.[].filename' >"$files" 2>/dev/null || exit 2
+# `previous_filename` as well, for the reason merge-gate.yml gives at its own
+# copy of this call: a rename reports only the new path, so moving a protected
+# file out of the set would read as an ordinary change here and as a human merge
+# in CI -- the two disagreeing is what this file exists not to do.
+  --jq '.[] | .filename, (.previous_filename // empty)' >"$files" 2>/dev/null || exit 2
 
 python3 - "$pr" "$payload" "$checks" "$files" <<'PY'
 import json, sys
 
 sys.path.insert(0, ".github/scripts")
 try:
-    from merge_gate import HUMAN_ONLY_PREFIXES, evaluate, unresolved_threads
+    from merge_gate import evaluate, human_only, unresolved_threads
 except Exception as exc:  # missing, half-edited, or broken at import time
     # Deliberately not ImportError alone. merge_gate.py is a file agents in this
     # repo edit, and a SyntaxError in it would otherwise reach the caller as an
@@ -114,7 +118,11 @@ problems = []
 # paths on purpose, so its FAILURE on such a PR is the gate working, not a defect
 # to chase. Reported as a plain failed check it costs an agent its three review
 # rounds trying to turn green a gate that never will (#96).
-protected = sorted(f for f in files if f.startswith(HUMAN_ONLY_PREFIXES))
+# Asked of the gate rather than restated here: the set is a prefix tuple AND a
+# pair of exact filenames now (#38), and the prefix half alone reads as correct
+# while silently sending a `.autofleet/guard.json` PR back to fix a gate that
+# will never go green.
+protected = human_only(files)
 
 # Everything about reviews comes from the gate itself, on the same pull request
 # minus the two things answered better here: threads (listed in full below) and

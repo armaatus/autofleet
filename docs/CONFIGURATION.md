@@ -12,6 +12,20 @@ project detail in there is the thing that makes the next repo fork this one
 | `.autofleet/teardown.sh` | `scripts/fleet/archive.sh`, once per removal | no |
 | `.autofleet/guard.json` | `.claude/hooks/guard.py`, on every tool call | no |
 
+Those same three are also **unwritable from a fleet worktree** — `guard.py`
+refuses the edit there, as it does for its own hooks and settings, because it
+re-reads `guard.json` on every tool call and an emptied file disarms every
+project rule long before anything merges. In a worktree you opened yourself they
+stay editable: you are the control there. Reading them is never blocked.
+
+Three files here are **human-merge-only**: `merge-gate` refuses to let a PR
+touching `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md`
+merge itself, the same way it refuses one touching `.claude/` or
+`.github/workflows/`. Those three decide what the rules *are* — the guard's
+project rules, `AUTOFLEET_REVIEW_MODE`, and the correctness rules the reviewer
+applies — so a person merges the change. `setup.sh` and `teardown.sh` are
+ordinary project code and merge like anything else.
+
 ## `.autofleet/config`
 
 Shell, sourced. `scripts/fleet/config.sh` holds every default with `:=`, so the
@@ -521,6 +535,12 @@ the module docstring says so.
 A malformed file is **fatal**, not ignored. A guard that silently falls back to
 "protect nothing" on a typo reports success on every write it was installed to
 stop.
+
+A *well-formed* file with a mistyped key is the same failure wearing a nicer
+suit: `guard.py` reads every key with `.get()`, so `protected_path` is not an
+error, it is no rule at all. `evals/lint.sh` reads the keys `guard.py` actually
+reads and fails the build on a key in this file that is not one of them, and on a
+rule declared here that does not reach the tuple `guard.py` enforces.
 
 ## The ceilings
 

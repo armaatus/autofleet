@@ -425,17 +425,21 @@ if [ -x .claude/hooks/guard.py ]; then
   # any PR that touches it.
   #
   # One thing guard.py still cannot check about itself: that SELF_PROTECTED has
-  # not grown a fourth entry that no assertion covers. That pin stays here.
+  # not grown an entry that no assertion covers. That pin stays here.
   # The list below is literal on purpose: derived from SELF_PROTECTED, removing
   # an entry would remove its own check. That catches a removal but not an
-  # ADDITION -- a fourth marker would get no assertion in guard.py's
+  # ADDITION -- a new marker would get no assertion in guard.py's
   # _stateful_checks and the coverage would quietly narrow -- so pin the set.
+  # The three `.autofleet/` entries joined it with armaatus/autofleet#38: the
+  # merge gate refuses to let a PR touching them merge itself, and this is the
+  # half that stops a fleet worktree disarming them while the PR is still open.
   if sp_drift="$(python3 -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("g", ".claude/hooks/guard.py")
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
-want = {"/.claude/hooks/", "/.claude/settings.json", "/.claude/settings.local.json"}
+want = {"/.claude/hooks/", "/.claude/settings.json", "/.claude/settings.local.json",
+        "/.autofleet/guard.json", "/.autofleet/config", "/.autofleet/review.md"}
 if set(g.SELF_PROTECTED) != want:
     print(repr(sorted(g.SELF_PROTECTED)))
     sys.exit(1)
@@ -3115,6 +3119,126 @@ if [ -x .github/scripts/pr_payload.sh ]; then
 else
   fail ".github/scripts/pr_payload.sh is missing or not executable"
 fi
+
+# The protected set has ONE implementation. `merge_gate.py` holds a prefix tuple
+# and, since #38, a pair of exact filenames -- `.autofleet/guard.json` and
+# `.autofleet/config`, which decide what the rules ARE, beside `setup.sh` and
+# `teardown.sh`, which are ordinary project code. A reader testing only the
+# prefixes still looks right and still compiles; what it does is report a
+# guard.json PR as a merge-gate failure to chase, which is the three wasted
+# review rounds #96 was about.
+grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'human_only(' \
+  || fail "review-status.sh no longer asks merge_gate.human_only() which paths a person merges"
+if grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'HUMAN_ONLY_'; then
+  fail "review-status.sh tests merge_gate's protected-path constants itself; ask human_only() instead, or the two drift the next time the set grows a shape"
+else
+  ok "review-status.sh and the gate agree on which paths a person merges"
+fi
+
+# ...and the guard's project half is LOADED, not merely declared. `guard.py`
+# reads every key with `PROJECT.get(...)`, so a `.autofleet/guard.json` key with
+# a typo in it is not an error: it is silently no rule at all, and
+# `guard.py --selftest` asserts against its own SELFTEST_PROJECT fixture rather
+# than this file, so nothing else in the tree notices. Hard rule 3. The read keys
+# are derived from guard.py rather than listed here -- a list would be the second
+# copy this check exists to make unnecessary.
+guard_probe="$(mktemp -d)"
+printf '{}\n' >"$guard_probe/empty.json"
+guard_drift="$(AUTOFLEET_GUARD_PROBE="$guard_probe/empty.json" python3 -c '
+import importlib.util, json, os, re, sys
+source = open(".claude/hooks/guard.py").read()
+# BOTH spellings. `--selftest` reloads the same four keys by subscript
+# (PROJECT["secret_tails"]), so a regex matching only `.get("...")` would report
+# a key added to that path alone as one guard.py never reads -- a false positive
+# is the worst failure a pin like this has, because the fix is to delete it.
+read = set(re.findall(r"PROJECT(?:\.get)?\(?\[?\"([A-Za-z_]+)\"", source))
+# The same file guard.py would read, override and all. Anything else compares a
+# file the host declared against rules loaded from a different one.
+path = os.environ.get("AUTOFLEET_GUARD_CONFIG",
+                      os.path.join(".autofleet", "guard.json"))
+# Read HERE rather than through guard.py, so a malformed file is reported as
+# what it is. Left to the import below it would be an uncaught ValueError, exit
+# 1 -- the code that means "drift" -- with nothing on stdout to say otherwise.
+try:
+    declared = json.load(open(path)) if os.path.exists(path) else {}
+except (OSError, ValueError) as exc:
+    print("cannot be read at all: %s" % exc)
+    sys.exit(2)
+# A leading underscore is the comment convention the shipped example uses.
+unread = sorted(k for k in declared if not k.startswith("_") and k not in read)
+if unread:
+    print("keys guard.py never reads: %s" % ", ".join(unread))
+    sys.exit(1)
+
+
+def counts(config):
+    """What guard.py ends up enforcing when it reads `config`."""
+    os.environ["AUTOFLEET_GUARD_CONFIG"] = config
+    spec = importlib.util.spec_from_file_location("g", ".claude/hooks/guard.py")
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    return {"protected_paths": len(g.PROTECTED_PATHS),
+            "secret_suffixes": len(g.SECRET_SUFFIXES),
+            "secret_contains": len(g.SECRET_CONTAINS),
+            "secret_tails": len(g.SECRET_TAILS)}
+
+
+# MEASURED, not hardcoded. guard.py adds universal entries of its own to some of
+# these tuples -- `("/.env", ".env")` today -- and subtracting a literal 2 would
+# turn this check red in every host repo the day a third one is added, naming a
+# `.autofleet/guard.json` nobody touched. The baseline is the same guard.py
+# loading an EMPTY config, which is what "over and above its universal rules"
+# means.
+base = counts(os.environ["AUTOFLEET_GUARD_PROBE"])
+loaded = counts(path)
+short = ["%s: declared %d, loaded %d" % (k, len(declared.get(k, [])),
+                                         loaded[k] - base[k])
+         for k in loaded if len(declared.get(k, [])) != loaded[k] - base[k]]
+if short:
+    print("; ".join(short))
+    sys.exit(1)
+')"; guard_rc=$?
+rm -rf "$guard_probe"
+# EXIT 1 IS THE VERDICT; anything else is the probe itself dying. A malformed
+# guard.json makes guard.py `sys.exit(2)` at import, and an entry missing `path`
+# raises KeyError -- both with nothing on stdout, so the old spelling printed
+# `does not enforce ()`: no reason, in exactly the case this check is nearest to.
+if [ "$guard_rc" = 0 ]; then
+  ok "every rule .autofleet/guard.json declares is a rule guard.py loads"
+elif [ "$guard_rc" = 1 ]; then
+  fail ".autofleet/guard.json declares rules guard.py does not enforce ($guard_drift)"
+else
+  fail "could not read .autofleet/guard.json through guard.py (exit $guard_rc); guard.py refuses a malformed config at import, and its reason is on stderr above"
+fi
+
+# The prose copies of the set, pinned to the code. This change hand-edited four
+# at once, and the new entry that arrives after it will not know where they are.
+#
+# THE MAINTAINER PAGES, NOT THE BRIEF. The brief cannot carry this list: the
+# rule-of-one-home check above reads every `*.md` it names as a document the
+# agent is being SENT to, and `.autofleet/review.md` is the reviewer's reading,
+# not the author's -- naming it there costs 536 words of a 3,500-word ceiling to
+# say "a person merges this". So the brief describes the seam and these two
+# pages carry the list.
+for protected_file in $(python3 -c '
+import importlib.util
+spec = importlib.util.spec_from_file_location("mg", ".github/scripts/merge_gate.py")
+mg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mg)
+print(" ".join(mg.HUMAN_ONLY_FILES))
+'); do
+  for page in docs/CONFIGURATION.md docs/WORKFLOW.md; do
+    qgrep -F "$protected_file" "$page" \
+      || fail "$protected_file is human-merge-only and $page does not say so; the maintainer reading that page is the person who has to do the merging"
+  done
+done
+# ...and the brief still has to SEND the agent at the seam, even without the
+# list. Without this, the paragraph above could lose its `.autofleet/` sentence
+# and every check here stays green.
+grep -vE '^[[:space:]]*#' scripts/fleet/issue-command.sh \
+  | qgrep -F 'the files in `.autofleet/` that set the rules' \
+  || fail "the brief no longer tells an agent that .autofleet/'s rule files never merge themselves; it spends its review rounds on a gate that will never go green"
+ok "the pages a maintainer reads name every file merge_gate refuses to merge by itself"
 
 echo "== orca.yaml"
 if [ ! -f orca.yaml ]; then

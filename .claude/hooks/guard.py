@@ -161,6 +161,19 @@ SELF_PROTECTED = (
     # Gitignored, so a permission rule written here appears in no diff. That is
     # exactly why it needs the guard the committed file has.
     "/.claude/settings.local.json",
+    # The PROJECT-owned half of the same layer, and the half this file reads.
+    # `merge_gate.py` will not let a PR touching these merge itself
+    # (armaatus/autofleet#38) -- but the merge is not where the damage lands.
+    # This module re-reads `guard.json` on EVERY tool call, so an agent that
+    # writes `{}` into it has disarmed every project rule from the next call
+    # on, with the PR still open and the gate still waiting for a person. Same
+    # "before any merge" argument `validate.yml` makes about reading the config
+    # off the head.
+    "/.autofleet/guard.json",
+    "/.autofleet/config",
+    # The host's own correctness rules, which REVIEW.md makes part of the
+    # policy the reviewer applies to this very branch.
+    "/.autofleet/review.md",
 )
 
 # The same targets, matched loosely enough to survive a relative path. A shell
@@ -1181,6 +1194,13 @@ SELFTEST = [
 HOOK_REL = ".claude/" + "hooks/" + "guard.py"
 SETTINGS_REL = ".claude/" + "settings.json"
 LOCAL_SETTINGS_REL = ".claude/" + "settings.local.json"
+# The project half, by the same rule: every entry in SELF_PROTECTED gets an
+# assertion below, and these are the ones that are not `.claude/`.
+PROJECT_RULE_RELS = (
+    ".autofleet/" + "guard.json",
+    ".autofleet/" + "config",
+    ".autofleet/" + "review.md",
+)
 _stateful_ran = 0
 
 
@@ -1460,6 +1480,34 @@ def _stateful_checks():
                            f"...nor {rel}", tool="Edit", because="enforcement layer")
                     expect(2, {"command": "echo x > " + rel},
                            f"...nor {rel} from the shell", because="enforcement layer")
+
+                # The project half of the layer, each of the three, by the
+                # absolute path and from the shell. `because` on each for the
+                # reason the settings files carry one: `.autofleet/` is where a
+                # host's secret rules are declared, so exit 2 alone could come
+                # from the secrets branch instead and these would stay green
+                # while the refusal said something else.
+                for rel in PROJECT_RULE_RELS:
+                    expect(2, {"file_path": os.path.join(root, rel)},
+                           f"...nor {rel}, which is what the rules ARE",
+                           tool="Edit", because="enforcement layer")
+                    expect(2, {"command": "echo x > " + rel},
+                           f"...nor {rel} from the shell", because="enforcement layer")
+                    # ...and after a `cd`, which is #139's case: the marker's
+                    # own prefix is what the cd consumed.
+                    expect(2, {"command": "cd .autofleet && cp /tmp/x "
+                                          + rel.split("/", 1)[1]},
+                           f"...nor {rel} after a cd into .autofleet",
+                           because="enforcement layer")
+                # READING one is not writing it. `config.sh` sources
+                # `.autofleet/config` on the way into every fleet script, and a
+                # guard that blocked that would stop the fleet rather than the
+                # agent -- the loudest possible way to get this rule removed.
+                expect(0, {"command": ". ./.autofleet/config"},
+                       "...while sourcing the config is reading, and stays allowed")
+                expect(0, {"file_path": os.path.join(root, ".autofleet/setup.sh")},
+                       "...and the project hooks beside them stay editable",
+                       tool="Edit")
 
                 # ...and the same three through a path a `cd` has shortened,
                 # which is the whole of #139: the marker's own prefix is what
