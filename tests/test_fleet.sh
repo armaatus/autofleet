@@ -1402,31 +1402,6 @@ DRIVER
     [ "$((lines))" -le 3 ] \
       || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
 
-    # 5. ...AND THE MACHINE WITH NO mktemp IS NOT TOLD TO INSTALL ORCA. Every
-    #    driver call runs under a deadline that writes to a temp file, so
-    #    without `mktemp` no candidate can be probed at all -- and the first fix
-    #    for that said so on the `tried:` line while the headline and the remedy
-    #    still pointed at an app that is fine. Those two are what a reader acts
-    #    on. `mktemp` is shadowed rather than the PATH starved, because a PATH
-    #    with no `python3` never gets as far as sourcing lib.sh.
-    refusal="$( cd "$WORK/repo" && bash -c '
-      set -uo pipefail
-      REPO_ROOT="$PWD"
-      exec 3>&2 2>/dev/null
-      . ./scripts/fleet/lib.sh
-      exec 2>&3 3>&-
-      mktemp() { return 1; }
-      runner_available
-    ' 2>&1 )"; rc=$?
-    [ "$rc" = 0 ] \
-      && fail "the driver said it was available without probing anything: $refusal"
-    grep -qi "mktemp" <<<"$refusal" \
-      || fail "a machine that cannot make a temp file was not told that is what is wrong: $refusal"
-    grep -q "install Orca" <<<"$refusal" \
-      && fail "it told a person to install Orca for a missing mktemp, which is the wrong machine named confidently: $refusal"
-    grep -q "is the Orca app running" <<<"$refusal" \
-      && fail "the headline still asked about the app on a failure that never reached it: $refusal"
-
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
   runner_stub)

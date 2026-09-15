@@ -326,7 +326,7 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  [ "${FLEET_RUNNER_SAID:-}" = "$FLEET_RUNNER_DRIVER" ] || {
+  [ "${FLEET_RUNNER_SAID:-}" = "$AUTOFLEET_RUNNER" ] || {
     echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
     echo "     looked for: $FLEET_RUNNER_DRIVER (no such file)"
     echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
@@ -341,11 +341,17 @@ else
   # `fleet_require_runner` can still name the file in the process that did not
   # print the block. Found by the local review.
   #
-  # It carries WHICH driver was reported rather than a boolean, so a value
+  # It carries WHICH RUNNER was reported rather than a boolean, so a value
   # exported from anywhere else cannot swallow the four lines the remedy lives
-  # in. Same hole FLEET_RUNNER_MISSING closes by being set on both arms. Found
-  # by the local review.
-  export FLEET_RUNNER_SAID="$FLEET_RUNNER_DRIVER" FLEET_RUNNER_DRIVER
+  # in. Same hole FLEET_RUNNER_MISSING closes by being set on both arms.
+  #
+  # The runner NAME, not the driver path: the path is built from
+  # `dirname "${BASH_SOURCE[0]}"`, and this file is sourced as
+  # `./scripts/fleet/lib.sh` by sixteen scripts and as `$REPO_ROOT/...` by
+  # `handoff.sh` and `issue-command.sh`. Keyed on the path, the block printed
+  # again the first time it crossed that spelling boundary. Both found by the
+  # local review.
+  export FLEET_RUNNER_SAID="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
   # SAID here, ACTED ON by `fleet_require_runner` below -- and this file neither
   # `return`s nor `exit`s on it. Three attempts, and each one was worse than the
   # last for a reason worth keeping:

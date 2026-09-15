@@ -99,11 +99,6 @@ orca_cli_candidates() {
 # candidates that all time out would be a hundred seconds of silence to explain
 # the fifty that came before it.
 ORCA_CLI_REJECTS=""
-# ...and the one for the failure that stops the probe before it starts. Declared
-# beside its sibling rather than above `orca_unavailable_says`, where it wedged
-# an assignment between the three-line-ceiling comment and the function that
-# comment documents. Found by the local review.
-ORCA_CLI_UNPROBED=""
 orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1"; }
 
 orca_cli_resolve() {
@@ -113,74 +108,31 @@ orca_cli_resolve() {
   # the app starts, must not leave the first attempt's reasons behind for a
   # later failure to print as if they were its own.
   ORCA_CLI_REJECTS=""
-  # SAID, not assumed. The deadline wrapper writes the probe's output to a file,
-  # so a machine with no `mktemp` on PATH turned every candidate down for want of
-  # a temp file and reported it as "is the Orca app running?" -- a true-looking
-  # sentence pointing at the wrong machine. Seen for real in
-  # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
-  # nothing else.
-  ORCA_CLI_UNPROBED=""
-  probe_out="$(mktemp 2>/dev/null)" || {
-    # SAID as its own state, not folded into "the app is not running". The
-    # deadline wrapper writes the probe's output to a file, so a machine that
-    # cannot make one turns every candidate down for a reason that has nothing
-    # to do with Orca -- and the first fix for that only reached the `tried:`
-    # line, leaving the headline and the remedy still saying "install Orca".
-    # Both of those are what a reader acts on. Seen for real in
-    # `tests/test_env.sh setup_fails_fast`, whose PATH holds one interpreter and
-    # nothing else.
-    #
-    # WHAT WAS OBSERVED, not a cause. `mktemp` also fails on a TMPDIR that is
-    # read-only, full, or not there, and "this machine has no mktemp" is
-    # unactionable on a machine where mktemp is sitting on PATH -- the same
-    # wrong-machine-named-confidently this branch exists to stop. Its stderr is
-    # relayed for the same reason: it is the only thing that knows which.
-    # Both found by the local review.
-    #
-    # ONE RULE, and it is stated as a rule because two attempts at it were
-    # wrong in the same direction: IF ANY CALL RETURNS A PATH, THAT PATH IS THE
-    # PROBE FILE AND THE RESOLVE CARRIES ON. Only a call that genuinely failed
-    # produces the words.
-    #
-    # Round four deleted the file a successful retry handed back and refused
-    # anyway. Round five stopped merging the streams but left the diagnostic
-    # call unchecked, so a `mktemp` that failed twice and worked the third time
-    # leaked that file and printed "this machine could not make a temp file ...
-    # mktemp said: nothing" -- and because setup.sh is fatal, that abandons a
-    # worktree `launch` has already created and owned. Each fix reintroduced the
-    # defect one line below itself, which is why the loop below is written
-    # against the rule rather than against the case that was last reported.
-    #
-    # The diagnostic call keeps BOTH streams, and every line of what comes back
-    # is tested for being a file. A `mktemp` that succeeds while writing to
-    # stderr answers "<path>" and "<warning>" in an order nothing guarantees, so
-    # testing the first line -- which is what merging tempted the last two
-    # rounds into -- reads a working machine as a broken one. That is
-    # `runner_worktree_create`'s merged-stderr bug, twice removed.
-    local said line
-    said="$(mktemp 2>&1)"
-    probe_out=""
-    while IFS= read -r line; do
-      [ -f "$line" ] && { probe_out="$line"; break; }
-    done <<CANDIDATE_TMP
-$said
-CANDIDATE_TMP
-    if [ -z "$probe_out" ]; then
-      ORCA_CLI_UNPROBED="${said%%$'\n'*}"
-      [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
-      return 1
-    fi
-  }
-  # ON FD 3, not stdin. The probe below runs through `fleet_run_with_deadline`,
-  # which redirects the command's stdout and stderr and nothing else -- so a
-  # candidate CLI that drains stdin would eat the rest of this heredoc, `read`
-  # would hit EOF, and the loop would end after that one candidate. The
-  # /Applications fallback is last in the list and is the one the 0700 install
-  # needs, and the refusal would then confidently name one candidate as
-  # everything that was tried. Bash points an async command's stdin at
-  # /dev/null with job control off, so this may be unreachable today; fd 3
-  # costs one character and does not depend on that staying true. Raised by the
-  # local review, where the two passes disagreed about whether it could fire.
+  # /dev/null, NOT A TEMP FILE. Nothing ever reads the probe's output -- only
+  # its exit status is the answer -- so the file existed solely to be written to
+  # and deleted.
+  #
+  # It cost three rounds of the local review to notice, and each of those rounds
+  # was a bug in the code that made it: the machine with no `mktemp` needed a
+  # third refusal shape of its own, a retry that SUCCEEDED had its file deleted
+  # and was refused anyway, and the diagnostic call that replaced it was itself
+  # unchecked. `tests/test_env.sh setup_fails_fast` caught the first, because
+  # its PATH holds one interpreter and nothing else. With `/dev/null` there is
+  # nothing left to fail: the probe works on a machine that cannot make temp
+  # files at all, which is better than diagnosing one. Sixty lines, a global, a
+  # branch in `orca_unavailable_says` and a test part went with it.
+  probe_out=/dev/null
+  # ON FD 3, and CLOSED for the probe (see the call below). A candidate CLI that
+  # drains the descriptor carrying this heredoc would eat the rest of the list,
+  # `read` would hit EOF, and the loop would end after that one candidate -- with
+  # the refusal then naming it as everything that was tried, while the
+  # /Applications fallback the 0700 install needs sits last and untried.
+  #
+  # Bash points an async command's STDIN at /dev/null with job control off, so
+  # the stdin form this replaced was protected by the shell and fd 3 is not:
+  # moving the list here made that reachable rather than theoretical, and the
+  # `3<&-` on the probe is what actually closes it. Raised by the local review,
+  # which caught the rationale pointing the wrong way.
   while IFS= read -r -u 3 candidate; do
     [ -n "$candidate" ] || continue
     if ! where="$(command -v "$candidate" 2>/dev/null)"; then
@@ -204,18 +156,22 @@ CANDIDATE_TMP
       esac
       continue
     fi
+    # `3<&-` closes the candidate list for the child. The comment above argues
+    # fd 3 protects the loop from a CLI that drains stdin -- and on its own it
+    # does not: `fleet_run_with_deadline` forks with `&`, and with job control
+    # off bash points only STDIN at /dev/null, so fd 3 is inherited untouched.
+    # That made the fd-3 rewrite strictly worse than the stdin version it
+    # replaced until this line. Found by the local review.
     if ! fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
-        "$candidate" --version; then
+        "$candidate" --version 3<&-; then
       orca_cli_reject "$where (--version did not answer)"
       continue
     fi
     ORCA_CLI="$candidate"
-    rm -f "$probe_out"
     return 0
   done 3<<EOF
 $(orca_cli_candidates)
 EOF
-  rm -f "$probe_out"
   return 1
 }
 
@@ -265,13 +221,6 @@ orca_json() {
 # the answer to "and now what" was a file nobody reads twice.
 # armaatus/autofleet#13.
 orca_unavailable_says() {
-  if [ -n "${ORCA_CLI_UNPROBED:-}" ]; then
-    printf 'no orca CLI could be probed here; this machine could not make a temp file\n'
-    printf '     tried: nothing -- the deadline every driver call runs under needs one. mktemp said: %s\n' \
-      "${ORCA_CLI_UNPROBED}"
-    printf '     check mktemp is on PATH and $TMPDIR is writable; nothing here says anything about Orca yet\n'
-    return 0
-  fi
   printf 'no orca CLI answers here; is the Orca app running?\n'
   printf '     tried: %s\n' "${ORCA_CLI_REJECTS:-nothing was probed}"
   printf '     install Orca (https://orca.computer) and start it, or set ORCA_CLI_COMMAND to a CLI that answers --version\n'
