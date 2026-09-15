@@ -804,12 +804,17 @@ fi
 # because the verdict has to land in the PR's own review state, which is what
 # await-review.sh on the other side polls.
 #
-# `Skill`, `Task` and `Agent` are what the workflow does not grant. The brief
-# tells the reviewer to run `/mattpocock-skills:code-review`, which is a skill and
-# which fans out into sub-agents of its own; without them it silently reviews
-# without the standards and spec-vs-diff axes, which is most of what that pass is
-# for. `git show` joins `git diff` and `git log` for the same reason: a review
-# that cannot read a commit is reading the diff in the dark.
+# `Skill`, `Task` and `Agent`, which the workflow grants too -- and for one
+# commit did not. The brief tells the reviewer to run
+# `/mattpocock-skills:code-review`, which is a skill and which fans out into
+# sub-agents of its own; without them the reviewer is ordered to run a pass it
+# has no tool for, and reviews without the standards and spec-vs-diff axes with
+# nothing in the log saying so. That made the review MODE decide what a review
+# does rather than only where it runs, which is the one thing the two venues
+# may not disagree about. `evals/lint.sh` asserts they agree.
+#
+# `git show` joins `git diff` and `git log` for the same reason: a review that
+# cannot read a commit is reading the diff in the dark.
 # NOT `Bash(gh api:*)`, which claude-review.yml does grant. The workflow's
 # reviewer holds an Actions token scoped by that job's `permissions:` block, in a
 # container that is destroyed afterwards. This one holds the maintainer's own gh

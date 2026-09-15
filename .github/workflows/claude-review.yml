@@ -202,7 +202,7 @@ jobs:
           # Read-only over the tree. It reviews; it does not fix. `gh pr review`
           # is here because the verdict has to land in the PR's own review state,
           # which is what the worktree on the other side polls.
-          claude_args: '--allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api:*)" --max-turns 80'
+          claude_args: '--allowed-tools "Read,Grep,Glob,Skill,Task,Agent,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api:*)" --max-turns 80'
           prompt: |
             Review pull request #${{ github.event.pull_request.number || inputs.pr }}
             of ${{ github.repository }}, following REVIEW.md in the repository

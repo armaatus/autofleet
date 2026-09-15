@@ -2250,6 +2250,38 @@ else
   fail "the phase registries in tests/run.sh do not match the scripts; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing. The line above says which"
 fi
 
+echo "== the two review venues grant the same thing"
+# THE MODE PICKS WHERE A REVIEW RUNS, NEVER WHAT IT DOES. `local` spawns the
+# reviewer and the validator here; `github` runs the same briefs in
+# claude-review.yml and validate.yml. Both are handed `.claude/agents/*.md`
+# verbatim, and that brief orders `/mattpocock-skills:code-review` -- a skill
+# that fans out into two sub-agents of its own.
+#
+# The workflows granted no `Skill`, no `Task` and no `Agent`, so in `github`
+# mode the reviewer was ordered to run a pass it had no tool for: it reviewed
+# without the standards and spec-vs-diff axes and nothing in the log said so.
+# One review shape became two, decided by a knob nobody set for that reason.
+#
+# Asserted as the three names rather than as whole-list equality, because the
+# lists are legitimately not equal: the local reviewer withholds
+# `Bash(gh api:*)` (it holds the maintainer's own login, not a scoped Actions
+# token) and validate.yml adds the project's test command. Those differences are
+# documented where they are made; this check is about the fan-out.
+venue_bad=""
+for venue in "scripts/fleet/review.sh" "scripts/fleet/validate.sh" \
+             ".github/workflows/claude-review.yml" ".github/workflows/validate.yml"; do
+  [ -f "$REPO_ROOT/$venue" ] || { venue_bad="$venue_bad $venue(missing)"; continue; }
+  for grant in Skill Task Agent; do
+    grep -q "[\"',]$grant[,\"']" "$REPO_ROOT/$venue" \
+      || venue_bad="$venue_bad $venue(no $grant)"
+  done
+done
+if [ -n "$venue_bad" ]; then
+  fail "the review venues do not grant the same fan-out, so AUTOFLEET_REVIEW_MODE changes what a review DOES and not only where it runs:$venue_bad"
+else
+  ok "local and github mode grant the reviewer the same Skill, Task and Agent"
+fi
+
 echo "== the workflows parse as GitHub reads them"
 # An invalid workflow file does not fail loudly: GitHub creates a run with no
 # jobs, named after the file, and the check it was meant to report simply never

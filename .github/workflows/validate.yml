@@ -204,7 +204,7 @@ jobs:
           # resolves the threads this validation is satisfied by, and it is the
           # narrow grant rather than `gh api:*` because `resolveReviewThread` is
           # a mutation with no `gh pr` spelling.
-          claude_args: '--allowed-tools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(${{ steps.testcmd.outputs.cmd }})" --max-turns 80'
+          claude_args: '--allowed-tools "Read,Grep,Glob,Skill,Task,Agent,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(${{ steps.testcmd.outputs.cmd }})" --max-turns 80'
           prompt: |
             ${{ env.VALIDATOR_BRIEF }}
 
