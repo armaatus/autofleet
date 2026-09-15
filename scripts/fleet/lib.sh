@@ -317,6 +317,7 @@ else
   # `fleet_python_rejections`: what was looked for, where, and what to do
   # instead. armaatus/autofleet#13.
   fleet_runner_dir="$(dirname "${BASH_SOURCE[0]}")/runner"
+  FLEET_RUNNER_DRIVER="$fleet_runner_dir/${AUTOFLEET_RUNNER}.sh"
   fleet_runner_ships=""
   for fleet_runner_f in "$fleet_runner_dir"/*.sh; do
     # The glob is unquoted so it expands, which means it stays literal when it
@@ -325,12 +326,18 @@ else
     fleet_runner_f="${fleet_runner_f##*/}"
     fleet_runner_ships="${fleet_runner_ships:+$fleet_runner_ships }${fleet_runner_f%.sh}"
   done
-  {
+  [ "${FLEET_RUNNER_SAID:-0}" = 1 ] || {
     echo "autofleet: no runner driver for AUTOFLEET_RUNNER=$AUTOFLEET_RUNNER"
-    echo "     looked for: $fleet_runner_dir/${AUTOFLEET_RUNNER}.sh (no such file)"
+    echo "     looked for: $FLEET_RUNNER_DRIVER (no such file)"
     echo "     drivers here: ${fleet_runner_ships:-none -- $fleet_runner_dir is empty}"
     echo "     set AUTOFLEET_RUNNER in .autofleet/config to one of those, or write that file against the contract in docs/RUNNERS.md"
   } >&2
+  # ONCE, which is the issue's title. `fleet.sh cost` execs `cost.sh` and both
+  # source this file, so the block above had two chances to print for one
+  # command. Exported so it survives the exec; the driver path goes with it so
+  # `fleet_require_runner` can still name the file in the process that did not
+  # print the block. Found by the local review.
+  export FLEET_RUNNER_SAID=1 FLEET_RUNNER_DRIVER
   # SAID here, ACTED ON by `fleet_require_runner` below -- and this file neither
   # `return`s nor `exit`s on it. Three attempts, and each one was worse than the
   # last for a reason worth keeping:
@@ -350,7 +357,7 @@ else
   #   exempting it by name was the tell that the line was drawn in the wrong
   #   place. Found by the local review.
   #
-  # So: say it once at source time, finish sourcing, and let the five scripts
+  # So: say it once at source time, finish sourcing, and let the four scripts
   # that actually reach for the runtime stop on it. `evals/lint.sh` check 4h
   # fails one that forgets to. armaatus/autofleet#13.
   FLEET_RUNNER_MISSING=1
@@ -363,7 +370,12 @@ fi
 # the cause, with the real message four lines up the screen.
 fleet_require_runner() {
   [ "${FLEET_RUNNER_MISSING:-0}" = 1 ] || return 0
-  echo "     ${0##*/} needs one to do anything, so it stops here" >&2
+  # NAMES THE FILE again rather than saying "one". The block above is printed at
+  # source time and this line can be hundreds of lines of output later --
+  # `setup.sh` runs the whole of env.sh in between -- so an indented
+  # continuation with no antecedent lands under unrelated output. Found by the
+  # local review.
+  echo "${0##*/}: no $FLEET_RUNNER_DRIVER, so it stops here" >&2
   exit 1
 }
 

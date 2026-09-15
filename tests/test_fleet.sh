@@ -1251,8 +1251,13 @@ case "${1:-}" in
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       || fail "the one subcommand that needs no runner died on a driver it never calls: $out"
-    grep -q "needs one to do anything" <<<"$out" \
+    grep -q "so it stops here" <<<"$out" \
       && fail "cost was given the consequence of a driver it never asks for: $out"
+    # ONCE, which is the issue's title: fleet.sh execs cost.sh and both source
+    # lib.sh, so the block had two chances to print for one command. Found by
+    # the local review.
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "the refusal printed $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
     # ...and the rest of lib.sh is still there. `return 1` at the driver source
     # left FLEET_DIR and the stop files undefined, which is how the first
     # attempt at this died two lines into fleet.sh instead of saying anything.

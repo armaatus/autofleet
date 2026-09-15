@@ -1424,11 +1424,11 @@ if runner="$(env -u AUTOFLEET_RUNNER bash -c '
     . ./scripts/fleet/config.sh || exit 1
     printf "%s" "${AUTOFLEET_RUNNER:-}"' 2>/dev/null)"; then
   if [ -z "$runner" ]; then
-    fail "scripts/fleet/config.sh leaves AUTOFLEET_RUNNER empty, so lib.sh sources scripts/fleet/runner/.sh and every fleet command dies at source time"
+    fail "scripts/fleet/config.sh leaves AUTOFLEET_RUNNER empty, so lib.sh looks for scripts/fleet/runner/.sh and every command that reaches for the runtime stops"
   elif [ -f "scripts/fleet/runner/$runner.sh" ]; then
     ok "AUTOFLEET_RUNNER=$runner resolves to scripts/fleet/runner/$runner.sh"
   else
-    fail "AUTOFLEET_RUNNER=$runner names no driver: scripts/fleet/runner/$runner.sh does not exist, so every fleet command here dies at source time. Set it in .autofleet/config to one that ships, or write that file against docs/RUNNERS.md"
+    fail "AUTOFLEET_RUNNER=$runner names no driver: scripts/fleet/runner/$runner.sh does not exist, so the dispatcher, the setup hook, the board and the autostart watcher all stop on it (4h below). Set it in .autofleet/config to one that ships, or write that file against docs/RUNNERS.md"
   fi
 else
   fail "scripts/fleet/config.sh would not source, so which runner this repo is configured for cannot be established; run it by hand to see what it refused"
@@ -1449,7 +1449,9 @@ fi
 #     it is asserted rather than remembered. Hard rule 3.
 #
 #     Comments are stripped the same way 4b and 4c strip them, and for the same
-#     reason: a `runner_*` named in prose is not a call.
+#     reason: a `runner_*` named in prose is not a call. What is asserted is the
+#     ORDER, not the presence: the guard has to come before the first call, or
+#     the `command not found` arrives first and splits the message in half.
 if python3 - <<'PYEOF'
 import re, sys, glob
 
@@ -1480,14 +1482,31 @@ def code_only(text):
 lib = open("scripts/fleet/lib.sh").read()
 if "fleet_require_runner()" not in lib:
     sys.exit("lib.sh no longer defines fleet_require_runner; this check now asserts nothing")
-provided = set(re.findall(r"^(runner_[a-z_]+)\(\)", lib, re.M))
+lib_code = code_only(lib)
+defined_in_lib = set(re.findall(r"^(runner_[a-z_]+)\(\)", lib_code, re.M))
+
+# A lib-defined `runner_*` counts as "not reaching for the runtime" ONLY if it
+# does not itself call one the driver provides. `runner_agent_terminal` is a
+# filter over the DRIVER's `runner_agent_terminals`, so a script whose only
+# reach is that wrapper does reach the driver, and without one gets rc 127 from
+# inside lib.sh. The first version of this check called every lib-defined name
+# safe -- which passed such a script unguarded and, worse, FAILED the build if
+# its author added the guard anyway, arguing for the removal of a correct one.
+# Found by the local review.
+provided = set()
+for name in defined_in_lib:
+    body = re.search(r"^%s\(\)\s*\{(.*?)^\}" % re.escape(name), lib_code, re.M | re.S)
+    calls = set(re.findall(r"\brunner_[a-z_]+", body.group(1))) if body else set()
+    if not (calls - defined_in_lib):
+        provided.add(name)
 
 bad, guarded = [], []
 for path in sorted(glob.glob("scripts/fleet/*.sh")):
     if path == "scripts/fleet/lib.sh":
         continue
     code = code_only(open(path).read())
-    if not (set(re.findall(r"\brunner_[a-z_]+", code)) - provided):
+    reaches = [m for m in re.finditer(r"\brunner_[a-z_]+", code) if m.group(0) not in provided]
+    if not reaches:
         # ...and the other direction: a guard in a script that needs none is a
         # refusal nobody asked for, and it is how `cost` nearly lost the one
         # property fleet.sh documents at length.
@@ -1496,10 +1515,20 @@ for path in sorted(glob.glob("scripts/fleet/*.sh")):
         continue
     if path in EXEMPT:
         continue
-    if "fleet_require_runner" in code:
-        guarded.append(path)
-    else:
+    guard = re.search(r"\bfleet_require_runner\b", code)
+    if not guard:
         bad.append(path + " calls the driver and never calls fleet_require_runner")
+        continue
+    # PRESENT IS NOT ENOUGH. agent-autostart.sh called `runner_set_deadline` 33
+    # lines before its guard, so with no driver the rc-127 `command not found`
+    # landed BETWEEN lib.sh's refusal and the line that completes it -- the
+    # split message this whole change exists to remove. The check said ok.
+    # Found by the local review.
+    if reaches[0].start() < guard.start():
+        bad.append("%s calls %s at offset %d, before fleet_require_runner at %d"
+                   % (path, reaches[0].group(0), reaches[0].start(), guard.start()))
+        continue
+    guarded.append(path)
 if not guarded:
     sys.exit("no script guards its driver calls; this check now asserts nothing")
 for path in sorted(EXEMPT):

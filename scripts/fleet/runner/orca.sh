@@ -136,12 +136,33 @@ orca_cli_resolve() {
     # them, which is the thing that just failed. A mktemp that fails is
     # instant and makes nothing, so the second call costs nothing and leaves
     # nothing behind. First line only -- this goes inside a three-line relay.
-    ORCA_CLI_UNPROBED="$(mktemp 2>&1 >/dev/null || true)"
-    ORCA_CLI_UNPROBED="${ORCA_CLI_UNPROBED%%$'\n'*}"
-    [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
+    local retry
+    retry="$(mktemp 2>&1)" || true
+    if [ -e "$retry" ]; then
+      # It worked the second time, so the first failure was transient -- a full
+      # or racing TMPDIR rather than a machine that cannot make files. Say that
+      # instead of quoting an error there was none of, and REMOVE the file:
+      # leaking one temp file per probe is what the unconditional
+      # `>/dev/null` form did. Found by the local review.
+      rm -f "$retry"
+      ORCA_CLI_UNPROBED="nothing the second time -- the first call failed and the retry did not"
+    else
+      ORCA_CLI_UNPROBED="${retry%%$'\n'*}"
+      [ -n "$ORCA_CLI_UNPROBED" ] || ORCA_CLI_UNPROBED="nothing"
+    fi
     return 1
   }
-  while IFS= read -r candidate; do
+  # ON FD 3, not stdin. The probe below runs through `fleet_run_with_deadline`,
+  # which redirects the command's stdout and stderr and nothing else -- so a
+  # candidate CLI that drains stdin would eat the rest of this heredoc, `read`
+  # would hit EOF, and the loop would end after that one candidate. The
+  # /Applications fallback is last in the list and is the one the 0700 install
+  # needs, and the refusal would then confidently name one candidate as
+  # everything that was tried. Bash points an async command's stdin at
+  # /dev/null with job control off, so this may be unreachable today; fd 3
+  # costs one character and does not depend on that staying true. Raised by the
+  # local review, where the two passes disagreed about whether it could fire.
+  while IFS= read -r -u 3 candidate; do
     [ -n "$candidate" ] || continue
     if ! where="$(command -v "$candidate" 2>/dev/null)"; then
       # NOT "not on PATH", twice over. `command -v` turns down a file that is
@@ -169,7 +190,7 @@ orca_cli_resolve() {
     ORCA_CLI="$candidate"
     rm -f "$probe_out"
     return 0
-  done <<EOF
+  done 3<<EOF
 $(orca_cli_candidates)
 EOF
   rm -f "$probe_out"

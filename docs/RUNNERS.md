@@ -111,9 +111,9 @@ second pass costs another `--version` timeout per candidate, and this is the
 first call `setup.sh` makes while the runner holds the agent's tab.
 
 **Every caller that reaches for the runtime probes before it spends anything.**
-`fleet.sh` (at source time), `setup.sh` and `agent-autostart.sh` all call it;
-`setup.sh` is fatal on a no, because everything it provisions is for an agent
-the runner is supposed to start. `setup.sh` probes *after* `env.sh` and before
+`fleet.sh` (at source time), `setup.sh`, `board.sh` and `agent-autostart.sh` all
+call it; `setup.sh` is fatal on a no, because everything it provisions is for an
+agent the runner is supposed to start. `setup.sh` probes *after* `env.sh` and before
 the submodules, the project hook and the watcher — env.sh is milliseconds and is
 where a machine missing its basic tools says so, and a probe in front of it
 answers a missing `shasum` with "is the runtime running?", which is the wrong
@@ -124,12 +124,25 @@ one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
 drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
 it neither returns nor exits, because most of what it defines has nothing to do
 with a runner and the scripts that source it mostly call no `runner_*` at all
-(`cost`, and the whole review and validation pipeline). The five that do reach
-for the runtime call `fleet_require_runner` before their first one, which adds
-the consequence and stops; without it that first call is `command not found`,
-and rc 127 through a `|| die` reports the consequence as the cause.
-`evals/lint.sh` check 4h fails a caller that forgets, and check 4g fails a repo
-whose configured runner names no file at all — red before an agent is opened
+(`cost`, and the whole review and validation pipeline). **Four** — `fleet.sh`,
+`setup.sh`, `board.sh`, `agent-autostart.sh` — call `fleet_require_runner`
+before their first `runner_*`, which adds the consequence and stops; without it
+that first call is `command not found`, and rc 127 through a `|| die` reports
+the consequence as the cause.
+
+`issue-command.sh` is the fifth script that names a `runner_*` and is
+deliberately **not** guarded: it prints an agent's brief, which needs no
+runtime, and asks `runner_available` only behind
+`if [ -z "$ref" ] && runner_available 2>/dev/null` to decide whether it can
+*also* resolve this worktree's issue. With no driver that call is rc 127, the
+`&&` is false, and the script carries on doing what it was run for. Guarding it
+would refuse an agent its own brief. A sixth caller is guarded unless it can
+make the same argument.
+
+`evals/lint.sh` check 4h fails a caller that forgets, a caller that guards
+without reaching for the runtime, and a guard that comes *after* the first
+`runner_*` — the order is the property, not the presence. Check 4g fails a repo
+whose configured runner names no file at all, red before an agent is opened
 rather than after.
 
 **Which stream a failure's words go on, per function, because the answer is not
