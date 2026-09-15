@@ -1,86 +1,130 @@
 # Review policy
 
-What `/code-review` looks for on this repo, what counts as **Important** rather
-than a **Nit**, and what it should not report at all.
+What the independent review looks for, which findings **block a merge** and
+which do not, and what it should not report at all.
 
-CLAUDE.md requires `/code-review` on your own branch before a PR, findings in
-the body. This file makes those findings comparable between agents and between
-PRs: without it, three worktrees produce three different reviews of three
-different things, and a human cannot tell a serious finding from a preference.
+The pull request arrives already reviewed: step 3 of the brief runs both
+self-review passes and their findings are in the body. This review is the one
+from a context that has not seen the conversation which produced the diff,
+because an author reviewing its own work shares its blind spots.
 
-Read this before reviewing. If you are the author, read it before you finish --
-a finding you can predict is one you can avoid.
+**It runs once.** One review per pull request, at PR-open, on the head the PR
+opened with. What follows is a **validation** — a different job, with a different
+brief ([`.claude/agents/validator.md`](.claude/agents/validator.md)), asking only
+whether these findings were addressed and whether the commits answering them
+broke anything.
 
-## The passes
+How many validations a pull request may have is **not this file's to say** — the
+brief states it, and `AUTOFLEET_VALIDATE_MAX` enforces it, in `local` mode where
+the dispatcher starts them. In the default `github` mode
+`.github/workflows/validate.yml` fires on every push and nothing bounds it. This
+file carried the cap unqualified, which asserted a termination argument the
+venue most hosts run does not have.
 
-Run all three. Report them separately.
+That is the shape, and it replaced a loop bounded at four reviews per pull
+request that routinely spent all four. Every answer to a finding was a commit,
+every commit moved the head, and a head move invalidates the review that asked
+for it — so the reviewer read the whole diff again and found one more thing a
+level down. #86 burned four reviews without one ever judging the commit that
+merged. Reviewing a branch four times is not four times the assurance; it is the
+same review of four different commits.
 
-### 1. Correctness
+So this review is the only one. Read this file before reviewing. If you are the
+author, read it before you finish — a finding you can predict is one you can
+avoid.
 
-Bugs, logic errors, and the failure paths this project cares about most:
+## The dimensions
 
-- **The save guarantee.** Any path that overwrites a save file backs it up first
-  and writes atomically. An interruption anywhere in the sequence leaves either
-  the old file or the new one. A failed backup aborts the write. This is hard
-  rule 2, and a breach is always Important.
-- **Network calls.** Every one has a timeout, is safe offline, retries with
-  backoff, and never blocks boot. A call missing a timeout is Important.
-- **Conflict resolution.** The server is the source of truth. Local-wins
-  behaviour that is not explicitly specified in the issue is a bug.
-- **Partial state.** What is left on disk when the process dies here? A
-  half-written state.db, a `.tmp` beside a save, or a token file with no
-  matching device record is Important.
-- **Integer and buffer handling** in anything that parses a server response.
+Evaluate all seven. Report only what you found; a dimension with nothing in it
+gets one line or none.
 
-### 2. Portability and platform rules
+1. **Architecture and design** — separation of concerns, modularity, coupling,
+   whether abstractions are at a consistent level, whether the design holds at
+   the size this will actually reach.
+2. **Code quality and maintainability** — readability by someone with no AI
+   assistance and no context, naming, unnecessary complexity, duplication that
+   should be extracted, error handling, and whether comments explain *why*.
+3. **Impact and breaking changes** — every usage of a changed interface found
+   and updated, backward compatibility, migrations that are safe and reversible,
+   consumers of a changed API accounted for, downstream effects considered.
+4. **Testing** — critical paths and edge cases covered, tests meaningful and
+   independent, failure cases tested. **Is there a test that would have failed
+   before this change?** Name it. Its absence is Important regardless of how
+   green the suite is.
+5. **Performance** — algorithmic complexity at the expected data size, query
+   patterns and N+1s, resource usage, whether long-running work blocks something
+   it should not.
+6. **Security** — input validation, authentication and authorisation, exposure
+   of sensitive data, injection, and dependencies.
+7. **Project standards and spec** — the hard rules in `CLAUDE.md`; the issue's
+   **Scope** and **Acceptance**, naming anything in the diff outside Scope and
+   anything in Acceptance the diff does not cover; the `## Plan` section, where
+   an undocumented departure from it is Important and a documented one is fine;
+   and whether the work invalidated an issue — any issue — that has not been
+   edited, which is Important because those bodies are the only channel between
+   parallel worktrees.
 
-- Nothing in `core/` includes a host-only or libnx header (hard rule 4). CI
-  catches the mechanical form; report the ones it cannot -- a platform
-  assumption smuggled in as a type, a path separator, an endianness assumption,
-  a `long` that is not the same width on aarch64.
-- Nothing new is on the boot path.
-- No production system is touched, and no hard rule in CLAUDE.md is broken. A test or
-  script that reaches a non-loopback address is Important -- `policy.loopback_only`
-  exists for this and a finding here means it was worked around.
-- No secrets in the tree (hard rule 5).
+**A fleet pull request carries its `fleet.sh cost` figure.** The ceilings bound
+what a run reads; that number says whether it got cheaper. Missing, it is a
+Suggestion.
 
-### 3. Compliance with the spec
+### ...and this project's own
 
-- Against the issue: does the diff do what **Scope** asked, and does it satisfy
-  **Acceptance**? Name anything in the diff that is outside Scope, and anything
-  in Acceptance the diff does not cover.
-- Against the PR body's `## Plan`: where the implementation departed from it, is
-  the departure written down? An undocumented one is Important; a documented one
-  is fine.
-- Is there a test that would have failed before this change? Name it. Its
-  absence is Important regardless of how green the suite is.
-- Did the work invalidate an issue -- any issue -- that has not been edited? That
-  is Important: those bodies are the only channel between parallel worktrees.
-- **A fleet PR body carries its `fleet.sh cost` figure.** The ceilings bound the
-  text; that number says whether the run got cheaper. Missing, it is a Nit.
+A host repository adds its correctness rules in **`.autofleet/review.md`**, and
+they are part of this policy wherever that file exists. Read it after this one.
 
-## Important vs Nit
+That seam is the point. The rules that belong there are the ones this file
+cannot know — the save file that must be written atomically, the header that may
+not appear in `core/`, the address a test may not reach. They were written into
+this file once, and this file is **vendored into every host repository**, so
+every project that installed autofleet was reviewed against another project's
+save format. Nothing in the payload may know about one project; that is hard rule
+2, and this file was breaking it.
 
-**Important** is reserved for a finding that would break behaviour, destroy or
-corrupt a save, leak a secret, breach a hard rule, break the build on either
-target, or leave the tracker saying something untrue.
+## Critical, Important, Suggestion
 
-Everything else is a **Nit**: naming, comment wording, ordering, a clearer
-formulation of something already correct.
+**Critical** — security, data loss or corruption, a breaking change with no
+migration, or a production failure. **A Critical finding is fixed, never argued
+away.** The validator will not accept a reasoned reply in its place, because
+there is no second reviewer behind it.
 
-Report at most **five nits**, and summarise the rest as a count. A review whose
-signal is buried in twenty preferences costs more attention than it saves.
+**Important** — a real defect or a breach of a hard rule: wrong behaviour on a
+path that matters, a missing test that would have caught the bug, a broken build
+on either target, or the tracker left saying something untrue. Fixed, or
+disputed with a reason the validator accepts.
 
-## A late round with no Important finding files issues, not findings
+**Suggestion** — naming, comment wording, ordering, a clearer formulation of
+something already correct. **A Suggestion is answered, not fixed**: say which you
+took and which you did not. Answering costs no commit, and a commit moves the
+head.
 
-From **round three onward**, a review that finds nothing Important stops asking
-for a diff: name the nits in the **body**, not as threads, say they belong in a
-follow-up issue, and report `review-important: 0` with a real
-`review-findings: N`.
+**A Suggestion never becomes its own issue.** One that does costs a whole loop —
+brief, implementation, review, validation — to change a comment, and a review
+that mints work every round is the most expensive thing in this system. Anything
+worth keeping goes on the repository's standing nit issue, if it keeps one.
 
-**Not `0` findings** — `0` releases the gate and the branch lands before the
-issue exists. Rounds one and two are unchanged. `review.sh` names the round;
-absent one, treat it as one. Why, in [docs/WORKFLOW.md](docs/WORKFLOW.md).
+Report at most **five Suggestions**, and summarise the rest as a count. A review
+whose signal is buried in twenty preferences costs more attention than it saves.
+
+## What not to report
+
+- **The comment density**, where a project's own rules ask for it. A diff that
+  matches the code around it is correct.
+- **A preference restated as a defect.** If the existing code is correct and you
+  would have written it differently, that is a Suggestion at most, and it counts
+  against the cap of five.
+- **Anything you cannot cite.** A behaviour claim needs a `file:line` in the
+  actual source, not an inference from a name. If you are unsure a finding is
+  real, drop it or say you are unsure — a wrong finding costs the author a round
+  trip, and there is no later round to take it back in.
+- **What the author already found.** The `/mattpocock-skills:code-review`
+  findings are in the PR body. Repeat one only if you think the fix was wrong.
+- **A verdict GitHub will refuse.** Under `AUTOFLEET_REVIEW_MODE=local` the
+  reviewer signs in as the pull request's own author, and GitHub declines
+  `CHANGES_REQUESTED` on a self-authored PR — *"Review Can not request changes on
+  your own pull request"*. Trying it returns a non-zero exit on the reviewer's
+  last action, which is how a run ends having submitted nothing at all. Use
+  `--comment` whatever you found; the counts below are what hold the branch.
 
 ## Say how many findings you left
 
@@ -105,60 +149,20 @@ Nothing else follows them.
 That marker is what makes a review count at all in that mode; `github` mode has
 none ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review)).
 
-**This file names every trailer that is allowed, and never says how many there
-are anywhere else.** A count stated twice goes stale in one of them.
+**This file names every trailer a review may carry, and never says how many there
+are anywhere else.** A count stated twice goes stale in one of them. The
+validator's own trailer is named in its brief, for the same reason.
 
-`N` is Important plus Nit, across all three passes, inline comments included;
-`0` means nothing found. `M` is the Important subset of `N`.
+**`M` is Critical plus Important.** **`N` is `M` plus Suggestions** — every
+finding across all seven dimensions, inline comments included. `0` means nothing
+found.
 
-**`M` decides nothing about merging** — `N` above zero holds the branch either
-way; see below. Omitting `M` reads as "did not say", never as zero, so write it
-even when `M` equals `N`.
+`N` above zero holds the branch until the author has answered. `M` decides
+nothing about merging; what it changes is what the author is *told*, because
+`M == 0` means answering in words is a complete answer and costs no commit.
+Omitting `M` reads as "did not say", never as zero, so write it even when `M`
+equals `N`.
 
 They are HTML comments, invisible in the rendered review. They exist because
-`merge-gate` cannot otherwise tell five nits from nothing at all: both are a
-COMMENTED verdict, and both satisfy every other condition it has.
-
-**Under `AUTOFLEET_REVIEW_MODE=local` the count is the only lever there is.**
-GitHub refuses to *request changes on your own pull request*, and in that mode
-the reviewer signs in as the author's account — so use `--comment` for every
-verdict and let `N` hold the branch. A reviewer that tries the other route gets
-a non-zero exit on its last action and may end having submitted nothing.
-
-`gh pr merge --auto` is armed when the PR opens and this review runs afterwards,
-so a wrong `0` merges the branch while its author is still fixing what you
-found; four PRs went in that way. Leaving the line out is safe — the PR is held
-as though findings were left. Write the line.
-
-## Do not report
-
-- Anything CI already enforces: compiler warnings, `core/` include hygiene,
-  shell scripts that do not parse, an unformatted Python file, artifact shape.
-  CI going red says it better, and says it without a reader.
-- Comment density or naming that matches the surrounding code. CLAUDE.md asks
-  for consistency with what is there, not for a house style this file does not
-  define.
-- Generated or vendored trees: `build/`, `.venv/`, `server/testing/library/`,
-  `.cache/`.
-- `server/contract/captures/` content. It is a recorded snapshot of a real
-  server; it is not written by hand and reviewing its style is meaningless.
-  A *change* to it, on the other hand, is Important and belongs in pass 3.
-
-## What findings do and do not do
-
-No review here approves, and no agent merges its own work — the brief's step 4
-states that rule, and `guard.py` refuses the command either way. Findings do not
-decide whether a PR is good enough; a human reading them does.
-
-They do hold the branch, though, and that is not the same thing. `merge-gate`
-refuses a PR while a `--request-changes` is standing, while a review thread is
-open, and while a review reporting findings has not been answered by its author
--- `./scripts/fleet/answer-review.sh "<what you did>"` is that answer, and "I am
-not doing this, because" is as good an answer as a fix.
-
-That answer costs **no commit** — which is what `review-important: 0` is for:
-a fix moves the head and buys the next round; words do not.
-
-When a review flags the same mistake twice across PRs, the correction goes into
-CLAUDE.md as part of that review. That is how this stops being a review finding
-and starts being something the next session already knows.
+`merge-gate` cannot otherwise tell five Suggestions from nothing at all: both are
+a COMMENTED verdict, and both satisfy every other condition it has.

@@ -344,6 +344,148 @@ card() {
   return 0
 }
 
+# Type one prompt at the agent in a worktree and submit it.
+#
+# The same two primitives agent-autostart.sh uses to submit a drafted prompt,
+# in the order that matters: `send` types into the composer, `enter` submits
+# whatever is in it. A `send` that fails must NOT be followed by an `enter` --
+# that submits whatever the agent had half-typed itself.
+#
+# Silent about a worktree with no agent, because two of the three callers run
+# against every owned worktree on every poll and most of them have no agent at
+# that moment. A listing that could not be READ is said once, the way
+# `interrupt_agent_in` says it, because that is the difference between "nobody
+# is in there" and "somebody is and we could not reach them".
+say_to_agent_in() {
+  local path="$1" text="$2" handle
+  if ! handle="$(runner_agent_terminal "$path")"; then
+    say "  the runner would not say whether an agent is in $path -- nothing was sent"
+    return 1
+  fi
+  [ -n "$handle" ] || return 1
+  runner_terminal_send "$handle" "$text" || {
+    say "  the runner would not type into $path -- nothing was sent"
+    return 1
+  }
+  runner_terminal_enter "$handle" || {
+    say "  the runner typed into $path but would not submit it"
+    return 1
+  }
+  return 0
+}
+
+# Ask the agent to write its handoff note, and let it, WITHOUT holding the poll.
+#
+# armaatus/autofleet#106: the note exists, and every path that ended a session
+# interrupted first and asked nothing, so an interrupted attempt wrote nothing
+# down. A note needs a turn to be written in, and this is the turn.
+#
+# ACROSS POLLS, NOT INSIDE ONE. The first version slept up to the grace right
+# here, which is a dispatcher that stops answering for two minutes per issue --
+# with three worktrees, six minutes in which no review is collected and no
+# time-box fires. The fleet already has the shape for "asked, waiting on an
+# answer": a marker, and a decision made on the next pass. So this asks once,
+# writes down when it asked and what the note's timestamp was, and answers
+# "not yet" until either the timestamp moves or the grace runs out.
+#
+# 0 = go ahead: the note was written, the grace is spent, there is no agent to
+#     ask, or asking is turned off.
+# 1 = wait: the request has just gone out, or it is still standing.
+#
+# So every caller reads as `handoff_turn ... || continue` -- the action it was
+# about to take happens on a later poll, which is safe for all three of them:
+# the time-box keeps its `started` marker, the reaper's warning pass is a pass
+# of notice by design, and an unreset context costs one more poll of build
+# tokens rather than a lost session.
+handoff_turn() {
+  local num="$1" path="$2" marker="$STATE_DIR/handoff-asked-$num"
+  local asked_at before now note
+  [ "${AUTOFLEET_HANDOFF_GRACE_SECONDS:-0}" -gt 0 ] || return 0
+  note="$(fleet_handoff_path "$path" "$num")"
+  now="$(date +%s)"
+  # `fleet_mtime`, NOT a local `stat -f %m || stat -c %Y`. That chain was written
+  # here and is wrong on GNU, where `-f` is `--file-system` and SUCCEEDS against
+  # a mount point -- so the fallback never runs, every call returns the same
+  # filesystem field, and the timestamp never appears to move. lib.sh already
+  # had the portable spelling, which validates each answer rather than trusting
+  # the end of an `||` chain.
+
+  if [ -e "$marker" ]; then
+    asked_at=""; before=""
+    read -r asked_at before 2>/dev/null <"$marker" || true
+    case "${asked_at:-}" in ''|*[!0-9]*) asked_at=0 ;; esac
+    # WRITTEN is the mtime MOVING, not the file existing: a note left by an
+    # earlier attempt in this worktree is already there, and reading it as this
+    # agent's answer is how a stale note gets treated as a fresh one.
+    if [ "$(fleet_mtime "$note")" != "${before:-}" ]; then
+      rm -f "$marker"
+      say "#$num: handoff note written -- $(( now - asked_at ))s after it was asked for"
+      return 0
+    fi
+    [ $(( now - asked_at )) -ge "$AUTOFLEET_HANDOFF_GRACE_SECONDS" ] || return 1
+    rm -f "$marker"
+    say "#$num: no handoff note ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s after asking -- going on without one"
+    return 0
+  fi
+
+  # Nobody to ask is not a wait. The agent may have exited already, which is
+  # exactly when the caller wants to get on with it.
+  say_to_agent_in "$path" \
+    "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
+    || return 0
+  printf '%s %s\n' "$now" "$(fleet_mtime "$note")" >"$marker"
+  say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
+  return 1
+}
+
+# THE PULL REQUEST IS THE SEAM. Once it is open the build is done, and every
+# file the build read is still in the agent's context -- paid for again on every
+# turn of the answering work, which needs none of it.
+#
+# So: ask for the note, drop the conversation, hand over the answering half of
+# the brief. Once per issue, marked, because the second one would drop the
+# answering context this just created.
+#
+# NOT KEYED TO THE REVIEW ARRIVING, deliberately. The agent is inside
+# `await-review.sh` at that moment -- a blocking call -- and text typed at a
+# running turn lands after it, so the reset would arrive in the middle of the
+# answer rather than before it. The PR appearing is the same boundary one step
+# earlier, and the agent is between turns there.
+reset_context_for_answering() {
+  [ "${AUTOFLEET_CONTEXT_RESET:-on}" = on ] || return 0
+  local f num path
+  for f in "$OWNED_DIR"/*; do
+    [ -e "$f" ] || continue
+    num="$(basename "$f")"
+    [ -e "$STATE_DIR/context-reset-$num" ] && continue
+    path="$(owned_path "$num")"
+    [ -d "$path" ] || continue
+    # "Could not tell" is not "yes", the same way enforce_timebox reads it: this
+    # branch ends a session, and a lookup that failed is no basis for that.
+    has_open_pr "$num" || continue
+    # EMPTY IS THE OFF SWITCH, and it is said rather than skipped silently: a
+    # host on a CLI with no clear command has turned the reset off, and the
+    # place to find that out is the log of the first issue it would have hit.
+    if [ -z "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ]; then
+      : >"$STATE_DIR/context-reset-$num"
+      say "#$num: AUTOFLEET_AGENT_CLEAR_CMD is empty, so the build context stays for the answering work"
+      continue
+    fi
+    handoff_turn "$num" "$path" || continue
+    say "#$num: PR is open -- starting the answering work in a clean context"
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue
+    # The marker goes down BEFORE the second prompt: a clear that landed and an
+    # answering brief that did not is recoverable by hand, and is much better
+    # than clearing the same agent again on the next poll because the marker
+    # waited for both.
+    : >"$STATE_DIR/context-reset-$num"
+    say_to_agent_in "$path" \
+      "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr $num\` and follow everything it prints. You are the same worktree and a new session: what the build decided is in its handoff note, which that command prints, and nothing else from it survives." \
+      || say "#$num: the conversation was dropped but the answering brief did not arrive -- send it by hand"
+    card "$path" comment "#$num: PR open; answering in a clean context"
+  done
+}
+
 # Interrupt the agent in one worktree, if it has one. Both callers are about to
 # take something away from it -- the time-box the rest of its hours, the release
 # its whole directory -- and an agent that is not told keeps working against a rig
@@ -407,7 +549,8 @@ clear_issue_markers() {
         "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
-        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1"
+        "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
+        "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -1350,7 +1493,7 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
 #   <pr>.rounds  a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
 #                had that DID produce a verdict, across every head it has ever
-#                been on, against AUTOFLEET_REVIEW_MAX_ROUNDS. Written by
+#                been on, against AUTOFLEET_REVIEW_MAX. Written by
 #                review.sh on exit 0 only. The opposite population from
 #                `.tries`, which is why it is a separate file and not a second
 #                column: a review that submits findings clears `.tries` and
@@ -1361,6 +1504,21 @@ REVIEWING_DIR="$STATE_DIR/reviewing"
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
+#
+#   v-<pr>       ...and the same four, for the VALIDATOR, under a `v-` prefix.
+#   v-<pr>.done  One directory rather than two, deliberately: `live_reviewers`,
+#   v-<pr>.tries `stop_reviewers` and the closed-PR sweep all walk this directory
+#   v-<pr>.rounds and all three want to treat a validator exactly as they treat a
+#                reviewer -- it is another agent holding this machine's `gh`
+#                login, it dies on a stop, and it is reaped the same way. A
+#                second directory would have been a second copy of each of them,
+#                and the copy that drifts is the one nobody is looking at.
+#
+#                `is_review_record` works on both unchanged -- it matches the
+#                SUFFIX -- and the one place that reads the number out of a
+#                filename strips the prefix first. Getting that wrong deletes
+#                `v-42.done` on the first poll after it is written, which starts
+#                a fresh validator every minute for the life of the PR.
 #
 # Only the first is a lock, and the four records must never be counted as one.
 # `is_review_record` is the predicate; use it rather than respelling the suffix
@@ -1381,6 +1539,102 @@ is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; es
 # leaks to global scope anyway and is invisible to anyone reading the file-level
 # helpers. Found by `/mattpocock-skills:code-review`.
 rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
+
+# Start a validator for $1 at head $2, if a slot is free.
+#
+# Deliberately THIN. Every question about whether a validation is due -- has this
+# head one already, did any review leave findings to check, has this pull request
+# had its two -- is `validate.sh`'s, and it asks `merge_gate.py` rather than
+# answering from here. That is the #114 lesson applied to the second phase before
+# it can be learned again: three paraphrases of "what counts" drifted apart once,
+# always in the permissive direction, and the permissive direction here is a
+# branch merging on a validation nobody asked for.
+#
+# So this decides one thing only: is there an agent slot. The cost of asking too
+# often is one exit 8, two API calls.
+start_validator() {
+  local pr="$1" head="$2" marker="$REVIEWING_DIR/v-$1"
+
+  # ...AND THE HEAD THAT HAS HAD ITS ATTEMPTS. A validator that runs its whole
+  # budget and submits nothing (validate.sh exit 5) writes no `.done` record --
+  # correctly, because retrying is usually right and the next attempt may well
+  # succeed. Unbounded, that is a full-budget agent started every poll against a
+  # head that will never get a verdict, for the life of the pull request. It is
+  # the same shape as the reviewer's `.tries`, bounded by the same knob, and it
+  # was missing here for one round: the refund helpers in `validate.sh` were
+  # decrementing a file nothing ever wrote.
+  #
+  # NOT the same counter as `AUTOFLEET_VALIDATE_MAX`, and the difference is the
+  # one `.tries` and `.rounds` have always had. That one counts validations this
+  # pull request has HAD -- verdicts, on any head -- and past it a person
+  # decides. This counts attempts on ONE head that produced NOTHING, and a push
+  # starts it again, because a new head is a new question.
+  # An EMPTY or corrupt `.tries` must read as 0 and not as nothing: `[ "" -ge 3 ]`
+  # is `integer expression expected` and exit 2, which reads as FALSE, so the cap
+  # silently does not exist -- and fleet.sh runs without `-e` to notice. That
+  # normalisation is `fleet_tries_count`'s, in lib.sh, because this function and
+  # the reviewer's twin below both needed it and only one of them had it.
+  local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
+
+  # Already running one for this PR -- on any head. Unlike the reviewer's lock,
+  # which is per head and restarts when the head moves, a validator whose head
+  # moved is judging a commit whose successor it has not read. Killing and
+  # restarting it would spend a validation out of a cap of two on a commit that
+  # is already superseded; letting it finish costs one wasted verdict that the
+  # sha binding makes harmless, and the next poll starts the one that counts.
+  [ -e "$marker" ] && return 0
+  [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ] && return 0
+  rm -f "$marker.done"
+
+  # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding the
+  # reviewer's copy of this records at length: checked before it, the branch is
+  # taken while the LAST validator is still running -- the count is incremented
+  # before the spawn -- so at a cap of 3 the third spawn leaves `.tries` at 3 and
+  # every poll for the rest of that validator's timeout announces a cap only two
+  # attempts have reached. Below the lock the message is true whenever it prints.
+  if [ "$tries_n" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
+    hold_say_into "$REVIEWING_DIR/v-$pr.said" "vgaveup-$head" \
+      "PR #$pr: $tries_n validators on ${head:0:8} submitted nothing, which is the cap." \
+      "  Not starting more on this head. Read $FLEET_DIR/validations/pr-$pr-${head:0:8}.log," \
+      "  then either ./scripts/fleet/validate.sh $pr by hand, or push -- a new head" \
+      "  starts the count again. The PR stays held meanwhile, which is the safe" \
+      "  direction: a missing verdict is not a passing one."
+    return 0
+  fi
+
+  # RE-COUNTED, not carried: this shares the reviewers' pool because it is the
+  # same resource -- an agent holding this machine's `gh` login -- and the count
+  # has to be current or three fast exits hold every slot for the whole pass.
+  #
+  # `live_reviewers` is defined INSIDE `review_open_prs`, which is the only
+  # caller of this and defines it before the loop that calls here -- bash makes a
+  # nested definition global once the enclosing function has run. Said out loud
+  # because moving this call anywhere earlier would find it undefined, and `set
+  # -e` is not on in this file, so the failure would be a silent zero and a
+  # validator started past the cap.
+  local running; running="$(live_reviewers)"
+  [ "${running:-0}" -ge "$MAX_WORKTREES" ] && return 0
+
+  # `</dev/null` is load-bearing where this is called from: the caller's stdin IS
+  # the pipe carrying the remaining pull requests, and a background child that
+  # inherits it eats them -- the next PR in the pass then silently gets nothing.
+  #
+  # The marker is written AFTER the spawn, because the pid is what goes in it.
+  # The race that opens is the same benign one review.sh documents: an exit-8
+  # validator can remove a marker that does not exist yet, and the `printf` then
+  # recreates it holding a dead pid, which `live_reviewers` reaps on its next
+  # call.
+  # Written BEFORE the spawn, because the dispatcher has to decide from
+  # something and the decision is made here. `validate.sh` refunds it on every
+  # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
+  # answer, no CLI on PATH, a kill at the deadline -- so what is left in it is
+  # attempts that reached an agent and got nothing back.
+  printf '%s %s\n' "$head" "$(( tries_n + 1 ))" >"$marker.tries"
+  AUTOFLEET_VALIDATE_MARKER="$marker" \
+    "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
+  printf '%s %s\n' "$!" "$head" >"$marker"
+  say "validating PR #$pr at ${head:0:8} (pid $!)"
+}
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -1417,7 +1671,18 @@ reviewer_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
-  printf '%s\n' "$line" | grep -E '(^|[[:space:]/])review\.sh([[:space:]]|$)' >/dev/null
+  # BOTH SCRIPTS, and this matched only the reviewer for one commit. The
+  # validator's lock lives in the same directory under a `v-` prefix and its
+  # pid is a `validate.sh`, so `live_reviewers` read every live validator as
+  # dead: it deleted the lock, the next poll started another, and up to
+  # AUTOFLEET_REVIEW_MAX_TRIES of them ran at once against one head. The same
+  # hole made `stop_reviewers` skip validators, so `stop.sh --now` left one
+  # running with this machine's gh login for the rest of its timeout.
+  #
+  # The separator on the left is still required so `await-review.sh` cannot
+  # satisfy it, and `-\?` is not used: the names are matched whole.
+  printf '%s\n' "$line" \
+    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
 }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
@@ -1447,7 +1712,7 @@ stop_reviewers() {
     case "$marker" in *.rounds) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
-    read -r held _ <"$marker" 2>/dev/null || true
+    read -r held _ 2>/dev/null <"$marker" || true
     if reviewer_alive "$held"; then
       kill "$held" 2>/dev/null && stopped=$((stopped + 1))
     fi
@@ -1521,8 +1786,18 @@ $(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
 EOF
 }
 
+# BOTH TRANSCRIPT STORES, and this swept one. `validate.sh` writes
+# `$FLEET_DIR/validations/pr-<n>-<head>.log` in exactly the shape `reviews/`
+# uses, and nothing ever pruned it: a store that grows for as long as the fleet
+# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. Found by the
+# self-review.
+#
+# $3 is the directory and $4 the prefix its locks carry in $REVIEWING_DIR --
+# empty for the reviewer, `v-` for the validator -- because the "a run is still
+# writing this one" test has to ask about the right lock. Defaulted, so the
+# reviewer call site reads as it did.
 prune_review_logs() {
-  local open_prs="$1" dir="$FLEET_DIR/reviews" f base num kept orphans=0 ref
+  local open_prs="$1" dir="${3:-$FLEET_DIR/reviews}" lock="${4:-}" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
   # `$2` is whether the caller COULD ANSWER, and it is separate from the list
   # because an empty list has two meanings and they are opposite instructions.
@@ -1559,9 +1834,9 @@ prune_review_logs() {
     # A PR with a reviewer still writing is not eligible for anything: the
     # deleting loop skips it, and granting grace here would mean the pass after
     # the reviewer finishes deletes with no grace at all.
-    if [ -e "$REVIEWING_DIR/$num_seen" ]; then
+    if [ -e "$REVIEWING_DIR/$lock$num_seen" ]; then
       local held_seen=""
-      read -r held_seen _ <"$REVIEWING_DIR/$num_seen" 2>/dev/null || true
+      read -r held_seen _ 2>/dev/null <"$REVIEWING_DIR/$lock$num_seen" || true
       reviewer_alive "$held_seen" && continue
     fi
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
@@ -1631,7 +1906,7 @@ prune_review_logs() {
     # cleared, so blocking on it is permanent. Found by the independent review.
     if [ -e "$REVIEWING_DIR/$num" ]; then
       local held_by=""
-      read -r held_by _ <"$REVIEWING_DIR/$num" 2>/dev/null || true
+      read -r held_by _ 2>/dev/null <"$REVIEWING_DIR/$num" || true
       reviewer_alive "$held_by" && continue
     fi
     case " $open_prs " in
@@ -1738,7 +2013,7 @@ rotate_fleet_log() {
   # then returned without renaming a thing. The real blind rotation, whenever it
   # came, was then silent -- the marker having been spent on a rotation that did
   # not happen. Found by the independent review.
-  size="$(wc -c <"$LOG" 2>/dev/null | tr -d ' ')"
+  size="$(wc -c 2>/dev/null <"$LOG" | tr -d ' ')"
   case "$size" in ''|*[!0-9]*) return 0 ;; esac
   [ "$size" -gt "$max" ] || return 0
   # A LIVE REVIEWER, asked properly. Two things were wrong here and both were
@@ -1768,7 +2043,7 @@ rotate_fleet_log() {
       [ -e "$live" ] || continue
       is_review_record "$live" && continue
       local held=""
-      read -r held _ <"$live" 2>/dev/null || true
+      read -r held _ 2>/dev/null <"$live" || true
       # `reviewer_alive` is the fleet's own three-way answer: 0 ours, 1 dead,
       # 2 alive-but-ps-would-not-say. ONLY 0 BLOCKS.
       #
@@ -1955,6 +2230,7 @@ print(len(json.load(sys.stdin)))
   # `yes` only when the parse produced something we can trust: `gh` succeeding
   # is not enough, because the parse below it can fail silently.
   prune_review_logs "$open_prs" "$prs_answered"
+  prune_review_logs "$open_prs" "$prs_answered" "$FLEET_DIR/validations" "v-"
   # Past the keep-reviews gate on purpose -- see the function's own comment.
   prune_review_refs "$open_prs" "$prs_answered"
 
@@ -1989,7 +2265,7 @@ print(len(json.load(sys.stdin)))
       # reaping it as a dead reviewer would put the re-spawn loop straight back.
       is_review_record "$m" && continue
       p=""
-      read -r p _ <"$m" 2>/dev/null || true
+      read -r p _ 2>/dev/null <"$m" || true
       reviewer_alive "$p"; local is=$?
       # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
       # documents as treat-it-as-ours, so it keeps both its marker and its slot.
@@ -2050,13 +2326,24 @@ for p in prs:
     # here rather than in words.
     rounds_n="${rounds_n:-0}"
     case "$rounds_n" in (*[!0-9]*) rounds_n=0 ;; esac
-    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
-      hold_say_into "$REVIEWING_DIR/$pr.said" "rounds-$rounds_n" \
-        "PR #$pr: $rounds_n reviews, which is the cap. Needs you." \
-        "  Not starting more, on this head or any later one. The reviews are in" \
-        "  $FLEET_DIR/reviews/pr-$pr-*.log; read the last one and decide, rather than" \
-        "  buying a $((rounds_n + 1))th. Raise AUTOFLEET_REVIEW_MAX_ROUNDS if this PR is" \
-        "  genuinely still converging."
+    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX" ]; then
+      # THIS IS THE ORDINARY PATH NOW, not the exhausted one. The cap is 1: a
+      # pull request that has had its review reaches here on every later poll,
+      # and what it wants from then on is a VALIDATION -- did the commits
+      # answering the findings address them, and did they break anything.
+      #
+      # `validate.sh` decides whether one is actually due (it asks
+      # `merge_gate.needs_validation`, the one definition) and enforces its own
+      # cap, so this only decides whether to ASK. A PR with nothing to validate
+      # costs one cheap exit 8, the same shape `review.sh` has on the other side.
+      #
+      # No `hold_say_into` here any more. The old message announced "N reviews,
+      # which is the cap. Needs you." -- true when the cap was four and reaching
+      # it meant a PR had failed to converge, and false now that reaching it is
+      # what every healthy pull request does on its second poll. The hold that
+      # still means something is the VALIDATION cap, and `validate.sh` says it
+      # where the number lives.
+      start_validator "$pr" "$head"
       continue
     fi
 
@@ -2075,14 +2362,17 @@ for p in prs:
     # is a full-budget reviewer started every poll against a head that will
     # never get a verdict. claude-review.yml bounds the same case at one more
     # attempt and then says a person decides; this says the same thing.
-    local tries_head tries_n
-    tries_head=""; tries_n=0
-    read -r tries_head tries_n <"$marker.tries" 2>/dev/null || true
-    [ "${tries_head:-}" = "$head" ] || tries_n=0
+    # THE SAME COUNT AS THE VALIDATOR'S, from the same helper. This site had
+    # the head comparison and not the normalisation: a `.tries` holding
+    # anything non-numeric left the comparison below at exit 2, which `if`
+    # reads as false, so the reviewer cap was off for that head with a green
+    # log beside it. The validator's copy already normalised; deduplicating
+    # them is what made the difference visible.
+    local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
     if [ -e "$marker" ]; then
       local for_head
       held=""; for_head=""
-      read -r held for_head <"$marker" 2>/dev/null || true
+      read -r held for_head 2>/dev/null <"$marker" || true
       if [ "${for_head:-}" = "$head" ]; then
         continue                      # one is running, on this very commit
       fi
@@ -2201,7 +2491,13 @@ for p in prs:
   for rec in "$REVIEWING_DIR"/*; do
     [ -e "$rec" ] || continue
     is_review_record "$rec" || continue
-    base="$(basename "$rec")"; num="${base%%.*}"
+    # `v-` is the validator's half of this directory -- the two phases share it
+    # so that `live_reviewers`, `stop_reviewers` and this sweep keep working on
+    # both with no second copy of any of them. Strip it before the number is
+    # read, or `v-42.done` parses as pull request "v-42", matches no open PR, and
+    # is deleted on the first poll after it is written -- which starts a fresh
+    # validator every minute for the life of the PR.
+    base="$(basename "$rec")"; base="${base#v-}"; num="${base%%.*}"
     case " ${open_prs:-} " in
       *" $num "*) continue ;;
     esac
@@ -2670,6 +2966,21 @@ reap_abandoned() {
     # The warning pass. One poll of notice, then the pair is asked again above --
     # so an agent that commits, or writes its plan to a file, keeps its worktree.
     if [ ! -e "$STATE_DIR/warned-$num" ]; then
+      # ITS TURN TO WRITE THE NOTE, before the terminal goes
+      # (armaatus/autofleet#106), and BEFORE `warned-` goes down.
+      #
+      # THE ORDER IS THE WHOLE OF IT. Marked first, this branch was not taken
+      # again: the next poll saw `warned-`, fell through to the release, and the
+      # worktree went with the note still unwritten -- at the shipped 60s poll
+      # and 120s grace, every time. The agent was asked for a note and then had
+      # the directory it writes into deleted.
+      #
+      # So the marker is the record that the WARNING was given, and the warning
+      # is not given until the turn is over. `continue` while the turn stands,
+      # which is what keeps this branch reachable next poll.
+      if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
+        handoff_turn "$num" "$path" || continue
+      fi
       : >"$STATE_DIR/warned-$num"
       say "#$num: $reason, and the worktree holds nothing -- releasing it next pass unless something lands in it"
       # ...unless the time-box, earlier in this same pass, already interrupted it
@@ -2873,6 +3184,19 @@ enforce_timebox() {
     # the same issue to inherit and be silenced by.
     forget_box_markers "$num"
 
+    # ITS TURN TO WRITE THE NOTE FIRST (armaatus/autofleet#106). This path takes
+    # the rest of an agent's hours away and asked nothing before it, so three
+    # hours of work left nothing behind and `fleet.sh retry` started from the
+    # files. The grace is spent before the interrupt, which is why it is bounded
+    # and why the wait ends the moment the note's timestamp moves.
+    #
+    # Worth spending here even though the worktree may be released below: it is
+    # kept whenever it holds uncommitted work or unmerged commits, which is
+    # exactly the case where the note has something to say.
+    # ...and the `continue` above is why this line is HERE and not before the
+    # turn: said first, it printed once a poll for the whole of the grace, which
+    # is the "once per event" rule this function keeps everywhere else.
+    handoff_turn "$num" "$path" || continue
     say "#$num: $((TIMEBOX_SECONDS / 3600))h with no PR -- stopping it; the worktree goes if it holds nothing"
     interrupt_agent_in "$path"
     # For reap_abandoned, which runs later in THIS pass and would otherwise
@@ -3241,16 +3565,29 @@ cmd_status() {
     # The rule the comment above states is about counting records as reviewers,
     # which is what a `find ! -name` got wrong; naming one suffix to read one
     # file is not that.
-    local r rn rpr found=0
+    #
+    # THE PREFIX IS STRIPPED AND THE CAP IS CHOSEN BY IT. Both phases keep a
+    # `.rounds` record in this one directory -- `<pr>.rounds` for reviews,
+    # `v-<pr>.rounds` for validations -- so a glob that reads the number and
+    # not the prefix prints `PR #v-42: 2/1 rounds`: a pull request that does not
+    # exist, at a cap that is not its own, on the first screen anybody looks at.
+    # The two counts are bounded by two different knobs for the reason
+    # docs/CONFIGURATION.md gives, and a screen that shows one cap for both is
+    # the "three paraphrases of what counts" failure in display form.
+    local r rn rpr rwhat rcap found=0
     for r in "$REVIEWING_DIR"/*.rounds; do
       [ -e "$r" ] || continue
       rn="$(cat "$r" 2>/dev/null)"
       case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
       rpr="$(basename "$r")"; rpr="${rpr%.rounds}"
-      if [ "$rn" -ge "$AUTOFLEET_REVIEW_MAX_ROUNDS" ]; then
-        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds -- AT THE CAP, a person decides"
+      case "$rpr" in
+        v-*) rpr="${rpr#v-}"; rwhat=validations; rcap="$AUTOFLEET_VALIDATE_MAX" ;;
+        *)   rwhat=reviews;   rcap="$AUTOFLEET_REVIEW_MAX" ;;
+      esac
+      if [ "$rn" -ge "$rcap" ]; then
+        echo "             PR #$rpr: $rn/$rcap $rwhat -- AT THE CAP, a person decides"
       else
-        echo "             PR #$rpr: $rn/$AUTOFLEET_REVIEW_MAX_ROUNDS rounds"
+        echo "             PR #$rpr: $rn/$rcap $rwhat"
       fi
       found=1
     done
@@ -3721,6 +4058,10 @@ while that one is up."
     # is waiting on exactly this, and every pass it waits is a pass of its
     # time-box spent.
     review_open_prs
+    # After review_open_prs and before the timers: this ends the build session
+    # of every worktree whose PR is up, and the answering session it starts is
+    # the one the reviewer's findings arrive into.
+    reset_context_for_answering
     enforce_timebox
     notice_stalled
     reap_abandoned

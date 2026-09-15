@@ -367,7 +367,7 @@ def measure(paths):
                 # SUBAGENTS LIVE HERE, and missing them is not a rounding
                 # error. A subagent writes its own transcript under
                 # `<session-id>/subagents/agent-*.jsonl`, and this repo
-                # REQUIRES subagents: verifier, researcher and two review
+                # REQUIRES subagents: researcher and the review
                 # passes per issue (CLAUDE.md). Reading only the top level
                 # dropped 92% of the cache-write tokens for one worktree and
                 # reported 1 session where 4 agents had run.

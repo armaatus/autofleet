@@ -122,7 +122,7 @@ if [ -r "$ROUNDS_FILE" ]; then
   # Files written by an older version carry fewer, and `read` leaves the rest
   # empty, which is exactly the "nothing seen yet" state.
   read -r seen_pr seen_round seen_head seen_stamp seen_comment_at \
-    <"$ROUNDS_FILE" 2>/dev/null || true
+    2>/dev/null <"$ROUNDS_FILE" || true
   # A dash is how record_round writes a field it does not have; see there for
   # why an empty one cannot be written literally.
   [ "${seen_head:-}" = "-" ] && seen_head=""
@@ -156,7 +156,7 @@ round=$((round + 1))
 record_round() {
   local stamp_head="" stamp_at="" stamp_comment=""
   { IFS= read -r stamp_head; IFS= read -r stamp_at
-    IFS= read -r stamp_comment; } <"$stamp" 2>/dev/null || true
+    IFS= read -r stamp_comment; } 2>/dev/null <"$stamp" || true
   # A MISSING FIELD IS A DASH, not an empty string, and that is the fifth
   # field's doing. `read` splits on a RUN of whitespace, so `42 1 abc  <at>` --
   # an absent `submittedAt` between two values that are present -- assigns the
@@ -328,7 +328,7 @@ print(doc.get('baseRefName') or '')
     # picture; only the state that makes waiting pointless exits here.
     if [ "$merge_state" = "DIRTY" ]; then
       seen_head=""
-      [ -r "$CONFLICT_FILE" ] && read -r seen_head <"$CONFLICT_FILE" 2>/dev/null
+      [ -r "$CONFLICT_FILE" ] && read -r seen_head 2>/dev/null <"$CONFLICT_FILE"
       printf '%s\n' "$head" >"$CONFLICT_FILE"
       cat <<CONFLICT
 
@@ -483,7 +483,7 @@ def stop(code):
 
 sys.path.insert(0, ".github/scripts")
 try:
-    from merge_gate import (independent_reviews, is_substantive,
+    from merge_gate import (validation, independent_reviews, is_substantive,
                             declared_important)
 except Exception as exc:  # missing, half-edited, or broken at import time
     # Not ImportError alone: merge_gate.py is a file agents in this repo edit --
@@ -512,6 +512,37 @@ if head != local_head:
     notes.append(f"this worktree is on {local_head[:8]} and the PR's head is "
                  f"{head[:8]} -- there is something unpushed. The review being "
                  "waited for is of what GitHub has.")
+
+# THE VALIDATION FIRST, because from the first fix onward it is the only thing
+# that can arrive.
+#
+# This wait is called twice in the loop: once for the review, and once for the
+# validation of the commits answering it. The second call is the one that breaks
+# without this. A validation rides in a `gh pr review` and carries a `validated:`
+# trailer, and `independent_reviews()` EXCLUDES anything carrying one -- a
+# validation is not a review, and counting it as one would let it satisfy the
+# independence requirement it exists downstream of. So the reviews list below is
+# empty on a validated head, forever: the review was invalidated by the push, no
+# second review is coming, and the wait would spend its whole deadline three
+# times over on something that has already happened.
+#
+# Reported and returned, not waited through. `review-status.sh` is what the
+# caller runs next either way; this only has to stop.
+verdict = validation(pull, head)
+if verdict is not None:
+    notes.append(
+        f"the validation of {head[:8]} came back {verdict.upper()}. That is what "
+        "judges a fix -- the review runs once, on the head the PR opened with, "
+        "and this is the pass that judges your answer to it. A PASS releases the "
+        "gate; run ./scripts/fleet/review-status.sh, which is the next step "
+        "either way. A FAIL names what is unsettled in its body: fix that and "
+        "push, and the next validation judges the new head.")
+    # `stop(0)`, not `stop(1)`. A `1` means "nothing yet, poll again", which for
+    # this condition is a lie that costs the whole deadline: the validation has
+    # ALREADY arrived and no later poll will find anything else, because a
+    # validated head has no review coming and no second validation until the next
+    # push. `0` is "something is in hand, go and read it", which is what happened.
+    stop(0)
 
 # The rules the gate itself uses, imported rather than paraphrased: not by the
 # PR author, on this head, and carrying something to act on.
@@ -817,30 +848,21 @@ PY
         echo
         echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""
         echo
-        echo "Say which nits you took, which you did not and why, and open one follow-up"
-        echo "issue for anything worth keeping -- name it in the answer so the next reader"
-        echo "can find it."
+        echo "Say which Suggestions you took and which you did not. Do NOT spin one into"
+        echo "an issue -- REVIEW.md says why. Reply on every thread, including the ones you"
+        echo "disagree with, and do not resolve them: the validator resolves what it"
+        echo "accepts, and merge-gate holds the branch until it has."
         echo
-        echo "Where you disagree with a thread, reply on it with the reason rather than"
-        echo "ignoring it, and RESOLVE EVERY THREAD -- the answer does not do that for you."
-        echo "merge-gate refuses the PR while one is open, whatever the counts say, so a nit"
-        echo "left as an open thread holds the branch just as an Important one would:"
-        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
+        echo "Pushing a nit fix instead is what costs: the push moves the head, and the"
+        echo "head this review judged is the only one it judged. If something here IS"
+        echo "worth a commit, make it -- but make that a decision, not the default."
         echo
-        echo "Pushing a nit fix instead is what costs: the push moves the head, a moved"
-        echo "head invalidates the review that asked for the fix, and the reviewer runs"
-        echo "again on the whole diff. Three pull requests were measured going round that"
-        echo "way with this script never once run. If something here IS worth a commit,"
-        echo "make it -- but make that a decision, not the default."
-        echo
-        echo "If you do push: that ends this round. The review above is invalidated by the"
-        echo "new head, the reviewer runs again on what you sent, and there is nothing left"
-        echo "to answer here -- come back to this script rather than to answer-review.sh."
+        echo "If you do push: the validator judges what you sent, against these findings."
         echo "  ./scripts/fleet/review-status.sh $pr"
       else
         echo "Fix what is real; where you disagree, reply on the thread with the reason."
-        echo "Then resolve every thread -- merge-gate refuses the PR while one is open:"
-        echo "  ./scripts/fleet/resolve-thread.sh <thread-id> [<thread-id>...]"
+        echo "Do not resolve the threads -- the validator resolves the ones it accepts,"
+        echo "and merge-gate holds the branch while one is open."
         echo "Changed something? Push and come back here. Changed nothing? Say so --"
         echo "it is the one thing standing between these findings and auto-merge:"
         echo "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\""

@@ -4,12 +4,15 @@ A fleet of coding agents that turns a GitHub backlog into merged pull requests,
 unattended. A deterministic shell dispatcher opens worktrees, an agent works each
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
-**Which document is whose.** Required reading: this file, the brief
-(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`), and
-[REVIEW.md](REVIEW.md) at the review passes. `evals/lint.sh` asserts each
-enforced rule is stated in full in exactly one of them — not that the others link
-to it, which is on you — and holds what is read *before the first edit* — this
-file, REVIEW.md and the opening brief — under a word ceiling. The rest are consulted, never read through:
+**Which document is whose.** Required reading: this file and the brief
+(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`).
+[REVIEW.md](REVIEW.md) is the review policy and you do not read it: the passes
+that apply it — both self-reviews and the reviewer — run in their own processes
+and read it there. The validator reads its own brief instead. `evals/lint.sh`
+asserts each enforced rule is stated in full in exactly one of those three — not that the others link to it,
+which is on you — and holds what is read *before the first edit* — this file,
+the opening brief, and the room it leaves for your issue and a handoff note —
+under a word ceiling. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
 page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 for a host project's knobs, [docs/RUNNERS.md](docs/RUNNERS.md) for the runner
@@ -72,14 +75,6 @@ The `orca` wrapper on `PATH` may be unusable (a macOS install has shipped its
 symlink `0700 root:wheel`). `scripts/fleet/runner/orca.sh` probes for a working
 CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 
-## Plan before you edit
-
-Start in plan mode and stay there until the plan is right: **Files that change /
-Order of work / Risks / Proof**. The bar is that someone who never saw the
-conversation could implement the change from it alone. It goes in the PR body
-under `## Plan`, along with anything the implementation ended up doing
-differently. Departing from a plan is normal; departing silently is not.
-
 ## Code
 
 - Bash and Python 3.10+. No build step, no dependencies to install.
@@ -89,6 +84,10 @@ differently. Departing from a plan is normal; departing silently is not.
   failure is the only thing that makes the rule readable a year later. Match it.
 - A path that came from the project this was extracted from cites it as
   `armaatus/rommsync-nx#N`, so the trail survives the move.
+- **Silence stderr before the redirection that can fail, not after it.**
+  `read -r h n <"$f" 2>/dev/null` prints the open failure and *then* silences
+  the stream; `|| true` hides the status, not the diagnostic. Write
+  `2>/dev/null <"$f"`. `evals/late_stderr_silence.py` scans the payload's shell.
 - **Never pipe an assertion into `grep -q`** in a file with `pipefail`. `-q`
   exits on the first match, the producer dies of EPIPE, the pipeline is 141, and
   a check that held reports as failed -- on large input only, so it is green on
@@ -99,7 +98,9 @@ differently. Departing from a plan is normal; departing silently is not.
 ## The tracker is the spec
 
 Every issue carries **Goal / Scope / Design notes / Acceptance**. Read yours in
-full before starting; it is meant to be sufficient.
+full before starting; it is meant to be sufficient. **It is also the plan** —
+there is no planning phase before you edit, and `/implement` is the opening
+prompt precisely because the deciding was done on the tracker.
 
 It stays sufficient only if you maintain it. When the work turns up something the
 issue did not know — a seam that is wider than it looked, scope another issue
@@ -152,13 +153,15 @@ than the permission does.
 2. **Both self-review passes — `/code-review` AND
    `/mattpocock-skills:code-review` — are required**, and both sets of findings
    go in the PR body; `merge_gate.py` refuses a body naming only one. Step 3 of
-   the brief runs them, not you.
+   the brief runs them, not you. The body's `## Plan` is what the issue asked
+   for and where the implementation departed from it; departing is normal,
+   departing silently is not.
 3. Any issue your findings invalidated is edited; the PR body says which and why.
 4. **The rest of the loop is one command**, fetched when it applies:
    `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must
    carry, how the merge is queued, which paths a person has to merge, how the
-   review rounds end — stated there and nowhere else, because a second copy is
-   what an agent reads instead of the original.
+   one review and the two validations end — stated there and nowhere else,
+   because a second copy is what an agent reads instead of the original.
 
 ## What is watching you
 
@@ -168,10 +171,12 @@ than the permission does.
   **only in a worktree the fleet opened**: editing the hooks or settings, pushing
   before the local review is recorded, and anything outward while the fleet is
   stopped. A block is a rule you were about to break, not a bug.
-- **Subagents**: [`verifier`](.claude/agents/verifier.md) gives an independent
-  build-and-test verdict before you open a PR;
-  [`researcher`](.claude/agents/researcher.md) answers questions about the
-  codebase without spending your context on the files it read.
+- **Subagents**: [`researcher`](.claude/agents/researcher.md) answers questions
+  about the codebase without spending your context on the files it read.
+  [`reviewer`](.claude/agents/reviewer.md) and
+  [`validator`](.claude/agents/validator.md) are the two post-PR passes — the
+  **dispatcher** starts both, from the repo root, and `guard.py` refuses either
+  by name from a fleet worktree. You wait for them; you do not run them.
 - `./evals/lint.sh` checks that all of the above is still well-formed and still
   enforcing what it claims.
 

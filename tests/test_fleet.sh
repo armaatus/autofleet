@@ -578,6 +578,13 @@ STUB
   # cmd_run sleeps between passes; a test that reached one would otherwise sit
   # for a minute before failing.
   export AUTOFLEET_POLL=1
+  # NO HANDOFF TURN BY DEFAULT, so a phase that is about the time-box or the
+  # reaper measures the thing it names. Every path that ends a session now asks
+  # the agent for its handoff note first and defers the ending to a LATER poll
+  # (armaatus/autofleet#106) -- so at the shipped 120s, the first poll of those
+  # phases asks and returns, and every one of them read as "it did not stop the
+  # agent". The turn has phases of its own below, which set this back.
+  export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
   export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
   export AUTOFLEET_DIR="$WORK/fleet"
   PATH="$WORK/bin:$PATH"
@@ -2017,6 +2024,138 @@ print(json.dumps({"result": {"worktrees": [
       && fail "it says so again every poll: $again"
     echo "ok: the time-box exempts an issue whose last step is yours"
     ;;
+  handoff_turn)
+    # armaatus/autofleet#106. Every path that ends a session used to interrupt
+    # first and ask nothing, so three hours of work left nothing behind and the
+    # next attempt re-derived it from the files. The note needs a TURN.
+    #
+    # Across polls, not inside one: the first pass asks and DEFERS, so this
+    # phase drives two. A version that slept the grace inside the pass stopped
+    # the whole dispatcher for two minutes per issue.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    agent_state working
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      && fail "it interrupted the agent in the same pass it asked for the note: $out"
+    grep -q "handoff.sh write 42" "$ORCA_CALLS" \
+      || fail "it did not ask for a handoff note at all: $out"
+    grep -q "asked for a handoff note" <<<"$out" \
+      || fail "it asked without saying so: $out"
+    grep -q "with no PR -- stopping it" <<<"$out" \
+      && fail "it announced the stop a pass before it stopped anything: $out"
+    echo "ok: the time-box asks for the handoff note and leaves the agent a pass to write it"
+
+    # ...and the note ARRIVING is what releases it -- the mtime moving, not the
+    # file existing, which is why the fixture writes it after the ask.
+    mkdir -p "$WORK/wt/.autofleet/run"
+    printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      || fail "the note was written and the agent was still not stopped: $out"
+    grep -q "handoff note written" <<<"$out" \
+      || fail "it stopped the agent without noticing the note it asked for: $out"
+    echo "ok: ...and stops it once the note is written"
+    ;;
+
+  handoff_expires)
+    # The grace is a CEILING, not a wait. An agent that ignores the request, or
+    # is already wedged, must not hold its slot for ever -- the note is worth a
+    # bounded turn and nothing more.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    agent_state working
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=1
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q "handoff.sh write 42" "$ORCA_CALLS" || fail "it did not ask: $out"
+    sleep 2
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      || fail "a grace that expired did not stop the agent: $out"
+    grep -q "no handoff note" <<<"$out" \
+      || fail "it went on without saying the note never came: $out"
+    echo "ok: a grace that expires stops the agent anyway, and says the note never came"
+
+    # The marker does not outlive the grace it was granted for, or the next
+    # worktree on this issue inherits a turn somebody else spent.
+    [ -e "$AUTOFLEET_DIR/handoff-asked-42" ] \
+      && fail "the request marker outlived its own grace"
+    echo "ok: ...and the request marker is cleared either way"
+    ;;
+
+  context_reset)
+    # THE PULL REQUEST IS THE SEAM. Sessions were measured past 900,000 tokens,
+    # most of it a build nobody was still reading, re-billed on every turn of
+    # the answering work. Once the PR is open the build is done.
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      || fail "the build context was never dropped: $out"
+    grep -q -- "issue-command.sh --after-pr 42" "$ORCA_CALLS" \
+      || fail "it dropped the context and sent no answering brief, which strands the worktree: $out"
+    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
+      || fail "nothing recorded that this issue has been reset: $out"
+    echo "ok: an open PR ends the build session and starts the answering one"
+
+    # ...ONCE. A second reset drops the answering context this one created,
+    # which is the same worktree losing the findings it was sent to answer.
+    : >"$ORCA_CALLS"
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it cleared the answering context it had just created: $out"
+    echo "ok: ...and not a second time"
+    ;;
+
+  context_reset_off)
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+
+    # `off` keeps the one-session shape, for a host that wants it.
+    export AUTOFLEET_CONTEXT_RESET=off
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "AUTOFLEET_CONTEXT_RESET=off still dropped the conversation: $out"
+    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
+      && fail "it marked an issue it did not reset, so turning the knob back on does nothing"
+    echo "ok: AUTOFLEET_CONTEXT_RESET=off leaves the session alone"
+
+    # An EMPTY clear command is the same decision reached the other way, and it
+    # has to SAY so: an unrecognised command typed at an agent is a turn spent
+    # on a syntax error, and the answering brief then arrives with the whole
+    # build still in front of it.
+    export AUTOFLEET_CONTEXT_RESET=on
+    export AUTOFLEET_AGENT_CLEAR_CMD=""
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q -- "--text" "$ORCA_CALLS" \
+      && fail "an empty clear command still typed something at the agent: $out"
+    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
+      || fail "an empty clear command turned the reset off silently: $out"
+    echo "ok: ...and an empty AUTOFLEET_AGENT_CLEAR_CMD turns it off out loud"
+
+    # ...and a value that is neither is refused rather than read as `off`.
+    unset AUTOFLEET_AGENT_CLEAR_CMD
+    cfg_out="$( (cd "$WORK/repo" \
+      && AUTOFLEET_CONTEXT_RESET=true bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+    cfg_rc=$?
+    [ "$cfg_rc" = 2 ] \
+      || fail "AUTOFLEET_CONTEXT_RESET=true was accepted (rc=$cfg_rc): $cfg_out"
+    grep -q "must be 'on' or 'off'" <<<"$cfg_out" \
+      || fail "it was refused without saying why: $cfg_out"
+    echo "ok: ...and a value that is neither is refused, not read as off"
+    ;;
+
   timebox_stops)
     make_fixture ok
     make_worktree

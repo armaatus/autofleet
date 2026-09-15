@@ -101,20 +101,6 @@ ROUNDS_MARKER="${AUTOFLEET_REVIEW_MARKER:+${AUTOFLEET_REVIEW_MARKER}.rounds}"
 # absent round as the first, which is the safe direction: round one and two
 # suppress nothing.
 review_round() {
-  local n=0
-  # `[ -f ]` first, and NOT `read ... 2>/dev/null`: bash opens the redirection
-  # before it applies `2>`, so the "No such file or directory" from a missing
-  # file goes to the REAL stderr and the suppression does nothing. Every poll,
-  # for every PR that has not been reviewed yet. Found by the independent
-  # review, which reproduced it. `fleet.sh`'s `.tries` read has the same shape
-  # and the same bug, older than this.
-  [ -n "$ROUNDS_MARKER" ] && [ -f "$ROUNDS_MARKER" ] && read -r n <"$ROUNDS_MARKER"
-  # Assigned, then tested -- see the same two lines in fleet.sh. An empty marker
-  # leaves `n` empty here too; arithmetic would forgive it and the `[ -ge ]` in
-  # fleet.sh would not, so both are written the one safe way rather than each
-  # being right about its own consumer.
-  n="${n:-0}"
-  case "$n" in (*[!0-9]*) n=0 ;; esac
   # ...AND THE DERIVED COUNT, which sees all three of the reviews the comment
   # above says this file's increment cannot. `$rounds` is how many distinct
   # heads on this pull request carry a review `merge_gate` counts, read out of
@@ -130,10 +116,9 @@ review_round() {
   # here rather than in `record_round` so that `$round`, which the brief's
   # late-round rule is keyed to, is the same number the cap will read.
   #
-  # EMPTY before the derivation runs, and then this is exactly what it was.
-  # armaatus/autofleet#65.
-  if [ -n "${rounds:-}" ] && [ "$rounds" -gt "$n" ]; then n="$rounds"; fi
-  printf '%s\n' "$(( n + 1 ))"
+  # EMPTY before the derivation runs, and then `fleet_round_next` is exactly
+  # what it was without one. armaatus/autofleet#65.
+  fleet_round_next "$ROUNDS_MARKER" "${rounds:-}"
 }
 
 # Counted on ONE exit path: 0, a review this run actually submitted. Not on 5 or
@@ -146,7 +131,7 @@ review_round() {
 # ever counted; and one a reviewer had already submitted when the dispatcher
 # killed it for a head move (the TERM trap exits 143 without reaching here).
 # Each leaves a real review on the PR that the tally does not know about, so a
-# pull request could exceed AUTOFLEET_REVIEW_MAX_ROUNDS unnoticed.
+# pull request could exceed AUTOFLEET_REVIEW_MAX unnoticed.
 #
 # The first and the third are covered: both are reviews the pull request
 # carries, so the derived count in `review_round` sees them and the marker takes
@@ -181,47 +166,27 @@ record_round() {
 # What DOES burn a try: 5, a reviewer that ran and submitted nothing, and 7, one
 # killed at the deadline having submitted nothing. Those are the ones the cap is
 # for.
+# `${head:-}` AND A GUARD ON IT, because this is called from paths that run
+# BEFORE `head` is assigned -- the stop check is the one this function exists
+# for. The file is `set -u`, so a bare `$head` there terminates the script: the
+# stopped path exited 1 with `head: unbound variable` rather than the documented
+# 3, and the try it was called to refund was not refunded. Found by the
+# independent review.
+#
+# With no head this refunds NOTHING, and that is the difference from
+# validate.sh's wrapper: the exits that fail before the head is known call
+# `unspent_try_any` themselves. Refunding the marker's own head from here would
+# refund twice on the paths that do both.
 unspent_try() {
-  [ -n "$TRIES_MARKER" ] || return 0
-  # `${head:-}`, because this is called from paths that run BEFORE `head` is
-  # assigned -- the stop check is the one this function exists for. The file is
-  # `set -u`, so a bare `$head` there terminates the script: the stopped path
-  # exited 1 with `head: unbound variable` rather than the documented 3, and the
-  # try it was called to refund was not refunded. The two guards above do not
-  # save it when the DISPATCHER is the caller, because it sets
-  # AUTOFLEET_REVIEW_MARKER and writes `.tries` before the spawn. With no head
-  # yet there is nothing to match, and nothing to refund. Found by the
-  # independent review.
   [ -n "${head:-}" ] || return 0
-  local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
-  [ "${h:-}" = "$head" ] || return 0
-  n=$(( ${n:-1} - 1 ))
-  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
-  else printf '%s %s\n' "$head" "$n" >"$TRIES_MARKER" 2>/dev/null || true
-  fi
+  fleet_try_refund "$TRIES_MARKER" "$head"
 }
-# The same refund with no head to match on, for the exits that fail before the
-# head is known. It decrements whatever head the marker names, which is right
-# because the dispatcher spent that try for THIS run and this run reached no
-# reviewer.
-unspent_try_any() {
-  [ -n "$TRIES_MARKER" ] || return 0
-  local h n
-  read -r h n <"$TRIES_MARKER" 2>/dev/null || return 0
-  [ -n "${h:-}" ] || return 0
-  n=$(( ${n:-1} - 1 ))
-  if [ "$n" -le 0 ]; then rm -f "$TRIES_MARKER" 2>/dev/null || true
-  else printf '%s %s\n' "$h" "$n" >"$TRIES_MARKER" 2>/dev/null || true
-  fi
-}
+# The same refund with no head to match on. It decrements whatever head the
+# marker names, which is right because the dispatcher spent that try for THIS
+# run and this run reached no reviewer.
+unspent_try_any() { fleet_try_refund "$TRIES_MARKER"; }
 
-record_done() {
-  [ -n "$DONE_MARKER" ] || return 0
-  printf '%s\n' "$head" >"$DONE_MARKER" 2>/dev/null || true
-  # The attempt count belongs to heads that got NO verdict. This head got one.
-  rm -f "$TRIES_MARKER" 2>/dev/null || true
-}
+record_done() { fleet_record_done "$DONE_MARKER" "$head" "$TRIES_MARKER"; }
 
 # Empty when a person ran this by hand, and then dropping it does nothing.
 #
@@ -686,7 +651,7 @@ PY
   # hundred open threads. `head -c` splits a multi-byte character at the cut and
   # the reviewer reads one replacement glyph; that is the right trade against an
   # unbounded file.
-  if [ "$(wc -c <"$ctx" 2>/dev/null || echo 0)" -gt "$AUTOFLEET_REVIEW_CONTEXT_MAX" ]; then
+  if [ "$(wc -c 2>/dev/null <"$ctx" || echo 0)" -gt "$AUTOFLEET_REVIEW_CONTEXT_MAX" ]; then
     head -c "$AUTOFLEET_REVIEW_CONTEXT_MAX" "$ctx" >"$ctx.cut" 2>/dev/null \
       && printf '\n[...truncated at AUTOFLEET_REVIEW_CONTEXT_MAX bytes]\n' >>"$ctx.cut" \
       && mv "$ctx.cut" "$ctx"
@@ -839,12 +804,17 @@ fi
 # because the verdict has to land in the PR's own review state, which is what
 # await-review.sh on the other side polls.
 #
-# `Skill`, `Task` and `Agent` are what the workflow does not grant. The brief
-# tells the reviewer to run `/mattpocock-skills:code-review`, which is a skill and
-# which fans out into sub-agents of its own; without them it silently reviews
-# without the standards and spec-vs-diff axes, which is most of what that pass is
-# for. `git show` joins `git diff` and `git log` for the same reason: a review
-# that cannot read a commit is reading the diff in the dark.
+# `Skill`, `Task` and `Agent`, which the workflow grants too -- and for one
+# commit did not. The brief tells the reviewer to run
+# `/mattpocock-skills:code-review`, which is a skill and which fans out into
+# sub-agents of its own; without them the reviewer is ordered to run a pass it
+# has no tool for, and reviews without the standards and spec-vs-diff axes with
+# nothing in the log saying so. That made the review MODE decide what a review
+# does rather than only where it runs, which is the one thing the two venues
+# may not disagree about. `evals/lint.sh` asserts they agree.
+#
+# `git show` joins `git diff` and `git log` for the same reason: a review that
+# cannot read a commit is reading the diff in the dark.
 # NOT `Bash(gh api:*)`, which claude-review.yml does grant. The workflow's
 # reviewer holds an Actions token scoped by that job's `permissions:` block, in a
 # container that is destroyed afterwards. This one holds the maintainer's own gh

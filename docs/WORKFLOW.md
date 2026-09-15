@@ -458,16 +458,30 @@ full build, its own fixture stack, its own data, a browser tab signed in as the
 fixture admin. `setupAgentStartupPolicy: wait-for-setup` holds the agent's tab
 until that finishes, so its first the test suite means something.
 
-The agent plans before it edits — **Files that change / Order of work / Risks /
-Proof**, in the PR body under `## Plan`, at the bar that someone who never saw the
-conversation could implement it from the plan alone. Departing from a plan is
-normal; departing silently is not.
+**There is no planning phase.** The agent's opening prompt is `/implement`, and
+the issue is the plan: Goal, Scope, Design notes and Acceptance were settled at
+Stage 2, on the tracker, which is where the deciding belongs. A planning round
+before the first edit re-derived what the issue already said, and then rode in
+the prompt prefix of every request for the rest of the session.
+
+`## Plan` in the PR body survives, with its meaning narrowed to the half that was
+ever read downstream: **what the issue asked for, and where the implementation
+departed from it and why.** Departing is normal; departing silently is not, and
+the review checks that section against the diff.
+
+`/implement` is a skill from the mattpocock plugin, and it ships
+`disable-model-invocation: true` — an agent will not reach for it on its own, and
+no other skill can call it. What makes it reachable here is that
+`agent-autostart.sh` delivers the brief as a **typed prompt**, not as an
+instruction to a model. That is worth knowing before anyone tries to move the
+brief somewhere a model merely reads it.
 
 **The brief arrives in two stages, and the second one is fetched, not pushed.**
 [`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`
-prints the spec, steps 1 to 3 — plan, build, review yourself — and a pointer;
+prints the spec, steps 1 to 3 — build, record the review, and a pointer;
 `issue-command.sh --after-pr <n>` prints steps 4 to 6, the post-PR contract:
-what the PR body must carry, arming auto-merge, and the review rounds. Whole,
+what the PR body must carry, arming auto-merge, the one review and the two
+validations. Whole,
 the brief was 1,521 words of which 1,272 were that second half, and all of it
 arrived before the agent had opened a file and then rode in the prompt prefix of
 every request it made for the rest of the session (armaatus/autofleet#49). Both
@@ -500,10 +514,13 @@ Then it builds, with three things that are not negotiable:
   actually run — `git add -A` on a round where a second file was also conflicted
   is how conflict markers reach a commit that still builds.
 
-The [`verifier`](../.claude/agents/verifier.md) subagent is the packaged final
-check: a fresh context that builds, runs the suite, hunts for the test that would
-have failed, and answers `READY` or `NOT READY`. It fixes nothing, which is why
-its verdict is worth having.
+There used to be a `verifier` subagent here: a fresh context that built, ran the
+suite, and answered `READY` or `NOT READY` before the PR opened. It is gone, and
+the reason is arithmetic rather than distrust. `/implement` runs the full suite
+at the end of the build, CI runs it on the push, and the **validator** runs it
+again with a reason to — "did the commits answering the review break anything" is
+not answerable by reading. A fourth run, before the pull request existed, was the
+belt-and-braces this whole change is about removing.
 
 An issue gets **three hours**. On expiry, if no PR closing it is open, the fleet
 interrupts the agent, comments on the issue saying so, and **leaves the worktree
@@ -517,16 +534,21 @@ the one grinding.
 
 ### Stage 4 — Local review, before anything leaves
 
-Two passes, because they look for different things and this machine has the time:
-one for defects, one for conformance, both against [REVIEW.md](../REVIEW.md).
-**What to run, and in what order, is the brief's step 3** — it names the two
-passes and the command that records them. This section is why that recording
-exists at all.
+**One pass, and `/implement` runs it** — `/mattpocock-skills:code-review`, at the
+end of the build, before it commits, against [REVIEW.md](../REVIEW.md). What to
+run is the brief's step 1; the command that records it is step 2. This section is
+why that recording exists at all.
+
+It used to be two, `/code-review` alongside it. They overlapped heavily, and
+`merge_gate.py` refused any PR body that did not name both — so every pull
+request paid for two reviews of the same diff before a reviewer who had never
+seen the conversation had looked at it once. The surviving pass covers both axes
+the second was there for: standards, and spec-vs-diff.
 
 Recording writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
 `gh pr create` from a fleet-owned worktree without it.** The marker records what
 it is given; it cannot tell whether a review really happened, so it is a
-checklist gate. What actually enforces the two passes is `merge-gate`, which
+checklist gate. What actually enforces the pass is `merge-gate`, which
 reads the PR body — and that a human can read too. The marker is
 per-commit, so amending or adding a commit needs the review re-run — which is the
 point. A worktree you opened by hand is never gated: pushing a half-finished
@@ -537,7 +559,71 @@ What the PR body must carry is the brief's step 4, and it is not decoration:
 [`merge-gate`](#the-merge-gate) reads it — which is why the list lives in one
 place and not here as well.
 
-### Stage 5 — Independent review, and the merge
+### Stage 5 — One review, two validations, and the merge
+
+**The loop is bounded by two numbers, and this is the section about why.**
+`AUTOFLEET_REVIEW_MAX` is 1 and `AUTOFLEET_VALIDATE_MAX` is 2, so a pull request
+costs at most three agent runs after it opens and often one.
+
+What it replaced was bounded at four **reviews** per pull request, and it spent
+them. The mechanism was not a bad reviewer; it was a correct one in a loop with
+no fixed point. A review is bound to the commit it judged. The author answers a
+finding with a commit. The commit moves the head. The moved head invalidates the
+review that asked for the fix, so `merge-gate` wants a verdict on the new head,
+so the reviewer reads the whole diff again — and finds one more thing, a level
+down, because there is always one more thing. #86 burned four reviews without one
+of them ever judging the commit that eventually merged. #79 converged on
+behaviour after two rounds and spent six more on the same finding one level
+further down; every one of the six was correct, which is the whole problem.
+
+So the second and later passes stopped being reviews. A **validation** asks two
+questions and no others:
+
+1. Is each finding the review left actually addressed — fixed, or answered with a
+   reason this reader accepts?
+2. Do the commits written since the review break anything — a red suite, or a
+   Critical defect *in that diff*?
+
+It does not re-read the branch. That narrowness is not modesty, it is the
+termination argument: a validator that looks for new things finds them, and new
+things are another round.
+
+**A `pass` stands in for the review.** `merge_gate.py` reads
+`<!-- validated: <head-sha> pass -->` on the current head as satisfying the
+"reviewed on this head" condition — which it has to, because from the first fix
+onward there is no review on the head and no second review is coming. Without
+that substitution every pull request would block forever on a review that cannot
+arrive, which is exactly the failure `AUTOFLEET_REVIEW_MODE=local` exists to
+remove, reintroduced one phase up.
+
+**The trailer rides in a `gh pr review`, not a `gh pr comment`**, and that is a
+security choice. `guard.py` already refuses `gh pr review` from a fleet-owned
+worktree in all four spellings it has, so the certificate is out of reach of the
+branch it certifies. `gh pr comment` had to stay reachable — `answer-review.sh`
+needs it — and a certificate its subject can write certifies nothing. The hook
+also refuses `validate.sh` by name from a worktree, so the refusal arrives at the
+command rather than one process deep in a log after a full-budget run.
+
+**Anything but a literal `pass` or `fail` is "not validated".** A missing
+trailer, a garbled verdict, a validator that crashed before writing one: all of
+them hold the pull request. That is the fail-closed direction and it is the one
+the whole phase rests on — nothing at all must not read as consent. The
+corollary is the refund: a validator killed at its deadline, or one whose CLI was
+not on `PATH`, does **not** burn a try. A cap that fires early here hands a
+person a branch nothing validated, and that is worse than a cap that fires late,
+because late still ends in a person.
+
+**Threads stayed.** The reviewer's inline comments are still threads, and
+`merge-gate` still refuses to merge while any is unresolved — #88 and #89 both
+sat green and blocked on exactly one. What changed is who closes them: the
+**validator** resolves the threads it is satisfied by. An author closing its own
+would be holding the ledger it is judged against.
+
+**A Critical or Important finding is fixed. A Suggestion is answered.** The
+asymmetry is because no second reviewer is coming: whatever an argument can close
+here, nothing else will catch. That replaced the old round-three nit floor, which
+existed to stop a reviewer spending rounds on preferences — a problem that only
+arises when there are rounds to spend.
 
 **Where this review runs is a knob**, `AUTOFLEET_REVIEW_MODE` in
 `.autofleet/config`. The rest of this stage describes the default, `github`.
@@ -597,8 +683,15 @@ On GitHub, in `github` mode:
   the agent configuration whenever it changes.
 - [`claude-review.yml`](../.github/workflows/claude-review.yml) — the independent
   review, from a context that has not seen the conversation which produced the
-  diff. It submits a **real GitHub review**: `REQUEST_CHANGES` when it has an
-  Important finding, `COMMENT` when it does not, never `APPROVE`.
+  diff. It submits a **real GitHub review**: `REQUEST_CHANGES` when it has a
+  Critical or Important finding, `COMMENT` when it does not, never `APPROVE`.
+  **It no longer fires on `synchronize`** — that was the trigger that turned one
+  review into one per push.
+- [`validate.yml`](../.github/workflows/validate.yml) — the `github`-mode twin of
+  `validate.sh`, on `synchronize`. Both modes get a validator or the payload is
+  broken in one of them: a host repository with the review secret and no
+  dispatcher would otherwise inherit a merge gate demanding a validation with
+  nothing able to write one.
 
   Silence is its failure mode, so two things guard it. The review job is keyed on
   the **head sha** and never cancels in progress: a build can be superseded by
@@ -670,13 +763,13 @@ What it waits *for* is not "any review record": it imports
 is on the head GitHub currently has, and carries a body worth reading or at least
 one inline comment. That matters because replying to a review thread submits a
 `COMMENTED` review attributed to the replier — so an agent answering findings
-used to be handed its own empty reply back as "the review", spend one of its
-three rounds on it, and then watch `merge-gate` refuse the PR for the reason the
-wait had just called satisfied ([#114](https://github.com/armaatus/rommsync-nx/issues/114)).
+used to be handed its own empty reply back as "the review", spend a round on it,
+and then watch `merge-gate` refuse the PR for the reason the wait had just called
+satisfied ([#114](https://github.com/armaatus/rommsync-nx/issues/114)).
 
 It also hands a given review back exactly once. A round can begin on an unchanged
-head — `claude-review.yml` fires on `review_requested` as well as on
-`synchronize` — so the wait remembers the newest review it reported, in
+head — `claude-review.yml` still fires on `review_requested`, the one manual route
+to a second opinion — so the wait remembers the newest review it reported, in
 `.autofleet/run/review-rounds` beside the round count, and waits for a *newer* one rather
 than spending a second round on findings already in hand.
 
@@ -708,13 +801,13 @@ what the PR body must carry, how the merge is queued and what auto-merge is doin
 meanwhile are the brief's, and a second copy of a contract is what an agent reads
 instead of the original.
 
-Then it fixes what is real, replies with a reason where it disagrees, and
-resolves every thread. If it changed anything it pushes and comes back for the
-next round; when a review arrives it is not going to change anything for, it says
-so and checks. `resolve-thread.sh`, then `answer-review.sh`, then
+Then it fixes what is Critical or Important, replies with a reason where it
+disagrees with a Suggestion, and **leaves the threads alone** — the validator
+resolves what it accepts, which is the whole of what makes a resolved thread mean
+anything. `answer-review.sh`, then a push if anything changed, then
 `review-status.sh`, whose exit 0 means every thread resolved and every check
-green — the brief's step 5 is the order and the exact invocations; the rest of
-this section is why each of the three has to exist.
+green. The brief's step 5 is the order and the exact invocations; the rest of
+this section is why each has to exist.
 
 The order matters: an answer has to come *after* the review it answers, and a
 push invalidates that review. So answering a review you have just pushed over
@@ -722,8 +815,9 @@ would be discarded by the review of the new head — `answer-review.sh` refuses
 when no review has been submitted against the current head, rather than posting
 one that nothing will count.
 
-Resolving goes through that script rather than the `resolveReviewThread` mutation
-because **no GitHub event re-runs `merge-gate` when a thread is resolved**.
+Resolving goes through `resolve-thread.sh` — which is now the **validator's** to
+run, and a person's — rather than the `resolveReviewThread` mutation, because
+**no GitHub event re-runs `merge-gate` when a thread is resolved**.
 `pull_request_review_thread` is a webhook event, not a workflow trigger — putting
 it in `on:` invalidates the whole file, and actionlint rejects it — so the gate
 went red on an open thread, the agent closed the thread, and nothing asked the
@@ -841,35 +935,43 @@ pull requests were measured sitting in that cycle — #85, #86 and #88 — with
 `answer-review.sh`, which clears the same hold with no commit, never once run on
 any of them. Nothing forbade the cheap path. Nothing mentioned it either.
 
-The other half of the floor is in [REVIEW.md](../REVIEW.md): from round three
-on, a review that finds nothing Important stops asking for a diff. It names its
-nits **in the body**, not as inline threads, says they belong in a follow-up
-issue, and reports `review-important: 0` with **the real `review-findings: N`**.
+**The other half of that floor has been removed, and with it the floor.** It used
+to live in [REVIEW.md](../REVIEW.md): from round three on, a review finding
+nothing Important stopped asking for a diff and named its nits in the body as
+follow-up issues instead. It was a correct rule for a loop with rounds to spend,
+and the loop no longer has them — the reviewer runs once. What replaced it is the
+asymmetry in the policy itself: a Critical or Important finding is fixed, a
+Suggestion is answered, and the validator will not accept an argument in place of
+the first two because no second reviewer is coming.
 
-Not `0`. `0` releases the gate outright and auto-merge is armed from the moment
-the PR opens, so a `0` would land the branch before the follow-up issue existed —
-the opposite of the trade. The real count holds it until the author answers, and
-answering costs no commit, so the round is still not spent. Body rather than
-threads for the neighbouring reason: an unresolved thread holds the branch
-whatever the counts say, and `answer-review.sh` does not close threads.
+One thing the old floor got right is worth keeping in view, because it is the
+reason `0` is still dangerous: `review-findings: 0` releases the gate outright,
+and auto-merge is armed from the moment the PR opens. A review that found five
+Suggestions and reported `0` merges the branch while its author is still reading
+them. That has happened four times.
 
-`review.sh` tells the reviewer which round it is, from `<pr>.rounds`. Rounds one
-and two are untouched — behaviour findings arrive early, and a floor that
-suppressed those would trade away what the review is for.
+**At most three waits, counted by the script.** `await-review.sh` keeps the count
+in `.autofleet/run/review-rounds` and exits 5 on the fourth call rather than
+waiting, so this is not something an agent has to remember. Three is still the
+right number under the new shape for a different reason than it was under the old
+one: one review plus two validations is three things an agent waits for. When it
+trips, the agent stops, comments saying exactly what is unresolved and why it
+disagrees, and flags the card. Another lap is not what a disagreement needs; your
+attention is.
 
-**At most three rounds, counted by the script.** `await-review.sh` keeps the
-count in `.autofleet/run/review-rounds` and exits 5 on the fourth call rather than
-waiting, so this is not something an agent has to remember. When it trips, the
-agent stops, comments saying exactly what is unresolved and why it disagrees, and flags
-the card. Another lap is not what a disagreement needs; your attention is.
+**And `AUTOFLEET_REVIEW_MAX` and `AUTOFLEET_VALIDATE_MAX` on the dispatcher's
+side**, which are different caps answering a different question. The agent's is
+per-worktree and binds only while the agent is alive: #85's agent stopped at its
+cap and a fourth review landed with nobody left to answer it. The dispatcher's
+count lives in `<pr>.rounds` and `v-<pr>.rounds`, counts what was *submitted* on
+the pull request across every head, and survives `stop.sh`, because what it
+counts belongs to the PR rather than to one dispatcher's run.
 
-**And at most `AUTOFLEET_REVIEW_MAX_ROUNDS` on the dispatcher's side**, which is
-a different cap answering a different question. That one is per-worktree and
-binds only while the agent is alive: #85's agent stopped at its three-round cap
-and a fourth review landed with nobody left to answer it. `<pr>.rounds` counts
-reviews *submitted* on the pull request, across every head, and at the cap the
-dispatcher stops starting them and says "needs you". It survives `stop.sh`,
-because what it counts belongs to the PR rather than to one dispatcher's run.
+Reaching the review cap is now the **ordinary** path rather than the exhausted
+one — at a cap of 1, every healthy pull request reaches it on its second poll —
+so the dispatcher no longer announces "needs you" there. It hands the PR to the
+validator instead. The hold that still means a person is due is the **validation**
+cap, and `validate.sh` prints it, where the number lives.
 
 Nothing in this section is where the merge gets armed. It used to end by saying
 the agent runs `gh pr merge --auto --squash` "when it is green" — a second copy
