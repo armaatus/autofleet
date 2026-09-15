@@ -489,11 +489,14 @@ the file it looked for and the drivers that do ship — and stops the four scrip
 that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
 caught before a worktree is opened rather than by an agent sitting on a prompt
 that never sends.
-`ORCA_CLI_COMMAND` (env only, Orca driver only) — the CLI to try first, ahead of
+`ORCA_CLI_COMMAND` (Orca driver only) — the CLI to try first, ahead of
 `orca`, `orca-dev`, `orca-ide` and the `/Applications` fallback. ONE command, not
 a word-split list: a path containing spaces is a single candidate. The driver's
 refusal names this knob, so it is listed here rather than left to be found in
-`scripts/fleet/runner/orca.sh`.
+`scripts/fleet/runner/orca.sh`. It has no default line in `config.sh`, but it is
+not env-only: `config.sh` sources `.autofleet/config` into the same shell before
+`lib.sh` sources the driver, so setting it there reaches the probe exactly as an
+exported variable does. It said env-only until the independent review checked.
 `AUTOFLEET_SETUP_HOOK` / `AUTOFLEET_TEARDOWN_HOOK` — paths to the two hooks.
 `AUTOFLEET_TEST_COMMAND` — quoted into the agent's opening prompt, so it names
 the command your project actually runs rather than one autofleet guessed.

@@ -48,6 +48,13 @@ set -a; . ./.env; set +a
 # It is FATAL rather than a warning: everything this hook exists to prepare is
 # for an agent the runner is supposed to start, and provisioning a worktree
 # whose agent cannot be reached spends the time and holds the slot for nothing.
+# SAID BEFORE THE PROBE, because the probe is the one thing here that can be
+# slow and silent: five candidates that each hit $ORCA_CLI_PROBE_SECONDS is
+# ~40s with nothing on the terminal, at the exact point #13's Design notes name
+# -- the runner holds the agent's tab and nothing has printed a reason yet. It
+# does not fix the wait; it stops the wait from looking like a hang. Raised by
+# the independent review.
+echo "==> checking the $AUTOFLEET_RUNNER runner"
 fleet_require_runner
 runner_available || {
   echo "!! the $AUTOFLEET_RUNNER runner is not usable here (why, above)" >&2

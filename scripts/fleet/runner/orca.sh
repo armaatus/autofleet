@@ -103,7 +103,7 @@ orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1
 
 orca_cli_resolve() {
   [ -n "${ORCA_CLI:-}" ] && return 0
-  local candidate probe_out where
+  local candidate probe_out where probe_rc
   # Reset per resolve, not per source: a resolve that fails, then succeeds after
   # the app starts, must not leave the first attempt's reasons behind for a
   # later failure to print as if they were its own.
@@ -117,10 +117,22 @@ orca_cli_resolve() {
   # third refusal shape of its own, a retry that SUCCEEDED had its file deleted
   # and was refused anyway, and the diagnostic call that replaced it was itself
   # unchecked. `tests/test_env.sh setup_fails_fast` caught the first, because
-  # its PATH holds one interpreter and nothing else. With `/dev/null` there is
-  # nothing left to fail: the probe works on a machine that cannot make temp
-  # files at all, which is better than diagnosing one. Sixty lines, a global, a
+  # its PATH holds one interpreter and nothing else. Sixty lines, a global, a
   # branch in `orca_unavailable_says` and a test part went with it.
+  #
+  # WHAT WENT WITH THEM IS THE `mktemp` BINARY, not every temp file, and the
+  # wider claim stood here until the independent review took it down. The
+  # candidate list at the bottom of this function is a here-document, and bash
+  # 3.2 -- the `/bin/bash` every macOS ships, which this repo targets -- backs
+  # one with a real file: `stat -f %HT /dev/fd/3` inside the loop says `Regular
+  # File` on 3.2.57 and `Fifo File` on 5.1+, which is where bash started using a
+  # pipe for small ones. An unwritable `$TMPDIR` does not reach it, because bash
+  # falls back to `/tmp` when `$TMPDIR` is not a writable directory (checked
+  # both ways on 3.2.57). A machine that can write a temp file NOWHERE loses the
+  # list instead: the loop body never runs, and the refusal reads `tried:
+  # nothing was probed` -- which names no candidate rather than naming the wrong
+  # one, so it is still not the confident lie about the machine that #13 exists
+  # to remove.
   probe_out=/dev/null
   # ON FD 3, and CLOSED for the probe (see the call below). A candidate CLI that
   # drains the descriptor carrying this heredoc would eat the rest of the list,
@@ -162,9 +174,22 @@ orca_cli_resolve() {
     # off bash points only STDIN at /dev/null, so fd 3 is inherited untouched.
     # That made the fd-3 rewrite strictly worse than the stdin version it
     # replaced until this line. Found by the local review.
-    if ! fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
-        "$candidate" --version 3<&-; then
-      orca_cli_reject "$where (--version did not answer)"
+    # 124 IS THE WRAPPER'S OWN STATUS and nothing else returns it, so the two
+    # failures a reader has to tell apart do not share a sentence: a CLI that
+    # HANGS is an app mid-start or wedged and is worth waiting out, while one
+    # that is there and exits non-zero has already answered. "did not answer"
+    # for an instant `exit 3` sent the reader to look for a wedged app. Captured
+    # into a variable because `if ! cmd` sets `$?` to the negation, so the
+    # branch that wants the status cannot read it. Raised by the independent
+    # review.
+    probe_rc=0
+    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
+      "$candidate" --version 3<&- || probe_rc=$?
+    if [ "$probe_rc" != 0 ]; then
+      case "$probe_rc" in
+        124) orca_cli_reject "$where (no --version answer in ${ORCA_CLI_PROBE_SECONDS}s)" ;;
+        *)   orca_cli_reject "$where (--version exited $probe_rc)" ;;
+      esac
       continue
     fi
     ORCA_CLI="$candidate"

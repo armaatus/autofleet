@@ -1341,18 +1341,23 @@ DRIVER
     #    which is the line this half of #13 adds.
     printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/orca-mute"
     chmod +x "$WORK/bin/orca-mute"
+    # A CLI THAT HANGS, told apart from one that answers no. One second of it,
+    # which is what ORCA_CLI_PROBE_SECONDS is dropped to below: the wording is
+    # the assertion, not the wait.
+    printf '#!/usr/bin/env bash\nsleep 30\n' >"$WORK/bin/orca-hangs"
+    chmod +x "$WORK/bin/orca-hangs"
     # stderr is closed over the SOURCE and reopened after it, so what is counted
     # below is the refusal and only the refusal. `. lib.sh` can write to stderr
     # itself -- config.sh relays a deprecated knob there -- and a three-line
     # ceiling that includes the sourcing chatter is measuring the wrong thing.
     # Found by the local review.
-    refusal="$( cd "$WORK/repo" && bash -c '
+    refusal="$( cd "$WORK/repo" && ORCA_CLI_PROBE_SECONDS=1 bash -c '
       set -uo pipefail
       REPO_ROOT="$PWD"
       exec 3>&2 2>/dev/null
       . ./scripts/fleet/lib.sh
       exec 2>&3 3>&-
-      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-absent-nowhere orca-mute; }
+      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-absent-nowhere orca-mute orca-hangs; }
       runner_available
     ' 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
@@ -1372,8 +1377,15 @@ DRIVER
     # CLAUDE.md names as the reason this probe exists. It says both.
     grep -q "orca-absent-nowhere (not found on PATH, or found and not executable)" <<<"$refusal" \
       || fail "a bare candidate that cannot be run was not named as tried, or claimed a cause it did not check: $refusal"
-    grep -q "orca-mute (--version did not answer)" <<<"$refusal" \
-      || fail "a candidate that is installed and does not answer was not told apart from one that is absent: $refusal"
+    grep -q "orca-mute (--version exited 3)" <<<"$refusal" \
+      || fail "a candidate that is installed and answers no was not told apart from one that is absent: $refusal"
+    # ...and a HANG is a third thing. Both used to read "--version did not
+    # answer", which sent a person looking for a wedged app on the strength of
+    # an `exit 3` that had already answered. Only the deadline wrapper returns
+    # 124, so the two cannot be confused once the status is read rather than
+    # thrown away. Raised by the independent review.
+    grep -q "orca-hangs (no --version answer in 1s)" <<<"$refusal" \
+      || fail "a CLI that hangs was not told apart from one that is there and exits non-zero: $refusal"
     grep -q "install Orca" <<<"$refusal" \
       || fail "it named the runtime and not the remedy, which is what #13 calls a line that stops half way: $refusal"
     # ...and ORCA_CLI_COMMAND is ONE candidate, not a word-split list. The old
@@ -1401,6 +1413,25 @@ DRIVER
     lines="$(printf '%s\n' "$refusal" | wc -l)"
     [ "$((lines))" -le 3 ] \
       || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
+
+    # 5. THE DOCUMENTED OPT-OUT STILL OUTRANKS THE REFUSAL. `fleet_require_runner`
+    #    is fatal, and moving it up to precede the first `runner_*` put it in
+    #    front of AUTOFLEET_AGENT_AUTOSTART=0 -- which then exited 1 on a repo
+    #    whose driver is missing, where it had always exited 0. A person who
+    #    turned the watcher off is not asking about drivers.
+    #
+    #    Asserted rather than commented because `evals/lint.sh` 4h pulls the
+    #    other way: it requires the guard to come BEFORE the first `runner_*`
+    #    and says nothing about what must come before the guard, so the next
+    #    author to satisfy 4h by moving the guard up re-breaks this with 4h
+    #    green -- a guard that silently stops guarding, on the file that failed
+    #    this way once. Raised by the independent review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope AUTOFLEET_AGENT_AUTOSTART=0 \
+      ./scripts/fleet/agent-autostart.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the documented opt-out exited $rc because the runner was missing, on a path that starts nothing and asks the runner for nothing: $out"
+    grep -q "agent autostart disabled" <<<"$out" \
+      || fail "the opt-out did not say it was disabled, so the one line proving it took that branch is gone: $out"
 
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
