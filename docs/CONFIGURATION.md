@@ -365,6 +365,7 @@ debugging its own reviewer wants.
 |---|---|---|
 | `AUTOFLEET_KEEP_REVIEWS` | `3` | Reviewer transcripts kept **per open pull request**, and the off switch for the `reviewed-<sha>` sweep too, so `0` means every piece of review state the dispatcher would otherwise delete. |
 | `AUTOFLEET_LOG_MAX_BYTES` | `1048576` | Bytes of `fleet.log` kept before it rotates to `fleet.log.1`. **One** generation, because the point is a bound and two files at the cap is twice the cap. |
+| `AUTOFLEET_LOG_PASSES` | `off` | `on` and the dispatcher writes one line per poll saying the pass ended and what it found; anything that is not `on` or `off` is refused at startup rather than read as one of them (`0` used to turn it **on**). **Off by default** — a line a minute is the log volume the say-once markers exist to prevent — and the only way to know a pass has finished without guessing from a clock. Turn it on when you are measuring what a pass costs (see [WORKFLOW.md, "What one poll costs"](WORKFLOW.md)) or watching a fleet that appears to be doing nothing. |
 
 **What goes, and when.** Older transcripts for an open PR go; every transcript
 for a PR that is no longer open goes regardless, because a review of a closed PR

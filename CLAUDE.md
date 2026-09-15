@@ -78,7 +78,9 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 ## Code
 
 - Bash and Python 3.10+. No build step, no dependencies to install.
-- Every script parses under `bash -n` — a PostToolUse hook checks it on save.
+- Every script parses under `bash -n`, checked on save — and so does a comment
+  after a `\`, which comments the rest of that command out. Put it above the
+  command; `evals/continuation_comment.py` scans.
 - Comments explain *why*, not *what*. The comment density in this repo is high
   on purpose: most of these rules exist because something failed once, and the
   failure is the only thing that makes the rule readable a year later. Match it.
@@ -88,12 +90,10 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
   `read -r h n <"$f" 2>/dev/null` prints the open failure and *then* silences
   the stream; `|| true` hides the status, not the diagnostic. Write
   `2>/dev/null <"$f"`. `evals/late_stderr_silence.py` scans the payload's shell.
-- **Never pipe an assertion into `grep -q`** in a file with `pipefail`. `-q`
-  exits on the first match, the producer dies of EPIPE, the pipeline is 141, and
-  a check that held reports as failed -- on large input only, so it is green on
-  a Mac and red in CI. `evals/piped_quiet_grep.py` asserts the payload's *shell*
-  has none; the `run:` blocks in `.github/workflows/` are not scanned yet and
-  have one (#90).
+- **Never pipe an assertion into `grep -q`** under `pipefail`: `-q` exits on the
+  first match, the producer dies of EPIPE, and a check that held reports 141 --
+  on large input only, so green on a Mac and red in CI. Scanned by
+  `evals/piped_quiet_grep.py`; `.github/workflows/` is not, and has one (#90).
 
 ## The tracker is the spec
 
