@@ -1257,9 +1257,10 @@ open_pr_listing() {
   # nothing over, and `count_startable`'s non-zero keeps `cmd_run` polling
   # forever. That is still the SAFE direction -- guessing opens a duplicate
   # worktree per issue past the boundary -- and armaatus/autofleet#122, filed
-  # for it, owns removing the cliff. NOT #31, which this comment cited first and
-  # which is closed and about `live_worktrees` seeing another repository's
-  # worktrees. Found by the local review.
+  # for it, owns removing the cliff. NOT armaatus/autofleet#31, which this
+  # comment cited first and which is closed and about `live_worktrees` seeing
+  # another repository's worktrees. Found by the local review.
+  # THE COUNT AND THE PARSE ARE ONE THING. What the probe below prints is
   # `row_count`, and it carries a third state in the empty string: "the body was
   # not a listing at all". The `case` below reads all three.
   local row_count=""
@@ -1275,13 +1276,13 @@ open_pr_listing() {
     # a minute for as long as `gh` misbehaved. The header above promises this
     # function never caches "could not tell" as a listing; this is the line that
     # makes that true. Found by the local review.
-    # `isinstance(..., list)`, because `len()` alone is TYPE-BLIND: a top-level
-    # JSON object -- an error envelope `gh` handed back with status 0 -- has a
-    # length too, so it passed this probe and was cached as an answer. Every
-    # caller then rediscovered it was not a listing, and `count_startable`'s
-    # `json.loads` has no `try` around it, which is the once-a-minute traceback
-    # this guard is supposed to close. `-1` fails the digits-only test below.
-    # Found by the local review.
+    # ...and it asks `isinstance(..., list)`, because `len()` alone is
+    # TYPE-BLIND: a top-level JSON object -- an error envelope `gh` handed back
+    # with status 0 -- has a length too, so it passed this probe and was cached
+    # as an answer. Every caller then rediscovered it was not a listing, and
+    # `count_startable`'s `json.loads` has no `try` around it, which is the
+    # once-a-minute traceback this guard is supposed to close. `-1` fails the
+    # digits-only test below. Found by the local review.
     row_count="$(printf '%s' "$listing" | python3 -c '
 import json, sys
 loaded = json.load(sys.stdin)
@@ -1698,6 +1699,18 @@ count_startable() {
   live="$(live_worktrees)" || return 1
   # The pass's one listing, not a fourth copy of it. It carries `number` as well
   # as `body`, which this block does not read and does not have to.
+  #
+  # IT GOES OUT AS ONE ARGV STRING below, which is a lower ceiling than the 100
+  # rows `open_pr_listing` guards: Linux caps a single argument at
+  # `MAX_ARG_STRLEN`, 128 KiB, and PR bodies in this repository run to ~20 KB --
+  # so seven of them, and about fifty on darwin, fail `execve` with `Argument
+  # list too long`. That is the same wedge the row cliff causes (non-zero under
+  # `pipefail` -> rc 1 -> `cmd_run` polls forever), reached earlier and measured
+  # in bytes rather than rows, and the `python3` below is the one listing parse
+  # with no `2>/dev/null`, so bash says so on stderr once a poll while it lasts.
+  # The fix is one line -- feed it on stdin the way `has_open_pr` does -- and it
+  # belongs with the paging work in armaatus/autofleet#122, not here.
+  # docs/WORKFLOW.md carries the numbers. Found by the local review.
   prs="$(open_pr_listing)" || return 1
   ready="$(ready_issues)" || return 1
   # An issue the fleet gave up on is one it will decline every pass, so counting
@@ -4720,7 +4733,7 @@ while that one is up."
     # finished" without guessing from a clock. Here rather than after the launch
     # loop, because everything a pass spends has been spent by this line --
     # `count_startable` above is the last call any pass makes.
-    [ -n "${AUTOFLEET_LOG_PASSES:-}" ] \
+    [ "${AUTOFLEET_LOG_PASSES:-off}" = on ] \
       && say "pass complete: $owned owned, $queued startable"
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
       if [ "${parked:-0}" -gt 0 ]; then

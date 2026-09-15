@@ -4308,14 +4308,28 @@ JSON
     echo "ok: the per-pass line is off by default"
     make_fixture ok
     backlog_all_claimed 10
-    out="$(AUTOFLEET_LOG_PASSES=1 in_fleet cmd_run --auto 2>&1)"
+    out="$(AUTOFLEET_LOG_PASSES=on in_fleet cmd_run --auto 2>&1)"
     grep -q "pass complete" <<<"$out" \
-      || fail "AUTOFLEET_LOG_PASSES=1 said nothing: $out"
+      || fail "AUTOFLEET_LOG_PASSES=on said nothing: $out"
     # ...AFTER the last call a pass makes, which is what makes it usable as the
     # end-of-pass signal budget_busy_pass waits on rather than a clock.
     [ "$(grep -c . "$GH_CALLS")" = 2 ] \
       || fail "the pass line landed before the pass was done: $(cat "$GH_CALLS")"
     echo "ok: ...and on, it says so once the pass has spent everything it spends"
+
+    # ...and `0` is REFUSED rather than read as either. The first shape of this
+    # knob was `[ -n ]`, so `AUTOFLEET_LOG_PASSES=0` -- the one thing a host
+    # writes when it means off -- turned the line a minute ON, with nothing said
+    # about it. AUTOFLEET_CONTEXT_RESET's validator is the shape copied here.
+    # Found by the local review.
+    cfg_out="$( (cd "$WORK/repo" \
+      && AUTOFLEET_LOG_PASSES=0 bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+    cfg_rc=$?
+    [ "$cfg_rc" = 2 ] \
+      || fail "AUTOFLEET_LOG_PASSES=0 was accepted (rc=$cfg_rc): $cfg_out"
+    grep -q "must be 'on' or 'off'" <<<"$cfg_out" \
+      || fail "it was refused without saying why: $cfg_out"
+    echo "ok: ...and a value that is neither on nor off is refused, not read as on"
     ;;
 
   budget_status_says_backlog_blind)
@@ -4364,7 +4378,12 @@ JSON
     # signal. Found by the local review.
     make_fixture ok
     printf 'FAIL\n' >"$GH_ISSUES"
-    out="$(in_pass 'ready_issues' 2>&1)"
+    # TWICE IN ONE PASS, which is what makes the second assertion an assertion.
+    # Called once the count can only be 1 or 0, so "it said so more than once"
+    # was unreachable and the say-once marker went untested -- the same shape
+    # `budget_ready_list_blind` uses to prove the cached failure is not re-asked.
+    # Found by the local review.
+    out="$(in_pass 'ready_issues; ready_issues' 2>&1)"
     grep -q "could not read the issue listing" <<<"$out" \
       || fail "the dispatcher stopped starting anything and said nothing: $out"
     [ "$(grep -c "could not read the issue listing" <<<"$out")" = 1 ] \
@@ -4451,11 +4470,12 @@ JSON
     # re-derived by hand") in the smallest form that answers this. The five
     # minute poll stays as the second guarantee: even if the line were missed,
     # no second pass exists to contaminate the count.
-    AUTOFLEET_POLL=300 AUTOFLEET_LOG_PASSES=1 start_dispatcher --auto
+    AUTOFLEET_POLL=300 AUTOFLEET_LOG_PASSES=on start_dispatcher --auto
     wait_for_log "pass complete"
-    # The pass is done when its calls stop arriving. With a 30-second poll behind
-    # us there is no second pass to race, so "stable for two reads" is an answer
-    # rather than a guess.
+    # The count is taken AFTER that line, which the dispatcher writes once
+    # `count_startable` -- the last call of a pass -- has returned. The five
+    # minute poll above is the second guarantee: no next pass can be underway
+    # while this reads $GH_CALLS.
     n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
     [ "$n" = 8 ] \
