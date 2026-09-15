@@ -45,6 +45,7 @@ Exits 0 when the PR may merge, 1 when it may not, and prints why either way.
 `--selftest` runs it against recorded shapes and needs no network.
 """
 
+import collections
 import json
 import os
 import re
@@ -1032,7 +1033,7 @@ def evaluate(head_sha, pull_request, changed_files):
         # the same data for the same order.
         latest = {}
         for r in substantive:
-            if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
+            if holds(r):
                 latest[(r.get("author") or {}).get("login") or "?"] = r
         blocking = sorted(w for w, r in latest.items()
                           if r.get("state") == "CHANGES_REQUESTED")
@@ -1077,7 +1078,40 @@ def evaluate(head_sha, pull_request, changed_files):
         # `substantive` down to `holding`, which excludes DISMISSED and PENDING
         # and leaves APPROVED in, so the comment describing the fix described
         # something the code did not do. Found by the independent review.
-        waiting = [r for r in holding if r.get("state") != "APPROVED"]
+        def owed(r):
+            """Could this review be waiting on an answer from the author?
+
+            EXACTLY WHAT THE LOOP BELOW CAN REPORT, because the count feeds a
+            sentence about it. Every looser definition has been wrong once: an
+            APPROVED asks for nothing; a standing CHANGES_REQUESTED is routed to
+            re-review two conditions above and an answer never clears it, so
+            counting it made the closing note promise a remedy the same refusal
+            list denies; and a review declaring zero findings owes nothing at
+            all. Found by the independent review, twice.
+            """
+            who_r = ((r.get("author") or {}).get("login")) or "?"
+            if r.get("state") == "APPROVED":
+                return False
+            if latest.get(who_r) is not r \
+                    and (latest.get(who_r) or {}).get("state") == "APPROVED":
+                return False
+            if r.get("state") == "CHANGES_REQUESTED" and latest.get(who_r) is r:
+                return False
+            return declared_findings(r) != 0
+
+        waiting = [r for r in holding if owed(r)]
+        # HOW MANY RECORDS ON THIS HEAD CARRY EACH ACCOUNT'S NAME. What the
+        # messages below have to tell apart is two reviews "the review from
+        # claude[bot]" names equally -- which is what `local` mode produces,
+        # every reviewer signing in as the PR's own account. Counted from
+        # `holding` rather than `waiting`, because the ambiguity is about what
+        # is ON the head: a second review that declares zero findings owes
+        # nothing and is still a review the reader has to be pointed past.
+        # Counted per AUTHOR rather than over the whole list, because a
+        # maintainer's APPROVED beside one bot review is two records nobody can
+        # confuse, and naming that one by timestamp was the worse sentence.
+        by_author = collections.Counter(
+            ((r.get("author") or {}).get("login")) or "?" for r in holding)
         unanswered = 0
         for review in holding:
             who = ((review.get("author") or {}).get("login")) or "?"
@@ -1096,6 +1130,25 @@ def evaluate(head_sha, pull_request, changed_files):
                     continue  # said above, with the remedy that belongs to it
                 # ...otherwise it falls through and is answered like any other
                 # review whose findings nobody has read.
+            # SUPERSEDED BY THIS AUTHOR'S OWN APPROVAL. Moving this loop off
+            # `latest` dropped supersession for every state, not just the one
+            # that needed it -- so a maintainer who left a substantive COMMENTED
+            # review and then APPROVED the same head held the PR forever on
+            # "does not say what it found", which is the very trap the APPROVED
+            # branch below was written to avoid. Found by the independent
+            # review.
+            #
+            # AND AN APPROVAL IS NOT A CLEAN SECOND COMMENTED, which is the
+            # distinction #64 turns on. A second reviewer's clean review does not
+            # answer the first reviewer's findings -- it never saw them, and
+            # reading it as an answer is this whole issue. An APPROVED can only
+            # come from a PERSON: `claude-review.yml` tells the reviewer never to
+            # `--approve` and GitHub refuses a self-approval. So an approval from
+            # the account that wrote the earlier review is somebody signing off
+            # having seen their own findings, and that does discharge them.
+            if (latest.get(who) is not review
+                    and (latest.get(who) or {}).get("state") == "APPROVED"):
+                continue
             if review.get("state") == "APPROVED":
                 # An approval asks for nothing, so there is nothing to answer.
                 #
@@ -1128,10 +1181,12 @@ def evaluate(head_sha, pull_request, changed_files):
             # always said; it stops being a NAME the moment a second review
             # arrives from the same account, which in `local` mode they all do.
             #
-            # COUNTED FROM `waiting`: what the name has to tell apart is two
-            # reviews the author still owes something to, not every record on
-            # the head.
-            named = (review_name(review) if len(waiting) > 1
+            # COUNTED PER AUTHOR OVER `holding`: what the name has to tell
+            # apart is two records the same login answers to. Counting
+            # `waiting` instead read one review and one clean second review as
+            # unambiguous -- and the clean one is exactly the record #64 is
+            # about, so the hold named neither of them.
+            named = (review_name(review) if by_author.get(who, 0) > 1
                      else f"the review from {who}")
             # THE AUTHOR'S WORDS CLEAR A SUGGESTION-ONLY REVIEW, AND NOTHING
             # MORE. `answered()` cannot tell "fixed it" from "I disagree" -- it

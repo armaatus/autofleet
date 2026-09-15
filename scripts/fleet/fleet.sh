@@ -1624,9 +1624,17 @@ start_validator() {
   # documents: since armaatus/autofleet#64 the REVIEWER's marker is a lock the
   # reviewer claims for itself, create-or-fail, and `review.sh` releases it by
   # content rather than by path. The validator's is still this file's private
-  # bookkeeping, so an exit-5 validator can remove a marker that does not exist
+  # bookkeeping, so an exit-8 validator can remove a marker that does not exist
   # yet and the write below recreates it holding a dead pid, which
   # `live_reviewers` reaps on its next call.
+  #
+  # EXIT 8, and not exit 5. `validate.sh`'s 8 is the "wants no validation" path,
+  # two API calls, and it is the only exit fast enough to lose the microsecond
+  # race with a write that happens right after the spawn; its 5 is reached only
+  # after `wait "$validator"` returns, which is minutes. An edit to this comment
+  # said 5 and was wrong -- the second time a comment in this neighbourhood has
+  # been rewritten from true to false, which is the failure the hunk below
+  # already records. Found by the independent review.
   #
   # THE SAME RACE THAT #64 CLOSED FOR REVIEWS IS STILL OPEN HERE, and the
   # difference in what it costs is why it was left: two validations on one head
@@ -2479,11 +2487,20 @@ for p in prs:
     # told to delete a lock that is being written normally -- in exactly the
     # hand-run-beside-a-dispatcher case #64's Design notes name. Found by the
     # independent review.
-    fleet_lock_publish "$marker" "$rpid" "$head"
+    fleet_lock_publish "$marker" "$rpid" "$head"; local published=$?
     local lockpid=""
     read -r lockpid _ 2>/dev/null <"$marker" || true
     if [ "${lockpid:-}" = "$rpid" ]; then
       say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
+    elif [ "$published" = 2 ]; then
+      # THE RETURN IS NOT DISCARDABLE, and this is the 1-vs-2 conflation
+      # `review.sh`'s own exit-2 arm exists to avoid. A state directory that
+      # cannot be written leaves no marker at all, so `lockpid` is empty and
+      # every poll announced a reviewer already in flight -- naming a holder
+      # that does not exist and never the one thing a person could fix. Found
+      # by the independent review.
+      say "PR #$pr: could not write $marker, so nothing here can stop a second"
+      say "  reviewer starting on this head. Check that directory is writable."
     else
       say "PR #$pr: a reviewer is already in flight; the one just spawned stands down"
     fi

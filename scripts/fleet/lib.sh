@@ -906,6 +906,21 @@ fleet_lock_claim() {
   # Found by the independent review.
   read -r held for_head 2>/dev/null <"$marker" || true
   [ "${held:-}" = "$$" ] && return 0
+  # A MARKER THAT VANISHED IS NOT A CORRUPT ONE. The holder's
+  # `fleet_lock_release` -- or `live_reviewers`, which removes exactly these
+  # dead-pid markers every poll -- can take the file away between the failed
+  # create and this read. Reported as corruption, the caller tells a person to
+  # delete a file that is already gone while the lock is in fact free: the
+  # phantom advice the `return 2` arm's own comment warns against, in the arm
+  # beside it. Retry the claim instead; one retry, because a marker that keeps
+  # vanishing is contention that will resolve on the next poll anyway. Found by
+  # the independent review.
+  if [ -z "${held:-}" ] && [ ! -e "$marker" ]; then
+    _fleet_lock_try "$marker" "$head"; rc=$?
+    [ "$rc" = 1 ] || return "$rc"
+    read -r held for_head 2>/dev/null <"$marker" || true
+    [ "${held:-}" = "$$" ] && return 0
+  fi
   [ -n "${held:-}" ] || return 3
   fleet_agent_alive "$held"; is=$?
   if [ "$is" != 1 ]; then
@@ -950,8 +965,17 @@ fleet_lock_claim() {
     # with, twenty lines below the comment rejecting it. The stolen file is
     # already complete, so linking it back publishes content and name together.
     # Found by the independent review.
-    ln "$stolen" "$marker" 2>/dev/null || true
-    rm -f "$stolen" 2>/dev/null || true
+    #
+    # ...WITH THE FALLBACK `fleet_lock_publish` HAS, because a filesystem with
+    # no hard links is one this explicitly supports -- and there `ln` fails
+    # silently, the `rm` below destroys the live winner's lock, and the next
+    # poll starts a second reviewer on one head. The `rm` is conditional on the
+    # restore for the same reason: a stolen file nothing could put back is the
+    # only copy of somebody's lock. Found by the independent review.
+    if ln "$stolen" "$marker" 2>/dev/null \
+       || ( set -C; cat "$stolen" >"$marker" ) 2>/dev/null; then
+      rm -f "$stolen" 2>/dev/null || true
+    fi
     _fleet_lock_holder "$marker"; return $?
   fi
   rm -f "$stolen" 2>/dev/null || true
