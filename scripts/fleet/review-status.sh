@@ -92,7 +92,7 @@ GH_PAGER=cat gh pr view "$pr" \
 # which is the one thing an agent at step 6 of the brief cannot work around.
 # `evals/continuation_comment.py` now fails the build on the shape.
 GH_PAGER=cat gh api --paginate "repos/$owner/$name/pulls/$pr/files" \
-  --jq '.[] | .filename, (.previous_filename // empty)' >"$files" 2>/dev/null || exit 2
+  --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null >"$files" || exit 2
 
 python3 - "$pr" "$payload" "$checks" "$files" <<'PY'
 import json, sys

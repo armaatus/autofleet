@@ -221,13 +221,13 @@ listing that comes back with exactly 100 might have a 101st on the next page —
 nothing in it can be trusted to mean "no PR closes this issue". The dispatcher
 refuses it rather than guessing, which is right (guessing opens a duplicate
 worktree for every issue past the boundary) and total: while it holds, nothing
-launches,
-nothing is time-boxed, no build context is reset for the answering work, and the
-run loop keeps polling because it cannot tell whether the backlog is empty. It
-says so in `fleet.log` once per outage rather than once a minute. The way out is
-to close or merge PRs until the count drops; paging past the limit is
-armaatus/autofleet#122, filed for it — not #31, which earlier drafts of this
-paragraph cited and which is closed and about worktree scoping.
+launches, nothing is time-boxed, no build context is reset for the answering
+work, and the run loop keeps polling because it cannot tell whether the backlog
+is empty. It says so in `fleet.log` once per outage rather than once a minute.
+The way out is to close or merge PRs until the count drops; paging past the
+limit is armaatus/autofleet#122, filed for it — not armaatus/autofleet#31, which
+earlier drafts of this paragraph cited and which is closed and about worktree
+scoping.
 
 **It is not the first cliff, and the row count is not what decides.**
 `count_startable` hands that same listing — every row with its full `body` — to
@@ -243,10 +243,11 @@ different number on each host, which is the shape hard rule 1 names. Over it,
 above describes, reached earlier and by a different measure. And that `python3`
 is the one listing parse with no `2>/dev/null`, so bash's diagnostic reaches the
 dispatcher's stderr once a poll for as long as it lasts — the flood the
-say-once markers exist to prevent, through a door they do not cover. Feeding
-`$prs` on stdin the way `has_open_pr` does is one line and removes it; it is
-armaatus/autofleet#122's, with the rest of the paging work. Found by the local
-review.
+say-once markers exist to prevent, through a door they do not cover. The way out
+is not the one-line move to stdin `has_open_pr` made: `count_startable`'s stdin
+already carries the `ready` listing. It is a swap — the bodies onto stdin, the
+`ready` rows, which have none, onto argv — and it is armaatus/autofleet#122's,
+with the rest of the paging work. Found by the local review.
 
 The `ready` listing's own `--limit 200` has **no** such guard, and that is a
 trade rather than a free pass. Guarding it would stop a repository with exactly

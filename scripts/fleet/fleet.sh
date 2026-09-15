@@ -1700,17 +1700,20 @@ count_startable() {
   # The pass's one listing, not a fourth copy of it. It carries `number` as well
   # as `body`, which this block does not read and does not have to.
   #
-  # IT GOES OUT AS ONE ARGV STRING below, which is a lower ceiling than the 100
-  # rows `open_pr_listing` guards: Linux caps a single argument at
-  # `MAX_ARG_STRLEN`, 128 KiB, and PR bodies in this repository run to ~20 KB --
-  # so seven of them, and about fifty on darwin, fail `execve` with `Argument
-  # list too long`. That is the same wedge the row cliff causes (non-zero under
-  # `pipefail` -> rc 1 -> `cmd_run` polls forever), reached earlier and measured
-  # in bytes rather than rows, and the `python3` below is the one listing parse
-  # with no `2>/dev/null`, so bash says so on stderr once a poll while it lasts.
-  # The fix is one line -- feed it on stdin the way `has_open_pr` does -- and it
-  # belongs with the paging work in armaatus/autofleet#122, not here.
-  # docs/WORKFLOW.md carries the numbers. Found by the local review.
+  # IT GOES OUT AS ONE ARGV STRING below, and that is a lower ceiling than the
+  # 100 rows `open_pr_listing` guards: the kernel caps a SINGLE argument
+  # (`MAX_ARG_STRLEN`, 128 KiB on Linux) and these rows carry full PR bodies, so
+  # what runs out first is bytes, not rows -- well under 100 of them on either
+  # platform, and a different number on each. Over it `execve` fails with
+  # `Argument list too long`: non-zero under `pipefail`, rc 1, and `cmd_run`
+  # polls forever. The `python3` below is also the one listing parse with no
+  # `2>/dev/null`, so bash says so on stderr once a poll while it lasts.
+  #
+  # NOT a one-line move to stdin: stdin here is already `$ready`. The swap is to
+  # trade which listing goes where -- the bodies onto stdin, `$ready`, which has
+  # none, onto argv -- and it belongs with the paging work in
+  # armaatus/autofleet#122, not here. docs/WORKFLOW.md carries the numbers.
+  # Found by the local review.
   prs="$(open_pr_listing)" || return 1
   ready="$(ready_issues)" || return 1
   # An issue the fleet gave up on is one it will decline every pass, so counting

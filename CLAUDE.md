@@ -92,8 +92,8 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
   `2>/dev/null <"$f"`. `evals/late_stderr_silence.py` scans the payload's shell.
 - **Never pipe an assertion into `grep -q`** under `pipefail`: `-q` exits on the
   first match, the producer dies of EPIPE, and a check that held reports 141 --
-  on large input only, so green on a Mac and red in CI. `piped_quiet_grep.py`
-  scans the payload's *shell*; `.github/workflows/` is unscanned, and has one (#90).
+  on large input only, so green on a Mac and red in CI. Scanned by
+  `evals/piped_quiet_grep.py`; `.github/workflows/` is not, and has one (#90).
 
 ## The tracker is the spec
 

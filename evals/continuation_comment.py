@@ -50,14 +50,21 @@ PATTERNS = (
 def hazard_lines(text):
     """1-based line numbers of continuations whose next line opens a comment.
 
-    A line ending in an EVEN number of backslashes does not continue: the last
-    two are an escaped backslash, and the newline stands. That is the only
-    subtlety here -- the rest is "does the next line start with `#`".
+    Two subtleties, and the rest is "does the next line start with `#`":
+
+    A line ending in an EVEN number of backslashes does not continue -- the last
+    two are an escaped backslash, and the newline stands.
+
+    And the backslash has to be the LAST character. `cmd \ ` escapes the space,
+    not the newline, so it is not a continuation and the comment under it is an
+    ordinary comment. Only `\r` is stripped, for a file with CRLF endings;
+    stripping whitespace here would report a line that is not a hazard, and a
+    scan that cries wolf is one somebody deletes (hard rule 3).
     """
     lines = text.split("\n")
     hits = []
     for i, line in enumerate(lines[:-1]):
-        stripped = line.rstrip()
+        stripped = line.rstrip("\r")
         if not stripped.endswith("\\"):
             continue
         trailing = len(stripped) - len(stripped.rstrip("\\"))
@@ -98,7 +105,20 @@ def selftest():
          True, "an escaped backslash then a real one still continues"),
         ('printf \'x\\\\\\\\\'\n# an even count does not continue, so this is just a comment',
          False, "two backslashes are an escaped one; the newline stands"),
+        # ...and that row ends in a QUOTE, so `endswith` short-circuits and the
+        # even/odd count is never reached. These two are what assert it: delete
+        # the `trailing % 2` guard and the first of them reports a hazard on a
+        # line bash does not continue. Found by the local review, which deleted
+        # the guard and watched all eleven other rows stay green (hard rule 3).
+        ('echo foo\\\\\n# the line ends in an escaped backslash, not a continuation', False,
+         "an even count at the very end of the line"),
+        ('echo foo\\\\\\\n# ...and three is odd again, so this one does continue', True,
+         "the guard counts; it does not merely look for a pair"),
         ('echo no continuation here\n# a comment', False, "nothing to swallow"),
+        ('cmd \\ \n# the backslash escaped the space, so the newline stands', False,
+         "a trailing space means this is not a continuation at all"),
+        ('cmd \\\r\n# a CRLF file continues just the same', True,
+         "...but a carriage return is line ending, not content"),
         ('cmd \\\n  --flag \\\n# swallowed on the SECOND continuation\n  --other', True,
          "the hazard is per continuation, not per statement"),
     ]
