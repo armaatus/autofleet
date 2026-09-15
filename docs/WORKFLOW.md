@@ -152,10 +152,11 @@ Only the third row spends anything, and it has **three** entries rather than
 two: `worktree create --agent claude` is the work itself, `review.sh` is the
 local reviewer, and `validate.sh` — spawned by `start_validator` from inside
 `review_open_prs`' own loop — is the third. Every other call a pass makes is an
-API or a CLI query and costs no tokens at all. **No poll invokes a model**: the
-body of `cmd_run` is shell and `gh`, and a model starts only when one of those
-three scripts is spawned. All three are marker-guarded, so none of them is a
-spawn per PR per poll — `start_validator` returns early on its `v-<pr>` lock and
+API or a CLI query and costs no tokens at all. **The poll itself never runs a
+model**: the body of `cmd_run` is shell and `gh` from end to end, and a model
+starts only inside one of those three scripts once the dispatcher has spawned
+it — which is a decision the pass makes, not something every pass does. All
+three are marker-guarded, so none of them is a spawn per PR per poll — `start_validator` returns early on its `v-<pr>` lock and
 on a `v-<pr>.done` holding the current head, and a reviewer is skipped while
 `$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
 polling an idle fleet overnight is free in the only sense that matters; it is
@@ -189,6 +190,21 @@ staleness — a PR opened mid-pass is invisible until the next one — which is
 why the listing is taken before the launch loop rather than during it.
 `tests/test_fleet.sh`'s `budget_` phases assert these numbers, so a change that
 puts the slope back fails the suite rather than the rate limit.
+
+**100 open pull requests is a cliff**, and it is the one number here that can
+stop the fleet dead. `gh pr list` is asked for 100 rows, and a listing that
+comes back with exactly 100 might have a 101st on the next page — so nothing in
+it can be trusted to mean "no PR closes this issue". The dispatcher refuses it
+rather than guessing, which is right (guessing opens a duplicate worktree for
+every issue past the boundary) and total: while it holds, nothing launches,
+nothing is time-boxed, no build context is reset for the answering work, and the
+run loop keeps polling because it cannot tell whether the backlog is empty. It
+says so in `fleet.log` once per outage rather than once a minute. The way out is
+to close or merge PRs until the count drops; paging past the limit is
+armaatus/autofleet#31. The `ready` listing's own `--limit 200` has **no** such
+guard, deliberately — a repository with 200 open issues would then never start
+anything, and losing the tail of a 200-issue queue delays work rather than
+duplicating it.
 
 **List mode still has the slope**, and the table above does not describe it.
 `fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its

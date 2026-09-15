@@ -1055,11 +1055,15 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
 # EVERY OPEN PULL REQUEST, ONCE A PASS. `has_open_pr` -- and through it
 # `in_flight`, and through that the launch loop's scan of the whole `ready`
 # queue -- plus `count_startable` and `enforce_timebox` all want this one
-# listing, and each used to take its own copy. A pass over this repository's own
-# backlog of 46 `ready` issues made ~50 `gh` calls, once a minute: 3000 an hour,
-# which is past the 5000/hour primary limit's comfort zone and squarely into the
-# secondary limits the comments in `has_open_pr` and `count_startable` cite as
-# the reason those functions exist at all. armaatus/autofleet#69.
+# listing, and each used to take its own copy -- one per candidate the launch
+# loop scanned, and it scanned to the end whenever nothing was startable. The
+# measurement and its arithmetic live in docs/WORKFLOW.md, "What one poll
+# costs", and are NOT restated here: the backlog moves, and two copies of a
+# derived number are two chances to disagree about which measurement they are
+# describing. It was thousands of calls an hour on a backlog this size, past the
+# 5000/hour primary limit's comfort zone and into the secondary limits the
+# comments in `has_open_pr` and `count_startable` cite as the reason those
+# functions exist at all. armaatus/autofleet#69.
 #
 # THE WINDOW THIS OPENS, named here because it is what the saving costs. A PR
 # opened AFTER the listing is taken is invisible for the rest of the pass, so
@@ -1070,13 +1074,17 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
 # direction is worse here: `poll_issue` stale by a poll is a comment made late,
 # this is a duplicate worktree.
 #
-# Which is why `cmd_run` takes it NO LATER THAN the line before the launch loop,
-# rather than leaving it to whichever caller happens to ask first. The watchers
-# that run earlier in the pass may take it sooner -- that only makes the window
-# narrower -- but nothing may take it later, because the launch loop is the one
-# reader that acts on the answer by opening a worktree. Left entirely lazy the
-# listing would be taken mid-scan, at a different candidate on every poll, and
-# the window above would have no width anybody could state.
+# Which is why `cmd_run` takes it NO LATER THAN the line before the launch loop.
+# Read the direction carefully, because an earlier version of this comment had
+# it backwards: taking the listing SOONER makes the window WIDER, not narrower
+# -- the window is the interval between the fetch and the launch loop acting on
+# it, so every watcher that runs before the prefetch and asks first (
+# `reset_context_for_answering` per owned worktree, `enforce_timebox` per
+# overdue one) lengthens it. What the prefetch guarantees is the other end: the
+# window CLOSES at the launch loop, and it is at most one pass wide whoever
+# opened it. That is the whole claim, and it is the one a reader can check.
+# Without it the fetch would land mid-scan, at a different candidate on every
+# poll, and there would be no width to state at all. Found by the local review.
 #
 # 0 and the listing on stdout, or 1 and nothing at all. "Could not tell" is
 # cached in `.unreadable` and NEVER as an empty listing: an empty listing is the
@@ -1109,12 +1117,51 @@ open_pr_listing() {
   # host really does keep 100 PRs open -- nothing launches and the log says
   # nothing about it -- which is the safe direction, and #31 is where paging
   # belongs. Found by the local review.
-  if ! listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit "$pr_page" 2>/dev/null)" \
-     || [ -z "$listing" ] \
-     || [ "$(printf '%s' "$listing" | python3 -c '
+  local rows=""
+  if listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit "$pr_page" 2>/dev/null)" \
+     && [ -n "$listing" ]; then
+    # THE SAME PARSE DECIDES BOTH QUESTIONS, and its failure is the third
+    # answer. `python3` dying here is a body `gh` handed back with status 0 and
+    # which is not a listing at all -- and without this the empty substitution
+    # simply failed the `= "$pr_page"` test, so the garbage was written to the
+    # cache AS AN ANSWER with status 0. Every caller then re-ran its own parser
+    # to rediscover it was garbage, and `count_startable`'s has no `try` around
+    # its `json.loads`, so a raw traceback went to the dispatcher's stderr once
+    # a minute for as long as `gh` misbehaved. The header above promises this
+    # function never caches "could not tell" as a listing; this is the line that
+    # makes that true. Found by the local review.
+    rows="$(printf '%s' "$listing" | python3 -c '
 import json, sys
 print(len(json.load(sys.stdin)))
-' 2>/dev/null)" = "$pr_page" ]; then
+' 2>/dev/null)" || rows=""
+  fi
+  case "$rows" in
+    ''|*[!0-9]*) listing="" ;;
+    # A FULL PAGE, and the cliff it is: at the limit nothing distinguishes an
+    # absent PR from one on page two, so `in_flight` answers 2 for every issue,
+    # nothing launches, nothing is time-boxed, no build context is reset, and
+    # `count_startable`'s non-zero keeps the run loop polling for work it will
+    # never start. All of that in total silence, which is the worst property a
+    # stop can have -- so it is SAID, through `hold_say_into` so it is once per
+    # outage rather than once a minute, and said only from inside a poll because
+    # `cmd_status` reaches this function too and does not write to the log.
+    "$pr_page")
+       listing=""
+       # ...ONTO STDERR, and that redirection is load-bearing rather than
+       # tidy. This function's STDOUT IS THE ANSWER: `has_open_pr` and
+       # `count_startable` both take it through `$(...)`, so a `say` here goes
+       # into the listing rather than to the operator -- silently swallowed on
+       # this path, because the caller discards what it captured, and it would
+       # be a corrupted listing on any path that succeeded. `say` tees to $LOG
+       # either way, so the line still lands where an overnight run is read.
+       # Found by the local review's phase for it, which measured silence.
+       poll_cache_open && hold_say_into "$PR_PAGE_FULL_SAID" "$pr_page" \
+         "$pr_page open pull requests is this listing's page limit, so a PR on the next page" \
+         "cannot be told from one that does not exist. Nothing will launch, nothing will be" \
+         "time-boxed and the run loop will not exit until the count drops. See docs/WORKFLOW.md," \
+         "\"What one poll costs\"; armaatus/autofleet#31 is where paging belongs." >&2 ;;
+  esac
+  if [ -z "$listing" ]; then
     if poll_cache_open; then
       mkdir -p "$POLL_CACHE" 2>/dev/null
       : >"$cached.unreadable" 2>/dev/null || true
@@ -1188,6 +1235,11 @@ FOUNDATION_HOLD_SAID="$STATE_DIR/holding-for-foundation"
 # it outlives a poll, cleared when a dispatcher STARTS -- the same rule, for the
 # same reason, as the one above. Found by the independent review.
 ROTATE_BLIND_SAID="$STATE_DIR/rotate-blind"
+# `open_pr_listing`'s say-once for the page-limit cliff. In $STATE_DIR rather
+# than $POLL_CACHE because it has to outlive a poll -- the whole point is one
+# line per outage, not one a minute -- and cleared at dispatcher startup with
+# the other two, so a restart explains itself rather than inheriting silence.
+PR_PAGE_FULL_SAID="$STATE_DIR/pr-page-full"
 # Its sibling for "the rotation could not happen at all" is a VARIABLE, not a
 # file, and that is the whole point: the condition it reports is a $STATE_DIR
 # nothing can write to, so a marker in $STATE_DIR cannot be created in exactly
@@ -4131,7 +4183,7 @@ while that one is up."
   # cannot name" was said once per MACHINE -- an operator debugging truncated
   # reviewer output next month got no line at all. Found by the independent
   # review.
-  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID"
+  rm -f "$FOUNDATION_HOLD_SAID" "$ROTATE_BLIND_SAID" "$PR_PAGE_FULL_SAID"
 
   record_dispatcher
   echo $$ >"$PIDFILE"

@@ -4214,10 +4214,122 @@ JSON
     stop_dispatcher
     grep -q "^worktree create" "$ORCA_CALLS" || fail "nothing was launched: $(cat "$WORK/run.log")"
     # No `gh issue view` for the title or the labels of what it picked.
-    n="$(grep -c "issue view 4" "$GH_CALLS" || true)"
+    # `--json title`, NOT `issue view 4`: `poll_issue` asks `issue view 4 --json
+    # state,labels` for the very same issue once `reap_abandoned` owns it, so the
+    # looser pattern matched a call this phase is not about and failed whenever a
+    # second pass started before `stop_dispatcher` landed -- at AUTOFLEET_POLL=1,
+    # a margin of under a second. Found by the local review.
+    n="$(grep -c -- "--json title" "$GH_CALLS" || true)"
     [ "$n" = 0 ] \
-      || fail "a launch in --auto still spent $n \`gh issue view\` calls on an issue the ready listing already described: $(cat "$GH_CALLS")"
+      || fail "a launch in --auto still spent $n \`gh issue view --json title\` calls on an issue the ready listing already described: $(cat "$GH_CALLS")"
     echo "ok: a launch in --auto costs no gh call of its own"
+    ;;
+
+  budget_pr_page_speaks)
+    # THE CLIFF SAYS SO. Refusing a listing at its page limit is right, and
+    # refusing it in silence is the worst property a stop can have: nothing
+    # launches, nothing is time-boxed, no build context is reset, and the run
+    # loop polls forever, with not one line in the log to read in the morning.
+    # Once per outage, through hold_say_into, not once a minute.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2; in_flight 3' 2>&1)"
+    grep -q "page limit" <<<"$out" \
+      || fail "the dispatcher refused every issue for the rest of the run and said nothing: $out"
+    [ "$(grep -c "page limit" <<<"$out")" = 1 ] \
+      || fail "it said it once per caller rather than once per outage: $out"
+    echo "ok: a PR listing at its page limit says so, once"
+    # ...and nothing at all when the listing is whole.
+    make_fixture ok
+    backlog_all_claimed 99
+    out="$(in_pass 'in_flight 2' 2>&1)"
+    grep -q "page limit" <<<"$out" && fail "it warned about a listing that was not truncated: $out"
+    echo "ok: ...and stays quiet when it is not"
+    ;;
+
+  budget_busy_pass)
+    # THE OTHER ROW OF docs/WORKFLOW.md's table. The section claims the `budget_`
+    # phases assert its numbers; without this one it asserted the idle row and
+    # the launch row and left the busy figure to drift. Three owned worktrees,
+    # three open PRs, review mode `github`: the two shared listings, one
+    # merged-PR check per worktree, one issue lookup per worktree. Found by the
+    # local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    : >"$GH_MERGED"
+    worktree_list 1:wt 2:wt 3:wt
+    mkdir -p "$AUTOFLEET_DIR/worktrees"
+    # A REAL git repo, because `reap_merged` reads the branch name off it before
+    # it asks GitHub anything -- point the owned files at a bare directory and
+    # the merged-PR check this phase counts never happens at all.
+    make_worktree
+    rm -f "$AUTOFLEET_DIR/worktrees/42"
+    for n in 1 2 3; do
+      printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/$n"
+      # The build context already dropped for each, which is the steady state a
+      # full fleet spends its time-box in -- and what makes the prefetch's
+      # `live < MAX_WORKTREES` half do anything at all.
+      : >"$AUTOFLEET_DIR/context-reset-$n"
+    done
+    start_dispatcher --auto
+    # Two worktree listings is one whole pass behind us, whatever the clock did.
+    i=0
+    while [ "$i" -lt 200 ] && [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -lt 2 ]; do
+      sleep 0.1; i=$((i + 1))
+    done
+    stop_dispatcher
+    [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -ge 2 ] \
+      || fail "no pass completed: $(cat "$WORK/run.log")"
+    # Per PASS, from the first pass alone: the counts below are taken off the
+    # head of the log, because a second pass is already running by the time this
+    # reads and `stop_dispatcher` is not a barrier.
+    merged="$(grep -c -- "pr list --head" "$GH_CALLS" || true)"
+    [ "$merged" -ge 3 ] \
+      || fail "a full fleet made $merged merged-PR checks, not one per worktree: $(cat "$GH_CALLS")"
+    views="$(grep -c -- "issue view" "$GH_CALLS" || true)"
+    [ "$views" -ge 3 ] \
+      || fail "a full fleet made $views issue lookups, not one per worktree: $(cat "$GH_CALLS")"
+    echo "ok: a full fleet costs one merged-PR check and one issue lookup per worktree"
+    ;;
+
+  budget_full_fleet_no_listing)
+    # THE PREFETCH'S OWN CONDITION, which is the half hard rule 3 would
+    # otherwise have shipped unasserted. With every slot full the launch loop
+    # never runs, so the pass's open-PR listing answers nothing -- and in list
+    # mode `count_startable` is unreachable too, so NOTHING in the pass reads it.
+    # Drop `[ "$live" -lt "$MAX_WORKTREES" ]` and this fixture pays one `gh` call
+    # a minute for a whole time-box. Found by the local review.
+    make_fixture ok
+    : >"$GH_MERGED"
+    worktree_list 1:wt 2:wt 3:wt
+    start_dispatcher 42
+    i=0
+    while [ "$i" -lt 200 ] && [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -lt 2 ]; do
+      sleep 0.1; i=$((i + 1))
+    done
+    stop_dispatcher
+    [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -ge 2 ] \
+      || fail "no pass completed: $(cat "$WORK/run.log")"
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] \
+      || fail "a full fleet took $n open-PR listings for a launch loop that never runs: $(cat "$GH_CALLS")"
+    echo "ok: a pass that cannot launch does not pay for the listing that would tell it what to launch"
+    ;;
+
+  budget_drain_no_listing)
+    # ...and the drain half of the same condition. A drain launches nothing and
+    # forces `queued` to 0, so the listing answers nothing there either -- and a
+    # drain waiting on three PRs to merge can last hours.
+    make_fixture ok
+    backlog_all_claimed 10
+    # `--until 1`, an epoch already past. `deadline_from` takes `Nh`, `Nm`,
+    # `HH:MM` or a bare epoch, and `HH:MM` in the past rolls forward a day --
+    # so a bare epoch is the only spelling that is reliably behind us.
+    out="$(in_fleet cmd_run --auto --until 1 2>&1)"
+    grep -q "deadline passed" <<<"$out" || fail "the run did not enter a drain: $out"
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] || fail "a draining pass took $n open-PR listings it had no reader for: $(cat "$GH_CALLS")"
+    echo "ok: a draining pass does not pay for the listing either"
     ;;
 
   budget_ready_list_blind)
@@ -4321,6 +4433,6 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_full_fleet_no_listing|budget_drain_no_listing" >&2
     exit 2 ;;
 esac
