@@ -93,6 +93,45 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', inputs.pr) }}
 
+      # WHICH VENUE OWNS THIS PHASE, and until now nothing asked.
+      #
+      # `AUTOFLEET_REVIEW_MODE` decided what COUNTS as a review -- `merge_gate.py`
+      # reads it -- and `have_token` below decided whether this workflow RUNS.
+      # Two independent switches for one question. They coincided only while a
+      # repository had no token: add one to a `local`-mode repo and both venues
+      # review every pull request, two agents and two bills, and the gate counts
+      # the Actions one because `counts()` returns true for any non-author review
+      # in either mode. armaatus/autofleet#22 called that "dead weight"; it is
+      # double spend and, for the validator, an uncapped loop beside a capped one.
+      #
+      # FROM THE BASE REF, for the reason merge-gate.yml states about this exact
+      # file: a head-ref copy would let a pull request choose its own venue in
+      # the change being judged. A base with no such file at all is `github`,
+      # which is the shipped default and the strong answer.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || format('refs/pull/{0}/base', inputs.pr) }}
+          sparse-checkout: |
+            .autofleet/config
+          sparse-checkout-cone-mode: false
+          path: base-mode
+      - id: mode
+        run: |
+          set -euo pipefail
+          mode=github
+          if [ -f base-mode/.autofleet/config ]; then
+            # Read, not sourced: this is the one value that decides whether this
+            # job runs at all, and running head-adjacent shell to find it out is
+            # the hole the test-command step next door had.
+            got="$(sed -n 's/^[[:space:]]*AUTOFLEET_REVIEW_MODE[[:space:]]*=[[:space:]]*//p' \
+                     base-mode/.autofleet/config | tail -1 | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
+            case "$got" in local) mode=local ;; esac
+          fi
+          echo "mode=$mode" >>"$GITHUB_OUTPUT"
+          if [ "$mode" = local ]; then
+            echo "::notice::AUTOFLEET_REVIEW_MODE=local on the base ref: the dispatcher owns this phase, so this workflow does nothing."
+          fi
+
       # `secrets` is not available in a job-level `if`, so the gate is a step
       # output.
       - id: token
@@ -241,7 +280,7 @@ jobs:
       # Pinned to a commit, with the tag in the comment. A mutable tag is a
       # supply-chain hole: whoever can move `v1` can change what runs here.
       - uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1
-        if: steps.token.outputs.have_token == 'true' && steps.due.outputs.due == 'true'
+        if: steps.token.outputs.have_token == 'true' && steps.mode.outputs.mode != 'local' && steps.due.outputs.due == 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The same single bot claude-review.yml allows, and for the same
@@ -299,7 +338,7 @@ jobs:
       # already holding the branch, and a red check here would only add a second
       # red thing saying the same.
       - name: say so if no verdict was submitted
-        if: always() && steps.token.outputs.have_token == 'true'
+        if: always() && steps.token.outputs.have_token == 'true' && steps.mode.outputs.mode != 'local'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}

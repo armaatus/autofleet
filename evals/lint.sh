@@ -2307,6 +2307,36 @@ else
   ok "local and github mode grant the reviewer the same Skill, Task and Agent"
 fi
 
+# ...AND THE MODE IS WHAT PICKS THE VENUE, which for a long time it was not.
+#
+# `AUTOFLEET_REVIEW_MODE` decided what COUNTS as a review -- `merge_gate.py`
+# reads it -- while the workflows decided whether they RUN on whether a
+# CLAUDE_CODE_OAUTH_TOKEN secret exists. Two switches for one question, and they
+# agreed only while a repository had no token: add one to a `local`-mode repo
+# and both venues review every pull request, two agents and two bills, with the
+# gate counting the Actions one because a non-author review counts in either
+# mode. For the validator it is worse -- validate.yml fires on every push with
+# no cap, beside a dispatcher-started validator capped at two.
+#
+# Asserted as the three things that make it hold: the base-ref read (a head-ref
+# one would let a PR pick its own venue in the change being judged), the mode
+# step, and at least one step gated on it. armaatus/autofleet#22.
+mode_bad=""
+for venue in ".github/workflows/claude-review.yml" ".github/workflows/validate.yml"; do
+  [ -f "$REPO_ROOT/$venue" ] || { mode_bad="$mode_bad $venue(missing)"; continue; }
+  qgrep -F 'pull_request.base.sha' "$REPO_ROOT/$venue" \
+    || mode_bad="$mode_bad $venue(no base-ref read)"
+  qgrep -F 'AUTOFLEET_REVIEW_MODE' "$REPO_ROOT/$venue" \
+    || mode_bad="$mode_bad $venue(never reads the mode)"
+  qgrep -F "steps.mode.outputs.mode != 'local'" "$REPO_ROOT/$venue" \
+    || mode_bad="$mode_bad $venue(nothing gated on it)"
+done
+if [ -n "$mode_bad" ]; then
+  fail "a workflow does not stand down in local mode, so both venues run the same phase -- two agents per pull request, and the validator uncapped beside a capped one:$mode_bad"
+else
+  ok "...and each stands down when the base ref says AUTOFLEET_REVIEW_MODE=local"
+fi
+
 echo "== the workflows parse as GitHub reads them"
 # An invalid workflow file does not fail loudly: GitHub creates a run with no
 # jobs, named after the file, and the check it was meant to report simply never
