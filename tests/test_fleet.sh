@@ -2006,6 +2006,52 @@ DRIVER
       && fail "a second dispatcher was refused after a drain that ended with a parked worktree: $out"
     echo "ok: ...and a second dispatcher is not refused afterwards"
     ;;
+  status_parked_beside_working)
+    make_fixture ok
+    # THE SEPARATION, which is the state a person actually meets: a drain that
+    # ended with one outstanding leaves ONE parked worktree beside one that is
+    # still being written. #37 asks `status` to name the parked one separately
+    # from the working one, and every phase that touched this planted a single
+    # worktree -- so the naming was asserted and the separation never was. A
+    # `status` that printed the reason and the recovery line against every row
+    # would have passed all of them, and it tells a person to go and discard
+    # what an agent is writing. armaatus/autofleet#71.
+    mkdir -p "$AUTOFLEET_DIR/worktrees" "$WORK/wt99"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
+    worktree_list "42:wt" "99:wt99"
+    # #42 is parked -- its removal was refused, the one reason that needs no
+    # agent check -- and #99 has no marker at all and an agent mid-work.
+    : >"$AUTOFLEET_DIR/stuck-42"
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    dispatcher_running
+    in_fleet record_dispatcher
+    out="$(in_fleet cmd_status 2>&1)"
+
+    # Both are listed...
+    grep -q -- "#42" <<<"$out" || fail "status dropped the parked worktree: $out"
+    grep -q -- "#99" <<<"$out" || fail "status dropped the working worktree: $out"
+    # ...and exactly one of them carries a reason and a recovery line.
+    n="$(grep -c "waiting for you" <<<"$out" || true)"
+    [ "$n" = 1 ] \
+      || fail "$n of 2 worktrees were named as waiting for a person; only the parked one is: $out"
+    grep -q "$WORK/wt99" <<<"$(grep -A2 -- "#42" <<<"$out")" \
+      && fail "the parked worktree's recovery line points at the working one: $out"
+    # The recovery line is the parked worktree's, by path -- so a `status` that
+    # printed one recovery line for the whole listing cannot pass this.
+    recovery="$(grep "worktree remove --force\|status --short" <<<"$out" || true)"
+    grep -q "'$WORK/wt'" <<<"$recovery" \
+      || fail "the parked worktree got no recovery line naming its own directory: $out"
+    grep -q "wt99" <<<"$recovery" \
+      && fail "status handed a person a recovery line for a directory an agent is writing to: $out"
+    echo "ok: a parked worktree is named with its reason and its recovery line, beside a working one that is not"
+    ;;
+
   drain_parked_counted_once)
     # Two markers, ONE worktree. `reap_merged` keeps a merged worktree owned as
     # `merge-blind-42` when its upstream was pruned, and `reap_abandoned` can
@@ -4402,6 +4448,21 @@ JSON
     reapable_worktree_at "$launched"
     echo '[{"number":9,"body":"Closes #148"}]' >"$GH_PRS"
     echo 9 >"$GH_MERGED"
+    # THE REAP RUNS ON THE PASSES AFTER THE CAP, asserted before the exit rather
+    # than inferred from it. #36's bullet asks for this by name; what shipped
+    # asserted the run ENDS, which is a different property -- a cap that stopped
+    # reaping as well as launching fails that assertion as a TIMEOUT, read as
+    # "some other failure" rather than as the reap having stopped. The say at the
+    # latch promises "still reaping what is in flight"; this is the line that
+    # holds it to it. armaatus/autofleet#71.
+    # `wait_for_log` calls `fail` itself, so it needs no `|| fail` here: the
+    # absence of this line IS "the cap stopped reaping as well as launching".
+    wait_for_log "is merged; marking it done"
+    latched="$(grep -n "launching nothing more" "$WORK/run.log" | head -1 | cut -d: -f1)"
+    reaped="$(grep -n "is merged; marking it done" "$WORK/run.log" | head -1 | cut -d: -f1)"
+    [ -n "$latched" ] && [ "$reaped" -gt "$latched" ] \
+      || fail "the reap ran before the cap latched the drain (latch line $latched, reap line $reaped), so this asserts nothing about the passes after it: $(cat "$WORK/run.log")"
+    echo "ok: the reap still runs on the passes after the cap"
     run_ended "$HELD_PID" \
       || fail "the run never ended after its one PR merged -- \`wanted\` still holds #148 because the prune lives inside the loop the drain just closed: $(cat "$WORK/run.log")"
     HELD_PID=""
