@@ -1571,6 +1571,26 @@ else
   fail "the \`grep -q\` scan could not run, so it is asserting nothing"
 fi
 
+# ...and stderr silenced BEFORE the redirection that can fail, not after it.
+#
+# Same scan, same tree, one statement later in the pipeline of things that read
+# as harmless. `read -r h n <"$m.tries" 2>/dev/null` prints the open failure and
+# then silences the stream, so a dispatcher poll left a shell error in fleet.log
+# on the first look at every new head (armaatus/autofleet#87) -- and the line was
+# re-typed until there were seventeen of it. Its own selftest first, for the
+# reason the scan above gives.
+python3 "$REPO_ROOT/evals/late_stderr_silence.py" --selftest \
+  || fail "evals/late_stderr_silence.py fails its own selftest, so the scan below means nothing"
+if bad="$(python3 "$REPO_ROOT/evals/late_stderr_silence.py")"; then
+  if [ -n "$bad" ]; then
+    fail "these silence stderr after the redirection that fails, so the diagnostic prints anyway -- put the \`2>/dev/null\` before the \`<\`: $bad"
+  else
+    ok "no payload script silences stderr after the open that would fail"
+  fi
+else
+  fail "the late-stderr scan could not run, so it is asserting nothing"
+fi
+
 # ...and the brief must still name them -- across BOTH of its stages.
 #
 # Since armaatus/autofleet#49 the brief arrives in two pieces out of the one

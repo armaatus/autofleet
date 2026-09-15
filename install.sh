@@ -52,6 +52,7 @@ PAYLOAD=(
   # installer did not deliver fails on every host PR, on a check about the host's
   # own configuration. Hard rule 1.
   "evals/piped_quiet_grep.py"
+  "evals/late_stderr_silence.py"
   "evals/run.sh"
   "docs/WORKFLOW.md"
   # Vendored because the payload POINTS AT IT: REVIEW.md links to it,
