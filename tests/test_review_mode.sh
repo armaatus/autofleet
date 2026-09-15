@@ -379,6 +379,28 @@ stub_reviewer() {
   ENV_FILE="$WORK/reviewer-env"
   : >"$ENV_FILE"
   export ENV_FILE
+  # THE WORK THE WRAPPER STARTS, as a script under $WORK rather than a bare
+  # `sleep 3607`. Two phases decide whether the kill reached the reviewer's own
+  # child by asking `pgrep -f "sleep 3607"` -- a question about the WHOLE
+  # MACHINE. Any unrelated `sleep 3607` (another worktree, another run of this
+  # suite, a stray left by a killed phase) answered for the fixture, and the
+  # phase failed with "the wedged reviewer's own child outlived the kill" about
+  # a process it had never started. Verified both ways in armaatus/autofleet#42:
+  # green on a clean machine, red with one unrelated sleep running, and read by
+  # a reviewer as pre-existing breakage rather than as contamination -- which is
+  # the defect, because the phase cannot tell the two apart. $WORK is this
+  # phase's own mktemp directory, so a pgrep on this path can match nothing
+  # else. NOT a prefix of `fake-reviewer`, or `-f` would match the wrapper too
+  # and the two assertions would answer for each other.
+  # armaatus/autofleet#71.
+  REVIEWER_WORK="$WORK/bin/reviewer-work"
+  cat >"$REVIEWER_WORK" <<'CHILD'
+#!/usr/bin/env bash
+# The distinctive duration stays, so a human reading `ps` still recognises it.
+sleep 3607
+CHILD
+  chmod +x "$REVIEWER_WORK"
+  export REVIEWER_WORK
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
 printf 'ran\n' >>"$REVIEWER_CALLS"
@@ -439,7 +461,7 @@ PY
   # what review.sh signals -- and a kill that reaps only the direct child leaves
   # it running. The sleep is given a distinctive duration so a test can tell the
   # wrapper's death from the work's.
-  hang)   sleep 3607 ;;
+  hang)   "$REVIEWER_WORK" ;;
   # NOTE: no default arm, deliberately-for-now. An unknown mode falls through and
   # behaves like \`silent\`, which is how \`stub_reviewer submits\` -- a mode that
   # was never defined -- read as the opposite of what it did. Adding
@@ -1103,7 +1125,7 @@ HOLDER
   # orphans what it started -- which with any AUTOFLEET_REVIEW_CMD wrapper is the
   # agent holding this machine's gh login. Both this phase and midstop checked
   # only the wrapper. Found by the independent review.
-  pgrep -f "sleep 3607" >/dev/null 2>&1 \
+  pgrep -f "$REVIEWER_WORK" >/dev/null 2>&1 \
     && fail "the wedged reviewer's own child outlived the kill"
   ok "...and so is what it had started"
   ;;
@@ -2442,7 +2464,7 @@ PY2
     pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
       && fail "the reviewer is still running after the stop"
     ok "...and does not leave it running"
-    pgrep -f "sleep 3607" >/dev/null 2>&1 \
+    pgrep -f "$REVIEWER_WORK" >/dev/null 2>&1 \
       && fail "the reviewer's own child outlived the stop"
     ok "...nor anything it had started"
     ;;
@@ -2654,15 +2676,13 @@ $bad"
   # failure, no output and no name to read -- nine minutes of silence and exit
   # 143 in CI run 34658821929.
   #
-  # WHAT IT DOES NOT CATCH, said plainly because this file has twice been bitten
-  # by a phase that claimed more than it asserted: a write-time expansion that
-  # succeeds SILENTLY and eats text this does not name -- `\`date\``, `$HOME` --
-  # passes all four rows. Only two shapes are caught: one that writes to stderr,
-  # and the loss of the one line named below. The general case wants the written
-  # file compared against the heredoc body, which is worth doing and is not this
-  # change; it is noted on armaatus/autofleet#71 with the other guards aimed
-  # slightly off. Both review passes raised this, and narrowing the claim is the
-  # answer rather than leaving the comment to be believed.
+  # The four rows below catch two SHAPES -- a write-time expansion that writes to
+  # stderr, and the loss of one named line. They never caught the class: an
+  # expansion that succeeds SILENTLY and eats text they do not name -- `\`date\``,
+  # `$HOME` -- passed all four. The last row of this phase is the general
+  # assertion and is what the rest of it is now a cheap prefix of: the written
+  # file compared against the heredoc body in this file, byte for byte.
+  # armaatus/autofleet#71.
   make_fixture
   err="$WORK/stub-err"
   stub_reviewer marked 2>"$err"
@@ -2699,6 +2719,81 @@ $bad"
   grep -qF "$ARGV_FILE" "$WORK/bin/fake-reviewer" \
     || fail "the stub cannot record the argv; \$ARGV_FILE did not expand"
   ok "...and the prompt- and argv-capture paths are baked in, so both are assertable"
+
+  # THE CLASS, not two shapes of it. Reconstruct the stub from the heredoc body
+  # in THIS file and require the written stub to equal it byte for byte.
+  #
+  # The reconstruction is deliberately narrow, which is where the assertion
+  # comes from: an ALLOWLIST of the five paths plus `$1` -- what the heredoc is
+  # unquoted FOR -- and nothing else. Any other unescaped `$NAME`, any `$(`, any
+  # backtick is a failure by NAME rather than by its effect, so `$HOME` eating
+  # half a comment fails here whether or not it happens to be quiet, and so does
+  # the next construct nobody has thought of. The backtick that hung CI for nine
+  # minutes fails on row one of this check rather than by the suite going
+  # silent.
+  #
+  # `\$1` is an expansion too, and it is the stub's MODE: this phase wrote the
+  # stub with `marked`, so that is what the reconstruction substitutes.
+  STUB_SRC="${BASH_SOURCE[0]}" STUB_OUT="$WORK/bin/fake-reviewer" STUB_MODE=marked \
+  REVIEWER_CALLS="$REVIEWER_CALLS" PROMPT_FILE="$PROMPT_FILE" ARGV_FILE="$ARGV_FILE" \
+  GH_HEAD="$GH_HEAD" GH_REVIEWS="$GH_REVIEWS" REVIEWER_WORK="$REVIEWER_WORK" \
+  python3 - <<'RECONSTRUCT' || fail "the written reviewer stub is not the heredoc body in $(basename "${BASH_SOURCE[0]}")"
+import os, re, sys
+
+src = open(os.environ["STUB_SRC"]).read()
+m = re.search(r'cat >"\$WORK/bin/fake-reviewer" <<STUB\n(.*?)\nSTUB\n', src, re.S)
+if not m:
+    sys.exit("could not find the stub heredoc in the source; this phase asserts nothing")
+body = m.group(1)
+
+# The paths the heredoc is unquoted for, and the mode. Adding a name here is a
+# deliberate act; anything not on the list is the failure.
+allowed = {n: os.environ[n] for n in
+           ("REVIEWER_CALLS", "PROMPT_FILE", "ARGV_FILE", "GH_HEAD", "GH_REVIEWS",
+            "REVIEWER_WORK")}
+allowed["1"] = os.environ["STUB_MODE"]
+
+out, i = [], 0
+while i < len(body):
+    c = body[i]
+    # An unquoted heredoc's backslash escapes `$`, backtick, backslash and a
+    # newline, and is literal before anything else. Escaped text is text.
+    if c == "\\" and i + 1 < len(body):
+        nxt = body[i + 1]
+        out.append(nxt if nxt in "$`\\\n" else c + nxt)
+        i += 2
+        continue
+    if c == "`":
+        sys.exit("an unescaped backtick in the stub heredoc: it runs as the stub "
+                 "is written. That is the nine-minute CI hang, at line %d"
+                 % (body[:i].count("\n") + 1))
+    if c == "$":
+        mm = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9])\}?", body[i:])
+        if not mm:
+            sys.exit("an unescaped `$` the allowlist cannot name at line %d: %r"
+                     % (body[:i].count("\n") + 1, body[i:i + 24]))
+        name = mm.group(1)
+        if name not in allowed:
+            sys.exit("`$%s` expands as the stub is written and is not one of the "
+                     "paths this heredoc is unquoted for (line %d). Escape it, or "
+                     "add it to the allowlist in the stubwrite phase."
+                     % (name, body[:i].count("\n") + 1))
+        out.append(allowed[name])
+        i += mm.end()
+        continue
+    out.append(c)
+    i += 1
+
+expected = "".join(out) + "\n"
+written = open(os.environ["STUB_OUT"]).read()
+if written != expected:
+    import difflib
+    diff = "".join(difflib.unified_diff(expected.splitlines(True),
+                                        written.splitlines(True),
+                                        "the heredoc body", "what reached the file"))
+    sys.exit("text was consumed on the way to the stub:\n" + diff[:2000])
+RECONSTRUCT
+  ok "...and the written stub IS the heredoc body: nothing expanded that was not meant to"
   ;;
 
 # -------------------------------------------------------------- await_threads
