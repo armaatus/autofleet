@@ -134,6 +134,50 @@ also where the `Blocked by #N` pattern lives, spelled to match `unblock.yml`.
 **What it will not do:** it does not merge, and it never touches a worktree it did
 not create.
 
+### What one poll costs
+
+The dispatcher polls every `AUTOFLEET_POLL` seconds (60 by default) for as long
+as it is up, so its per-pass cost is a per-hour cost multiplied by 60. Three
+different things are being spent, and only one of them is money:
+
+| | per pass | scales with | costs |
+|---|---|---|---|
+| **GitHub API calls** | 2 shared listings, plus 2 per owned worktree, plus 2 per launch | worktrees, not the backlog | rate limit |
+| **Runner CLI calls** | 1 `worktree list` + 1 `worktree ps`, plus 3 per launch and 2 per release | worktrees | nothing |
+| **Model invocations** | 1 per launch; plus up to `AUTOFLEET_MAX` reviewers when `AUTOFLEET_REVIEW_MODE=local` | launches and open PRs | **tokens** |
+
+Only the third row spends anything. `worktree create --agent claude` is the work
+itself, and `review.sh` is the local reviewer; every other call a pass makes is
+an API or a CLI query and costs no tokens at all. A dispatcher left polling an
+idle fleet overnight is free in the only sense that matters — it is the
+`--auto` runs that *launch* that cost, and `AUTOFLEET_MAX` is the number that
+bounds them.
+
+Concretely, at the defaults: an **idle** pass — nothing owned, every `ready`
+issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`**,
+whether the backlog holds ten issues or fifty. A **full** fleet of three
+worktrees on `AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared
+listings, one merged-PR check per worktree, and one issue lookup per worktree.
+`AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
+spawns, and up to `AUTOFLEET_MAX` model agents **on top of** the worktree
+agents — six concurrent sessions at the defaults, which is the number to know
+before leaving one running.
+
+The flat idle figure is the point, and it was not always flat. Each candidate
+the launch loop scanned used to take its own `gh pr list` of every open PR, so a
+pass over a 46-issue `ready` queue made ~50 calls a minute — 3000 an hour, past
+the comfortable half of the 5000/hour primary limit and into the secondary ones.
+The open-PR listing, the `ready` listing and the worktree listing are now each
+taken **once per pass** and read from `$STATE_DIR/poll-cache`, which
+`forget_poll_answers` empties at the top of every pass. Everything in that cache
+keeps one contract: an answer that **could not be read** is cached as "could not
+tell" and never as "nothing found", because "no PR closes this issue" is what
+sends the fleet off to open a worktree. The cost of caching is one poll of
+staleness — a PR opened mid-pass is invisible until the next one — which is
+why the listing is taken before the launch loop rather than during it.
+`tests/test_fleet.sh`'s `budget_` phases assert these numbers, so a change that
+puts the slope back fails the suite rather than the rate limit.
+
 ## Stop it
 
 ```bash

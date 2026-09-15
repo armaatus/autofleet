@@ -503,7 +503,11 @@ case "$*" in
   # has_open_pr, which parses JSON -- answering `7` there is a parse failure,
   # which the dispatcher reads as "could not tell" rather than as "no PR".
   *"pr list --head"*) cat "$GH_MERGED"; exit 0 ;;
-  *"pr list"*)        cat "$GH_PRS"; exit 0 ;;
+  # ...and the literal FAIL is a `gh` that could not answer AT ALL, which is a
+  # different failure from a body it could not parse: the per-poll listing
+  # caches the first as "could not tell" and must never cache it as "no PR".
+  *"pr list"*)        [ "$(cat "$GH_PRS")" = FAIL ] && { echo "gh: could not connect" >&2; exit 1; }
+                      cat "$GH_PRS"; exit 0 ;;
   *"issue list"*)     cat "$GH_ISSUES"; exit 0 ;;
   # gh applies --jq itself, so the stub answers what the filter would produce.
   # The literal FAIL stands for a gh that could not answer at all -- the third
@@ -1033,6 +1037,30 @@ run_ended() {
     sleep 0.1; i=$((i + 1))
   done
   return 1
+}
+
+# A backlog of $1 `ready` issues, every one of them already claimed by an open
+# PR. That is the ORDINARY state of a fleet whose slate is full, and it is the
+# worst case for the per-pass budget: nothing is startable, so the launch loop
+# scans the whole list before it gives up. armaatus/autofleet#69.
+backlog_all_claimed() {
+  local n="$1" i
+  {
+    printf '['
+    for i in $(seq 1 "$n"); do
+      [ "$i" = 1 ] || printf ','
+      printf '{"number":%s,"title":"issue %s","body":"","labels":[{"name":"ready"}]}' "$i" "$i"
+    done
+    printf ']\n'
+  } >"$GH_ISSUES"
+  {
+    printf '['
+    for i in $(seq 1 "$n"); do
+      [ "$i" = 1 ] || printf ','
+      printf '{"number":%s,"isDraft":false,"headRefOid":"deadbee","body":"Closes #%s"}' "$((100 + i))" "$i"
+    done
+    printf ']\n'
+  } >"$GH_PRS"
 }
 
 # fleet.sh sourced from somewhere OTHER than the dispatcher's own checkout --
@@ -4080,7 +4108,108 @@ GITSTUB
     echo "ok: status asked from a worktree still scopes to the repository"
     ;;
 
+  # ------------------------------------------------- the per-pass budget ---
+  # What one poll costs, asserted rather than re-derived by hand. The numbers in
+  # docs/WORKFLOW.md's budget table are these. armaatus/autofleet#69.
+  budget_idle_pass)
+    # The ordinary state of a fleet whose slate is all claimed: every `ready`
+    # issue already has a PR, so the launch loop scans the list to the end and
+    # starts nothing. Before the per-poll PR listing this pass made 13 `gh`
+    # calls -- one `pr list` per candidate scanned, plus two `issue list`, plus
+    # `count_startable`'s own `pr list` -- and every one of those grew with the
+    # backlog.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" \
+      || fail "the pass did not end on an empty slate, so what follows is not one pass: $out"
+    gh="$(grep -c . "$GH_CALLS" || true)"
+    [ "$gh" = 2 ] \
+      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 2: $(cat "$GH_CALLS")"
+    echo "ok: one idle pass costs 2 gh calls"
+    # ...and ONE worktree listing, which is #30's cache doing its job with
+    # `in_flight` reading it too. One cache, one invalidation point: this
+    # asserts the number, #30's own phases assert where it is dropped.
+    wt="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "$wt" = 1 ] \
+      || fail "one idle pass made $wt \`worktree list\` calls, not 1: $(grep "^worktree list" "$ORCA_CALLS")"
+    echo "ok: ...and one worktree listing"
+    ;;
+
+  budget_scales)
+    # THE SLOPE, which is the number that matters. 46 `ready` issues at one poll
+    # a minute is 3000 `gh`/hour on the old shape and the same 120 on this one.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the 10-issue pass did not end: $out"
+    ten="$(grep -c . "$GH_CALLS" || true)"
+    make_fixture ok
+    backlog_all_claimed 50
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the 50-issue pass did not end: $out"
+    fifty="$(grep -c . "$GH_CALLS" || true)"
+    [ "$ten" = "$fifty" ] \
+      || fail "a pass over 10 ready issues made $ten \`gh\` calls and one over 50 made $fifty: the cost still scales with the backlog"
+    echo "ok: the gh calls a pass makes do not scale with the size of the backlog ($ten either way)"
+    ;;
+
+  budget_pr_list_once)
+    # One listing, shared. Two issues asked about, one `gh pr list` -- and the
+    # answers are still each issue's own.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_pass 'in_flight 2; echo "claimed=$?"; in_flight 9; echo "free=$?"' 2>&1)"
+    grep -q "claimed=0" <<<"$out" || fail "an issue with an open PR read as free: $out"
+    grep -q "free=1" <<<"$out" || fail "an issue with no PR did not read as free: $out"
+    n="$(grep -c "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "two in_flight questions cost $n open-PR listings, not 1: $(cat "$GH_CALLS")"
+    echo "ok: one open-PR listing answers every in_flight question in a pass"
+    ;;
+
+  budget_pr_list_blind)
+    # A `gh` that could not answer at all. "Could not tell" is cached AS SUCH --
+    # the second caller in the pass gets 2, not the 1 an empty cache file would
+    # mean -- because reading it as "no PR" opens a second worktree for work
+    # already in flight, which is the failure has_open_pr's third answer exists
+    # to prevent. The same contract poll_issue's `.unreadable` already keeps.
+    make_fixture ok
+    backlog_all_claimed 3
+    printf 'FAIL\n' >"$GH_PRS"
+    out="$(in_pass 'in_flight 2; echo "first=$?"; in_flight 9; echo "second=$?"' 2>&1)"
+    grep -q "first=2" <<<"$out" || fail "an unreadable PR listing did not answer 'could not tell': $out"
+    grep -q "second=2" <<<"$out" \
+      || fail "the cached failure came back as an answer rather than as 'could not tell': $out"
+    n="$(grep -c "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "the failed listing was re-asked $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: a PR listing that could not be read is cached as 'could not tell', and asked once"
+    # ...and the other shape of the same failure: `gh` exits 0 and hands back
+    # something that is not a listing. python printing nothing is what "no PR"
+    # looks like, so this one has to end at 2 as well.
+    make_fixture ok
+    backlog_all_claimed 3
+    printf 'not a listing\n' >"$GH_PRS"
+    out="$(in_pass 'in_flight 2; echo "first=$?"; in_flight 9; echo "second=$?"' 2>&1)"
+    grep -q "first=2" <<<"$out" || fail "a malformed PR listing read as 'no PR': $out"
+    grep -q "second=2" <<<"$out" || fail "a malformed PR listing read as 'no PR' on the second ask: $out"
+    echo "ok: ...and so is one that came back malformed"
+    ;;
+
+  budget_pr_list_fresh_per_pass)
+    # The cache is the POLL's. A PR opened between passes is seen on the next
+    # one -- the window named at the cache is one poll wide, not the run's life.
+    make_fixture ok
+    backlog_all_claimed 1
+    out="$(in_pass 'in_flight 9; echo "before=$?"' 2>&1)"
+    grep -q "before=1" <<<"$out" || fail "#9 was not free to start with: $out"
+    backlog_all_claimed 9
+    out="$(in_pass 'in_flight 9; echo "after=$?"' 2>&1)"
+    grep -q "after=0" <<<"$out" \
+      || fail "a PR opened between passes was still invisible on the next one: $out"
+    echo "ok: the open-PR listing is re-read every pass"
+    ;;
+
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass" >&2
     exit 2 ;;
 esac

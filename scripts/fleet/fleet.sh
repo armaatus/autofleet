@@ -949,8 +949,37 @@ waiting_worktrees() {
 # most other work goes first.
 # It reads the same `Blocked by #N` lines unblock.yml parses, so nothing new has
 # to be maintained.
+# ONE LISTING PER PASS. The launch loop takes one per iteration of the outer
+# `while ! $drain_mode` loop and `count_startable` takes another at the bottom
+# of the pass to count what the first already listed, so an idle pass paid for
+# two and a pass that launched three paid for four. The cache is the poll's, so
+# an issue relabelled `ready` mid-pass is seen on the next one -- one poll of
+# staleness, the same contract `poll_issue` takes.
+#
+# `count_startable` reading a list taken BEFORE this pass's launches is not a
+# miscount: it excludes what is running off the worktree listing, which `launch`
+# drops the cache of, so an issue this pass just opened a worktree for is
+# already excluded by the time the count is taken. armaatus/autofleet#69.
+#
+# A FAILED read is cached as a failure and never as an empty list. "No issue is
+# ready" ends the dispatcher -- `queued` reaches 0, and with nothing owned the
+# run loop exits -- so a `gh` outage read as an empty backlog is a fleet that
+# stops for the night on the first blip.
 ready_issues() {
-  GH_PAGER=cat gh issue list --state open --limit 200 \
+  # THE CACHE IS INSIDE THIS FUNCTION, not wrapped around a split-out reader,
+  # and that is `evals/lint.sh`'s doing: it asserts by name that `ready_issues`
+  # itself imports `issue_refs`, so that the pattern this queue selects on
+  # cannot drift away from the one `unblock.yml` writes the labels with. Moving
+  # the read into a helper would have satisfied a `grep` over the file while
+  # leaving the named function empty, which is the drift that check exists to
+  # catch. Found by ./evals/lint.sh.
+  local cached="$POLL_CACHE/ready" listing
+  if poll_cache_open; then
+    [ -e "$cached.unreadable" ] && return 1
+    # `-e`, not `-s`: an empty backlog is an ANSWER and caches as an empty file.
+    if [ -e "$cached" ]; then cat "$cached" || return 1; return 0; fi
+  fi
+  listing="$(GH_PAGER=cat gh issue list --state open --limit 200 \
     --json number,title,body,labels 2>/dev/null \
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
 import json, sys
@@ -985,7 +1014,26 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
                                       i["number"])):
     labels = ",".join(l["name"] for l in i.get("labels", []))
     print(i["number"], blocks.get(i["number"], 0), labels, i["title"], sep="\t")
-' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL"
+' "$HUMAN_STEP_LABEL" "$PRIORITY_LABEL")" || {
+    if poll_cache_open; then
+      mkdir -p "$POLL_CACHE" 2>/dev/null
+      : >"$cached.unreadable" 2>/dev/null || true
+    fi
+    return 1
+  }
+  if poll_cache_open; then
+    mkdir -p "$POLL_CACHE" 2>/dev/null
+    # Whole or not at all, for the reason `live_worktrees`' write has one: a
+    # half-written file is one `[ -e ]` says is an answer, and a short queue is
+    # work this pass silently declines to start.
+    print_listing "$listing" 2>/dev/null >"$cached.new" \
+      && mv -f "$cached.new" "$cached" 2>/dev/null
+    rm -f "$cached.new"
+  fi
+  # Through `print_listing` rather than `printf '%s\n'`, because `$(...)` ate
+  # the trailing newline: without it the launch loop's `read` drops the LAST
+  # candidate, and a one-issue backlog never starts at all.
+  print_listing "$listing"
 }
 
 # `ready` overstates availability: the label stays until the PR merges, so an
@@ -995,12 +1043,77 @@ for i in sorted(ready, key=lambda i: (not has(i, priority),
 # also what a failed import or a malformed listing looks like. Read as "free",
 # that opens a second worktree for work already in flight -- which is the whole
 # failure this shared module exists to prevent.
+# EVERY OPEN PULL REQUEST, ONCE A PASS. `has_open_pr` -- and through it
+# `in_flight`, and through that the launch loop's scan of the whole `ready`
+# queue -- plus `count_startable` and `enforce_timebox` all want this one
+# listing, and each used to take its own copy. A pass over this repository's own
+# backlog of 46 `ready` issues made ~50 `gh` calls, once a minute: 3000 an hour,
+# which is past the 5000/hour primary limit's comfort zone and squarely into the
+# secondary limits the comments in `has_open_pr` and `count_startable` cite as
+# the reason those functions exist at all. armaatus/autofleet#69.
+#
+# THE WINDOW THIS OPENS, named here because it is what the saving costs. A PR
+# opened AFTER the listing is taken is invisible for the rest of the pass, so
+# `in_flight` can read an issue as free seconds after somebody claimed it and
+# the launch loop opens a second worktree for work already running. One poll
+# wide -- `forget_poll_answers` empties the cache at the top of every pass --
+# and the same one-poll contract `poll_issue` already takes, but the failure
+# direction is worse here: `poll_issue` stale by a poll is a comment made late,
+# this is a duplicate worktree.
+#
+# Which is why `cmd_run` takes it NO LATER THAN the line before the launch loop,
+# rather than leaving it to whichever caller happens to ask first. The watchers
+# that run earlier in the pass may take it sooner -- that only makes the window
+# narrower -- but nothing may take it later, because the launch loop is the one
+# reader that acts on the answer by opening a worktree. Left entirely lazy the
+# listing would be taken mid-scan, at a different candidate on every poll, and
+# the window above would have no width anybody could state.
+#
+# 0 and the listing on stdout, or 1 and nothing at all. "Could not tell" is
+# cached in `.unreadable` and NEVER as an empty listing: an empty listing is the
+# answer "no PR closes any issue", and a caller that reads a `gh` outage that
+# way opens a worktree for every issue in the backlog at once.
+open_pr_listing() {
+  local cached="$POLL_CACHE/open-prs" listing
+  if poll_cache_open; then
+    [ -e "$cached.unreadable" ] && return 1
+    # `-e`, not `-s`: `[]` is an answer. `|| return 1` and NOT a fall-through to
+    # a fresh read, for `live_worktrees`' reason -- a `cat` that died part-way
+    # has already printed half a listing, and reading `gh` again behind it would
+    # hand the caller that half twice.
+    if [ -e "$cached" ]; then cat "$cached" || return 1; return 0; fi
+  fi
+  # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
+  # so a zero-length body is a `gh` that printed nothing, which the parsers
+  # below would each read as "no PR". Caught here, once, rather than five times.
+  if ! listing="$(GH_PAGER=cat gh pr list --state open --json number,body --limit 100 2>/dev/null)" \
+     || [ -z "$listing" ]; then
+    if poll_cache_open; then
+      mkdir -p "$POLL_CACHE" 2>/dev/null
+      : >"$cached.unreadable" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if poll_cache_open; then
+    mkdir -p "$POLL_CACHE" 2>/dev/null
+    # Whole or not at all. A SHORT listing is the bad one: every PR that fell
+    # off the end reads as "this issue is free", which is the duplicate worktree
+    # again.
+    printf '%s\n' "$listing" 2>/dev/null >"$cached.new" \
+      && mv -f "$cached.new" "$cached" 2>/dev/null
+    rm -f "$cached.new"
+  fi
+  printf '%s\n' "$listing"
+}
+
 has_open_pr() {
-  local found
+  local listing found
+  # `|| return 2` -- "could not tell", not "no PR". See the header above.
+  listing="$(open_pr_listing)" || return 2
   # The issue number goes in as an ARGUMENT, not spliced into the source. A PR
   # body is third-party text and so, in principle, is anything that reaches the
   # pattern.
-  found="$(GH_PAGER=cat gh pr list --state open --json number,body --limit 100 2>/dev/null \
+  found="$(printf '%s' "$listing" \
     | PYTHONPATH="$ISSUE_REFS" python3 -c '
 import json, sys
 from issue_refs import closes_issue
@@ -1327,7 +1440,9 @@ for p in prs:
 count_startable() {
   local live prs ready gaveup
   live="$(live_worktrees)" || return 1
-  prs="$(GH_PAGER=cat gh pr list --state open --json body --limit 100 2>/dev/null)" || return 1
+  # The pass's one listing, not a fourth copy of it. It carries `number` as well
+  # as `body`, which this block does not read and does not have to.
+  prs="$(open_pr_listing)" || return 1
   ready="$(ready_issues)" || return 1
   # An issue the fleet gave up on is one it will decline every pass, so counting
   # it is the run loop polling forever for work that never starts.
@@ -4074,6 +4189,20 @@ while that one is up."
       continue
     fi
     live="$(count_worktrees "$live_list")"
+
+    # THE PASS'S OPEN-PR LISTING, taken here at the latest -- see the header on
+    # `open_pr_listing` for the window this closes and why the launch loop is
+    # the line it has to be closed before. A cache hit when a watcher above
+    # already took it; the fetch itself only when none did.
+    #
+    # Not under a drain: nothing launches then, `queued` is forced to 0, and the
+    # watchers that still run take the listing themselves if they need it. A
+    # drain can last hours, and an unconditional fetch here would be one `gh`
+    # call a minute for all of them, answering a question nobody asked.
+    #
+    # Its failure is not handled here and must not be: every caller has its own
+    # "could not tell" branch and they do not agree on what to do about it.
+    $drain_mode || open_pr_listing >/dev/null || true
 
     while ! $drain_mode && [ "$live" -lt "$MAX_WORKTREES" ]; do
       # `break`, not `break 2`: this is the drain arriving MID-PASS, after the
