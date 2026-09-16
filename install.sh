@@ -48,10 +48,13 @@ PAYLOAD=(
   # the validator runs it again with a reason to.
   ".claude/agents/validator.md"
   "evals/lint.sh"
-  # lint.sh RUNS this one -- a vendored lint that shells out to a file the
-  # installer did not deliver fails on every host PR, on a check about the host's
-  # own configuration. Hard rule 1.
+  # lint.sh RUNS these -- a vendored lint that shells out to, or imports, a file
+  # the installer did not deliver fails on every host PR, on a check about the
+  # host's own configuration. Hard rule 1. `shell_code.py` is the import: the
+  # two compression-seam checks read it, and lint.sh drives its `--selftest`
+  # before trusting either of them.
   "evals/piped_quiet_grep.py"
+  "evals/shell_code.py"
   "evals/late_stderr_silence.py"
   "evals/continuation_comment.py"
   "evals/run.sh"

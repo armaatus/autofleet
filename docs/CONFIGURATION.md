@@ -466,6 +466,201 @@ itself. A reviewer run from the main checkout (`AUTOFLEET_REVIEW_MODE=local`)
 lands under the main checkout's slug, not the worktree's, so its tokens are not
 in that issue's row.
 
+### Compressing what the agents read
+
+Off by default, and off costs nothing. At `AUTOFLEET_HEADROOM=0` — the default —
+nothing is exported, nothing is probed, and there is nothing to install, which is
+what keeps CLAUDE.md's "no build step, no dependencies to install" true for a
+repository that never touches this.
+
+At `1`, the fleet points the model calls **it makes itself** at a local HTTP
+proxy that compresses what the agent *reads* — tool output, logs, file reads,
+JSON, diffs — before those tokens are counted. It exports two variables:
+
+```
+ANTHROPIC_BASE_URL=$AUTOFLEET_HEADROOM_URL
+ENABLE_TOOL_SEARCH=true
+```
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_HEADROOM` | `0` | `1` points fleet-started model calls at the compression proxy. `0` changes nothing anywhere. |
+| `AUTOFLEET_HEADROOM_URL` | `http://127.0.0.1:8787` | Where the proxy answers. **One host-level port**, shared by every worktree on the machine — deliberately not a per-worktree port out of `AUTOFLEET_PORTS`, and deliberately not in `.env`, which derives per-worktree values from the worktree path. |
+
+`./scripts/fleet/fleet.sh status` says which of the three states you are in: off,
+on and answering, or on and not answering.
+
+**It degrades, loudly, and never blocks.** Before it exports anything the fleet
+opens a TCP connection to that URL. If nothing answers it prints one line naming
+both the URL and the knob and runs the agent **unwrapped, at full token price**.
+A dispatcher that refuses to dispatch because an optional optimiser is down is a
+worse failure than one expensive pass.
+
+**The fleet probes the proxy and never spawns it.** Starting and stopping the
+daemon is yours; a dispatcher that owns a daemon's lifecycle is a dispatcher that
+can fail to start for a reason that has nothing to do with the backlog.
+
+#### What it covers, and what it does not
+
+The three model calls the fleet starts as a **direct child** of one of its own
+scripts:
+
+| Call | Script | Started by |
+|---|---|---|
+| the independent review | `scripts/fleet/review.sh` | the dispatcher, in `AUTOFLEET_REVIEW_MODE=local` |
+| the validation | `scripts/fleet/validate.sh` | the dispatcher |
+| both self-review passes | `scripts/fleet/self-review.sh` | the agent, in its worktree |
+
+A fourth call site added without the export would be a knob that silently
+measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
+on any shell file anywhere under `scripts/fleet/` that runs a
+`$AUTOFLEET_*_CMD` in command position
+and contains no call to the seam. It is in `evals/` rather than `tests/` because
+`evals/` is vendored: a host project gets the guard along with the thing it
+guards.
+
+What it does **not** catch, named here rather than left to be discovered: it is
+**per script**, not per call, so a script that goes through the seam once and
+then gains a second, unwrapped call still passes; it reads the command word, so a
+call captured into a variable (`out="$($AUTOFLEET_REVIEW_CMD …)"`) or a literal
+`claude -p` that bypasses the knob entirely is invisible to it. Both need a shell
+parser. `evals/shell_code.py --selftest` records the shapes it does and does not
+see, and `lint.sh` runs that selftest before trusting the scan.
+
+It does **not** cover the worktree agent. That process is started by the runtime,
+not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
+Orca driver the agent's terminal is a child of the Orca app, not of the
+dispatcher — `printenv` inside a fleet-opened worktree shows no `AUTOFLEET_*` at
+all, and the process tree runs `Orca Helper → login → zsh → bash → claude` with
+`fleet.sh` nowhere in it. The `runner_*` contract in [RUNNERS.md](RUNNERS.md) has
+no environment parameter, and this knob did not add one.
+
+To cover the worktree agent, wrap `claude` on the machine instead. This is
+durable and global to your user, which is why it is a person's step and not the
+fleet's:
+
+```bash
+headroom wrap claude      # starts the proxy, sets ANTHROPIC_BASE_URL and
+                          # ENABLE_TOOL_SEARCH for `claude` from now on
+headroom unwrap claude    # undo the durable part
+```
+
+**The two overlap, and `wrap` wins. Pick one.** `wrap` is durable and global to
+your `claude`, and the reviewer, the validator and both self-review passes all
+run `claude` by default — so on a wrapped machine those three go through the
+proxy whatever `AUTOFLEET_HEADROOM` says, and the knob adds nothing there but the
+`status` row. Worse, its degrade line becomes **untrue**: if the proxy dies,
+`fleet_headroom_env` prints "running unwrapped, at full token price" and takes
+its own exports back, but a wrapped `claude` is still pointed at the dead proxy
+through its own settings and its model call fails anyway. `fleet.sh status` is
+reporting the knob's state, not the wrap's.
+
+So:
+
+- **Want the worktree agent covered?** Use `wrap`, and leave `AUTOFLEET_HEADROOM`
+  at `0`. `headroom doctor` is then the thing that tells you the proxy is down.
+- **Want the probe, the degrade and the `status` row?** Use the knob, and leave
+  `claude` unwrapped. The worktree agent pays full price; #130 is the issue that
+  would close that gap properly.
+- Setting both is the "two mechanisms for one behaviour" outcome this seam was
+  written to avoid.
+
+#### Installing it
+
+```bash
+uv tool install --python 3.13 "headroom-ai[all]"   # or: pip install "headroom-ai[all]"
+headroom proxy --port 8787
+```
+
+The npm package of the same name is SDK-only and ships no CLI.
+
+**On "compression runs locally", from observation rather than from the README.**
+Started here, the proxy's own banner reports `Telemetry: DISABLED`, `Security:
+loopback-only (no inbound token)` and `License: OSS`, and its savings ledger is a
+local JSONL under `~/.headroom/`. But `lsof` on the proxy process during a run
+that sent **only** Anthropic traffic also showed connections to Google and CDN
+addresses — its routing table carries upstreams for other providers, so
+connection-pool warmup is the obvious explanation, and it was not established
+what, if anything, was sent over them. If you need a hard "nothing leaves this
+machine" guarantee, verify it yourself before turning the knob on. At `0` the
+proxy is never contacted at all.
+
+#### What a custom base URL costs you
+
+All three are Claude-side and apply to **any** non-default `ANTHROPIC_BASE_URL`,
+not just this one. Turning the knob on trades them away:
+
+- **Claude Remote Control is unavailable** in a proxied session.
+- **Server-managed settings are not fetched.** Anthropic skips that fetch for any
+  non-default base URL. The OS-level `managed-settings.json` is unaffected — it
+  is read from disk.
+- **`/context all` misreports** without `ENABLE_TOOL_SEARCH=true`, which is why
+  the knob sets it alongside the base URL rather than leaving it to you.
+
+#### What it is worth here
+
+Savings scale with how repetitive the payload is: repeated JSON and log lines
+clear 90%, prose and already-dense output compress very little. This fleet's
+traffic is a mix — issue bodies and PR bodies are prose, `gh` JSON, test output
+and diffs are not — so the number that matters is a measured one for this
+repository, not the vendor's.
+
+Measured here on one read-only pass over a real pull request (its body, its diff,
+the issue it closes, the files it touches, `git log`), run twice with the same
+prompt and the same tool allowlist. **Not a `review.sh` run**: `guard.py` refuses
+that from a fleet-opened worktree, which is the rule working, so the pass reads
+everything a review reads and submits nothing.
+
+| | unproxied | through the proxy |
+|---|---|---|
+| billed cost | $5.4725 | $2.7213 |
+| cache read | 3,476,688 | 1,659,126 |
+| cache creation | 330,435 | 131,728 |
+| output | 17,183 | 22,969 |
+| turns | 28 | 31 |
+| wall clock | 248s | 350s |
+
+The proxy's own ledger for that traffic: **8.8% compressed, 133,864 of 1,529,329
+tokens over 22 calls** — below the vendor's published 21–57%, which is what a
+prose-heavy mix predicts. Read the two numbers separately: **8.8% is what
+compression is worth here**, per payload and deterministic. The halved bill is
+one sample, it also carries whatever `ENABLE_TOOL_SEARCH=true` is worth on its
+own, and the two runs are not byte-identical (28 turns against 31). **Output
+tokens and wall clock both went up.** Measure your own traffic before you assume
+either figure.
+
+**Any Anthropic-compatible compressing proxy satisfies this seam.** Nothing under
+`scripts/fleet/` imports headroom, probes for its CLI, or reads a file of its:
+the mechanism is two environment variables and a TCP connect. The knob carries
+the name because a dependency is named rather than hidden, not because the code
+knows about it — and `evals/lint.sh` **runs** that rule rather than quoting it,
+so a `command -v headroom` added anywhere under `scripts/fleet/` later fails the
+build. It scans that directory and not the rest of the payload, which is where
+every line of this seam lives.
+
+The probe is strict about the URL on purpose: **no scheme or no host reads as
+unreachable**, so `AUTOFLEET_HEADROOM_URL=localhost:8787` (no `http://`) and an
+empty value both degrade loudly instead of being probed against port 80 of your
+own machine and then exported as a broken base URL.
+
+If the proxy dies between two calls in one process — the two self-review passes
+are minutes apart — the second call **puts back whatever was there before**
+rather than leaving the agent pointed at a dead endpoint.
+
+**If you already have your own `ANTHROPIC_BASE_URL`, the knob replaces it while
+the proxy is up.** It is recorded and restored, so it is not lost — but for as
+long as the proxy answers, the fleet's calls go to the proxy and then wherever
+*it* sends them upstream, **not through your gateway**. If that gateway is doing
+your authentication, your compliance logging or your egress control, that is the
+thing to know before setting `AUTOFLEET_HEADROOM=1`, and the reason to point
+`AUTOFLEET_HEADROOM_URL` at a proxy you have configured to forward through it.
+
+**Keep a non-loopback URL on `https://`.** The probe accepts any `http://` host,
+and whatever the knob exports is where `claude` then sends its credential — so
+`http://proxy.corp:8787` puts an API key or OAuth bearer token on the wire in
+cleartext for anything between here and that host. The default is loopback,
+where that does not apply; the moment the proxy is not on this machine, it does.
+
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,

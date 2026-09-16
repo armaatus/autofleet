@@ -233,6 +233,12 @@ run_pass() {
   local slug="$1" label="$2"
   local out="$LOG_DIR/$slug-${sha:0:8}.md" err="$LOG_DIR/$slug-${sha:0:8}.log"
 
+  # The compression proxy, if this repository turned it on (lib.sh carries the
+  # reasoning). PER PASS, not once at the top: the proxy can die between the two
+  # passes, and lib.sh's re-probe is what takes the first pass's exports back.
+  # armaatus/autofleet#89.
+  fleet_headroom_env
+
   echo "==> $label  (${AUTOFLEET_SELF_REVIEW_TIMEOUT}s," \
        "${AUTOFLEET_SELF_REVIEW_MAX_TURNS} turns, $AUTOFLEET_SELF_REVIEW_CMD)" >&2
   set -m

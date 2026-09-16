@@ -370,6 +370,13 @@ tools="$tools,Bash(./scripts/fleet/resolve-thread.sh:*)"
 [ -n "${AUTOFLEET_TEST_COMMAND:-}" ] \
   && tools="$tools,Bash($AUTOFLEET_TEST_COMMAND)"
 
+# The compression proxy, if this repository turned it on (lib.sh carries the
+# reasoning). Above `set -m` for the reason review.sh states: the exports have to
+# be in place before the background job forks. A validation reads the same
+# payload mix as a review, so a knob that covered one of the two would report
+# half the saving it claims. armaatus/autofleet#89.
+fleet_headroom_env
+
 set -m
 "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
   --allowed-tools "$tools" \

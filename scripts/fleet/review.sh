@@ -1081,6 +1081,20 @@ PY
   rm -f "$raw_out" "$raw_err"
 }
 
+# ------------------------------------------------- the compression proxy (#89)
+#
+# One of the three model calls the fleet starts as a direct child of its own
+# scripts -- this one, validate.sh and self-review.sh. The reasoning is in
+# lib.sh, canonically and once; what is local to here is the POSITION. Above
+# `set -m`, because the exports have to be in place before the background job
+# forks, and because the degrade line has to reach the log ahead of the
+# reviewer's own output rather than in the middle of it.
+#
+# The worktree agent is NOT covered and cannot be from here: it does not inherit
+# this process's environment (docs/CONFIGURATION.md has the process tree, and
+# armaatus/autofleet#130 is the contract change that would fix it).
+fleet_headroom_env
+
 set -m
 "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
   --allowed-tools "$tools" \

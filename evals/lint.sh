@@ -1627,6 +1627,118 @@ else
   fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
 fi
 
+# 7b. EVERY MODEL CALL THE FLEET STARTS GOES THROUGH THE COMPRESSION SEAM.
+#
+#     `AUTOFLEET_HEADROOM` (armaatus/autofleet#89) is worth exactly what it
+#     covers, and what it covers is every `scripts/fleet/*.sh` that runs an
+#     agent as a direct child. Three do: review.sh, validate.sh, self-review.sh.
+#     A fourth added without `fleet_headroom_env` is the failure with NO
+#     symptom -- the seam still works, its own tests still pass, and the number
+#     docs/CONFIGURATION.md publishes quietly becomes a fraction of the truth.
+#
+#     HERE AND NOT IN `tests/`, which was the first version and was wrong: per
+#     CLAUDE.md's Layout table `tests/` is autofleet's own suite and does not
+#     ship, so a host project got the seam and not the guard on it while
+#     docs/CONFIGURATION.md sold the guard as the guarantee. `evals/` ships.
+#
+#     PER SCRIPT, NOT PER CALL, and docs/CONFIGURATION.md says so in those
+#     words: this asks whether a file that starts a model call also calls the
+#     seam, not whether each individual call does. A script that gains a SECOND,
+#     unwrapped call still passes. Tightening that needs a shell parser; the
+#     sharp edge is named rather than papered over.
+#
+#     BOTH SIDES READ CODE, NOT PROSE. The first version grepped the raw file,
+#     so a `$AUTOFLEET_*_CMD` in a comment made a file a call site and -- far
+#     worse -- a COMMENT mentioning `fleet_headroom_env` cleared one. A guard a
+#     comment satisfies has stopped guarding, which is this check's own subject.
+#
+#     AND IT FAILS CLOSED. `if x="$(python3 ...)"` sends a CRASHING scan to the
+#     `ok` branch: an ImportError -- a host whose older installer never shipped
+#     `evals/shell_code.py` is the live case -- printed nothing, exited 1, and
+#     lint reported the seam as covered. The `grep -q` scan below has said
+#     "could not run, so it is asserting nothing" since it was written; these
+#     two now say it too. Found by the self-review.
+#
+#     THE CANARY IS THE OTHER HALF. A detector that matches nothing reports a
+#     clean tree, so the three call sites this repository HAS are named: if the
+#     scan stops finding them, the scan is broken, not the payload.
+python3 "$REPO_ROOT/evals/shell_code.py" --selftest \
+  || fail "evals/shell_code.py fails its own selftest, so the two scans below mean nothing"
+if sites="$(python3 - <<'PYEOF'
+import sys
+sys.path.insert(0, "evals")
+from shell_code import payload_shell, starts_a_model_call
+
+calls, covered = {}, {}
+for path, _, raw, code in payload_shell():
+    calls[path] = calls.get(path, False) or starts_a_model_call(raw)
+    covered[path] = covered.get(path, False) or "fleet_headroom_env" in code
+for path in sorted(calls):
+    if calls[path]:
+        print(("site " if covered[path] else "LEAK ") + path)
+PYEOF
+)"; then
+  clean=1
+  # `fail` COUNTS AND RETURNS -- it does not exit, which is what lets this file
+  # report every breach in one run. So the `ok` has to be conditional or the log
+  # says both things about the same check, one line apart, and the reader has to
+  # know which of the two is the verdict. Found by the self-review.
+  if leaks="$(printf '%s\n' "$sites" | sed -n 's/^LEAK //p')" && [ -n "$leaks" ]; then
+    clean=0
+    fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
+$(printf '%s\n' "$leaks" | sed 's/^/    /')"
+  fi
+  for known in scripts/fleet/review.sh scripts/fleet/validate.sh scripts/fleet/self-review.sh; do
+    printf '%s\n' "$sites" | qgrep -xF "site $known" && continue
+    clean=0
+    fail "the model-call scan no longer sees $known, so it is asserting nothing about the compression seam"
+  done
+  [ "$clean" = 1 ] \
+    && ok "every fleet script that starts a model call goes through the compression seam"
+else
+  fail "the model-call scan could not run, so it is asserting nothing"
+fi
+
+# 7c. ...AND THE SEAM STAYS GENERIC. The knob is NAMED for headroom because a
+#     dependency is named rather than hidden -- but nothing in the payload may
+#     reach for it. No `command -v headroom`, no version probe, no config file
+#     of theirs: the mechanism is two environment variables and a TCP connect,
+#     so any Anthropic-compatible compressing proxy satisfies it.
+#
+#     docs/CONFIGURATION.md states that as a guarantee, and hard rule 3's
+#     temperament is that a rule with no assertion is not shipped -- the same
+#     reasoning that makes 4c RUN the Orca grep instead of quoting it. So this
+#     runs it.
+#
+#     WHAT IS ALLOWED is every identifier the fleet itself owns, plus the
+#     literal `headroom:` -- the label on `fleet.sh status`'s row, which is the
+#     "named rather than hidden" half of the rule in the one place a person
+#     reads. A command word is never followed by a colon, so admitting it costs
+#     the check nothing. This differs from 4c on purpose: hard rule 4 forbids
+#     NAMING Orca in a message because the driver is meant to be invisible;
+#     here naming the vendor IS the rule, and only reaching for it is the leak.
+if leaks="$(python3 - <<'PYEOF'
+import re, sys
+sys.path.insert(0, "evals")
+from shell_code import payload_shell
+
+OWNED = re.compile(r"(AUTOFLEET_HEADROOM(_URL)?|_?fleet_headroom_[a-z_]*|headroom:)")
+
+for path, n, raw, code in payload_shell():
+    if "headroom" in OWNED.sub("", code).lower():
+        print(f"    {path}:{n}: {raw.strip()}")
+PYEOF
+)"; then
+  if [ -n "$leaks" ]; then
+    fail "the compression seam is no longer generic -- these reach for headroom itself, which docs/CONFIGURATION.md promises the payload does not:
+$leaks"
+  else
+    ok "the compression seam names headroom and reaches for nothing of theirs"
+  fi
+else
+  fail "the headroom-leak scan could not run, so it is asserting nothing"
+fi
+
 # 8. THE GATE AND THE SHELL AGREE, spelling for spelling.
 #
 #    This is the assertion whose absence let the two disagree in the BLOCKING

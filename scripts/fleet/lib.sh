@@ -579,6 +579,164 @@ fleet_review_mode() {
   esac
 }
 fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
+
+# ------------------------------------------------- the compression proxy (#89)
+#
+# Is the opt-in proxy in front of the fleet's own model calls turned on, and is
+# anything actually there. Two questions, kept apart on purpose: the KNOB is
+# what a person set, the ENDPOINT is what is true, and a screen or a launch path
+# that answers the first while meaning the second says "on" for a proxy that has
+# been dead since Tuesday.
+fleet_headroom_on() { [ "${AUTOFLEET_HEADROOM:-0}" = 1 ]; }
+
+# Does anything answer at `$1`. A TCP connect and nothing more.
+#
+# NOT `command -v headroom`, NOT a version endpoint, NOT a health route of
+# theirs. The seam is two environment variables and an address; any
+# Anthropic-compatible compressing proxy satisfies it, and the moment this asks
+# a vendor-shaped question the knob stops being generic and starts being an
+# undeclared dependency (hard rule 4's temperament, applied to a second vendor).
+#
+# python3 rather than `curl`: curl appears nowhere else in the payload, so it
+# would be a new dependency for a probe, while python3 is already required by
+# everything under this directory -- and it parses the URL, which bash would
+# have to do by hand to open /dev/tcp at all. A short timeout because this sits
+# in front of a review that must start either way.
+#
+# NO FALLBACK HOST AND NO FALLBACK SCHEME, which is the whole of the second
+# half. `urlsplit("localhost:8787")` -- a URL with the scheme left off, which is
+# how everybody writes one by hand -- yields `hostname=None` and `port=None`, and
+# an `or "127.0.0.1"` / `or 80` pair launders that typo into a probe of
+# 127.0.0.1:80. Anything on port 80 then answers, `status` says "answering", and
+# the malformed string is exported as ANTHROPIC_BASE_URL to every model call the
+# fleet starts. An EMPTY `AUTOFLEET_HEADROOM_URL=` in `.autofleet/config` gets
+# there too -- the `:=` default runs before the host config is sourced, so empty
+# survives -- and that is exactly the exported-but-empty base URL the knob
+# claims to avoid. So: no scheme, no host, or no port we can name is NOT
+# REACHABLE, and the degrade path says so with the value in it.
+fleet_headroom_up() {
+  python3 - "${1:-}" 2>/dev/null <<'PY'
+import socket, sys, threading
+from urllib.parse import urlsplit
+
+# A DAEMON THREAD AND A JOIN, not SIGALRM and not `timeout=` alone. Three
+# ways this has been wrong, and the first two looked right:
+#
+#   `timeout=` on create_connection bounds the CONNECT and not getaddrinfo, so a
+#   URL naming a host that does not resolve -- http://proxy.corp:8787 on a
+#   laptop off the VPN -- stalls `fleet.sh status` and the start of every review
+#   for as long as the resolver takes.
+#
+#   SIGALRM does not fix that either, which is the round that looked fixed and
+#   was not: CPython runs a Python signal handler only once the C call returns,
+#   and getaddrinfo is libc (on macOS, a round trip to mDNSResponder). The alarm
+#   fires after the lookup it was meant to bound.
+#
+# A daemon thread is the shape that actually works: the main thread stops
+# waiting at the join whatever the worker is blocked in, and the process exits
+# without waiting for it because daemon threads do not hold exit. The worker may
+# still be inside getaddrinfo when we go; that costs nothing, because nothing
+# reads its answer after the deadline.
+#
+# THE 3s IS THE WHOLE PROBE, not per address, and that is a real narrowing: a
+# hostname that resolves to several addresses gets 2s per connect, so a first
+# address that hangs can cost a live second one its answer. The result is "NOT
+# ANSWERING" and an unwrapped run against a proxy that is up -- the safe
+# direction, and the one this whole function is written to fail in. The shipped
+# default is a literal address, where it cannot arise at all.
+answer = []
+
+
+def probe(url):
+    try:
+        u = urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return
+        port = u.port or (443 if u.scheme == "https" else 80)
+        socket.create_connection((u.hostname, port), timeout=2).close()
+        answer.append(True)
+    except Exception:
+        pass
+
+
+t = threading.Thread(target=probe, args=(sys.argv[1],), daemon=True)
+t.start()
+t.join(3)
+raise SystemExit(0 if answer else 1)
+PY
+}
+
+# Point THIS process's children at the proxy, or say why not and leave them
+# alone. Callers export nothing themselves; this is the only writer of the two
+# variables, so "what does the knob do" has one answer.
+#
+# IT MUST DEGRADE, and this is the one behaviour the suite pins. A dispatcher
+# that refuses to dispatch because an optional optimiser is down is a worse
+# failure than paying full token price for one pass -- so a probe that fails
+# prints one line and returns 0, and the caller runs the agent unwrapped. If
+# this ever becomes a prerequisite, a stopped proxy is a stopped fleet.
+#
+# The line names the URL AND the knob: the person reading a dispatcher log has
+# to be able to find the thing that is off without knowing this file exists.
+#
+# ENABLE_TOOL_SEARCH rides along because it is a COST of the custom base URL and
+# not a second feature: `/context all` misreports without it. The other two
+# costs cannot be paid from here and are in docs/CONFIGURATION.md -- Claude
+# Remote Control is unavailable in a proxied session, and server-managed
+# settings are not fetched for any non-default base URL.
+#
+# OFF MEANS INERT. Not "exported empty", not "exported to the default": with the
+# knob at 0 this returns before it touches the environment at all, because an
+# exported-but-empty ANTHROPIC_BASE_URL is its own breakage and a repository
+# that never set the knob must behave exactly as it did before it existed.
+#
+# AND IT TAKES BACK WHAT IT SET. `self-review.sh` calls this ONCE PER PASS and
+# runs two passes minutes apart, against a daemon the fleet deliberately does
+# not own -- so "up for pass one, gone for pass two" is an ordinary Tuesday. A
+# degrade branch that only printed left pass one's exports in place: the line
+# said "running unwrapped" while the pass was still pointed at a dead endpoint
+# and failed its model call outright, which is the one failure this function
+# exists to prevent, arriving through the function itself. Found by both
+# self-review passes.
+#
+# It RESTORES rather than unsets, which is the second round of this fix. An
+# operator who points ANTHROPIC_BASE_URL at a company gateway and then turns the
+# knob on had their value replaced by the proxy on the first call; a degrade that
+# `unset` it sent the next pass straight at Anthropic, past the gateway, where it
+# can fail auth outright -- and the comment here claimed the opposite. So the
+# first successful call records what was there, presence and value, and the
+# degrade puts it back. Found by both self-review passes, twice.
+_fleet_headroom_restore() {
+  # `$2` is "" when the variable was UNSET before we touched it, and
+  # "set:<value>" when it was set -- the two are different states and an empty
+  # string is a legal value for either.
+  case "${2:-}" in
+    set:*) export "$1=${2#set:}" ;;
+    *)     unset "$1" ;;
+  esac
+}
+fleet_headroom_env() {
+  fleet_headroom_on || return 0
+  if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
+    if [ "${_fleet_headroom_saved:-0}" != 1 ]; then
+      _fleet_headroom_was_url="${ANTHROPIC_BASE_URL+set:$ANTHROPIC_BASE_URL}"
+      _fleet_headroom_was_ts="${ENABLE_TOOL_SEARCH+set:$ENABLE_TOOL_SEARCH}"
+      _fleet_headroom_saved=1
+    fi
+    export ANTHROPIC_BASE_URL="$AUTOFLEET_HEADROOM_URL"
+    export ENABLE_TOOL_SEARCH=true
+    return 0
+  fi
+  if [ "${_fleet_headroom_saved:-0}" = 1 ]; then
+    _fleet_headroom_restore ANTHROPIC_BASE_URL "${_fleet_headroom_was_url:-}"
+    _fleet_headroom_restore ENABLE_TOOL_SEARCH "${_fleet_headroom_was_ts:-}"
+    _fleet_headroom_saved=0
+  fi
+  echo "AUTOFLEET_HEADROOM=1, but nothing answers at '${AUTOFLEET_HEADROOM_URL:-}'." >&2
+  echo "    Running unwrapped, at full token price. Start the proxy, check the" >&2
+  echo "    URL has a scheme and a host, or set AUTOFLEET_HEADROOM=0 in" >&2
+  echo "    .autofleet/config to stop asking." >&2
+}
 # A file's mtime in epoch seconds, or non-zero if it cannot be had.
 #
 # GNU first, BSD second, and THE ANSWER IS VALIDATED -- which is not belt and
