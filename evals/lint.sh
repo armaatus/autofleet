@@ -1641,58 +1641,53 @@ fi
 #     ship, so a host project got the seam and not the guard on it while
 #     docs/CONFIGURATION.md sold the guard as the guarantee. `evals/` ships.
 #
-#     BOTH SIDES READ CODE, NOT PROSE, and that is the second round of this
-#     check rather than a flourish. The first version asked `grep -q` twice on
-#     the raw file: a `$AUTOFLEET_*_CMD` named in a comment made a file a call
-#     site, and -- far worse -- a COMMENT mentioning `fleet_headroom_env` was
-#     enough to clear one. A guard a comment satisfies is a guard that has
-#     stopped guarding. Found by the self-review, twice.
+#     PER SCRIPT, NOT PER CALL, and docs/CONFIGURATION.md says so in those
+#     words: this asks whether a file that starts a model call also calls the
+#     seam, not whether each individual call does. A script that gains a SECOND,
+#     unwrapped call still passes. Tightening that needs a shell parser; the
+#     sharp edge is named rather than papered over.
 #
-#     COMMAND POSITION, not "appears on the line", and that is the difference
-#     between a call site and a mention. `fleet.sh:524` passes
-#     `"$AUTOFLEET_AGENT_CLEAR_CMD"` as an ARGUMENT -- keystrokes for a terminal,
-#     not a model -- and a check that read the line would demand the dispatcher
-#     export a base URL for it. A short prefix allowlist comes off first, so
-#     `timeout 600 "$AUTOFLEET_REVIEW_CMD"` and `exec "$..._CMD"` are still call
-#     sites; the first version keyed on the literal `_CMD" -p `, which both of
-#     those walked past.
-if leaks="$(python3 - <<'PYEOF'
-import glob, re, sys
+#     BOTH SIDES READ CODE, NOT PROSE. The first version grepped the raw file,
+#     so a `$AUTOFLEET_*_CMD` in a comment made a file a call site and -- far
+#     worse -- a COMMENT mentioning `fleet_headroom_env` cleared one. A guard a
+#     comment satisfies has stopped guarding, which is this check's own subject.
+#
+#     AND IT FAILS CLOSED. `if x="$(python3 ...)"` sends a CRASHING scan to the
+#     `ok` branch: an ImportError -- a host whose older installer never shipped
+#     `evals/shell_code.py` is the live case -- printed nothing, exited 1, and
+#     lint reported the seam as covered. The `grep -q` scan below has said
+#     "could not run, so it is asserting nothing" since it was written; these
+#     two now say it too. Found by the self-review, three rounds in.
+#
+#     THE CANARY IS THE OTHER HALF. A detector that matches nothing reports a
+#     clean tree, so the three call sites this repository HAS are named: if the
+#     scan stops finding them, the scan is broken, not the payload.
+python3 "$REPO_ROOT/evals/shell_code.py" --selftest \
+  || fail "evals/shell_code.py fails its own selftest, so the two scans below mean nothing"
+if sites="$(python3 - <<'PYEOF'
+import glob, sys
 sys.path.insert(0, "evals")
-from shell_code import code_of
-
-# What may stand in front of the command and leave it a command: a wrapper that
-# still ends up exec-ing the agent in the environment of this process.
-#
-# NO BARE APOSTROPHE ANYWHERE IN THIS HEREDOC, in code or in prose. It sits
-# inside a "$( ... )" substitution and bash tracks quotes through that even for
-# a quoted heredoc body, so one unpaired single quote swallows the closing paren
-# and the file stops parsing 1900 lines further down, where the error is
-# reported. Write "of this process" rather than the possessive.
-PREFIX = re.compile(r"^(exec|command|nohup|time|timeout\s+[0-9smhd.]+|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+")
-CALL = re.compile(r'^"\$AUTOFLEET_[A-Z_]*_CMD"')
-
-def starts_a_model(line):
-    line = line.strip()
-    while True:
-        stripped = PREFIX.sub("", line, count=1)
-        if stripped == line:
-            break
-        line = stripped
-    return bool(CALL.match(line))
+from shell_code import code_of, starts_a_model_call
 
 for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
-    lines = [code_of(l) for l in open(path, encoding="utf-8")]
-    if not any(starts_a_model(l) for l in lines):
+    lines = list(open(path, encoding="utf-8"))
+    if not any(starts_a_model_call(l) for l in lines):
         continue
-    if not any("fleet_headroom_env" in l for l in lines):
-        print(f"    {path}")
+    covered = any("fleet_headroom_env" in code_of(l) for l in lines)
+    print(("site " if covered else "LEAK ") + path)
 PYEOF
-)" && [ -n "$leaks" ]; then
-  fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
-$leaks"
-else
+)"; then
+  if leaks="$(printf '%s\n' "$sites" | sed -n 's/^LEAK //p')" && [ -n "$leaks" ]; then
+    fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
+$(printf '%s\n' "$leaks" | sed 's/^/    /')"
+  fi
+  for known in scripts/fleet/review.sh scripts/fleet/validate.sh scripts/fleet/self-review.sh; do
+    printf '%s\n' "$sites" | qgrep -xF "site $known" \
+      || fail "the model-call scan no longer sees $known, so it is asserting nothing about the compression seam"
+  done
   ok "every fleet script that starts a model call goes through the compression seam"
+else
+  fail "the model-call scan could not run, so it is asserting nothing"
 fi
 
 # 7c. ...AND THE SEAM STAYS GENERIC. The knob is NAMED for headroom because a
@@ -1725,11 +1720,15 @@ for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
         if "headroom" in OWNED.sub("", code_of(line)).lower():
             print(f"    {path}:{n}: {line.strip()}")
 PYEOF
-)" && [ -n "$leaks" ]; then
-  fail "the compression seam is no longer generic -- these reach for headroom itself, which docs/CONFIGURATION.md promises the payload does not:
+)"; then
+  if [ -n "$leaks" ]; then
+    fail "the compression seam is no longer generic -- these reach for headroom itself, which docs/CONFIGURATION.md promises the payload does not:
 $leaks"
+  else
+    ok "the compression seam names headroom and reaches for nothing of theirs"
+  fi
 else
-  ok "the compression seam names headroom and reaches for nothing of theirs"
+  fail "the headroom-leak scan could not run, so it is asserting nothing"
 fi
 
 # 8. THE GATE AND THE SHELL AGREE, spelling for spelling.

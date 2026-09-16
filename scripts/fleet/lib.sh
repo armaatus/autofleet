@@ -616,8 +616,16 @@ fleet_headroom_on() { [ "${AUTOFLEET_HEADROOM:-0}" = 1 ]; }
 # REACHABLE, and the degrade path says so with the value in it.
 fleet_headroom_up() {
   python3 - "${1:-}" 2>/dev/null <<'PY'
-import socket, sys
+import signal, socket, sys
 from urllib.parse import urlsplit
+# SIGALRM AROUND THE WHOLE THING, not just `timeout=` on the connect. That
+# argument bounds the connect and NOT the name lookup, so a URL naming a host
+# that does not resolve -- http://proxy.corp:8787 on a laptop off the VPN --
+# stalls `fleet.sh status` and the start of every review for as long as the
+# resolver takes, which is not the "short timeout" this promises. Found by the
+# self-review.
+signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+signal.alarm(3)
 try:
     u = urlsplit(sys.argv[1])
     if u.scheme not in ("http", "https") or not u.hostname:

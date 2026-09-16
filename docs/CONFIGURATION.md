@@ -513,9 +513,12 @@ scripts:
 
 A fourth call site added without the export would be a knob that silently
 measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
-on any `scripts/fleet/*.sh` that starts a model call and does not go through the
+on any `scripts/fleet/*.sh` that starts a model call and contains no call to the
 seam. It is in `evals/` rather than `tests/` because `evals/` is vendored: a host
-project gets the guard along with the thing it guards.
+project gets the guard along with the thing it guards. The check is **per
+script**, not per call — a script that already goes through the seam once and
+then gains a second, unwrapped call still passes; catching that needs a shell
+parser.
 
 It does **not** cover the worktree agent. That process is started by the runtime,
 not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
@@ -542,8 +545,18 @@ uv tool install --python 3.13 "headroom-ai[all]"   # or: pip install "headroom-a
 headroom proxy --port 8787
 ```
 
-The npm package of the same name is SDK-only and ships no CLI. Compression runs
-locally: no prompt or file content leaves the machine to be compressed.
+The npm package of the same name is SDK-only and ships no CLI.
+
+**On "compression runs locally", from observation rather than from the README.**
+Started here, the proxy's own banner reports `Telemetry: DISABLED`, `Security:
+loopback-only (no inbound token)` and `License: OSS`, and its savings ledger is a
+local JSONL under `~/.headroom/`. But `lsof` on the proxy process during a run
+that sent **only** Anthropic traffic also showed connections to Google and CDN
+addresses — its routing table carries upstreams for other providers, so
+connection-pool warmup is the obvious explanation, and it was not established
+what, if anything, was sent over them. If you need a hard "nothing leaves this
+machine" guarantee, verify it yourself before turning the knob on. At `0` the
+proxy is never contacted at all.
 
 #### What a custom base URL costs you
 
@@ -567,7 +580,9 @@ repository, not the vendor's.
 
 Measured here on one read-only pass over a real pull request (its body, its diff,
 the issue it closes, the files it touches, `git log`), run twice with the same
-prompt and the same tool allowlist:
+prompt and the same tool allowlist. **Not a `review.sh` run**: `guard.py` refuses
+that from a fleet-opened worktree, which is the rule working, so the pass reads
+everything a review reads and submits nothing.
 
 | | unproxied | through the proxy |
 |---|---|---|
