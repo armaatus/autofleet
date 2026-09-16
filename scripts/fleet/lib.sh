@@ -1085,7 +1085,12 @@ fleet_try_record() {
 # fleet that cannot write its bookkeeping must not die in the middle of a poll.
 fleet_try_write() {
   [ -n "$1" ] || return 0
-  printf '%s %s\n' "$2" "$3" >"$1" 2>/dev/null || true
+  # `2>/dev/null` BEFORE the redirection that can fail: written the other way
+  # round, a marker directory that has been swept from under us prints bash's
+  # own "No such file or directory" and only then silences the stream. `|| true`
+  # hides the status, not the diagnostic. CLAUDE.md's rule, in the direction
+  # `evals/late_stderr_silence.py` does not scan (it reads the `<"$f"` form).
+  printf '%s %s\n' "$2" "$3" 2>/dev/null >"$1" || true
 }
 
 # Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty

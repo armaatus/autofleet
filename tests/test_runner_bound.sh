@@ -198,7 +198,13 @@ trap cleanup EXIT
 # `pgrep -f` MATCHES AN EXTENDED REGEX, not a fixed string, so a path handed to
 # it needs escaping -- a `+` in a generated $TMPDIR component makes the pattern
 # match nothing, and a `pgrep ... && fail` that cannot match proves the absence
-# it was asked for. Same helper, same reason, as test_review_mode.sh's.
+# it was asked for.
+#
+# DUPLICATED from test_review_mode.sh, deliberately: every tests/test_*.sh here
+# is a standalone script -- `tests/run.sh` runs each with `bash <file>` and there
+# is no shared library for them to source. Adding one for six characters of sed
+# would be a new seam for every suite to know about; the comment on both copies
+# is the link. Raised by `/mattpocock-skills:code-review` as a judgement call.
 ere() { printf '%s' "$1" | sed 's/[][(){}.*+?^$|\\]/\\&/g'; }
 
 # ...AND $WATCH_NAP'S PATTERN IS ANCHORED, `"sleep ${WATCH_NAP}\$"`, because

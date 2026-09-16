@@ -718,8 +718,13 @@ parked_marker() {
   return 1
 }
 
+# $2 is the marker, when the caller already has it: `parked_for_person` looks it
+# up to decide the gate and then wanted the sentence for the same one, and three
+# subshells per worktree per pass for a value the caller is holding is the slope
+# armaatus/autofleet#69 is about. Optional, because `cmd_status` and the tests
+# ask by number alone. Found by `/mattpocock-skills:code-review`.
 why_parked() {
-  case "$(parked_marker "$1")" in
+  case "${2:-$(parked_marker "$1")}" in
     stuck)       printf 'its removal was refused\n' ;;
     merge-held)  printf 'merged, and it holds uncommitted work\n' ;;
     held)        printf 'it holds uncommitted work\n' ;;
@@ -741,10 +746,11 @@ why_parked() {
 # and the dispatcher kept that promise itself while breaking it through the
 # operator, two lines apart. Found by the independent review.
 how_to_release() {
-  local n="$1" path="$2"
+  local n="$1" path="$2" marker="${3:-}"
+  [ -n "$marker" ] || marker="$(parked_marker "$n")"
   # By the marker's NAME, like the gate -- not by testing a file this function
   # would then be the second place to spell. #71.
-  if [ "$(parked_marker "$n")" = stuck ]; then
+  if [ "$marker" = stuck ]; then
     printf "$BY_HAND_REMOVAL" "$path"
     return 0
   fi
@@ -815,7 +821,7 @@ how_to_release() {
 parked_for_person() {
   local n="$1" voice="${2:-quiet}" marker reason listing state
   marker="$(parked_marker "$n")" || return 1
-  reason="$(why_parked "$n")" || return 1
+  reason="$(why_parked "$n" "$marker")" || return 1
   # EVERY reason that means "there is something in there" is gated, not just the
   # two `reap_abandoned` writes. The gate used to be reached only when a `held-`
   # or `git-blind-` marker was on disk, so `merge-held-` and `merge-blind-`
@@ -4644,6 +4650,78 @@ print(int(spec))
 ' "$1" 2>/dev/null
 }
 
+# THE LAST LINES A PERSON READS, when something is waiting for them: a header,
+# then one line per worktree naming the issue and the command that frees it.
+#
+# AFTER `fleet down: $reason`, which is what armaatus/autofleet#37's third
+# acceptance bullet asks for and what it got one line short of. The block used to
+# run inside the poll loop, so the last thing on the screen was the farewell --
+# and `$reason` carries a COUNT ("and 1 worktree(s) are waiting for you"), not
+# which issue and not how to release it. A reader stops at the last line.
+# What changed is the ORDER and nothing else: `--until`, `--for` and `--max-prs`
+# all latch the drain and still leave through `cmd_run`'s
+# `queued == 0 && owned == 0` break, which is the poll loop's only exit.
+#
+# A FUNCTION and not four lines inside `cmd_run`, because its two runner-outage
+# branches are the ones a phase has to drive, and reached inline they need the
+# runner to stop answering BETWEEN the last poll and the farewell -- a race no
+# fixture can arrange. Extracted, `in_fleet farewell_parked 2` with an unreadable
+# agent listing is the whole test. Found by `/code-review`, which noted both
+# branches could be deleted with the suite green.
+#
+# `parked_for_person`, NOT `why_parked`: this was the third reader of the park
+# predicate and the one still on the ungated one, so it would print
+# `how_to_release` -- "commit, move or discard what is there" -- against a
+# worktree whose agent is writing. Unreachable from `cmd_run`, because `owned`
+# reaching 0 means every one of these already passed the gate inside
+# `count_parked_owned`; a guard that holds only because of something two hundred
+# lines away is the shape #71 is about. In the QUIET voice, like `cmd_status`:
+# nothing after the loop should be writing to $STATE_DIR.
+#
+# THE LIST IS BUILT BEFORE THE HEADER IS SAID, for the same reason: a runner that
+# stops answering makes every `parked_for_person` here return 1, and a header
+# announcing N worktrees with nothing under it is the "one line short" failure
+# this block exists to fix.
+#
+# $1 is what the last poll counted.
+farewell_parked() {
+  local parked="${1:-0}" n why line parked_lines="" named=0
+  case "$parked" in ''|*[!0-9]*) parked=0 ;; esac
+  [ "$parked" -gt 0 ] || return 0
+  for n in $(ls "$OWNED_DIR" 2>/dev/null); do
+    why="$(parked_for_person "$n" quiet)" || continue
+    named=$((named + 1))
+    parked_lines="$parked_lines  #$n -- $why
+    $(how_to_release "$n" "$(owned_path "$n")")
+"
+  done
+  if [ "$named" -eq 0 ]; then
+    # NOT silence: the poll said there were some, and this is the only line that
+    # can say why none of them could be named.
+    say "$parked worktree(s) are waiting for you, and the runner would not say"
+    say "  which -- ./scripts/fleet/fleet.sh status once it answers again"
+    return 0
+  fi
+  say "$named worktree(s) are waiting for you rather than for an agent:"
+  # One `say` per line, so each keeps its own timestamp and the log reads the way
+  # every other multi-line message here does.
+  printf '%s' "$parked_lines" | while IFS= read -r line; do say "$line"; done
+  # TWO COUNTS, RECONCILED, IN BOTH DIRECTIONS. `fleet down: $reason` above
+  # carries the number the last poll counted; this re-derives its own by asking
+  # the runner again, and an agent that starts -- or stops -- writing in between
+  # makes them differ. Either way two numbers for one thing with nothing
+  # explaining them is worse than either alone. Found by
+  # `/mattpocock-skills:code-review`, the second direction on its second pass.
+  if [ "$named" -lt "$parked" ]; then
+    say "  ...and $(( parked - named )) more that were waiting a moment ago:"
+    say "  the runner would not say what their agents are doing just now."
+    say "  ./scripts/fleet/fleet.sh status once it answers again."
+  elif [ "$named" -gt "$parked" ]; then
+    say "  ...$(( named - parked )) more than the line above says: an agent"
+    say "  finished between the last poll and now. The list is the current one."
+  fi
+}
+
 cmd_run() {
   # THE DRAIN LATCH, once. Three stop conditions were each spelling the same
   # three lines -- set the flag, set the reason, say "-- launching nothing more,
@@ -5113,69 +5191,9 @@ while that one is up."
   done
 
   say "fleet down: $reason"
-  # ...AND THE LAST LINE NAMES WHAT IS PARKED AND HOW TO RELEASE IT, which is
-  # what armaatus/autofleet#37's third acceptance bullet asks for and what it
-  # got one line short of. The naming block ran INSIDE the loop, so the last
-  # thing on the screen was `fleet down: $reason` -- and `$reason` carries a
-  # count ("and 1 worktree(s) are waiting for you"), not which issue and not the
-  # command that releases it. A reader stops at the last line.
-  #
-  # What changed is the ORDER and nothing else. `--until`, `--for` and
-  # `--max-prs` all latch the drain and still leave through the
-  # `queued == 0 && owned == 0` break above, which is the poll loop's only exit
-  # -- so this is outside that `if` because it is after the loop and there is
-  # nothing left to gate on, NOT because it reaches an ending the old placement
-  # did not. Said precisely because the first version of this comment claimed
-  # the second thing. Found by `/mattpocock-skills:code-review`.
-  #
-  # `parked_for_person`, NOT `why_parked`: this was the third reader of the park
-  # predicate and the one still on the ungated one, so it would print
-  # `how_to_release` -- "commit, move or discard what is there" -- against a
-  # worktree whose agent is writing. Unreachable today, because `owned` reaching
-  # 0 means every one of these already passed the gate inside
-  # `count_parked_owned`; a guard that holds only because of something two
-  # hundred lines away is the shape armaatus/autofleet#71 is about. In the QUIET
-  # voice, like `cmd_status`: nothing after the loop should be writing to
-  # $STATE_DIR. Found by the same pass.
-  #
-  # THE LIST IS BUILT BEFORE THE HEADER IS SAID. `parked_for_person` asks the
-  # runner, and a runner that stops answering between the last poll and this
-  # line makes every one of these return 1 -- so a header announcing N worktrees
-  # with nothing under it, which is the "one line short" failure this block was
-  # moved to fix. The old reading was pure filesystem and could not do it; the
-  # gate is worth the ordering. Found by `/mattpocock-skills:code-review`.
-  if [ "${parked:-0}" -gt 0 ]; then
-    local parked_lines="" named=0
-    for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-      why="$(parked_for_person "$n" quiet)" || continue
-      named=$((named + 1))
-      parked_lines="$parked_lines  #$n -- $why
-    $(how_to_release "$n" "$(owned_path "$n")")
-"
-    done
-    if [ "$named" -gt 0 ]; then
-      say "$named worktree(s) are waiting for you rather than for an agent:"
-      # One `say` per line, so each keeps its own timestamp and the log reads the
-      # way every other multi-line message here does.
-      printf '%s' "$parked_lines" | while IFS= read -r line; do say "$line"; done
-      # TWO COUNTS, RECONCILED. `$reason` above already carries `$parked` -- the
-      # number the last poll counted -- and this block re-derives its own by
-      # asking the runner again. An agent that starts writing in between makes
-      # them differ, and "2 worktree(s) are waiting for you" over a list of one,
-      # with nothing saying why, is worse than either number alone. Found by
-      # `/mattpocock-skills:code-review`.
-      if [ "$named" -lt "${parked:-0}" ]; then
-        say "  ...and $(( parked - named )) more that were waiting a moment ago:"
-        say "  the runner would not say what their agents are doing just now."
-        say "  ./scripts/fleet/fleet.sh status once it answers again."
-      fi
-    else
-      # NOT silence: `parked` said there were some, and this is the only line
-      # that can say why none could be named.
-      say "$parked worktree(s) are waiting for you, and the runner would not say"
-      say "  which -- ./scripts/fleet/fleet.sh status once it answers again"
-    fi
-  fi
+  # ...AND AFTER IT, the lines naming what is parked and how to release it. See
+  # `farewell_parked` for why they come last and why they are a function.
+  farewell_parked "${parked:-0}"
   notify "fleet down" "$reason. $opened worktree(s) opened."
 }
 

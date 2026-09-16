@@ -1491,6 +1491,23 @@ HOLDER
     [ -e "$m" ] \
       && fail "a junk count refunded to something rather than being dropped: $(cat "$m")"
     ok "the refund and the count read one junk record the same way"
+    # A RECORD WITH NO TRAILING NEWLINE, which is the shape a hand-written
+    # marker leaves -- and the behaviour change `fleet_try_record` was rewritten
+    # for. `read` returns non-zero at EOF with no delimiter as well as on a file
+    # it could not open, so the old `|| return 1` read this as unreadable: the
+    # count came back 0 and the refund refunded nothing. What decides is whether
+    # a HEAD came out. Found by `/mattpocock-skills:code-review`, which noted the
+    # comment claimed a fix nothing drove.
+    printf 'abc123 4' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 4" ] \
+      || fail "a record with no trailing newline read as unreadable: $(in_fleet_fn fleet_try_record "$m")"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 4 ] \
+      || fail "the cap counted 0 against a marker holding 4, so the cap silently does not exist"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 3" ] \
+      || fail "the refund refunded nothing against a marker with no trailing newline: $(cat "$m")"
+    ok "...and a record with no trailing newline is a record"
+
     # A head with no count at all -- the shape a half-written marker leaves.
     printf 'abc123\n' >"$m"
     [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 0" ] \

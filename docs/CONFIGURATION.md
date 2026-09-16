@@ -388,18 +388,17 @@ nothing to trim them — and drops the `.closed-<n>` marker, so the question is
 asked again on the pass after next rather than on every one. The sweep says how
 many it took.
 
-**The review records go the same way.** `$FLEET_DIR/reviewing/` holds four files
-per pull request beside the reviewer's lock — `<pr>.done` (the head that has been
-handled), `<pr>.tries` (attempts on that head with no verdict, against
-`AUTOFLEET_REVIEW_MAX_TRIES`), `<pr>.rounds` (verdicts this PR has had, against
-`AUTOFLEET_REVIEW_MAX`) and `<pr>.said` (which hold has already been explained) —
-and the same four again under a `v-` prefix for the validator. They are swept on
-**the same rule and by the same code** as the transcripts above: not on the pass
-the PR drops off the open list, not without a confirming
-`gh pr view <n> --json state`, and one decision per pull request per pass rather
-than one per file. `reviewing/.closed-<n>` is that sweep's bookkeeping and goes
-with the records it graced. The protection is not decoration — the file at stake
-is `<pr>.done`, and a `.done` deleted under an open PR hands that head a reviewer
+**The review records go the same way.** `$FLEET_DIR/reviewing/` holds four small
+records per pull request beside the reviewer's lock — `.done`, `.tries`,
+`.rounds` and `.said` — and the same four again under a `v-` prefix for the
+validator; what each one holds is written out once, in `scripts/fleet/fleet.sh`'s
+header above `is_review_record`, and not restated here. What a host operator
+needs from this page is that they are swept on **the same rule and by the same
+code** as the transcripts above: not on the pass the PR drops off the open list,
+not without a confirming `gh pr view <n> --json state`, and one decision per pull
+request per pass rather than one per file, with `reviewing/.closed-<n>` as that
+sweep's bookkeeping. The protection is not decoration — the file at stake is
+`<pr>.done`, and a `.done` deleted under an open PR hands that head a reviewer
 every poll.
 
 **The rotation** is `mv` rather than truncate-in-place, and **not while a

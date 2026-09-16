@@ -2006,6 +2006,59 @@ DRIVER
       && fail "a second dispatcher was refused after a drain that ended with a parked worktree: $out"
     echo "ok: ...and a second dispatcher is not refused afterwards"
     ;;
+  farewell_runner_blind)
+    make_fixture ok
+    mkdir -p "$AUTOFLEET_DIR/worktrees" "$WORK/wt99"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
+    # THE TWO BRANCHES A DRAIN CANNOT REACH ON PURPOSE. The farewell re-derives
+    # its list by asking the runner, and the count in `fleet down: $reason` came
+    # from the last poll -- so a runner that stops answering in between leaves
+    # the two disagreeing, or leaves a header with nothing under it. Reached
+    # inline that is a race no fixture can arrange, which is why it is a
+    # function. Both branches could be deleted with the suite green.
+    # Found by `/code-review`. armaatus/autofleet#71.
+    : >"$AUTOFLEET_DIR/held-42"
+    : >"$AUTOFLEET_DIR/held-99"
+    printf 'not json' >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 2 2>&1)"
+    grep -q "the runner would not say" <<<"$out" \
+      || fail "the farewell announced 2 worktrees and named none, with nothing saying why: $out"
+    grep -q "waiting for you rather than for an agent" <<<"$out" \
+      && fail "it printed the header for a list it could not build: $out"
+    echo "ok: a farewell that cannot name any of them says so instead of printing an empty header"
+
+    # ...and the SHORTFALL: one nameable, and the poll had counted two.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 2 2>&1)"
+    grep -q -- "#42 --" <<<"$out" || fail "it did not name the one it could: $out"
+    grep -q -- "#99 --" <<<"$out" \
+      && fail "it named a worktree whose agent is working, and told a person to discard what is in there: $out"
+    grep -q "1 more that were waiting a moment ago" <<<"$out" \
+      || fail "the farewell said 1 under a line that said 2, with nothing reconciling them: $out"
+    echo "ok: ...and says so when it can name fewer than the poll counted"
+
+    # ...and the other direction, which is an agent that FINISHED in between:
+    # both name-able now, against a farewell line that counted one.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "idle"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 1 2>&1)"
+    grep -q -- "#99 --" <<<"$out" \
+      || fail "the worktree whose agent went idle was not named: $out"
+    grep -q "more than the line above says" <<<"$out" \
+      || fail "the farewell named more worktrees than the farewell line said, with nothing reconciling them: $out"
+    echo "ok: ...and when it can name more"
+    ;;
+
   parked_since_swept_at_start)
     make_fixture ok
     # `parked-since-$n` is the survive-a-pass marker: a keep-marker counts only
@@ -4669,8 +4722,13 @@ JSON
     # `wait_for_log` calls `fail` itself, so it needs no `|| fail` here: the
     # absence of this line IS "the cap stopped reaping as well as launching".
     wait_for_log "is merged; marking it done"
-    latched="$(grep -n "launching nothing more" "$WORK/run.log" | head -1 | cut -d: -f1)"
-    reaped="$(grep -n "is merged; marking it done" "$WORK/run.log" | head -1 | cut -d: -f1)"
+    # `awk 'NR==1'`, NOT `head -1`: `head` exits on line one, `grep` dies of
+    # EPIPE, and `set -o pipefail` makes the pipeline 141 -- on a long enough log
+    # only, which is green on a Mac and red in CI. It is CLAUDE.md's `grep -q`
+    # rule one construct over, and these were the only `head -1 |` in tests/.
+    # Found by `/mattpocock-skills:code-review`.
+    latched="$(grep -n "launching nothing more" "$WORK/run.log" | awk -F: 'NR==1{print $1}')"
+    reaped="$(grep -n "is merged; marking it done" "$WORK/run.log" | awk -F: 'NR==1{print $1}')"
     [ -n "$latched" ] && [ "$reaped" -gt "$latched" ] \
       || fail "the reap ran before the cap latched the drain (latch line $latched, reap line $reaped), so this asserts nothing about the passes after it: $(cat "$WORK/run.log")"
     echo "ok: the reap still runs on the passes after the cap"
