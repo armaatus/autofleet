@@ -3113,6 +3113,23 @@ XX
     && { cat "$WORK/out" >&2; fail "an unconfigured repo printed something about a proxy"; }
   ok "...and says nothing about a proxy it was not asked to use"
 
+  # ...AND IT LEAVES AN OPERATOR'S OWN BASE URL ALONE. The row above clears both
+  # variables first, which is right for asserting an absence and wrong for
+  # asserting inertness: "off" has to mean the seam does not touch the
+  # environment, not that the environment happened to be empty. Somebody with a
+  # company gateway in ANTHROPIC_BASE_URL and no knob set must reach the
+  # reviewer with it. Found by the self-review.
+  advance_head_simple
+  ANTHROPIC_BASE_URL="https://gateway.invalid" ENABLE_TOOL_SEARCH=false \
+    run_it 42 >"$WORK/out1b" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out1b" >&2; fail "the review did not submit (got $rc)"; }
+  grep -qxF "ANTHROPIC_BASE_URL=https://gateway.invalid" "$ENV_FILE" \
+    || { cat "$ENV_FILE" >&2; fail "an unconfigured repo changed a base URL the operator set"; }
+  grep -qxF "ENABLE_TOOL_SEARCH=false" "$ENV_FILE" \
+    || { cat "$ENV_FILE" >&2; fail "an unconfigured repo changed ENABLE_TOOL_SEARCH"; }
+  ok "...and passes an operator's own values through untouched"
+  unset ANTHROPIC_BASE_URL ENABLE_TOOL_SEARCH
+
   # ON, AND SOMETHING ANSWERS -> both variables reach the reviewer, and the base
   # URL is the one the knob names rather than a default compiled in here.
   # ENABLE_TOOL_SEARCH goes with it because `/context all` misreports without

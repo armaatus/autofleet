@@ -1657,7 +1657,7 @@ fi
 #     `evals/shell_code.py` is the live case -- printed nothing, exited 1, and
 #     lint reported the seam as covered. The `grep -q` scan below has said
 #     "could not run, so it is asserting nothing" since it was written; these
-#     two now say it too. Found by the self-review, three rounds in.
+#     two now say it too. Found by the self-review.
 #
 #     THE CANARY IS THE OTHER HALF. A detector that matches nothing reports a
 #     clean tree, so the three call sites this repository HAS are named: if the

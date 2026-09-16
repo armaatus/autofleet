@@ -30,17 +30,18 @@ _PREFIX = re.compile(
     # A wrapper that still runs the agent in the environment of this process...
     r"^(exec|command|nohup|env|time|timeout(\s+(-[A-Za-z]\S*|[0-9smhd.]+))+"
     # ...a shell keyword the call is nested behind...
-    r"|if|while|until|then|do|!"
+    r"|if|while|until|then|do|else|elif|!"
     # ...or a one-command variable assignment, whose VALUE may be quoted and
     # therefore may contain spaces: `AUTOFLEET_X="a b" cmd` is one command.
     r"|[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|'[^']*'|\S*))\s+"
-    r"|^[(]\s*|^\$[(]\s*"
+    # ...or a grouping the call is opened inside.
+    r"|^[({]\s*|^\$[(]\s*"
 )
 
 # Where one command ends and the next begins. Crude on purpose -- an operator
 # inside quotes splits a line that was already going to be looked at whole, and
 # the worst that costs is one extra fragment that matches nothing.
-_SEPARATOR = re.compile(r"(?:;|&&|\|\||\|&|\|)")
+_SEPARATOR = re.compile(r"(?:;|&&|\|\||\|&|\||&)")
 
 # The expansion itself, in every spelling bash accepts: quoted or bare, braced
 # or not. The first version wanted the quotes and the bare brace-less form only,
@@ -144,6 +145,9 @@ _CASES = [
     ('env FOO=1 "$AUTOFLEET_REVIEW_CMD" -p x', True),
     ('timeout -k 5 600 "$AUTOFLEET_REVIEW_CMD" -p x', True),
     ('FOO="a b" "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('{ "$AUTOFLEET_REVIEW_CMD" -p x; }', True),
+    ('else "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('sleep 1 & "$AUTOFLEET_REVIEW_CMD" -p x', True),
     # ...and the mentions, which are not call sites.
     ('  say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue', False),
     ('command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {', False),

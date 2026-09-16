@@ -620,7 +620,7 @@ import socket, sys, threading
 from urllib.parse import urlsplit
 
 # A DAEMON THREAD AND A JOIN, not SIGALRM and not `timeout=` alone. Three
-# rounds of self-review on this one line:
+# ways this has been wrong, and the first two looked right:
 #
 #   `timeout=` on create_connection bounds the CONNECT and not getaddrinfo, so a
 #   URL naming a host that does not resolve -- http://proxy.corp:8787 on a
@@ -637,6 +637,13 @@ from urllib.parse import urlsplit
 # without waiting for it because daemon threads do not hold exit. The worker may
 # still be inside getaddrinfo when we go; that costs nothing, because nothing
 # reads its answer after the deadline.
+#
+# THE 3s IS THE WHOLE PROBE, not per address, and that is a real narrowing: a
+# hostname that resolves to several addresses gets 2s per connect, so a first
+# address that hangs can cost a live second one its answer. The result is "NOT
+# ANSWERING" and an unwrapped run against a proxy that is up -- the safe
+# direction, and the one this whole function is written to fail in. The shipped
+# default is a literal address, where it cannot arise at all.
 answer = []
 
 
