@@ -750,12 +750,9 @@ why_parked() {
 # the whole reason it is parked is that removing it would destroy something" --
 # and the dispatcher kept that promise itself while breaking it through the
 # operator, two lines apart. Found by the independent review.
-# NO `$3` FOR THE MARKER, unlike `why_parked` above. One was added on the same
-# cost argument and had no caller: both production callsites -- `cmd_status` and
-# `farewell_parked` -- reach this through `parked_for_person`, which has already
-# returned by the time they call it, so neither is holding the marker to pass.
-# A parameter whose fast path nothing can take is the comment claiming a saving
-# nobody gets. Found by both self-review passes. #71.
+# NO `$3` FOR THE MARKER, unlike `why_parked` above: every callsite reaches this
+# through `parked_for_person`, which has already returned, so nothing is holding
+# one to pass and the fast path would be unreachable. #71.
 how_to_release() {
   local n="$1" path="$2" marker
   marker="$(parked_marker "$n")"
@@ -2239,8 +2236,8 @@ stop_reviewers() {
   # The loop below clears every record, so without this line a grace marker whose
   # records this function deleted is orphaned for good -- and the number it names
   # is then swept with no grace at all if it comes round again, which is the one
-  # thing the marker exists to prevent. `prune_review_records` collects the ones
-  # it graces itself; this is the other path out. Found by `/code-review` of the
+  # thing the marker exists to prevent. the record sweep in `review_open_prs`
+  # collects the ones it graces itself; this is the other path out. Found by `/code-review` of the
   # branch that added it.
   rm -f "$REVIEWING_DIR"/.closed-*
   for marker in "$REVIEWING_DIR"/*; do
@@ -2332,20 +2329,10 @@ $(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
 EOF
 }
 
-# BOTH TRANSCRIPT STORES, and this swept one. `validate.sh` writes
-# `$FLEET_DIR/validations/pr-<n>-<head>.log` in exactly the shape `reviews/`
-# uses, and nothing ever pruned it: a store that grows for as long as the fleet
-# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. Found by the
-# self-review.
-#
-# $3 is the directory and $4 the prefix its locks carry in $REVIEWING_DIR --
-# empty for the reviewer, `v-` for the validator -- because the "a run is still
-# writing this one" test has to ask about the right lock. Defaulted, so the
-# reviewer call site reads as it did.
 # WHAT THIS PASS MAY DO WITH PR $1's FILES -- a VERDICT and not a predicate, so
 # the name says `if` is the wrong construct at a callsite. $2 is the directory
-# its `.closed-` grace marker lives
-# in. Two protections, and they are not decoration:
+# its `.closed-` grace marker lives in. Two protections, and they are not
+# decoration:
 #
 #   the GRACE PASS -- never prune on the pass a PR drops off the open listing.
 #   A blip in the listing then costs a pass rather than a store.
@@ -2437,6 +2424,16 @@ pr_state_once() {
   PR_STATE_MEMO="$PR_STATE_MEMO$num=$PR_STATE_ANSWER "
 }
 
+# BOTH TRANSCRIPT STORES, and this swept one. `validate.sh` writes
+# `$FLEET_DIR/validations/pr-<n>-<head>.log` in exactly the shape `reviews/`
+# uses, and nothing ever pruned it: a store that grows for as long as the fleet
+# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. Found by the
+# self-review.
+#
+# $3 is the directory and $4 the prefix its locks carry in $REVIEWING_DIR --
+# empty for the reviewer, `v-` for the validator -- because the "a run is still
+# writing this one" test has to ask about the right lock. Defaulted, so the
+# reviewer call site reads as it did.
 prune_review_logs() {
   local open_prs="$1" dir="${3:-$FLEET_DIR/reviews}" lock="${4:-}" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -4706,7 +4703,7 @@ print(int(spec))
 #
 # $1 is what the last poll counted.
 farewell_parked() {
-  local parked="${1:-0}" n why line parked_lines="" named=0
+  local parked="${1:-0}" n why line path parked_lines="" named=0
   case "$parked" in ''|*[!0-9]*) parked=0 ;; esac
   [ "$parked" -gt 0 ] || return 0
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
@@ -4718,8 +4715,9 @@ farewell_parked() {
     # numbers by construction, so `-` cannot reach here today -- which is a
     # guard holding because of something elsewhere, the shape #71 is about.
     # Found by `/mattpocock-skills:code-review`.
-    parked_lines="$parked_lines  $(worktree_label "$n" "$(owned_path "$n")") -- $why
-    $(how_to_release "$n" "$(owned_path "$n")")
+    path="$(owned_path "$n")"
+    parked_lines="$parked_lines  $(worktree_label "$n" "$path") -- $why
+    $(how_to_release "$n" "$path")
 "
   done
   if [ "$named" -eq 0 ]; then

@@ -1017,17 +1017,23 @@ import merge_gate; print(merge_gate.review_mode())'); }
   : >"$REVIEWER_CALLS"
   # `set -m` AROUND THE LAUNCH, and it is the whole reason this row can exist.
   # A command started with `&` by a shell WITHOUT job control has SIGINT set to
-  # ignore -- POSIX, so the trap never runs and the first spelling of this row
-  # failed at the timeout instead. Job control makes the runner its own group
-  # leader, and `kill -INT -$runner` signals the group the way a terminal does.
-  # Same construction as `tests/test_runner_bound.sh`'s INT phase.
+  # IGNORE -- POSIX -- so the trap never runs and the first spelling of this row
+  # died at the timeout instead. Job control gives the job its own process group
+  # and leaves INT deliverable.
+  #
+  # ...AND THE SIGNAL GOES TO THE PID, not to `-$runner`. Signalling the group is
+  # what `tests/test_runner_bound.sh` does, and it needs the `setpgid` to have
+  # succeeded; under a `tests/run.sh` that is not the session leader it does not
+  # always, which printed `child setpgid: Operation not permitted` into the suite
+  # output on one run in four. The subshell `exec`s, so `$!` IS review.sh and the
+  # pid is the whole handle.
   set -m
   ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
       AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out2" 2>&1 &
   runner=$!
   set +m
   await n_started 1 60 || fail "the reviewer never started, so the trap was never armed"
-  kill -INT -"$runner" 2>/dev/null || true
+  kill -INT "$runner" 2>/dev/null || true
   wait "$runner"; rc=$?
   [ "$rc" = 143 ] || { cat "$WORK/out2" >&2; fail "an INT mid-review exited $rc rather than 143, so the trap does not cover INT"; }
   [ "$(tries_now)" = 1 ] \
