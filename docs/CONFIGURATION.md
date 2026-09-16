@@ -538,6 +538,26 @@ headroom wrap claude      # starts the proxy, sets ANTHROPIC_BASE_URL and
 headroom unwrap claude    # undo the durable part
 ```
 
+**The two overlap, and `wrap` wins. Pick one.** `wrap` is durable and global to
+your `claude`, and the reviewer, the validator and both self-review passes all
+run `claude` by default — so on a wrapped machine those three go through the
+proxy whatever `AUTOFLEET_HEADROOM` says, and the knob adds nothing there but the
+`status` row. Worse, its degrade line becomes **untrue**: if the proxy dies,
+`fleet_headroom_env` prints "running unwrapped, at full token price" and takes
+its own exports back, but a wrapped `claude` is still pointed at the dead proxy
+through its own settings and its model call fails anyway. `fleet.sh status` is
+reporting the knob's state, not the wrap's.
+
+So:
+
+- **Want the worktree agent covered?** Use `wrap`, and leave `AUTOFLEET_HEADROOM`
+  at `0`. `headroom doctor` is then the thing that tells you the proxy is down.
+- **Want the probe, the degrade and the `status` row?** Use the knob, and leave
+  `claude` unwrapped. The worktree agent pays full price; #130 is the issue that
+  would close that gap properly.
+- Setting both is the "two mechanisms for one behaviour" outcome this seam was
+  written to avoid.
+
 #### Installing it
 
 ```bash

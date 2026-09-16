@@ -63,6 +63,22 @@ def code_of(line):
     return "".join(out)
 
 
+def payload_shell():
+    """Every shell file in the vendored payload, as (path, lineno, raw, code).
+
+    Both callers walked `scripts/fleet/**/*.sh` and called `code_of` on each
+    line, which is one loop written twice in the file whose whole reason for
+    existing is that the third copy of a question drifts. Found by the
+    self-review.
+    """
+    import glob
+
+    for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
+        with open(path, encoding="utf-8") as fh:
+            for n, raw in enumerate(fh, 1):
+                yield path, n, raw, code_of(raw)
+
+
 def starts_a_model_call(line):
     """Is this line's CODE a `$AUTOFLEET_*_CMD` in command position.
 

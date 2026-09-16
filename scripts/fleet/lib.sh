@@ -616,26 +616,46 @@ fleet_headroom_on() { [ "${AUTOFLEET_HEADROOM:-0}" = 1 ]; }
 # REACHABLE, and the degrade path says so with the value in it.
 fleet_headroom_up() {
   python3 - "${1:-}" 2>/dev/null <<'PY'
-import signal, socket, sys
+import socket, sys, threading
 from urllib.parse import urlsplit
-# SIGALRM AROUND THE WHOLE THING, not just `timeout=` on the connect. That
-# argument bounds the connect and NOT the name lookup, so a URL naming a host
-# that does not resolve -- http://proxy.corp:8787 on a laptop off the VPN --
-# stalls `fleet.sh status` and the start of every review for as long as the
-# resolver takes, which is not the "short timeout" this promises. Found by the
-# self-review.
-signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
-signal.alarm(3)
-try:
-    u = urlsplit(sys.argv[1])
-    if u.scheme not in ("http", "https") or not u.hostname:
-        raise SystemExit(1)
-    port = u.port or (443 if u.scheme == "https" else 80)
-    socket.create_connection((u.hostname, port), timeout=2).close()
-except SystemExit:
-    raise
-except Exception:
-    raise SystemExit(1)
+
+# A DAEMON THREAD AND A JOIN, not SIGALRM and not `timeout=` alone. Three
+# rounds of self-review on this one line:
+#
+#   `timeout=` on create_connection bounds the CONNECT and not getaddrinfo, so a
+#   URL naming a host that does not resolve -- http://proxy.corp:8787 on a
+#   laptop off the VPN -- stalls `fleet.sh status` and the start of every review
+#   for as long as the resolver takes.
+#
+#   SIGALRM does not fix that either, which is the round that looked fixed and
+#   was not: CPython runs a Python signal handler only once the C call returns,
+#   and getaddrinfo is libc (on macOS, a round trip to mDNSResponder). The alarm
+#   fires after the lookup it was meant to bound.
+#
+# A daemon thread is the shape that actually works: the main thread stops
+# waiting at the join whatever the worker is blocked in, and the process exits
+# without waiting for it because daemon threads do not hold exit. The worker may
+# still be inside getaddrinfo when we go; that costs nothing, because nothing
+# reads its answer after the deadline.
+answer = []
+
+
+def probe(url):
+    try:
+        u = urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return
+        port = u.port or (443 if u.scheme == "https" else 80)
+        socket.create_connection((u.hostname, port), timeout=2).close()
+        answer.append(True)
+    except Exception:
+        pass
+
+
+t = threading.Thread(target=probe, args=(sys.argv[1],), daemon=True)
+t.start()
+t.join(3)
+raise SystemExit(0 if answer else 1)
 PY
 }
 

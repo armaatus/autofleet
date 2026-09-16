@@ -1665,16 +1665,17 @@ fi
 python3 "$REPO_ROOT/evals/shell_code.py" --selftest \
   || fail "evals/shell_code.py fails its own selftest, so the two scans below mean nothing"
 if sites="$(python3 - <<'PYEOF'
-import glob, sys
+import sys
 sys.path.insert(0, "evals")
-from shell_code import code_of, starts_a_model_call
+from shell_code import payload_shell, starts_a_model_call
 
-for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
-    lines = list(open(path, encoding="utf-8"))
-    if not any(starts_a_model_call(l) for l in lines):
-        continue
-    covered = any("fleet_headroom_env" in code_of(l) for l in lines)
-    print(("site " if covered else "LEAK ") + path)
+calls, covered = {}, {}
+for path, _, raw, code in payload_shell():
+    calls[path] = calls.get(path, False) or starts_a_model_call(raw)
+    covered[path] = covered.get(path, False) or "fleet_headroom_env" in code
+for path in sorted(calls):
+    if calls[path]:
+        print(("site " if covered[path] else "LEAK ") + path)
 PYEOF
 )"; then
   if leaks="$(printf '%s\n' "$sites" | sed -n 's/^LEAK //p')" && [ -n "$leaks" ]; then
@@ -1709,16 +1710,15 @@ fi
 #     NAMING Orca in a message because the driver is meant to be invisible;
 #     here naming the vendor IS the rule, and only reaching for it is the leak.
 if leaks="$(python3 - <<'PYEOF'
-import glob, re, sys
+import re, sys
 sys.path.insert(0, "evals")
-from shell_code import code_of
+from shell_code import payload_shell
 
 OWNED = re.compile(r"(AUTOFLEET_HEADROOM(_URL)?|_?fleet_headroom_[a-z_]*|headroom:)")
 
-for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
-    for n, line in enumerate(open(path, encoding="utf-8"), 1):
-        if "headroom" in OWNED.sub("", code_of(line)).lower():
-            print(f"    {path}:{n}: {line.strip()}")
+for path, n, raw, code in payload_shell():
+    if "headroom" in OWNED.sub("", code).lower():
+        print(f"    {path}:{n}: {raw.strip()}")
 PYEOF
 )"; then
   if [ -n "$leaks" ]; then
