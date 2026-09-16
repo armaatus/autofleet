@@ -164,6 +164,21 @@
 #                                 phase now, so a wedge is a FAIL that names
 #                                 itself; this catches the two shapes named in
 #                                 the arm, not every write-time expansion.
+#   test_review_mode.sh headroom  AUTOFLEET_HEADROOM -- the opt-in compression
+#                                 proxy in front of the reviewer's model call.
+#                                 Unset means the two variables are ABSENT from
+#                                 its environment, which is the half a presence
+#                                 assertion cannot cover; on with a listener
+#                                 means both are set to what the knob names; and
+#                                 on with NOTHING listening means the review
+#                                 still runs and one line names the URL and the
+#                                 knob. That last row is the one that turns a
+#                                 stopped proxy into a stopped fleet if it ever
+#                                 becomes a prerequisite.
+#   test_review_mode.sh headroom_status
+#                                 ...and which of those three states the first
+#                                 screen anybody looks at reports, probing the
+#                                 endpoint rather than repeating the knob.
 #
 # `gh` and the reviewer command are both stubbed on PATH and the fleet state dir
 # is a temp dir, so nothing here touches a pull request or the machine's fleet.
@@ -344,11 +359,24 @@ stub_reviewer() {
   ARGV_FILE="$WORK/reviewer-argv"
   : >"$ARGV_FILE"
   export ARGV_FILE
+  # ...and WHICH OF THE TWO COMPRESSION VARIABLES were in its environment. The
+  # knob in front of this call is the only thing that sets them, and its
+  # default promises they are ABSENT -- a promise nothing could check from the
+  # argv or the prompt, because an environment variable appears in neither.
+  # Recorded by PRESENCE (`${VAR+x}`), not by value: an exported-but-empty
+  # ANTHROPIC_BASE_URL is its own breakage, and a recording that flattened it to
+  # "unset" would call that byte-identical to today.
+  ENV_FILE="$WORK/reviewer-env"
+  : >"$ENV_FILE"
+  export ENV_FILE
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
 printf 'ran\n' >>"$REVIEWER_CALLS"
 printf '%s' "\$2" >"$PROMPT_FILE"
 printf '%s\n' "\$@" >"$ARGV_FILE"
+: >"$ENV_FILE"
+[ -n "\${ANTHROPIC_BASE_URL+x}" ] && printf 'ANTHROPIC_BASE_URL=%s\n' "\$ANTHROPIC_BASE_URL" >>"$ENV_FILE"
+[ -n "\${ENABLE_TOOL_SEARCH+x}" ] && printf 'ENABLE_TOOL_SEARCH=%s\n' "\$ENABLE_TOOL_SEARCH" >>"$ENV_FILE"
 # HOW LONG THE REVIEWER TAKES, for the one phase that needs two of them to
 # overlap. Every other phase leaves it unset and the stub is as immediate as it
 # was. \`hang\` is no use there: what \`lockrace\` needs is a reviewer that
@@ -428,6 +456,56 @@ exit 0
 STUB
   chmod +x "$WORK/bin/fake-reviewer"
   export AUTOFLEET_REVIEW_CMD=fake-reviewer
+}
+
+# A listener on a free port, and the URL that reaches it. The compression proxy
+# the knob points at is a HOST-LEVEL endpoint owned by nobody in this tree -- the
+# fleet probes it and never spawns it -- so the only thing the suite has to
+# stand up is something that accepts a TCP connection and something that does
+# not. It accepts and closes: the probe asks "does anything answer here", and a
+# stub that spoke HTTP would be asserting a protocol the seam deliberately does
+# not name (any compressing proxy satisfies it, not headroom's).
+#
+# PORT 0, not a number picked here: the suite runs three worktrees deep on one
+# machine and a hardcoded port is the one way two phases can fail each other.
+# The port file is written with os.replace so a reader that sees the file sees
+# the whole number.
+stub_proxy() {
+  PROXY_PORT_FILE="$WORK/proxy.port"
+  rm -f "$PROXY_PORT_FILE"
+  python3 - "$PROXY_PORT_FILE" <<'PROXY' &
+import os, socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0))
+s.listen(8)
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w") as f:
+    f.write(str(s.getsockname()[1]))
+os.replace(tmp, sys.argv[1])
+while True:
+    try:
+        conn, _ = s.accept()
+    except OSError:
+        break
+    conn.close()
+PROXY
+  PROXY_PID=$!
+  local i=0
+  while [ ! -s "$PROXY_PORT_FILE" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$PROXY_PORT_FILE" ] || fail "the stub proxy never bound a port"
+  PROXY_URL="http://127.0.0.1:$(cat "$PROXY_PORT_FILE")"
+}
+
+# ...and the same URL with nothing behind it. Killing the listener rather than
+# guessing an unused port is what makes "nothing answers" deterministic: the
+# port was ours a moment ago, so no other process on this machine is about to
+# answer on it.
+kill_proxy() {
+  [ -n "${PROXY_PID:-}" ] || return 0
+  kill "$PROXY_PID" 2>/dev/null
+  wait "$PROXY_PID" 2>/dev/null
+  PROXY_PID=""
 }
 
 # How many review records the PR has. Six copies of this one-liner is five too
@@ -556,6 +634,16 @@ advance_head() {
   PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
   printf '%s' "$PR_HEAD" >"$GH_HEAD"
   git -C "$WORK/repo" push -q --force origin "HEAD:refs/pull/42/head"
+}
+
+# The same, without an origin to publish to. `advance_head` pushes, which needs
+# `make_origin`; the phases that only need the head to MOVE -- so the next run
+# is not answered by the review already on the old one -- should not have to
+# stand up a bare repository to say so.
+advance_head_simple() {
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next
+  PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+  printf '%s' "$PR_HEAD" >"$GH_HEAD"
 }
 
 # A round that has already happened: a counting review on `$1`, declaring `$2`
@@ -2970,11 +3058,6 @@ XX
   # still reach a readable log, with no cost row invented for it.
   rows_before="$(grep -c . "$tsv")"
   stub_reviewer text
-  advance_head_simple() {
-    git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m next
-    PR_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
-    printf '%s' "$PR_HEAD" >"$GH_HEAD"
-  }
   advance_head_simple
   run_it 42 >"$WORK/out2" 2>&1; rc=$?
   [ "$rc" = 0 ] || { cat "$WORK/out2" >&2; fail "the text reviewer did not submit (got $rc)"; }
@@ -2984,6 +3067,107 @@ XX
   [ "$(grep -c . "$tsv")" = "$rows_before" ] \
     || { cat "$tsv" >&2; fail "a cost row was invented for output that carried no cost"; }
   ok "...and no cost row is invented for it"
+  ;;
+
+
+# ----------------------------------------------------------------- headroom
+  headroom)
+  # THE COMPRESSION SEAM in front of the one model call the dispatcher makes
+  # itself. Every call this fleet makes pays full price for its context and
+  # nothing in the tree had ever tried a proxy in front of it -- so the seam is
+  # opt-in, off by default, and the default has to be provably INERT. Which
+  # means asserting an ABSENCE and not only a presence: a knob that is "off" by
+  # setting two variables to nothing is not off, and no argv or prompt
+  # assertion can see an environment variable either way. armaatus/autofleet#89.
+  make_fixture; stub_reviewer marked
+  unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the unconfigured review did not submit (got $rc)"; }
+  [ -s "$ENV_FILE" ] \
+    && { cat "$ENV_FILE" >&2; fail "an unconfigured repo put a compression variable in the reviewer's environment"; }
+  ok "the knob unset leaves the reviewer's environment exactly as it was"
+  grep -qiE 'headroom|ANTHROPIC_BASE_URL|compress' "$WORK/out" \
+    && { cat "$WORK/out" >&2; fail "an unconfigured repo printed something about a proxy"; }
+  ok "...and says nothing about a proxy it was not asked to use"
+
+  # ON, AND SOMETHING ANSWERS -> both variables reach the reviewer, and the base
+  # URL is the one the knob names rather than a default compiled in here.
+  # ENABLE_TOOL_SEARCH goes with it because `/context all` misreports without
+  # it, which is a cost of the custom base URL and not a second feature.
+  stub_proxy
+  export AUTOFLEET_HEADROOM=1
+  export AUTOFLEET_HEADROOM_URL="$PROXY_URL"
+  advance_head_simple
+  run_it 42 >"$WORK/out2" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out2" >&2; fail "the wrapped review did not submit (got $rc)"; }
+  grep -qxF "ANTHROPIC_BASE_URL=$PROXY_URL" "$ENV_FILE" \
+    || { cat "$ENV_FILE" >&2; fail "the reviewer was not pointed at the proxy"; }
+  grep -qxF "ENABLE_TOOL_SEARCH=true" "$ENV_FILE" \
+    || { cat "$ENV_FILE" >&2; fail "ENABLE_TOOL_SEARCH did not reach the reviewer"; }
+  ok "the knob on, with a listener, puts both variables in the reviewer's environment"
+
+  # ON, AND NOTHING ANSWERS -> THE REVIEW STILL RUNS. A dispatcher that refuses
+  # to dispatch because an optional optimiser is down is a worse failure than
+  # paying full token price for one pass. This is the row that would have been
+  # red before the change, and the one that goes quietly wrong later: a probe
+  # that becomes a prerequisite turns a stopped proxy into a stopped fleet.
+  #
+  # The line it prints names BOTH the URL and the knob, because the person
+  # reading a dispatcher log has to be able to find the thing that is off
+  # without knowing this file, or scripts/fleet/lib.sh, exists.
+  kill_proxy
+  before="$(n_started)"
+  advance_head_simple
+  run_it 42 >"$WORK/out3" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out3" >&2; fail "an unreachable proxy stopped the review (got $rc)"; }
+  [ "$(n_started)" -gt "$before" ] \
+    || { cat "$WORK/out3" >&2; fail "no reviewer was started at all"; }
+  ok "an unreachable proxy does not stop the review"
+  grep -qF "$AUTOFLEET_HEADROOM_URL" "$WORK/out3" \
+    || { cat "$WORK/out3" >&2; fail "the degrade line does not name the URL"; }
+  grep -qF "AUTOFLEET_HEADROOM" "$WORK/out3" \
+    || { cat "$WORK/out3" >&2; fail "the degrade line does not name the knob"; }
+  ok "...and the line it prints names both the URL and the knob"
+  [ -s "$ENV_FILE" ] \
+    && { cat "$ENV_FILE" >&2; fail "the reviewer was pointed at a proxy that is not there"; }
+  ok "...and the reviewer is not pointed at a proxy that is not there"
+  unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
+  ;;
+
+# ---------------------------------------------------------- headroom_status
+  headroom_status)
+  # WHICH STATE IT IS IN, on the first screen anybody looks at -- the same place
+  # and for the same reason `review:` is there. A seam whose whole point is that
+  # it changes nothing when off is a seam nobody can tell is on, and "is the
+  # proxy up" is not answerable from a dispatcher that never says.
+  make_fixture; stub_reviewer marked
+  unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  grep -qi "headroom:.*off" <<<"$out" \
+    || fail "status does not say the compression seam is off: $out"
+  ok "status names the seam and says it is off"
+
+  # ON AND ANSWERING. The probe on this screen is the same one the review path
+  # makes, which is the point: a screen that reported the KNOB rather than the
+  # endpoint would say "on" for a proxy that has been dead since Tuesday.
+  stub_proxy
+  export AUTOFLEET_HEADROOM=1
+  export AUTOFLEET_HEADROOM_URL="$PROXY_URL"
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  grep -qF "$PROXY_URL" <<<"$out" || fail "status does not name the URL: $out"
+  grep -qi "answering" <<<"$out" || fail "status does not say the proxy answers: $out"
+  grep -qi "NOT ANSWERING" <<<"$out" \
+    && fail "status called a live proxy dead: $out"
+  ok "...and on, with a listener, names the URL and says it answers"
+
+  kill_proxy
+  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  grep -qi "NOT ANSWERING" <<<"$out" \
+    || fail "status did not notice the proxy is gone: $out"
+  grep -qi "unwrapped" <<<"$out" \
+    || fail "status does not say what happens instead: $out"
+  ok "...and on, with nothing there, says so and says what happens instead"
+  unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
   ;;
 
 
@@ -3199,6 +3383,6 @@ XX
   ;;
 
   *)
-  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_noplaceholder|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row" >&2
+  echo "usage: $0 mode|refuses|stopped|submits|unmarked|silent|skips|stale|midstop|reaper|timeout|sweeps|queue|records|status_count|holds|once|rounds|roundcap|retries|capped|stubwrite|await_threads|await_quiet|await_moved|await_own_reply|await_own_reply_local|await_cap|scope_full|scope_delta|scope_orphan|scope_kth|scope_noplaceholder|scope_nofetch|scope_ctxcap|scope_ctxbroken|status_rounds|cost_row|headroom|headroom_status" >&2
   exit 2 ;;
 esac
