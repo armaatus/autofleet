@@ -2556,7 +2556,7 @@ print(json.dumps({"result": {"worktrees": [
 
   context_reset_send_refused)
     # The other caller that meets a driver which cannot type, and the one with
-    # no exit of its own: the reset is only marked done once the clear lands, so
+    # no exit of its own: the reset retries every poll until the clear lands, so
     # a send that is always refused said so -- three lines -- on every poll for
     # as long as the PR stayed open. Found by the self-review of #106's PR.
     make_fixture ok
@@ -2569,23 +2569,28 @@ print(json.dumps({"result": {"worktrees": [
     echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
     export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
     out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q "would not type into" <<<"$out" \
-      || fail "a refused send was not said at all: $out"
+    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
+      || fail "a refused send was not said exactly once on the first poll: $out"
     grep -q "^terminal enter" "$STUB_CALLS" \
       && fail "it submitted after a send that failed"
-    echo "ok: a driver that refuses the send is told about on the first poll"
+    echo "ok: a driver that refuses the send is said once on the first poll"
     out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q "would not type into" <<<"$out" \
-      && fail "it says so again every poll: $out"
-    echo "ok: ...and not again on the next one"
-    # Refused is not "no agent": an agent that is simply not there yet must
-    # still be reset once it is, so that case must leave no marker.
-    rm -f "$AUTOFLEET_DIR/context-reset-42" "$STUB_DIR/send-refuses"
-    : >"$STUB_DIR/terminals"
+    [ -z "$out" ] || fail "it says something again on the next poll: $out"
+    echo "ok: ...and nothing on the next one"
+    # ...but it is still RETRIED. The contract cannot tell a driver that never
+    # types from a send that timed out once, and giving up the reset for good on
+    # one timeout costs every review round the whole build context.
+    rm -f "$STUB_DIR/send-refuses"
+    : >"$STUB_CALLS"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
     in_fleet reset_context_for_answering >/dev/null 2>&1
+    grep -q "^terminal enter t1" "$STUB_CALLS" \
+      || fail "a send that recovered was never retried: $(cat "$STUB_CALLS")"
     [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
-      && fail "a worktree with no agent at that moment was marked reset for good"
-    echo "ok: ...while a worktree with no agent yet is still reset later"
+      || fail "the reset did not complete once the driver typed again"
+    [ -e "$AUTOFLEET_DIR/send-refused-42" ] \
+      && fail "a send that landed left the refusal marker, silencing the next one"
+    echo "ok: ...and retried, so a send that recovers still resets the context"
     ;;
 
   handoff_expires)

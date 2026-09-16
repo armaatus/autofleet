@@ -405,26 +405,32 @@ card() {
 # `interrupt_agent_in` says it, because that is the difference between "nobody
 # is in there" and "somebody is and we could not reach them".
 #
-# 1 = nothing was sent: no agent, or the listing could not be read -- both may
-#     change by the next poll. 2 = there IS an agent and the driver would not
-#     type at it or submit, which a driver that cannot type will say on every
-#     poll for ever; a caller that retries per poll reads 2 as its exit
-#     (armaatus/autofleet#106).
+# The third argument, when given, is a marker that makes a REFUSED send said
+# once rather than once a poll (armaatus/autofleet#106). The contract cannot
+# tell "this driver never types" from "this send timed out", so a caller that
+# retries every poll must keep retrying -- a one-off timeout on the poll a PR
+# opened is not a reason to give up its context reset for good -- and only the
+# line is throttled. A send that lands clears it, so the next refusal is news.
 say_to_agent_in() {
-  local path="$1" text="$2" handle
+  local path="$1" text="$2" said="${3:-}" handle
   if ! handle="$(runner_agent_terminal "$path")"; then
     say "  the runner would not say whether an agent is in $path -- nothing was sent"
     return 1
   fi
   [ -n "$handle" ] || return 1
   runner_terminal_send "$handle" "$text" || {
-    say "  the runner would not type into $path -- nothing was sent"
-    return 2
+    [ -n "$said" ] && [ -e "$said" ] \
+      || say "  the runner would not type into $path -- nothing was sent"
+    [ -z "$said" ] || : >"$said"
+    return 1
   }
   runner_terminal_enter "$handle" || {
-    say "  the runner typed into $path but would not submit it"
-    return 2
+    [ -n "$said" ] && [ -e "$said" ] \
+      || say "  the runner typed into $path but would not submit it"
+    [ -z "$said" ] || : >"$said"
+    return 1
   }
+  [ -z "$said" ] || rm -f "$said"
   return 0
 }
 
@@ -486,6 +492,7 @@ handoff_turn() {
   # exactly when the caller wants to get on with it.
   say_to_agent_in "$path" \
     "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
+    "$STATE_DIR/send-refused-$num" \
     || return 0
   printf '%s %s\n' "$now" "$(fleet_mtime "$note")" >"$marker"
   say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
@@ -507,7 +514,7 @@ handoff_turn() {
 # earlier, and the agent is between turns there.
 reset_context_for_answering() {
   [ "${AUTOFLEET_CONTEXT_RESET:-on}" = on ] || return 0
-  local f num path rc
+  local f num path
   for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"
@@ -526,17 +533,10 @@ reset_context_for_answering() {
       continue
     fi
     handoff_turn "$num" "$path" || continue
-    say "#$num: PR is open -- starting the answering work in a clean context"
-    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD"; rc=$?
-    # A driver that REFUSED is marked done, like the empty clear command above:
-    # retrying it is the same refusal and the same lines on every poll for as
-    # long as the PR is open. No agent yet (1) is left to the next poll.
-    if [ "$rc" -eq 2 ]; then
-      : >"$STATE_DIR/context-reset-$num"
-      say "#$num: the runner would not type at this agent, so the build context stays for the answering work"
-      continue
-    fi
-    [ "$rc" -eq 0 ] || continue
+    # Retried every poll while the driver refuses, so said only while it has not.
+    [ -e "$STATE_DIR/send-refused-$num" ] \
+      || say "#$num: PR is open -- starting the answering work in a clean context"
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
     # The marker goes down BEFORE the second prompt: a clear that landed and an
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
@@ -613,6 +613,7 @@ clear_issue_markers() {
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
+        "$STATE_DIR/send-refused-$1" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
