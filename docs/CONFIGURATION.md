@@ -562,8 +562,29 @@ Savings scale with how repetitive the payload is: repeated JSON and log lines
 clear 90%, prose and already-dense output compress very little. This fleet's
 traffic is a mix — issue bodies and PR bodies are prose, `gh` JSON, test output
 and diffs are not — so the number that matters is a measured one for this
-repository, not the vendor's. It is in the pull request for
-armaatus/autofleet#89.
+repository, not the vendor's.
+
+Measured here on one read-only pass over a real pull request (its body, its diff,
+the issue it closes, the files it touches, `git log`), run twice with the same
+prompt and the same tool allowlist:
+
+| | unproxied | through the proxy |
+|---|---|---|
+| billed cost | $5.4725 | $2.7213 |
+| cache read | 3,476,688 | 1,659,126 |
+| cache creation | 330,435 | 131,728 |
+| output | 17,183 | 22,969 |
+| turns | 28 | 31 |
+| wall clock | 248s | 350s |
+
+The proxy's own ledger for that traffic: **8.8% compressed, 133,864 of 1,529,329
+tokens over 22 calls** — below the vendor's published 21–57%, which is what a
+prose-heavy mix predicts. Read the two numbers separately: **8.8% is what
+compression is worth here**, per payload and deterministic. The halved bill is
+one sample, it also carries whatever `ENABLE_TOOL_SEARCH=true` is worth on its
+own, and the two runs are not byte-identical (28 turns against 31). **Output
+tokens and wall clock both went up.** Measure your own traffic before you assume
+either figure.
 
 **Any Anthropic-compatible compressing proxy satisfies this seam.** Nothing under
 `scripts/fleet/` imports headroom, probes for its CLI, or reads a file of its:
