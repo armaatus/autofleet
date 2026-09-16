@@ -58,6 +58,12 @@ set -a; . ./.env; set +a
 # the wait; it stops the wait from looking like a hang. Raised by the
 # independent review, and narrowed by the self-review, which caught the first
 # wording asserting one driver's candidate count from a driver-agnostic file.
+# WHAT A REFUSAL HERE LEAVES BEHIND, because this is where the next reader is
+# standing: on this path the worktree already exists, is owned, and is carded
+# `in-progress` -- `launch` created and carded it before invoking this hook and
+# does not read its exit status -- so stopping here aborts provisioning of a
+# worktree that is already open. #13's Acceptance carries it; this is the line
+# that says so from the code. Raised by the self-review.
 echo "==> checking the $AUTOFLEET_RUNNER runner"
 fleet_require_runner
 runner_available || {

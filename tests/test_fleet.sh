@@ -1466,8 +1466,12 @@ DRIVER
       || fail "the driver's reason arrived without the consequence, which only the caller can add: $out"
     [ -s "$WORK/down-calls" ] \
       && fail "a dispatcher that had been told the runner is unusable still called into it: $(cat "$WORK/down-calls")"
-    [ -n "$(ls -A "$AUTOFLEET_DIR/worktrees" 2>/dev/null)" ] \
-      && fail "a worktree was opened by a dispatcher that had already been told the runner is unusable"
+    # NOT a second check on $AUTOFLEET_DIR/worktrees: `make_worktree` is what
+    # creates that directory and this phase does not call it, so an emptiness
+    # test there passes on every machine whatever the dispatcher did. The
+    # recorded calls above are the whole of this claim. Found by the
+    # self-review, on an assertion this branch added.
+    :
 
     # 3. ...AND setup.sh PROBES. It runs earliest of the three hooks and was the
     #    only one that did not, while the runner holds the agent's tab until it

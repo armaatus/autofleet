@@ -431,9 +431,9 @@ else
   # later descendant of that same environment -- an agent shell running
   # `board.sh` -- gets `fleet_require_runner`'s line rather than the block, and
   # that line names the file, which is the part it needs. Exported so it
-  # survives the exec; the driver path goes with it so `fleet_require_runner`
-  # can still name the file in the process that did not print the block. Found
-  # by the local review.
+  # survives the exec; the driver PATH is not, because every process that
+  # sources this file recomputes it above the branch. Found by the local review,
+  # the stale half of the sentence by the self-review.
   #
   # Named for what it holds, so nothing has to say it is not a boolean. The
   # hazard is the environment, not the name: this is compared against the runner
