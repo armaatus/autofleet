@@ -181,16 +181,21 @@ trap cleanup EXIT
 # whole machine, which is what armaatus/autofleet#71 is about. A stray from
 # another worktree answered the assertion; worse, the cleanup would have KILLED
 # it. The watchdog's sleep belongs to the payload's `tests/run.sh` and has no
-# path to match on, so the number is the only handle either of them has: derived
-# from `$$` it names this run's fixture, and two suites on one machine cannot
-# collide because two live processes cannot share a pid. The `before` guard in
-# `orphans` still covers the one case left -- a recycled pid with a stale orphan
-# from a previous run under the same number.
+# path to match on, so the number is the only handle either of them has.
 #
-# The bases keep them apart from each other whatever the pid is, and both stay
-# in the range a real timeout would plausibly be.
-BLOCK_NAP=$(( 5000 + $$ % 1000 ))   # what the blocking fixture waits on
-WATCH_NAP=$(( 4000 + $$ % 1000 ))   # what the watchdog waits on, i.e. the bound itself
+# THE WHOLE PID, not `$$ % 1000`. Two live processes cannot share a pid, so the
+# whole of it is unique by construction; a remainder is not -- two concurrent
+# runs whose pids are congruent mod 1000 got the SAME two numbers, and then
+# `cleanup`'s `pkill -9` SIGKILLed the other run's live watchdog. That is the
+# machine-wide signalling this change exists to remove, arriving through its own
+# fix. Found by `/code-review`.
+#
+# The bases keep the two apart from each other whatever the pid is: a Linux
+# `pid_max` may be as large as 4194304, and 9000000 is clear of 4000 plus any
+# pid that can exist. Both stay in the range `sleep` accepts; neither is ever
+# waited out, because every phase that starts one kills it.
+BLOCK_NAP=$(( 9000000 + $$ ))   # what the blocking fixture waits on
+WATCH_NAP=$((    4000 + $$ ))   # what the watchdog waits on, i.e. the bound itself
 
 # A copy of the real runner, registering ONLY the throwaway suites named in "$@".
 #
@@ -373,10 +378,12 @@ case "${1:-}" in
   ok "...keeping what the phase managed to say, which is the diagnosis"
 
   # The descendants die with it. `timeout` and `midstop` in test_review_mode.sh
-  # ask `pgrep` a machine-wide question about a `sleep 3607`, so a descendant of
-  # one bounded phase surviving fails a later, unrelated phase -- measured, with
-  # "the wedged reviewer's own child outlived the kill". A bound that creates the
-  # misattribution it exists to remove is the worst of the two.
+  # USED TO ask `pgrep` a machine-wide question about a `sleep 3607`, so a
+  # descendant of one bounded phase surviving failed a later, unrelated phase --
+  # measured, with "the wedged reviewer's own child outlived the kill". A bound
+  # that creates the misattribution it exists to remove is the worst of the two.
+  # Those phases are scoped to their own fixture since armaatus/autofleet#71 and
+  # would no longer notice; this row is what is left watching.
   sleep 2
   strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \

@@ -396,8 +396,14 @@ stub_reviewer() {
   REVIEWER_WORK="$WORK/bin/reviewer-work"
   cat >"$REVIEWER_WORK" <<'CHILD'
 #!/usr/bin/env bash
-# The distinctive duration stays, so a human reading `ps` still recognises it.
-sleep 3607
+# `exec -a "$0"`, so THIS PROCESS IS THE SLEEP rather than a shell waiting on
+# one. The assertion is about the LEAF the wrapper started -- with a shell in
+# between, a scoped `pgrep` matches only the shell and an orphaned `sleep` is
+# neither caught nor reaped, which moves the check one process up instead of
+# scoping it. argv is then `<path> 3607`: the path scopes it to this fixture and
+# the distinctive duration is still there for a human reading `ps`.
+# Found by `/code-review`.
+exec -a "$0" sleep 3607
 CHILD
   chmod +x "$REVIEWER_WORK"
   export REVIEWER_WORK
@@ -1960,6 +1966,28 @@ PY_FIX
   [ -e "$AUTOFLEET_DIR/reviewing/.closed-99" ] \
     && fail "the grace marker outlived the records it graced; a number that comes round again is then swept with no grace at all"
   ok "...and the grace marker goes with them"
+
+  # ...AND ONE `gh pr view --json state` PER PULL REQUEST PER PASS, however many
+  # sweeps ask. There are two -- the transcripts and the records -- each with its
+  # own grace marker, so on the passes they both ask, the same PR cost two
+  # identical calls. For the host the confirmation exists for, whose PRs are
+  # opened under another account and always answer OPEN, that is one call per
+  # poll per PR forever, which is what the alternation is there to avoid. The
+  # bound is the reason for asking at all. armaatus/autofleet#71.
+  mkdir -p "$AUTOFLEET_DIR/reviews"
+  : >"$AUTOFLEET_DIR/reviews/pr-97-11111111.log"
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.done"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.tries"
+  poll_review_open_prs                 # the grace pass: neither sweep asks
+  asked="$(grep -c "pr view 97 --json state" "$GH_CALLS" || true)"
+  [ "${asked:-0}" = 0 ] \
+    || fail "a PR was asked about on the pass it became eligible ($asked call(s)): $(grep 'pr view 97' "$GH_CALLS")"
+  : >"$GH_CALLS"
+  poll_review_open_prs                 # ...and the pass that does
+  asked="$(grep -c "pr view 97 --json state" "$GH_CALLS" || true)"
+  [ "${asked:-0}" = 1 ] \
+    || fail "the two sweeps each asked GitHub about PR 97 ($asked call(s) in one pass), so the bound the alternation buys is spent twice"
+  ok "...and one pass asks GitHub about a pull request once, however many sweeps want to know"
 
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a

@@ -3108,7 +3108,12 @@ JSON
     out="$(in_fleet cmd_status 2>&1)"
     grep -q -- "#-" <<<"$out" \
       && fail "status prints a bare dash for a worktree the hold names by its directory: $out"
-    grep -q "handmade" <<<"$out" \
+    # ANCHORED ON THE LABEL COLUMN. A bare `grep handmade` is satisfied by the
+    # PATH column beside it, so a `cmd_status` that still rendered `#-` in the
+    # label and printed the path unchanged would pass -- which is the row
+    # asserting nothing that this phase exists to stop.
+    # Found by `/mattpocock-skills:code-review`.
+    grep -q "^  handmade " <<<"$out" \
       || fail "status does not name the unlinked worktree the way the hold does: $out"
     grep -q -- "#42" <<<"$out" \
       || fail "status stopped naming the linked worktree by its issue: $out"

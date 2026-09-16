@@ -173,6 +173,8 @@ forget_poll_answers() {
   rm -rf "$POLL_CACHE"; mkdir -p "$POLL_CACHE"
   # ...and the out-of-poll memo with it. See $OPEN_PR_MEMO below.
   OPEN_PR_MEMO=""; OPEN_PR_MEMO_STATE=""
+  # ...and the sweeps' shared answer about each PR's state. See $PR_STATE_MEMO.
+  PR_STATE_MEMO=" "
 }
 
 # THE POLL CACHE IS THE POLL'S, and this is the line that says so rather than
@@ -2307,7 +2309,8 @@ EOF
 # never noticing it had closed, and its files would outlive it. Halved and
 # alternating is the bound, not "asked once".
 #
-# ASKED ONCE PER PULL REQUEST PER PASS, which is the caller's job: this used to
+# ASKED ONCE PER PULL REQUEST PER PASS, and `pr_state_once` below is what makes
+# that true across BOTH sweeps rather than within each. The call used to
 # sit inside the deleting loop, so the PR with thirteen transcripts #70 measured
 # cost thirteen identical calls -- every poll, forever, because a PR that
 # answers OPEN is never deleted and so never stops being a candidate. At the
@@ -2320,11 +2323,48 @@ pr_sweepable() {
     : >"$dir/.closed-$num"
     return 1
   fi
-  case "$(GH_PAGER=cat gh pr view "$num" --json state --jq .state 2>/dev/null)" in
+  # NOT `case "$(pr_state_once ...)"`: the memo is written by that function, and
+  # a command substitution is a subshell, so every write would be discarded and
+  # every caller would ask GitHub again. The answer comes back in a variable for
+  # the same reason `count_parked_owned`'s warning had to leave stdout.
+  pr_state_once "$num"
+  case "$PR_STATE_ANSWER" in
     CLOSED|MERGED) return 0 ;;
     OPEN) rm -f "$dir/.closed-$num"; return 2 ;;
     *) return 1 ;;
   esac
+}
+
+# WHAT GITHUB SAYS PR $1 IS, asked at most once per pass however many sweeps ask.
+#
+# There are TWO callers of `pr_sweepable` with two grace markers of their own --
+# the transcript store's and the record store's -- and both run every pass. The
+# alternation the header above describes is per marker, so on the passes they
+# both ask, the same pull request cost two identical `gh pr view` calls: for a
+# host whose PRs are opened under another account, one call per poll per PR
+# forever, which is the "every one" that paragraph promises to avoid. The bound
+# is the point of asking at all. Found by `/mattpocock-skills:code-review`.
+#
+# A VARIABLE and not a file, for $OPEN_PR_MEMO's reason, and dropped by
+# `forget_poll_answers` with the rest of the pass's answers. Pure parameter
+# expansion rather than a pipe: `printf | sed | head` under `pipefail` is the
+# EPIPE race this file has measured twice.
+#
+# `-` is "gh would not say", memoised like any other answer: one outage is one
+# call, and every caller in the pass treats it as "keep the files".
+# THE ANSWER IS IN $PR_STATE_ANSWER, not on stdout, because the memo is the
+# point: a function whose caller reads it through `$( )` runs in a subshell and
+# every memo write it makes is thrown away.
+PR_STATE_MEMO=" "
+PR_STATE_ANSWER=""
+pr_state_once() {
+  local num="$1" rest
+  case "$PR_STATE_MEMO" in
+    *" $num="*) rest="${PR_STATE_MEMO#*" $num="}"; PR_STATE_ANSWER="${rest%% *}"; return 0 ;;
+  esac
+  PR_STATE_ANSWER="$(GH_PAGER=cat gh pr view "$num" --json state --jq .state 2>/dev/null)"
+  case "$PR_STATE_ANSWER" in ''|*[!A-Za-z]*) PR_STATE_ANSWER="-" ;; esac
+  PR_STATE_MEMO="$PR_STATE_MEMO$num=$PR_STATE_ANSWER "
 }
 
 prune_review_logs() {
@@ -4992,10 +5032,11 @@ while that one is up."
     if [ "$queued" -eq 0 ] && [ "${owned:-0}" -eq 0 ]; then
       if $drain_mode; then
         # NOT "everything in flight has landed" when something has not: the
-        # parked worktrees named just above are exactly the work that did not
-        # land, and signing off with the one thing that did not happen is how a
-        # reader stops reading the lines that say what to do about it. Found by
-        # the independent review.
+        # parked worktrees -- named after this line now, in the block below
+        # `fleet down` -- are exactly the work that did not land, and signing off
+        # with the one thing that did not happen is how a reader stops reading
+        # the lines that say what to do about it. Found by the independent
+        # review.
         if [ "${parked:-0}" -gt 0 ]; then
           reason="${reason:-you stopped it}; everything else in flight has landed, and $parked worktree(s) are waiting for you"
         else
@@ -5021,14 +5062,29 @@ while that one is up."
   # got one line short of. The naming block ran INSIDE the loop, so the last
   # thing on the screen was `fleet down: $reason` -- and `$reason` carries a
   # count ("and 1 worktree(s) are waiting for you"), not which issue and not the
-  # command that releases it. A reader stops at the last line. Moved here, and
-  # out of the `queued == 0 && owned == 0` branch as well: a run that ends on
-  # `--until` or its time-box leaves the same parked worktrees behind, and a
-  # worktree nobody mentions is one nobody releases. armaatus/autofleet#71.
+  # command that releases it. A reader stops at the last line.
+  #
+  # What changed is the ORDER and nothing else. `--until`, `--for` and
+  # `--max-prs` all latch the drain and still leave through the
+  # `queued == 0 && owned == 0` break above, which is the poll loop's only exit
+  # -- so this is outside that `if` because it is after the loop and there is
+  # nothing left to gate on, NOT because it reaches an ending the old placement
+  # did not. Said precisely because the first version of this comment claimed
+  # the second thing. Found by `/mattpocock-skills:code-review`.
+  #
+  # `parked_for_person`, NOT `why_parked`: this was the third reader of the park
+  # predicate and the one still on the ungated one, so it would print
+  # `how_to_release` -- "commit, move or discard what is there" -- against a
+  # worktree whose agent is writing. Unreachable today, because `owned` reaching
+  # 0 means every one of these already passed the gate inside
+  # `count_parked_owned`; a guard that holds only because of something two
+  # hundred lines away is the shape armaatus/autofleet#71 is about. In the QUIET
+  # voice, like `cmd_status`: nothing after the loop should be writing to
+  # $STATE_DIR. Found by the same pass.
   if [ "${parked:-0}" -gt 0 ]; then
     say "$parked worktree(s) are waiting for you rather than for an agent:"
     for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-      why="$(why_parked "$n")" || continue
+      why="$(parked_for_person "$n" quiet)" || continue
       say "  #$n -- $why"
       say "    $(how_to_release "$n" "$(owned_path "$n")")"
     done

@@ -310,12 +310,16 @@ phase_watchdog() {
 
 # Every process descended from `$1`, deepest first, then `$1` itself.
 #
-# `kill` on the phase alone leaves its children reparented to init, and two
-# phases in test_review_mode.sh (`timeout`, `midstop`) ask `pgrep` a MACHINE-WIDE
-# question about exactly such a child: a `sleep 3607` left by one bounded phase
-# failed a later, unrelated phase with "the wedged reviewer's own child outlived
-# the kill". That is the misattribution this whole change exists to remove,
-# reintroduced by the thing removing it. Found by review.
+# `kill` on the phase alone leaves its children reparented to init, and that was
+# measured: two phases in test_review_mode.sh (`timeout`, `midstop`) asked
+# `pgrep` a MACHINE-WIDE question about exactly such a child, and a `sleep 3607`
+# left by one bounded phase failed a later, unrelated phase with "the wedged
+# reviewer's own child outlived the kill". That is the misattribution this whole
+# change exists to remove, reintroduced by the thing removing it. Found by
+# review. Those two phases scope their `pgrep` to their own fixture since
+# armaatus/autofleet#71, so they can no longer be the ones that notice -- which
+# is an argument for reaping the tree here, not against it: a stray from a
+# bounded phase is now a stray nothing reports.
 #
 # The process group is not enough on its own. `review.sh` deliberately puts the
 # reviewer in its OWN group so it can signal it, so the descendant this most
