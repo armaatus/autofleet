@@ -680,38 +680,56 @@ disown_issue() {
 # on that order -- `waiting_worktrees`, `in_flight`, `foundation_in_flight` and
 # `cmd_status` -- and it is stated here because the `awk` alone does not say it.
 #
-# THE PARK REASONS, in one place, with the sentence a person is told for each.
+# THE PARK REASONS: which one applies, and what a person is told about it.
 #
 # There are five, and the count and the two places that REPORT them drifted
 # apart the moment there were more than three: `count_parked_owned` learned
 # `held-` and `git-blind-` and the farewell list and `cmd_status` did not, so a
 # worktree could be counted as waiting for a person and then never named as one
 # -- present in the tally, absent from the list that says what to do about it.
-# That is worse than not counting it at all. One list, three readers.
+# That is worse than not counting it at all. One SOURCE, three readers -- and a
+# source rather than a list is the whole of what the next paragraph is about.
 #
-# `why_parked <issue>` prints the reason, or nothing when that issue is not
-# parked. Order is deliberate where two can coexist: a refused removal is the
-# one a person acts on, so it wins over "git could not say".
+# TWO QUESTIONS, TWO SOURCES, and the call graph rather than a count, because an
+# earlier version of this paragraph invented a set of callers that did not exist.
+# `parked_marker` over `PARK_MARKERS` answers WHICH reason applies, and is the
+# only place the five are ordered. `why_parked` answers what a person is TOLD
+# about one, and prints nothing when the issue is not parked.
+#
+#   how_to_release      asks `parked_marker`: its line differs by reason, and it
+#                       never needs the sentence.
+#   parked_for_person   asks BOTH -- the marker for the agent gate, `why_parked`
+#                       for the sentence it returns.
+#   the count, `status`
+#   and the farewell    ask `parked_for_person`, so they get the sentence and
+#                       never touch either of the two directly. These are the
+#                       "three readers" the paragraph above means; the number is
+#                       not the number of callers of `parked_marker`.
+#
 # THERE IS NO LIST OF THE REASON SENTENCES, and that is deliberate. `PARK_MARKERS`
-# below is not one: it holds the five marker NAMES in precedence order and has a
-# reader, `parked_marker`, which is why it is load-bearing where a list of the
-# sentences would not be. One was added here
-# under a comment promising "one list, three readers", and it had NO reader:
+# below is not one: it holds the five marker NAMES, has a reader in
+# `parked_marker`, and is load-bearing where a list of the sentences would not be.
+# A list of the sentences was added here once, under a comment promising "one
+# list, three readers", and it had NO reader:
 # `why_parked`, `how_to_release` and the phase each enumerated the five by hand,
 # so the list was the drift it was added to prevent, one indirection later. An
 # attempt to make it load-bearing through `clear_issue_markers` failed too --
 # that function's existing `*-blind-` glob and explicit names already cover all
 # five, so removing a reason from the list changed nothing.
-#
-# `why_parked` below IS the single source: it is the only place that knows what
-# parks a worktree and what a person is told about it, and the three readers ask
-# IT rather than a list beside it. Found by the independent review.
+# Found by the independent review, twice: once for the list, and once for the
+# half of this header that still called `why_parked` the single source after
+# `parked_marker` had become it.
+
 # WHICH MARKER PARKS $1, as the marker's own name, in precedence order. One
-# list, and it is the only place the five are ordered.
+# list, and it is the only place the five are ordered. The order is deliberate
+# where two can coexist: a refused removal is the one a person acts on, so it
+# wins over "git could not say".
 #
-# Split out from `why_parked` because three readers need to know WHICH reason
-# this is and only one of them wants the sentence: the agent gate, which applies
-# to four of the five, and `how_to_release`, whose answer differs for the fifth.
+# Split out from `why_parked` because TWO places need to know which reason this
+# is, and they want different things with it: `how_to_release`, whose line
+# differs for the fifth reason and which never prints the sentence at all, and
+# the agent gate inside `parked_for_person`, which applies to four of the five
+# and does want the sentence beside it.
 # Both used to infer it -- the gate from the prose `why_parked` printed, then
 # from the ABSENCE of `stuck-`, which is correct only while `stuck-` is the first
 # test here and is a coupling nothing pins. A sixth reason added above it would
@@ -729,8 +747,10 @@ parked_marker() {
 # $2 is the marker, when the caller already has it: `parked_for_person` looks it
 # up to decide the gate and then wanted the sentence for the same one, and three
 # subshells per worktree per pass for a value the caller is holding is the slope
-# armaatus/autofleet#69 is about. Optional, because `cmd_status` and the tests
-# ask by number alone. Found by `/mattpocock-skills:code-review`.
+# armaatus/autofleet#69 is about. Optional because THE TESTS ask by number alone;
+# `cmd_status` used to and does not any more -- it goes through
+# `parked_for_person` like the other two readers, and `parked_for_person` always
+# has the marker to pass. Found by `/mattpocock-skills:code-review`.
 why_parked() {
   case "${2:-$(parked_marker "$1")}" in
     stuck)       printf 'its removal was refused\n' ;;
