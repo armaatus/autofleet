@@ -156,7 +156,9 @@ cleanup() {
   # assertion, or died before reaching it, must not leave the stray behind: this
   # file would then be causing the machine-wide contamination it is here to
   # catch, and the next phase to ask `pgrep` a question would pay for it.
-  # BOTH naps. $WATCH_NAP is 82 minutes and is the subject of `orphans`: when the
+  # BOTH naps, and both are this process's own numbers -- see their definition:
+  # an unscoped `pkill -f` here would signal another fleet's sleep, not merely
+  # read one. $WATCH_NAP is the subject of `orphans`: when the
   # regression that phase guards against is present, the phase fails AND leaves
   # the stray -- after which every later `orphans` on this machine hard-fails at
   # its own `before` guard, so the guard is off for exactly as long as it matters
@@ -171,13 +173,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Distinctive durations, so `pgrep` cannot match some unrelated process on the
-# machine and answer a question this test did not ask. The `timeout` phase in
-# test_review_mode.sh greps for a bare `sleep 3607` machine-wide and does fail
-# when an unrelated one is running; that is armaatus/autofleet#71's territory,
-# not something to reproduce here.
-BLOCK_NAP=5507   # what the blocking fixture waits on
-WATCH_NAP=4931   # what the watchdog waits on, i.e. the bound itself
+# THIS PROCESS'S OWN durations, so neither the `pgrep`s that decide nor the
+# `pkill`s that reap can reach a process this run did not start.
+#
+# Distinctive constants made a collision unlikely and left the construction
+# wrong: `pkill -9 -f "sleep 5507"` is a question -- and a signal -- aimed at the
+# whole machine, which is what armaatus/autofleet#71 is about. A stray from
+# another worktree answered the assertion; worse, the cleanup would have KILLED
+# it. The watchdog's sleep belongs to the payload's `tests/run.sh` and has no
+# path to match on, so the number is the only handle either of them has: derived
+# from `$$` it names this run's fixture, and two suites on one machine cannot
+# collide because two live processes cannot share a pid. The `before` guard in
+# `orphans` still covers the one case left -- a recycled pid with a stale orphan
+# from a previous run under the same number.
+#
+# The bases keep them apart from each other whatever the pid is, and both stay
+# in the range a real timeout would plausibly be.
+BLOCK_NAP=$(( 5000 + $$ % 1000 ))   # what the blocking fixture waits on
+WATCH_NAP=$(( 4000 + $$ % 1000 ))   # what the watchdog waits on, i.e. the bound itself
 
 # A copy of the real runner, registering ONLY the throwaway suites named in "$@".
 #

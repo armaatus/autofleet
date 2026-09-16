@@ -1461,8 +1461,44 @@ HOLDER
       || fail "an empty marker did not read as zero, so the cap compares against nothing"
     [ "$(in_fleet_fn fleet_tries_count "$m.absent" abc123)" = 0 ] \
       || fail "an absent marker did not read as zero"
-    rm -f "$m"
     ok "...and fleet_tries_count answers with a number for junk, empty, absent and another head"
+
+    # ...AND THE OTHER READER OF THE SAME FORMAT AGREES WITH IT. `head n` was
+    # parsed by a bare `read -r` in three places, each free to decide what a
+    # corrupt count means: the refund defaulted a missing one to 1 and the
+    # counter normalised it to 0, by hand, five lines apart. One reader now, and
+    # this is the row that says the two answer the same question the same way.
+    # armaatus/autofleet#71.
+    printf 'abc123 two\n' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 0" ] \
+      || fail "the shared reader did not normalise a junk count: $(in_fleet_fn fleet_try_record "$m")"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ -e "$m" ] \
+      && fail "a junk count refunded to something rather than being dropped: $(cat "$m")"
+    ok "the refund and the count read one junk record the same way"
+    # A head with no count at all -- the shape a half-written marker leaves.
+    printf 'abc123\n' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 0" ] \
+      || fail "a record with no count did not read as zero: $(in_fleet_fn fleet_try_record "$m")"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 0 ] \
+      || fail "the counter disagreed with the reader about a record with no count"
+    # ...and a record it cannot read at all is a failure, not `" 0"`.
+    : >"$m"
+    in_fleet_fn fleet_try_record "$m" >/dev/null 2>&1 \
+      && fail "an empty marker read as a record; every caller would then charge a try to an empty head"
+    in_fleet_fn fleet_try_record "$m.absent" >/dev/null 2>&1 \
+      && fail "an absent marker read as a record"
+    ok "...and a record with no head at all is a failure rather than an answer"
+    # The writer round-trips through the reader, which is what makes them one
+    # format rather than two that happen to agree today.
+    in_fleet_fn fleet_try_write "$m" abc123 4
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 4" ] \
+      || fail "what the writer wrote is not what the reader reads: $(cat "$m")"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 3" ] \
+      || fail "the refund did not write the record back in the format the reader reads: $(cat "$m")"
+    ok "...and the one writer round-trips through the one reader"
+    rm -f "$m"
 
     # THE KNOB THAT WAS REPLACED IS AN ERROR, NOT AN ALIAS. A host project that
     # tuned `AUTOFLEET_REVIEW_MAX_ROUNDS` meant "give this repository more
@@ -1718,6 +1754,19 @@ PY_FIX
     [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
       && fail "a reviewer KILLED at the deadline wrote the done record, so that head is never reviewed again -- the silent block #33 exists to remove"
     ok "...and a reviewer killed at the deadline is not recorded as done"
+
+    # ...AND IT IS RETRIED, which is the property #33's Acceptance actually
+    # states. The absence of `.done` is the MECHANISM that produces the retry,
+    # so the row above infers the property from its cause -- exit 5 has the
+    # positive row (`await n_started 2`) and exit 7 had none, and a change that
+    # stopped the poll reaching a PR with no `.done` would pass it.
+    # armaatus/autofleet#71.
+    stub_reviewer marked
+    before="$(n_started)"
+    poll_review_open_prs
+    await n_started "$(( before + 1 ))" \
+      || fail "a reviewer killed at its deadline was never retried; #33 groups exit 5 and exit 7 as the two retryable cases"
+    ok "...and the next pass starts one"
     ;;
 
 # --------------------------------------------------------------------- capped
@@ -1873,12 +1922,44 @@ PY_FIX
   # this pull request is closed. The two halves of that rule are asserted in the
   # two places they differ. Found by the independent review.
   printf '3\n' >"$AUTOFLEET_DIR/reviewing/99.rounds"
+  # ONE GRACE PASS FIRST, and then a CONFIRMATION -- the two protections the
+  # transcript sweep has had since #70 and this one had neither of. It deleted
+  # as soon as a number was absent from `gh pr list --author "@me"`, which is
+  # right for deciding whom to review and wrong for "is this PR still open": on
+  # a host whose worktrees open PRs under another account, every one of them
+  # reads as closed. The file deleted is `<pr>.done`, and a `.done` deleted in
+  # error is the re-spawn loop #42 exists to remove, back for a poll.
+  # armaatus/autofleet#71.
+  poll_review_open_prs
+  for f in 99.done 99.said 99.tries 99.rounds; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      || fail "$f went on the pass its PR dropped off the listing; one blip in that listing is then a .done deleted under an open PR, which is the re-spawn loop"
+  done
+  ok "...and a closed PR's records survive the pass they become eligible on"
+
+  # ...and NOT AT ALL while GitHub says the pull request is open, whatever the
+  # author-scoped listing says. This is the protection the grace pass cannot
+  # give: a systematic mismatch is wrong on every pass, not just the first.
+  printf 'OPEN' >"$WORK/prstate"
+  GH_PR_STATE="$WORK/prstate" poll_review_open_prs
+  for f in 99.done 99.said 99.tries 99.rounds; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      || fail "$f was deleted for a pull request GitHub says is OPEN, on the strength of an author-scoped listing that cannot answer that question"
+  done
+  ok "...and are never swept while GitHub says the PR is open"
+
+  # ...and go once it is graced AND confirmed. The stub's `--json state` arm
+  # answers CLOSED by default, which is the ordinary case: a PR that has merged.
+  poll_review_open_prs
   poll_review_open_prs
   for f in 99.done 99.said 99.tries 99.rounds; do
     [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
       && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
   done
   ok "...and a closed PR's records are swept, .rounds included"
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-99" ] \
+    && fail "the grace marker outlived the records it graced; a number that comes round again is then swept with no grace at all"
+  ok "...and the grace marker goes with them"
 
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a

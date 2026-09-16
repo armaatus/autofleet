@@ -1045,6 +1045,41 @@ fleet_venv_is_usable() {
 # see the comments on their own `unspent_try` and round functions. What is
 # shared is the file format and the arithmetic, which is what drifted.
 
+# THE `head n` RECORD, read in one place and written in one place.
+#
+# The format had three spellings and the arithmetic two: `fleet_try_refund`
+# defaulted a missing count to 1 and `fleet_tries_count` normalised it to 0,
+# both by hand, and the dispatcher's two spawn gates wrote the pair back with
+# their own `printf`. That is the naming half of what `is_review_record` was
+# introduced to stop -- one format, several readers, each free to disagree about
+# junk. armaatus/autofleet#71.
+#
+# Prints `head count` and returns 0; returns 1 when there is no marker, when it
+# cannot be read, or when it names no head. The count is normalised HERE, so a
+# corrupt one is 0 for every caller rather than 0 for whichever caller
+# remembered: `[ "" -ge 3 ]` is `integer expression expected` and exit 2, which
+# reads as FALSE, and a cap that silently does not exist is what this file's
+# other normalisation comment is about.
+#
+# `2>/dev/null` BEFORE the redirection it is there for -- see the note above on
+# the seventeen places this was re-typed the other way round.
+fleet_try_record() {
+  local marker="$1" h n
+  [ -n "$marker" ] || return 1
+  read -r h n 2>/dev/null <"$marker" || return 1
+  [ -n "${h:-}" ] || return 1
+  case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s %s\n' "$h" "$n"
+}
+
+# ...and the one writer. $1 the marker, $2 the head, $3 the count. Silent on a
+# $STATE_DIR that will not take the file, like every other marker write here: a
+# fleet that cannot write its bookkeeping must not die in the middle of a poll.
+fleet_try_write() {
+  [ -n "$1" ] || return 0
+  printf '%s %s\n' "$2" "$3" >"$1" 2>/dev/null || true
+}
+
 # Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty
 # means "whatever head the marker names", which is the right refund for an exit
 # that failed before the head was known: the dispatcher spent that try for this
@@ -1054,14 +1089,16 @@ fleet_venv_is_usable() {
 # hand has no marker at all, and a refund with nothing to refund is a no-op, not
 # an error.
 fleet_try_refund() {
-  local marker="$1" want="${2:-}" h n
-  [ -n "$marker" ] || return 0
-  read -r h n 2>/dev/null <"$marker" || return 0
-  [ -n "${h:-}" ] || return 0
+  local marker="$1" want="${2:-}" record h n
+  record="$(fleet_try_record "$marker")" || return 0
+  read -r h n <<<"$record"
   [ -z "$want" ] || [ "$h" = "$want" ] || return 0
-  n=$(( ${n:-1} - 1 ))
+  # A count of 0 -- an absent or corrupt one, normalised by the reader -- goes
+  # to -1 and the marker is dropped, which is what the hand-rolled `${n:-1}`
+  # here did by a different route. One route now.
+  n=$(( n - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$marker" 2>/dev/null || true
-  else printf '%s %s\n' "$h" "$n" >"$marker" 2>/dev/null || true
+  else fleet_try_write "$marker" "$h" "$n"
   fi
 }
 
@@ -1075,12 +1112,10 @@ fleet_try_refund() {
 # and it is the reason this is one function rather than a shape each caller
 # remembers.
 fleet_tries_count() {
-  local marker="$1" want="${2:-}" h n
+  local marker="$1" want="${2:-}" record h n
   h=""; n=0
-  [ -n "$marker" ] && [ -f "$marker" ] && read -r h n <"$marker"
+  record="$(fleet_try_record "$marker")" && read -r h n <<<"$record"
   [ "${h:-}" = "$want" ] || n=0
-  n="${n:-0}"
-  case "$n" in (*[!0-9]*) n=0 ;; esac
   printf '%s\n' "$n"
 }
 

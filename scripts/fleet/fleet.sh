@@ -1976,6 +1976,14 @@ REVIEWING_DIR="$FLEET_REVIEWING"
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
+#   .closed-<pr> NOT a record and NOT a lock: the sweep's own bookkeeping, and a
+#                DOTFILE, which is what keeps it out of every `"$REVIEWING_DIR"/*`
+#                loop above without any of them learning a new name. Its presence
+#                means "a previous pass found this number absent from the open
+#                listing"; the records go on the pass AFTER that, and only once
+#                `gh pr view --json state` confirms it. Same name and same
+#                meaning as the transcript store's, because it is the same
+#                function that writes it -- see `pr_sweepable`.
 #
 #   v-<pr>       ...and the same four, for the VALIDATOR, under a `v-` prefix.
 #   v-<pr>.done  One directory rather than two, deliberately: `live_reviewers`,
@@ -2119,7 +2127,9 @@ start_validator() {
   # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
   # answer, no CLI on PATH, a kill at the deadline -- so what is left in it is
   # attempts that reached an agent and got nothing back.
-  printf '%s %s\n' "$head" "$(( tries_n + 1 ))" >"$marker.tries"
+  # Through `fleet_try_write`, like every other touch of this record: the
+  # `head n` format used to be respelled at each of its writers. #71.
+  fleet_try_write "$marker.tries" "$head" "$(( tries_n + 1 ))"
   AUTOFLEET_VALIDATE_MARKER="$marker" \
     "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
   printf '%s %s\n' "$!" "$head" >"$marker"
@@ -2265,6 +2275,58 @@ EOF
 # empty for the reviewer, `v-` for the validator -- because the "a run is still
 # writing this one" test has to ask about the right lock. Defaulted, so the
 # reviewer call site reads as it did.
+# IS PR $1 SAFE TO SWEEP? $2 is the directory its `.closed-` grace marker lives
+# in. Two protections, and they are not decoration:
+#
+#   the GRACE PASS -- never prune on the pass a PR drops off the open listing.
+#   A blip in the listing then costs a pass rather than a store.
+#
+#   the CONFIRMATION -- `gh pr view <n> --json state`, because the listing is
+#   `gh pr list --author "@me"`, which is right for deciding whom to REVIEW and
+#   wrong for "is this PR still open". On a host whose worktrees open PRs under
+#   a different account than the dispatcher's `gh` login, every one of them
+#   reads as closed.
+#
+# The transcript sweep had both and the record sweep had neither: it deleted as
+# soon as a number was absent. The blast radius looked small -- records exist
+# only for PRs that appeared in that listing -- but the file deleted is
+# `<pr>.done`, and a `.done` deleted in error is the re-spawn loop
+# armaatus/autofleet#42 exists to remove, back for a poll. One function now,
+# rather than the record sweep growing a second copy that can drift.
+# armaatus/autofleet#71.
+#
+#   0  confirmed closed, and this is not the first pass seeing it absent
+#   1  keep it: first pass, or `gh` would not say. Anything but a confident
+#      answer keeps the files AND keeps the grace, so a blip costs a pass.
+#   2  it is OPEN -- the author-scoped listing was wrong about it. The grace is
+#      dropped, so the next pass asks nothing and the question costs one call
+#      every SECOND poll rather than every one.
+#
+# THE QUESTION RECURS, and that is chosen rather than overlooked. Keeping the
+# marker on OPEN would ask on every poll; caching the answer for good would mean
+# never noticing it had closed, and its files would outlive it. Halved and
+# alternating is the bound, not "asked once".
+#
+# ASKED ONCE PER PULL REQUEST PER PASS, which is the caller's job: this used to
+# sit inside the deleting loop, so the PR with thirteen transcripts #70 measured
+# cost thirteen identical calls -- every poll, forever, because a PR that
+# answers OPEN is never deleted and so never stops being a candidate. At the
+# default 60s poll that is ~18,700 calls a day against the same budget
+# `next_issue` and `review_open_prs` spend, and gh's secondary rate limit is how
+# this dispatcher breaks.
+pr_sweepable() {
+  local num="$1" dir="$2"
+  if [ ! -e "$dir/.closed-$num" ]; then
+    : >"$dir/.closed-$num"
+    return 1
+  fi
+  case "$(GH_PAGER=cat gh pr view "$num" --json state --jq .state 2>/dev/null)" in
+    CLOSED|MERGED) return 0 ;;
+    OPEN) rm -f "$dir/.closed-$num"; return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 prune_review_logs() {
   local open_prs="$1" dir="${3:-$FLEET_DIR/reviews}" lock="${4:-}" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -2311,48 +2373,21 @@ prune_review_logs() {
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
   done
   for num_seen in $closed; do
-    if [ ! -e "$dir/.closed-$num_seen" ]; then
-      : >"$dir/.closed-$num_seen"       # first pass seeing it closed: grace it
-      continue
-    fi
-    # CONFIRMED CLOSED, not merely absent from an author-scoped list -- and
-    # asked ONCE PER PULL REQUEST, here, rather than once per transcript in the
-    # loop below. The open list comes from `gh pr list --author "@me"`, which is
-    # right for deciding whom to REVIEW and wrong for "is this PR still open":
-    # on a host where the worktrees open PRs under a different account than the
-    # dispatcher's `gh` login, every one of them reads as closed and loses its
-    # transcripts. The comment above named that hazard among three and the code
-    # guarded the other two.
-    #
-    # The call used to sit in the deleting loop, so the PR with thirteen
-    # transcripts #70 measured cost thirteen identical calls -- every poll,
-    # forever, because a PR that answers OPEN is never deleted and so never
-    # stops being a candidate. At the default 60s poll that is ~18,700 calls a
-    # day against the same budget `next_issue` and `review_open_prs` spend, and
-    # gh's secondary rate limit is how this dispatcher breaks. Found by the
-    # independent review.
-    #
-    # An OPEN answer puts the PR BACK ON THE OPEN LIST for the rest of this
-    # sweep, which is what it is. Leaving it a permanent candidate meant its
-    # transcripts were never swept AND never trimmed either -- the newest-N cap
-    # below iterates `$open_prs`, which by construction did not contain it -- so
-    # the one case this call exists to protect was the one case that grew
-    # without bound. Anything but a confident answer keeps the files and keeps
-    # the grace, so a `gh` blip costs a pass rather than a store.
-    #
-    # THE QUESTION RECURS, and that is chosen rather than overlooked. Dropping
-    # the marker on OPEN means the next pass is a grace pass that asks nothing,
-    # so such a PR costs one call every SECOND poll for as long as it stays open
-    # and absent from the author-scoped list. Keeping the marker instead would
-    # ask on every poll; caching the answer for good would mean never noticing
-    # it had closed, and its transcripts would outlive it. Halved and alternating
-    # is the bound, not "asked once" -- the cap reaches it on the passes it
-    # answers, which is enough to bound the store. Found by the independent
-    # review, which read the paragraph above as claiming more than the code does.
-    case "$(GH_PAGER=cat gh pr view "$num_seen" --json state --jq .state 2>/dev/null)" in
-      CLOSED|MERGED) graced="$graced$num_seen " ;;
-      OPEN) open_prs="$open_prs $num_seen"; rm -f "$dir/.closed-$num_seen" ;;
-      *) ;;
+    # THE GRACE PASS AND THE CONFIRMATION, both of them `pr_sweepable`'s since
+    # armaatus/autofleet#71 -- the record sweep needed the same two and had
+    # neither, and a second copy of them is what drifts. The paragraphs above
+    # this loop are its header now; what is left here is what THIS sweep does
+    # with each answer.
+    pr_sweepable "$num_seen" "$dir"
+    case $? in
+      0) graced="$graced$num_seen " ;;
+      # An OPEN answer puts the PR BACK ON THE OPEN LIST for the rest of this
+      # sweep, which is what it is. Leaving it a permanent candidate meant its
+      # transcripts were never swept AND never trimmed either -- the newest-N cap
+      # below iterates `$open_prs`, which by construction did not contain it --
+      # so the one case the confirmation exists to protect was the one case that
+      # grew without bound.
+      2) open_prs="$open_prs $num_seen" ;;
     esac
   done
 
@@ -2943,7 +2978,15 @@ for p in prs:
     # the exit-8 path is two API calls -- leaves no marker, this recreates one
     # holding a pid that has just died, and `live_reviewers` reaps it on the
     # very next candidate in this loop.
-    printf '%s %s\n' "$head" "$(( ${tries_n:-0} + 1 ))" >"$marker.tries"
+    #
+    # THROUGH `fleet_try_write`, like every other touch of this record since
+    # armaatus/autofleet#71: the open failure is silenced before the redirection
+    # rather than after it, and the STATUS comes back to the caller. An
+    # open-coded `printf >` here swallowed bash's own diagnostic, and a `.tries`
+    # that cannot be written reads 0 forever -- `AUTOFLEET_REVIEW_MAX_TRIES`
+    # becomes a guard that silently stopped guarding while a reviewer respawns
+    # every poll. Found by `/code-review`.
+    fleet_try_write "$marker.tries" "$head" "$(( ${tries_n:-0} + 1 ))"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     # CAPTURED, not read twice: `$!` inside the subshell below is the parent's
@@ -3023,7 +3066,17 @@ for p in prs:
   # a transcript is too weak to prune these. Both readers of `open_prs` honour
   # the one signal, which is the point of #72 having made it a signal.
   [ "${prs_answered:-no}" = yes ] || return 0
-  local rec base num
+  # ...and NOT on the pass a number drops off the listing, nor without asking
+  # GitHub. Both are `pr_sweepable`'s, and this sweep had neither: it deleted as
+  # soon as a number was absent. The file it deletes is `<pr>.done`, and a
+  # `.done` deleted in error is the re-spawn loop armaatus/autofleet#42 exists to
+  # remove, back for a poll. armaatus/autofleet#71.
+  #
+  # DECIDED ONCE PER PULL REQUEST, not once per record: a PR carries up to four
+  # of them, and the confirmation is a `gh` call. `$verdict_keep` and
+  # `$verdict_go` are this pass's answers, so the second record of a PR costs
+  # nothing.
+  local rec base num verdict_keep="" verdict_go=""
   for rec in "$REVIEWING_DIR"/*; do
     [ -e "$rec" ] || continue
     is_review_record "$rec" || continue
@@ -3037,8 +3090,19 @@ for p in prs:
     case " ${open_prs:-} " in
       *" $num "*) continue ;;
     esac
-    rm -f "$rec"
+    case " $verdict_keep " in *" $num "*) continue ;; esac
+    case " $verdict_go "   in *" $num "*) rm -f "$rec"; continue ;; esac
+    if pr_sweepable "$num" "$REVIEWING_DIR"; then
+      verdict_go="$verdict_go$num "
+      rm -f "$rec"
+    else
+      verdict_keep="$verdict_keep$num "
+    fi
   done
+  # The grace marker goes with the records it graced. Left behind, a number that
+  # comes round again -- a PR reopened, or a fresh dispatcher on a long-lived
+  # store -- would be swept on the first pass it is absent, with no grace at all.
+  for num in $verdict_go; do rm -f "$REVIEWING_DIR/.closed-$num"; done
 }
 
 # ---------------------------------------------------------------- the reap ---
