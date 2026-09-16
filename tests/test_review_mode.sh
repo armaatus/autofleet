@@ -2416,6 +2416,34 @@ PY2
   kill "$taker" 2>/dev/null
   ok "...and the one it does name is"
 
+  # A ZERO-BYTE MARKER, which is the `set -C` window in `fleet_lock_publish`,
+  # a crash between create and write, or `fleet_lock_claim` restoring a stolen
+  # file that was empty. The sweeps used to `rm -f` this unconditionally; the
+  # by-content guard has to keep reaping it or it becomes immortal. `read`
+  # fails at EOF exactly as it fails on an open error, so leaning on its status
+  # turned "the file is empty" into "the file is gone" and returned early --
+  # and then every poll found a marker with no head, spawned a reviewer whose
+  # `fleet_lock_claim` returned 3, and `review.sh` exited 2 saying "the
+  # dispatcher clears it on its next poll", which it never did. That PR is
+  # never reviewed again. Found by the self-review of the merge.
+  : >"$AUTOFLEET_DIR/reviewing/76"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/76" "" )
+  [ -e "$AUTOFLEET_DIR/reviewing/76" ] \
+    && fail "a zero-byte marker is never reaped, so that PR is wedged forever"
+  ok "...and a marker holding no pid at all is reaped, not left immortal"
+
+  # ...but NOT under a caller that names a pid: an empty marker does not name
+  # 4242, and reaping it here would be the path-keyed `rm -f` coming back in
+  # through the guard that replaced it.
+  : >"$AUTOFLEET_DIR/reviewing/75"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/75" 4242 )
+  [ -e "$AUTOFLEET_DIR/reviewing/75" ] \
+    || fail "an empty marker was reaped by a sweeper that named a live pid"
+  ok "...and only for the sweeper that read that same emptiness"
+  rm -f "$AUTOFLEET_DIR/reviewing/75"
+
   # ...AND THE SWEEPS ACTUALLY CALL IT. `live_reviewers` is nested inside
   # `review_open_prs` and cannot be invoked on its own, so the wiring is
   # asserted where it lives: no sweep in fleet.sh may remove a reviewer marker
