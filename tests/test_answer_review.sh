@@ -106,14 +106,27 @@ case "$*" in
     # The paginated PR read, in the shape merge_gate.py judges. `$GH_REVIEWED`
     # holds the sha the review is against -- empty for the phase where none has
     # been submitted yet.
-    python3 - "$(cat "$GH_REVIEWED")" <<'PY'
+    python3 - "$(cat "$GH_REVIEWED")" "$(cat "$GH_ABANDONED")" <<'PY'
 import json, sys
 oid = sys.argv[1]
+gone = sys.argv[2]
 reviews = [{"state": "COMMENTED", "submittedAt": "2026-09-06T02:00:00Z",
             "commit": {"oid": oid}, "author": {"login": "claude"},
             "body": "Nit: the comment says what, not why.\n"
                     "<!-- review-findings: 1 -->",
             "comments": {"totalCount": 0}}] if oid else []
+# A review on a head the branch has LEFT BEHIND, submitted before the one
+# above: findings, no answer, no validation. `abandoned_findings` keeps it and
+# `needs_validation` cannot send it a reader, because the review on the current
+# head has already moved `reviewed_sha()` past it -- so an answer naming that
+# head is the only thing that can ever clear it.
+if gone:
+    reviews.insert(0, {
+        "state": "COMMENTED", "submittedAt": "2026-09-06T01:00:00Z",
+        "commit": {"oid": gone}, "author": {"login": "claude"},
+        "body": "The lock is read by path, not by content.\n"
+                "<!-- review-findings: 3 -->",
+        "comments": {"totalCount": 0}})
 print(json.dumps({"data": {"repository": {"pullRequest": {
     "body": "Closes #170\n/code-review\nmattpocock-skills:code-review",
     "author": {"login": "armaatus"},
@@ -134,10 +147,14 @@ STUB
   # where no review has been submitted yet.
   GH_REVIEWED="$WORK/reviewed"
   if [ "${1:-}" = no_review ]; then : >"$GH_REVIEWED"; else printf '%s' "$PR_HEAD" >"$GH_REVIEWED"; fi
+  # A head this branch has left behind, carrying an unanswered review. Empty
+  # for every phase but `abandoned`.
+  GH_ABANDONED="$WORK/abandoned"; : >"$GH_ABANDONED"
+  [ "${1:-}" = abandoned ] && printf '%s' "$first" >"$GH_ABANDONED"
   # Non-empty means the next `run list` reports a gate run still in flight.
   GH_FLIGHT="$WORK/flight"; : >"$GH_FLIGHT"
   [ "${1:-}" = flight ] && printf 1 >"$GH_FLIGHT"
-  export GH_CALLS GH_HEAD GH_POSTED GH_REVIEWED GH_FLIGHT
+  export GH_CALLS GH_HEAD GH_POSTED GH_REVIEWED GH_FLIGHT GH_ABANDONED
   export FLEET_GATE_WAIT_SECONDS=5 FLEET_GATE_POLL_SECONDS=1
   export AUTOFLEET_DIR="$WORK/fleet"
   mkdir -p "$AUTOFLEET_DIR"
@@ -160,6 +177,32 @@ case "${1:-}" in
     grep -q 'run rerun --job 4242' "$GH_CALLS" \
       || { echo "$out" >&2; fail "the gate job was not re-run, so nothing asks merge-gate again"; }
     echo "ok: the answer is posted with its marker, and the gate is asked again"
+    ;;
+  abandoned)
+    # THE HOLD WITH NO REACHABLE REMEDY. A review with findings on a head the
+    # branch has left behind is kept by `abandoned_findings`, and the only
+    # reader it can have is a validation submitted while it was still the
+    # newest review. Once a review lands on the NEW head, `reviewed_sha()` has
+    # moved past it for good, so no future validation can ever read it -- and
+    # `needs_validation` returns False the moment any validation exists on the
+    # current head. The gate then refuses forever and its refusal said
+    # `answer-review.sh` could not clear the line, which left a hand-typed
+    # marker or an admin merge as the only ways out. The gate already keys
+    # `answered()` on the abandoned head's own sha; what was missing is this
+    # script ever writing that marker. Found by both self-review passes of the
+    # merge.
+    make_fixture abandoned
+    out="$(run_it "$ANSWER" 2>&1)" || fail "answer-review.sh exited non-zero: $out"
+    gone="$(cd "$WORK/repo" && command git rev-parse HEAD~1)"
+    grep -qF "review-answered $PR_HEAD" "$GH_POSTED" \
+      || { echo "$out" >&2; fail "the answer does not name the current head"; }
+    grep -qF "review-answered $gone" "$GH_POSTED" \
+      || { cat "$GH_POSTED" >&2; fail "the answer does not name the abandoned head, so the gate holds forever"; }
+    grep -qF "$ANSWER" "$GH_POSTED" \
+      || fail "the posted comment does not carry what the author actually said"
+    grep -qi 'left behind' <<<"$out" \
+      || { echo "$out" >&2; fail "it answered an abandoned review without saying so"; }
+    echo "ok: an answer also names the heads whose reviews the branch left behind"
     ;;
   thin)
     make_fixture

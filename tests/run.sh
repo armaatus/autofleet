@@ -38,7 +38,7 @@ SUITES=(
 "teardown:derives reap watcher profiles mtime"
 "runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"
-"answer_review:posts thin unpushed behind no_review flight stopped gate"
+"answer_review:posts abandoned thin unpushed behind no_review flight stopped gate"
 "await_review:nitonly threads tworeviewers knob important untrailered quiet validated"
 "cost:sums json empty attempts long_path filtered reaped subcommand"
 "install:ignores idempotent dry"
