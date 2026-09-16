@@ -314,7 +314,8 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
   # file, `if !` or not -- and bash's own parser error naming the file and line
   # is what the reader gets. Found by the self-review, which had the syntax case
   # as the example; the early return is the half that is actually catchable.
-  if ! . "$FLEET_RUNNER_DRIVER"; then :; fi
+  fleet_runner_source_rc=0
+  . "$FLEET_RUNNER_DRIVER" || fleet_runner_source_rc=$?
   # A DRIVER THAT SOURCED AND DEFINED NOTHING is the same failure as no driver
   # at all, and it was landing as the one this issue exists to remove: a host
   # driver with a syntax error, or one that `return`s early when a dependency it
@@ -324,7 +325,15 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
   # right. `runner_available` is the probe every guarded caller reaches first
   # and the function docs/RUNNERS.md requires first, so it is the one tested
   # for. Found by the self-review.
-  if command -v runner_available >/dev/null 2>&1; then
+  # THE STATUS IS KEPT, not just the probe. A driver is free to define
+  # `runner_available` and THEN bail -- define the probe, discover the helper
+  # file it needs is absent, `return 1` -- and `command -v` alone called that
+  # working: the first real call was `command not found`, and `launch` relayed
+  # "could not create it:" with nothing under it. docs/RUNNERS.md imposes no
+  # ordering on a driver, so the source's own status is the only thing that
+  # knows. Found by the self-review, which also had the earlier half of this.
+  if [ "$fleet_runner_source_rc" = 0 ] \
+    && command -v runner_available >/dev/null 2>&1; then
     # Set on BOTH arms, never defaulted from the environment. An exported
     # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
     # refusal below, which is the same hole `evals/lint.sh` 4g closes with
@@ -338,11 +347,12 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     # which is the failure class this issue removes, one branch over. Found by
     # the self-review, on both axes.
     unset FLEET_RUNNER_MISSING_SAYS
+    unset fleet_runner_source_rc
   else
     [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
       && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
-      echo "autofleet: $FLEET_RUNNER_DRIVER is there and defines no runner_available"
-      echo "     a driver implements the runner_* contract in docs/RUNNERS.md; this one sourced and defined none of it"
+      echo "autofleet: $FLEET_RUNNER_DRIVER is there and did not finish implementing the runner_* contract"
+      echo "     it sourced with status $fleet_runner_source_rc and $(command -v runner_available >/dev/null 2>&1 && echo "returned before it finished" || echo "defined no runner_available"); the contract is in docs/RUNNERS.md"
       echo "     check it for an early return when something it needs is missing, and for names that match the contract"
     } >&2
     # WHAT IS WRONG WITH IT, carried to `fleet_require_runner`, because the two
@@ -350,9 +360,10 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     # reader to create a file that is right there -- and in a descendant shell,
     # where the block above is suppressed, that line is the only thing printed.
     # Exported for exactly that case. Found by the self-review, on both axes.
-    export FLEET_RUNNER_MISSING_SAYS="$FLEET_RUNNER_DRIVER defines no runner_available"
+    export FLEET_RUNNER_MISSING_SAYS="$FLEET_RUNNER_DRIVER did not finish implementing the runner_* contract"
     export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
     FLEET_RUNNER_MISSING=1
+    unset fleet_runner_source_rc
   fi
 else
   # IT NAMES THE FILE, and lists the drivers that do ship.

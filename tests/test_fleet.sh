@@ -1304,7 +1304,7 @@ case "${1:-}" in
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=hollow ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "a driver that defines no runner_* was accepted as working: $out"
-    grep -q "runner/hollow.sh is there and defines no runner_available" <<<"$out" \
+    grep -q "runner/hollow.sh is there and did not finish implementing" <<<"$out" \
       || fail "the refusal did not say the driver sourced and implemented nothing, which is the only thing that separates it from a missing file: $out"
     grep -q "is not usable here" <<<"$out" \
       && fail "the undefined runner_* was reported as an unusable runtime, which is the consequence named as the cause: $out"
@@ -1313,7 +1313,7 @@ case "${1:-}" in
     # there. "no <path>, so it stops here" under a file that exists is the same
     # confident wrong sentence one layer down, and both self-review axes
     # converged on it.
-    grep -q "hollow.sh defines no runner_available, so it stops here" <<<"$out" \
+    grep -q "hollow.sh did not finish implementing the runner_\* contract, so it stops here" <<<"$out" \
       || fail "the line that stops the script did not say what is wrong with a driver that is present: $out"
     grep -qE "no [^ ]*hollow\.sh, so it stops here" <<<"$out" \
       && fail "the refusal told the reader to create a driver file that is already there: $out"
@@ -1333,7 +1333,7 @@ DRIVER
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=bails ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "a worktree was provisioned against a driver whose source did not finish: $out"
-    grep -q "bails.sh is there and defines no runner_available" <<<"$out" \
+    grep -q "bails.sh is there and did not finish implementing" <<<"$out" \
       || fail "errexit killed the hook on the failed source, so the reason never printed: $out"
     grep -q "project setup hook" <<<"$out" \
       && fail "the project hook ran for a worktree whose driver never finished sourcing: $out"
@@ -1344,12 +1344,31 @@ DRIVER
     #     one whose driver is simply absent -- where it would name a file that
     #     is not the missing one. Found by the self-review.
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope \
-      FLEET_RUNNER_MISSING_SAYS="/somewhere/else.sh defines no runner_available" \
+      FLEET_RUNNER_MISSING_SAYS="/somewhere/else.sh did not finish implementing" \
       ./scripts/fleet/fleet.sh status 2>&1 )"
     grep -q "somewhere/else.sh" <<<"$out" \
       && fail "an inherited sentence named a driver that has nothing to do with this failure: $out"
     grep -qE "no [^ ]*runner/nope\.sh, so it stops here" <<<"$out" \
       || fail "the missing-file arm did not say the file is missing once an unrelated sentence was in the environment: $out"
+
+    #     ...AND A DRIVER THAT BAILS AFTER DEFINING ITS PROBE. docs/RUNNERS.md
+    #     imposes no ordering, so `command -v runner_available` alone called
+    #     this one working: the guard passed, `runner_available ||` passed, and
+    #     `launch`'s `runner_worktree_create` was `command not found` with
+    #     "could not create it:" and nothing under it. The source's own status
+    #     is the only thing that knows. Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/lateba.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A driver that defines its probe and THEN discovers it cannot work.
+runner_available() { return 0; }
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_worktree_create() { :; }
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=lateba ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that returned before implementing the contract was accepted because its probe happened to be defined first: $out"
+    grep -q "lateba.sh is there and did not finish implementing" <<<"$out" \
+      || fail "the refusal did not say the driver stopped part way, which is the only thing separating it from a working one: $out"
 
     # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
     #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
