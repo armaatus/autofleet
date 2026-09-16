@@ -411,30 +411,30 @@ card() {
 # retries every poll must keep retrying -- a one-off timeout on the poll a PR
 # opened is not a reason to give up its context reset for good -- and only the
 # line is throttled. A send that lands clears it, so the next refusal is news.
-# The submit gets its own `.submit` beside it: one marker for both meant a
-# refused send silenced a later refused submit, which is the one that leaves
-# text piling up in the agent's composer.
+# The marker is per ISSUE, not per caller: a refusal said by one caller stays
+# unsaid for another until some send lands in between.
+#
+# A refused SUBMIT is never throttled. The text was typed, so every retry adds
+# another copy to the agent's composer, and a log that fell silent after the
+# first poll would hide exactly that pile-up.
 say_to_agent_in() {
-  local path="$1" text="$2" said="${3:-}" handle
+  local path="$1" text="$2" refused_marker="${3:-}" handle
   if ! handle="$(runner_agent_terminal "$path")"; then
     say "  the runner would not say whether an agent is in $path -- nothing was sent"
     return 1
   fi
   [ -n "$handle" ] || return 1
   runner_terminal_send "$handle" "$text" || {
-    [ -n "$said" ] && [ -e "$said" ] \
+    [ -n "$refused_marker" ] && [ -e "$refused_marker" ] \
       || say "  the runner would not type into $path -- nothing was sent"
-    [ -z "$said" ] || : >"$said"
+    [ -z "$refused_marker" ] || : >"$refused_marker"
     return 1
   }
-  [ -z "$said" ] || rm -f "$said"
+  [ -z "$refused_marker" ] || rm -f "$refused_marker"
   runner_terminal_enter "$handle" || {
-    [ -n "$said" ] && [ -e "$said.submit" ] \
-      || say "  the runner typed into $path but would not submit it"
-    [ -z "$said" ] || : >"$said.submit"
+    say "  the runner typed into $path but would not submit it"
     return 1
   }
-  [ -z "$said" ] || rm -f "$said.submit"
   return 0
 }
 
@@ -617,7 +617,7 @@ clear_issue_markers() {
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
-        "$STATE_DIR/send-refused-$1" "$STATE_DIR/send-refused-$1.submit" \
+        "$STATE_DIR/send-refused-$1" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.

@@ -857,7 +857,11 @@ runner_terminal_send() {
   [ -e "$STUB_DIR/send-refuses" ] && return 1
   return 0
 }
-runner_terminal_enter()     { stub_say "terminal enter $1";     return 0; }
+runner_terminal_enter() {
+  stub_say "terminal enter $1"
+  [ -e "$STUB_DIR/enter-refuses" ] && return 1
+  return 0
+}
 runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
 STUBDRIVER
   export AUTOFLEET_RUNNER=stub
@@ -2525,10 +2529,10 @@ print(json.dumps({"result": {"worktrees": [
 
   handoff_send_refused)
     # A driver that cannot send still gets the interrupt, IN THE SAME PASS: the
-    # grace is for an agent that was asked, and this one was not. Said once
-    # because the time-box CLOSES on that pass (its `started` marker goes), not
-    # because anything suppresses the line -- the context reset has no such
-    # exit, and `context_reset_send_refused` is its phase.
+    # grace is for an agent that was asked, and this one was not. The second
+    # poll is quiet because the time-box CLOSES on that pass (its `started`
+    # marker goes); the `send-refused-` throttle is what the context reset,
+    # which has no such exit, relies on -- `context_reset_send_refused`.
     make_fixture ok
     make_worktree
     make_overdue
@@ -2593,6 +2597,16 @@ print(json.dumps({"result": {"worktrees": [
     [ -e "$AUTOFLEET_DIR/send-refused-42" ] \
       && fail "a send that landed left the refusal marker, silencing the next one"
     echo "ok: ...and retried, so a send that recovers still resets the context"
+
+    # A refused SUBMIT is said every poll: the text was typed, each retry adds
+    # a copy to the composer, and a throttled line would hide the pile-up.
+    rm -f "$AUTOFLEET_DIR/context-reset-42"
+    : >"$STUB_DIR/enter-refuses"
+    in_fleet reset_context_for_answering >/dev/null 2>&1
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q "would not submit it" <<<"$out" \
+      || fail "a submit refused on every poll went quiet after the first: $out"
+    echo "ok: a refused submit is said on every poll it happens"
     ;;
 
   handoff_expires)
