@@ -53,7 +53,7 @@ PAYLOAD=(
   # own configuration. Hard rule 1.
   "evals/piped_quiet_grep.py"
   "evals/late_stderr_silence.py"
-  "evals/comment_in_continuation.py"
+  "evals/continuation_comment.py"
   "evals/run.sh"
   "docs/WORKFLOW.md"
   # Vendored because the payload POINTS AT IT: REVIEW.md links to it,

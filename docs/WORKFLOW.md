@@ -134,6 +134,152 @@ also where the `Blocked by #N` pattern lives, spelled to match `unblock.yml`.
 **What it will not do:** it does not merge, and it never touches a worktree it did
 not create.
 
+### What one poll costs
+
+The dispatcher polls every `AUTOFLEET_POLL` seconds (60 by default) for as long
+as it is up, so an hour costs 60 times what one pass costs. Three different
+things are being spent, and only one of them is money. The figures below are
+`--auto`, which is the mode that runs unattended; **list mode differs, and the
+last paragraph says how**.
+
+| | per pass (`--auto`) | scales with | costs |
+|---|---|---|---|
+| **GitHub API calls** | 2 shared listings, plus 2 per owned worktree; a launch adds none | worktrees, not the backlog | rate limit |
+| **Runner CLI calls** | 1 `worktree list`, plus 1 `worktree ps` per stall check and per parked-dirty worktree, plus 3 per launch and 2 per release | worktrees | nothing |
+| **Model invocations** | 1 per launch; a handoff turn and an answering brief typed into a live agent, once per owned worktree per issue; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
+
+Only the third row spends anything. **No model runs inside `cmd_run`'s own
+process** — its body is shell and `gh` from end to end — but it is what decides
+when one runs somewhere else, in two different ways, and only the first is a new
+session:
+
+*Sessions it spawns*, three of them rather than the two an older reading of this
+counted: `worktree create --agent claude` is the work itself, `review.sh` is the
+local reviewer, and `validate.sh` — spawned by `start_validator` from inside
+`review_open_prs`' own loop — is the third.
+
+*Turns it types into a session already running*, which is the half easily missed
+because it goes out over the runner CLI and so looks free in the row above it.
+`reset_context_for_answering` asks a worktree agent for its handoff note and
+then hands it the `--after-pr` brief, which is the opening turn of a fresh
+session; `enforce_timebox`'s give-up path and `reap_abandoned` reach the same
+seam. Each of those is a model turn, priced in the third row and not the second.
+Bounded by the work rather than by the clock: once per owned worktree per issue,
+not once per poll.
+
+Every other call a pass makes is an API or a CLI query and costs no tokens at
+all. All three spawned sessions are marker-guarded, so none is a spawn per PR
+per poll —
+`start_validator` returns early on its `v-<pr>` lock and on a `v-<pr>.done`
+holding the current head, and a reviewer is skipped while
+`$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
+polling an idle fleet overnight is free in the only sense that matters; it is
+the runs that *launch* and *review* that cost, and `AUTOFLEET_MAX` is the number
+that bounds both.
+
+Concretely, at the defaults: an **idle** pass — nothing owned, every `ready`
+issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`**,
+whether the backlog holds ten issues or fifty. A launch adds no `gh` call at
+all, because the title and labels the card needs come out of the `ready` listing
+the pass already has. A **full** fleet of three worktrees on
+`AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared listings, one
+merged-PR check per worktree, and one issue lookup per worktree.
+`AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
+spawns and two more per validator, and up to `AUTOFLEET_MAX` model agents **on
+top of** the worktree agents — six concurrent sessions at the defaults, which is
+the number to know before leaving one running.
+
+The flat idle figure is the point, and it was not always flat. Each candidate
+the launch loop scanned used to take its own `gh pr list` of every open PR, so a
+pass over this repository's own `ready` queue — 53 of 56 open issues, measured
+2026-09-15 — made ~57 calls a minute: 3400 an hour, past the comfortable half of
+the 5000/hour primary limit and into the secondary ones.
+The open-PR listing, the `ready` listing and the worktree listing are now each
+taken **once per pass** and read from `$STATE_DIR/poll-cache`, which
+`forget_poll_answers` empties at the top of every pass. Everything in that cache
+keeps one contract: an answer that **could not be read** is cached as "could not
+tell" and never as "nothing found", because "no PR closes this issue" is what
+sends the fleet off to open a worktree. The cost of caching is one poll of
+staleness — a PR opened mid-pass is invisible until the next one — which is
+why the listing is taken before the launch loop rather than during it.
+`tests/test_fleet.sh`'s `budget_` phases assert these numbers, so a change that
+puts the slope back fails the suite rather than the rate limit. To watch it on a
+running fleet rather than in the suite, set `AUTOFLEET_LOG_PASSES=on` and the
+dispatcher writes one line per poll saying the pass ended — off by default,
+because a line a minute is what the say-once markers elsewhere exist to prevent.
+
+One slope is **not** gone: `has_open_pr` still forks `python3` once per candidate
+the launch loop scans, to re-parse the listing it already has. That is a process
+start per `ready` issue per poll, and it is none of the three columns above — no
+API quota, no runner call, no tokens — which is why it is out of this table
+rather than in it. `count_startable` already answers the same question for the
+whole queue in one parse, so the launch loop could read that set instead; it is
+work for a day when the cost being measured is wall-clock rather than money.
+
+**100 open pull requests is a cliff.** `gh pr list` is asked for 100 rows, and a
+listing that comes back with exactly 100 might have a 101st on the next page — so
+nothing in it can be trusted to mean "no PR closes this issue". The dispatcher
+refuses it rather than guessing, which is right (guessing opens a duplicate
+worktree for every issue past the boundary) and total: while it holds, nothing
+launches, nothing is time-boxed, no build context is reset for the answering
+work, and the run loop keeps polling because it cannot tell whether the backlog
+is empty. It says so in `fleet.log` once per outage rather than once a minute.
+The way out is to close or merge PRs until the count drops; paging past the
+limit is armaatus/autofleet#122, filed for it — not armaatus/autofleet#31, which
+earlier drafts of this paragraph cited and which is closed and about worktree
+scoping.
+
+**It is not the first cliff, and the row count is not what decides.**
+`count_startable` hands that same listing — every row with its full `body` — to
+`python3` as a SINGLE command-line argument, and the kernel caps how long one
+argument may be. On Linux `MAX_ARG_STRLEN` is 32 pages, 131,072 bytes, whatever
+room `ARG_MAX` leaves; on darwin there is no per-argument cap and `ARG_MAX` is
+1 MiB. So the ceiling that arrives first is **total body bytes, not rows**: PR
+bodies in this repository run to ~20 KB, which puts seven of them past the Linux
+limit and roughly fifty past the darwin one — both well under 100, and a
+different number on each host, which is the shape hard rule 1 names. Over it,
+`execve` fails with `Argument list too long`, the pipeline is non-zero under
+`pipefail`, and `count_startable` returns 1: the same total wedge the paragraph
+above describes, reached earlier and by a different measure. And that `python3`
+is the one listing parse with no `2>/dev/null`, so bash's diagnostic reaches the
+dispatcher's stderr once a poll for as long as it lasts — the flood the
+say-once markers exist to prevent, through a door they do not cover. The way out
+is not the one-line move to stdin `has_open_pr` made: `count_startable`'s stdin
+already carries the `ready` listing. It is a swap — the bodies onto stdin, the
+`ready` rows, which have none, onto argv — and it is armaatus/autofleet#122's,
+with the rest of the paging work. Found by the local review.
+
+The `ready` listing's own `--limit 200` has **no** such guard, and that is a
+trade rather than a free pass. Guarding it would stop a repository with exactly
+200 open issues from starting anything at all, which is the worse cliff. What it
+costs instead is not merely late work: `count_startable` counts off the same
+truncated page, so a repository with more than 200 open issues whose newest 200
+are all claimed reaches `queued == 0` with nothing owned, and the dispatcher
+**exits** saying "the backlog has nothing startable left" while real startable
+work sits behind the page boundary. Both listings are armaatus/autofleet#122.
+
+**`fleet.sh status` is not a poll**, and the table above does not price it. It
+asks the same questions from outside the dispatcher, where `$POLL_CACHE` is
+deliberately unavailable — #35's rule is that `status` leaves `$STATE_DIR`
+byte-identical — so it keeps its answers in memory for the one process instead.
+That makes a screen **one issue listing and one open-PR listing** whatever the
+queue holds, where it used to be one open-PR listing *per ready row*. The
+**worktree listing is still per row** — `live_worktrees` keeps its answers in
+`$POLL_CACHE`, which is exactly what `status` may not touch — so the runner-side
+slope survives there. That is deliberate rather than missed: the table above
+prices runner calls at nothing, and they are local. It is still the most
+expensive read in the tree, because it prints a table the dispatcher never has
+to.
+
+**List mode still has the slope**, and the table above does not describe it.
+`fleet.sh run 11 12 13` asks `issue_is_done` about every issue still on its
+command line, every pass, and that is two uncached `gh` calls each — a `gh issue
+view` whose `state` field `poll_issue` already has, and a `gh pr list --state
+merged`. Both are named in armaatus/autofleet#69's own list of what stays
+uncached, and both were left there: list mode is a person driving a named set of
+issues while watching, not the unattended overnight run the flat figure is
+about. It is the mode to keep short.
+
 ## Stop it
 
 ```bash

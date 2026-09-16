@@ -78,22 +78,22 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 ## Code
 
 - Bash and Python 3.10+. No build step, no dependencies to install.
-- Every script parses under `bash -n` — a PostToolUse hook checks it on save.
+- Every script parses under `bash -n`, checked on save — and so does a comment
+  after a `\`, which comments the rest of that command out. Put it above the
+  command; `evals/continuation_comment.py` scans.
 - Comments explain *why*, not *what*. The comment density in this repo is high
   on purpose: most of these rules exist because something failed once, and the
   failure is the only thing that makes the rule readable a year later. Match it.
 - A path that came from the project this was extracted from cites it as
   `armaatus/rommsync-nx#N`, so the trail survives the move.
-- Three shell rules that all read fine at the call site, each with its own eval:
-  - **Silence stderr before the redirection that can fail.** `read -r h n <"$f"
-    2>/dev/null` prints the open failure and *then* silences it, and `|| true`
-    hides the status not the diagnostic. Write `2>/dev/null <"$f"`.
-  - **Never pipe an assertion into `grep -q`** under `pipefail`: `-q` exits on
-    the first match, the producer dies of EPIPE, the pipeline is 141, and a
-    check that HELD reports as failed -- on large input only, so green on a Mac
-    and red in CI. `.github/workflows/`'s `run:` blocks are unscanned (#90).
-  - **No comment inside a `\` continuation** -- the `\` joins it, the `#` eats
-    the rest of the command, and it still parses. Put it above the command.
+- **Silence stderr before the redirection that can fail, not after it.**
+  `read -r h n <"$f" 2>/dev/null` prints the open failure and *then* silences
+  the stream; `|| true` hides the status, not the diagnostic. Write
+  `2>/dev/null <"$f"`. `evals/late_stderr_silence.py` scans the payload's shell.
+- **Never pipe an assertion into `grep -q`** under `pipefail`: `-q` exits on the
+  first match, the producer dies of EPIPE, and a check that held reports 141 --
+  on large input only, so green on a Mac and red in CI. Scanned by
+  `evals/piped_quiet_grep.py`; `.github/workflows/` is not, and has one (#90).
 
 ## The tracker is the spec
 

@@ -365,6 +365,7 @@ debugging its own reviewer wants.
 |---|---|---|
 | `AUTOFLEET_KEEP_REVIEWS` | `3` | Reviewer transcripts kept **per open pull request**, and the off switch for the `reviewed-<sha>` sweep too, so `0` means every piece of review state the dispatcher would otherwise delete. |
 | `AUTOFLEET_LOG_MAX_BYTES` | `1048576` | Bytes of `fleet.log` kept before it rotates to `fleet.log.1`. **One** generation, because the point is a bound and two files at the cap is twice the cap. |
+| `AUTOFLEET_LOG_PASSES` | `off` | `on` and the dispatcher writes one line per poll saying the pass ended and what it found; anything that is not `on` or `off` is refused at startup rather than read as one of them (`0` used to turn it **on**). **Off by default** — a line a minute is the log volume the say-once markers exist to prevent — and the only way to know a pass has finished without guessing from a clock. Turn it on when you are measuring what a pass costs (see [WORKFLOW.md, "What one poll costs"](WORKFLOW.md)) or watching a fleet that appears to be doing nothing. |
 
 **What goes, and when.** Older transcripts for an open PR go; every transcript
 for a PR that is no longer open goes regardless, because a review of a closed PR
@@ -482,7 +483,23 @@ and a port nothing can re-derive is a port nothing can release.
 
 ### The rest
 
-`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md).
+`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
+`scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
+the file it looked for and the drivers that do ship — and stops the four scripts
+that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
+caught before a worktree is opened rather than by an agent sitting on a prompt
+that never sends.
+`ORCA_CLI_COMMAND` (Orca driver only) — the CLI to try first, ahead of `orca`,
+`orca-dev`, `orca-ide` and the `/Applications` fallback. **Exactly one command**,
+so a path containing spaces is a single candidate and a value with arguments in
+it (`orca --debug`) is not a command at all: nothing on `PATH` has that name, the
+candidate is turned down, and the resolve falls through to plain `orca` — a
+different CLI from the one that was configured. It used to be expanded unquoted,
+where the same value was two candidates that both failed. The driver's refusal
+names this knob, so it is listed here rather than left in
+`scripts/fleet/runner/orca.sh`, and it has no default line in `config.sh` but is
+settable in `.autofleet/config`, which `config.sh` sources into the same shell
+before `lib.sh` sources the driver.
 `AUTOFLEET_SETUP_HOOK` / `AUTOFLEET_TEARDOWN_HOOK` — paths to the two hooks.
 `AUTOFLEET_TEST_COMMAND` — quoted into the agent's opening prompt, so it names
 the command your project actually runs rather than one autofleet guessed.

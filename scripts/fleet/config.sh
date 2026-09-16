@@ -55,8 +55,15 @@
 
 # ---------------------------------------------------------------- the runner
 # Which driver creates worktrees and terminals. `orca` is the only one that
-# ships today; see fleet/runner/README.md for the contract a second one has to
-# meet.
+# ships today; the contract a second one has to meet is docs/RUNNERS.md, which
+# CLAUDE.md hard rule 4 names as the authority -- fleet/runner/README.md, which
+# this used to point at, is about the seam and lists no `runner_*` at all.
+#
+# A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
+# lib.sh sources it -- the file it looked for and the drivers that do ship --
+# and stops the four scripts that call `fleet_require_runner`: the dispatcher,
+# the setup hook, the board and the autostart watcher. `evals/lint.sh` check 4g
+# goes red on it before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=orca}"
 
 # ---------------------------------------------------------------- the review
@@ -256,6 +263,21 @@
 # and holds the inode for up to AUTOFLEET_REVIEW_TIMEOUT, so the cap is a bound
 # the fleet reaches between reviews rather than a hard ceiling.
 : "${AUTOFLEET_LOG_MAX_BYTES:=1048576}"
+
+# One line per dispatcher pass, saying the pass ended. OFF by default, because a
+# line a minute is exactly the log volume the say-once markers elsewhere in this
+# file exist to prevent -- and ON it is the only deterministic answer to "has a
+# pass finished", which is a question both an operator watching a quiet fleet and
+# a test asserting what a pass COST have to be able to ask. armaatus/autofleet#69
+# measured the per-pass budget by watching call counts stop moving, which is a
+# wall-clock guess; this is the signal that guess was standing in for.
+#
+# `on` or `off`, and validated below, because the first shape of this knob was
+# "set to anything" -- read with `[ -n ]`, which turns ON for `0` and for `off`.
+# A host writing `AUTOFLEET_LOG_PASSES=0` into `.autofleet/config` then gets the
+# line a minute this default exists to prevent, with no diagnostic saying why.
+# Found by the local review.
+: "${AUTOFLEET_LOG_PASSES:=off}"
 
 # ------------------------------------------------------------- the handoff
 # How long the note one attempt leaves the next may be, in words.
@@ -487,6 +509,17 @@ case "$AUTOFLEET_CONTEXT_RESET" in
   on|off) ;;
   *) echo "AUTOFLEET_CONTEXT_RESET must be 'on' or 'off';" \
           "got '$AUTOFLEET_CONTEXT_RESET'" >&2
+     exit 2 ;;
+esac
+
+# The same shape, for the same reason: anything that is not `on` would leave the
+# quiet default, but silently -- and here the misspelling fails in the LOUD
+# direction instead (`[ -n ]` read `0` and `off` as on), which is worse than
+# either. See the knob's own comment.
+case "$AUTOFLEET_LOG_PASSES" in
+  on|off) ;;
+  *) echo "AUTOFLEET_LOG_PASSES must be 'on' or 'off';" \
+          "got '$AUTOFLEET_LOG_PASSES'" >&2
      exit 2 ;;
 esac
 

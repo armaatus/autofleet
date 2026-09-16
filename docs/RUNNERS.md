@@ -100,6 +100,63 @@ runner_set_deadline <secs> # for calls from this process
 what to check next, and "is the Orca app running?" is not a sentence the
 dispatcher can write for an arbitrary runner. The caller adds the consequence.
 
+What it says is **the runtime, what was tried, and what to install**, within the
+same three-line bound every relay has. Naming the runtime and stopping there
+leaves the reader with a true sentence and no next step, and this is the one
+message a person sees on a machine that has never worked — so a driver lists the
+candidates it probed and how each was turned down, one comma-joined line rather
+than one line each, and ends with the install or start. The Orca driver collects
+those reasons *during* its resolve rather than re-deriving them afterwards: a
+second pass costs another `--version` timeout per candidate, and this is the
+first call `setup.sh` makes while the runner holds the agent's tab.
+
+**Every caller that reaches for the runtime probes before it spends anything.**
+`fleet.sh` (at source time), `setup.sh`, `board.sh` and `agent-autostart.sh` all
+call it; `setup.sh` is fatal on a no, because everything it provisions is for an
+agent the runner is supposed to start. `setup.sh` probes *after* `env.sh` and before
+the submodules, the project hook and the watcher — env.sh is milliseconds and is
+where a machine missing its basic tools says so, and a probe in front of it
+answers a missing `shasum` with "is the runtime running?", which is the wrong
+machine named confidently.
+
+**Your driver must have defined `runner_available` and `runner_worktree_create`
+by the time sourcing ends.** They are the two `lib.sh` looks for, and they are
+those two because they are the first calls every guarded caller makes: the probe,
+and then the one whose failure this issue opens with. A driver that defines the
+probe and then `return`s -- the documented shape for one that bails when a
+dependency it needs is absent -- used to pass as working, and its first real call
+was `command not found` relayed as "could not create it:" with nothing under it.
+A non-zero status from sourcing the file is not by itself a refusal: a conformant
+driver that ends on `[ -n "${FOO:-}" ] && export FOO` sources non-zero and
+implements everything. It raises the bar to that second function rather than
+deciding on its own.
+
+A driver that is **not there at all** is a different question and is answered
+one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
+drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
+it neither returns nor exits, because most of what it defines has nothing to do
+with a runner and the scripts that source it mostly call no `runner_*` at all
+(`cost`, and the whole review and validation pipeline). **Four** — `fleet.sh`,
+`setup.sh`, `board.sh`, `agent-autostart.sh` — call `fleet_require_runner`
+before their first `runner_*`, which adds the consequence and stops; without it
+that first call is `command not found`, and rc 127 through a `|| die` reports
+the consequence as the cause.
+
+`issue-command.sh` is the fifth script that names a `runner_*` and is
+deliberately **not** guarded: it prints an agent's brief, which needs no
+runtime, and asks `runner_available` only behind
+`if [ -z "$ref" ] && runner_available 2>/dev/null` to decide whether it can
+*also* resolve this worktree's issue. With no driver that call is rc 127, the
+`&&` is false, and the script carries on doing what it was run for. Guarding it
+would refuse an agent its own brief. A sixth caller is guarded unless it can
+make the same argument.
+
+`evals/lint.sh` check 4h fails a caller that forgets, a caller that guards
+without reaching for the runtime, and a guard that comes *after* the first
+`runner_*` — the order is the property, not the presence. Check 4g fails a repo
+whose configured runner names no file at all, red before an agent is opened
+rather than after.
+
 **Which stream a failure's words go on, per function, because the answer is not
 the same for all of them.** An earlier version of this paragraph said "stderr
 for `runner_available`, stdout for everything else" — an absolute rule that the

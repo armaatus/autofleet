@@ -99,7 +99,11 @@ STUB
   # evals/lint.sh check 4b does not read its functions as contract phantoms.
   cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
 #!/usr/bin/env bash
+# The two lib.sh requires of any driver by the end of sourcing -- see
+# docs/RUNNERS.md. Nothing here calls create; it is present because a driver
+# that does not define it is one that bailed part way, which lib.sh refuses.
 runner_available() { return 0; }
+runner_worktree_create() { return 1; }
 STUBDRIVER
   export AUTOFLEET_RUNNER=stub
   export AUTOFLEET_TEST_COMMAND="the full test suite"

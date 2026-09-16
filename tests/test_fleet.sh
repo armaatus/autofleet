@@ -503,8 +503,16 @@ case "$*" in
   # has_open_pr, which parses JSON -- answering `7` there is a parse failure,
   # which the dispatcher reads as "could not tell" rather than as "no PR".
   *"pr list --head"*) cat "$GH_MERGED"; exit 0 ;;
-  *"pr list"*)        cat "$GH_PRS"; exit 0 ;;
-  *"issue list"*)     cat "$GH_ISSUES"; exit 0 ;;
+  # ...and the literal FAIL is a `gh` that could not answer AT ALL, which is a
+  # different failure from a body it could not parse: the per-poll listing
+  # caches the first as "could not tell" and must never cache it as "no PR".
+  *"pr list"*)        [ "$(cat "$GH_PRS")" = FAIL ] && { echo "gh: could not connect" >&2; exit 1; }
+                      cat "$GH_PRS"; exit 0 ;;
+  # ...and the same FAIL shape, for the same reason: `ready_issues` caches its
+  # own failure, and "could not tell" read as "the backlog is empty" ends the
+  # dispatcher for the night on one blip.
+  *"issue list"*)     [ "$(cat "$GH_ISSUES")" = FAIL ] && { echo "gh: could not connect" >&2; exit 1; }
+                      cat "$GH_ISSUES"; exit 0 ;;
   # gh applies --jq itself, so the stub answers what the filter would produce.
   # The literal FAIL stands for a gh that could not answer at all -- the third
   # answer the dispatcher is built around.
@@ -1035,6 +1043,30 @@ run_ended() {
   return 1
 }
 
+# A backlog of $1 `ready` issues, every one of them already claimed by an open
+# PR. That is the ORDINARY state of a fleet whose slate is full, and it is the
+# worst case for the per-pass budget: nothing is startable, so the launch loop
+# scans the whole list before it gives up. armaatus/autofleet#69.
+backlog_all_claimed() {
+  local n="$1" i
+  {
+    printf '['
+    for i in $(seq 1 "$n"); do
+      [ "$i" = 1 ] || printf ','
+      printf '{"number":%s,"title":"issue %s","body":"","labels":[{"name":"ready"}]}' "$i" "$i"
+    done
+    printf ']\n'
+  } >"$GH_ISSUES"
+  {
+    printf '['
+    for i in $(seq 1 "$n"); do
+      [ "$i" = 1 ] || printf ','
+      printf '{"number":%s,"isDraft":false,"headRefOid":"deadbee","body":"Closes #%s"}' "$((100 + i))" "$i"
+    done
+    printf ']\n'
+  } >"$GH_PRS"
+}
+
 # fleet.sh sourced from somewhere OTHER than the dispatcher's own checkout --
 # what an agent in a fleet worktree runs.
 in_fleet_at() { local at="$1"; shift; (cd "$at" && . ./scripts/fleet/fleet.sh && "$@"); }
@@ -1175,6 +1207,396 @@ case "${1:-}" in
       || fail "card would log 'board update FAILED' with no cause under it, for the same reason create did: $out"
 
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
+    ;;
+  runner_missing)
+    # A machine with no usable runner is told so, ONCE, AT THE START --
+    # armaatus/autofleet#13, both of its acceptance lines and the two hooks that
+    # were still finding out late.
+    #
+    # The failure this replaces is not an error at all, which is what made it
+    # expensive: an unreachable runtime came back as an ANSWER. The CLI printed
+    # nothing, the JSON never parsed, and the caller reported "this worktree has
+    # no linked issue" -- leaving a fully provisioned worktree whose agent sat on
+    # an unsent prompt forever. Every assertion below is about a refusal arriving
+    # before anything is spent, carrying enough to act on.
+    make_fixture ok
+
+    # 1. THE DRIVER THAT DOES NOT EXIST. lib.sh names the FILE it looked for.
+    #    "no runner driver for AUTOFLEET_RUNNER=nope" alone sends the reader to
+    #    `.autofleet/config`, where the name is the one thing that is not wrong.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "fleet.sh status succeeded with a runner driver that does not exist: $out"
+    grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
+      || fail "the refusal did not name the file it looked for, which is the only place the remedy is: $out"
+    # ANCHORED LOOSELY: the list is every driver in the directory, so a second
+    # one sorting before `orca` would break a fixed substring. Found by the
+    # local review.
+    grep -qE "drivers here: .*orca" <<<"$out" \
+      || fail "it did not say which drivers do ship, so the next step is a guess: $out"
+    # ...and it stops THERE. fleet.sh runs `set -uo pipefail` without `-e`, so a
+    # lib.sh that only `return 1`s let the script sail on into a shell with no
+    # driver, where the next runner_* is `command not found` -- rc 127 through
+    # `runner_available ||`, which printed "the nope runner is not usable here"
+    # as if the name were the problem. The cause had scrolled past; the sentence
+    # the reader acts on named the consequence.
+    grep -q "is not usable here" <<<"$out" \
+      && fail "it carried on past the missing driver and reported the consequence as the cause: $out"
+    # ...AND THE SCRIPTS THAT NEED NO DRIVER ARE UNTOUCHED, which is the half
+    # this nearly got wrong. `cost` reads transcripts off disk and calls no
+    # runner_* at all -- "what did last night cost" is asked from exactly the
+    # machines where the runner is not there, a CI box, a laptop with the app
+    # shut -- and behind it sit the seven review and validation scripts, which
+    # would otherwise have refused to answer a review comment for want of a
+    # driver none of them uses. A refusal at source time takes all of them;
+    # `fleet_require_runner` takes only the four that call it.
+    # Found by the local review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the one subcommand that needs no runner died on a driver it never calls: $out"
+    grep -q "so it stops here" <<<"$out" \
+      && fail "cost was given the consequence of a driver it never asks for: $out"
+    # ONCE, which is the issue's title: fleet.sh execs cost.sh and both source
+    # lib.sh, so the block had two chances to print for one command. Found by
+    # the local review.
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "the refusal printed $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
+    # ...and the rest of lib.sh is still there. `return 1` at the driver source
+    # left FLEET_DIR and the stop files undefined, which is how the first
+    # attempt at this died two lines into fleet.sh instead of saying anything.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>/dev/null
+      echo "source rc=$?"
+      echo "dir=${FLEET_DIR:-UNSET}"
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^source rc=0$" <<<"$out" \
+      || fail "sourcing lib.sh without a driver answered non-zero, which every -e caller reads as fatal: $out"
+    grep -q "dir=UNSET" <<<"$out" \
+      && fail "lib.sh stopped at the driver and left the library half sourced: $out"
+    grep -q "^missing=1$" <<<"$out" \
+      || fail "nothing recorded that the driver was missing, so fleet_require_runner has nothing to act on: $out"
+    # ...AND THE ENVIRONMENT CANNOT DISARM IT. `FLEET_RUNNER_MISSING` is set on
+    # both arms rather than defaulted, and the comment beside it says why; a
+    # later author writing `FLEET_RUNNER_MISSING="${FLEET_RUNNER_MISSING:-0}"`
+    # turns the whole refusal off with the suite green, which is the shape hard
+    # rule 3 exists against. Check 4g closes the sibling hole for
+    # AUTOFLEET_RUNNER with `env -u`; this closes this one. Found by the
+    # self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope FLEET_RUNNER_MISSING=0 \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an exported FLEET_RUNNER_MISSING=0 disarmed the refusal, which is the whole guard: $out"
+    grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
+      || fail "the refusal stopped naming the file once the environment claimed a driver was present: $out"
+
+    # 1b. A DRIVER THAT IS THERE AND DEFINES NOTHING -- a host driver with a
+    #     syntax error, or one that returns early when a dependency it needs is
+    #     absent. The file test alone called that a working driver, every
+    #     `runner_*` was then `command not found`, and rc 127 through
+    #     `runner_available ||` printed "the <name> runner is not usable here":
+    #     #13's own failure, arriving through the code that fixes it. Found by
+    #     the self-review.
+    printf '#!/usr/bin/env bash\n# defines nothing\nreturn 0 2>/dev/null || true\n' \
+      >"$WORK/repo/scripts/fleet/runner/hollow.sh"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=hollow ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that defines no runner_* was accepted as working: $out"
+    grep -q "runner/hollow.sh is there and did not finish implementing" <<<"$out" \
+      || fail "the refusal did not say the driver sourced and implemented nothing, which is the only thing that separates it from a missing file: $out"
+    grep -q "is not usable here" <<<"$out" \
+      && fail "the undefined runner_* was reported as an unusable runtime, which is the consequence named as the cause: $out"
+    # ...and the LAST line, which is `fleet_require_runner`'s and is the only
+    # one a descendant shell gets, must not say the file is absent. It is right
+    # there. "no <path>, so it stops here" under a file that exists is the same
+    # confident wrong sentence one layer down, and both self-review axes
+    # converged on it.
+    grep -q "hollow.sh did not finish implementing the runner_\* contract, so it stops here" <<<"$out" \
+      || fail "the line that stops the script did not say what is wrong with a driver that is present: $out"
+    grep -qE "no [^ ]*hollow\.sh, so it stops here" <<<"$out" \
+      && fail "the refusal told the reader to create a driver file that is already there: $out"
+
+    #     ...AND THE SAME UNDER `set -e`, which is `setup.sh`: a driver that
+    #     `return`s when a dependency it needs is absent makes the `.` non-zero,
+    #     and errexit killed the hook there before anything could be said. The
+    #     driver is written in that documented shape rather than stubbed, since
+    #     what is under test is the source failing, not the file being empty.
+    #     Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/bails.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A host driver that bails when something it needs is not installed.
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_available() { return 0; }
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=bails ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a worktree was provisioned against a driver whose source did not finish: $out"
+    grep -q "bails.sh is there and did not finish implementing" <<<"$out" \
+      || fail "errexit killed the hook on the failed source, so the reason never printed: $out"
+    grep -q "project setup hook" <<<"$out" \
+      && fail "the project hook ran for a worktree whose driver never finished sourcing: $out"
+
+    #     ...AND AN INHERITED SENTENCE CANNOT SURVIVE INTO THE OTHER ARM. The
+    #     string is exported so it crosses `fleet.sh`'s exec of `cost.sh`, which
+    #     means a shell that sourced lib.sh under a hollow driver passes it to
+    #     one whose driver is simply absent -- where it would name a file that
+    #     is not the missing one. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope \
+      FLEET_RUNNER_MISSING_SAYS="/somewhere/else.sh did not finish implementing" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"
+    grep -q "somewhere/else.sh" <<<"$out" \
+      && fail "an inherited sentence named a driver that has nothing to do with this failure: $out"
+    grep -qE "no [^ ]*runner/nope\.sh, so it stops here" <<<"$out" \
+      || fail "the missing-file arm did not say the file is missing once an unrelated sentence was in the environment: $out"
+
+    #     ...AND A DRIVER THAT BAILS AFTER DEFINING ITS PROBE. docs/RUNNERS.md
+    #     imposes no ordering, so `command -v runner_available` alone called
+    #     this one working: the guard passed, `runner_available ||` passed, and
+    #     `launch`'s `runner_worktree_create` was `command not found` with
+    #     "could not create it:" and nothing under it. The source's own status
+    #     is the only thing that knows. Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/lateba.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A driver that defines its probe and THEN discovers it cannot work.
+runner_available() { return 0; }
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_worktree_create() { :; }
+DRIVER
+
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=lateba ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that returned before implementing the contract was accepted because its probe happened to be defined first: $out"
+    grep -q "lateba.sh is there and did not finish implementing" <<<"$out" \
+      || fail "the refusal did not say the driver stopped part way, which is the only thing separating it from a working one: $out"
+    grep -q "defines no runner_worktree_create" <<<"$out" \
+      || fail "the refusal did not name which of the two conditions failed, so the driver's author has to guess: $out"
+
+    #     ...AND A CONFORMANT DRIVER THAT MERELY SOURCES NON-ZERO IS ACCEPTED.
+    #     `[ -n "${FOO:-}" ] && export FOO` with FOO empty is a routine last
+    #     line, and refusing a driver that implements everything because of it
+    #     would be this issue's own confident lie about a machine that is fine.
+    #     The status raises the bar to runner_worktree_create; it does not
+    #     decide. Found by the self-review, which caught the first fix
+    #     overreaching.
+    cat >"$WORK/repo/scripts/fleet/runner/trailer.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# Implements the two lib.sh looks for, and ends on a false test.
+runner_available() { return 0; }
+runner_worktree_create() { :; }
+runner_worktree_list() { :; }
+[ -n "${DEFINITELY_UNSET_HERE:-}" ] && export DEFINITELY_UNSET_HERE
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=trailer bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>&1
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^missing=0$" <<<"$out" \
+      || fail "a driver that implements the contract was refused because its last line was a false test: $out"
+    grep -q "did not finish implementing" <<<"$out" \
+      && fail "a conformant driver was told it stopped part way: $out"
+
+    # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
+    #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
+    #     empty -- and the once-per-tree test was `"" = ""`, true, which
+    #     suppressed the four lines carrying the remedy. Found by the
+    #     self-review.
+    #     Through a config FILE, which is the only way it is reachable: an empty
+    #     AUTOFLEET_RUNNER in the environment is replaced by config.sh's
+    #     `:=orca` default, and the host config is sourced after it.
+    printf 'AUTOFLEET_RUNNER=""\n' >"$WORK/empty-runner-config"
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an empty AUTOFLEET_RUNNER was accepted: $out"
+    grep -q "no runner driver for AUTOFLEET_RUNNER=" <<<"$out" \
+      || fail "an empty runner name suppressed the block that names the drivers that do ship: $out"
+    grep -qE "drivers here: .*orca" <<<"$out" \
+      || fail "the remedy for an empty name did not list the drivers that ship: $out"
+    # ...ONCE for one command, which the first fix for the empty name broke: the
+    # sentinel it exports is itself empty, so an emptiness test never matched it
+    # again and `fleet.sh cost` -- which execs cost.sh, both sourcing lib.sh --
+    # printed the four lines twice. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh cost 2>&1 )"
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "an empty runner name printed the refusal $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
+
+    # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
+    #    the caller's consequence, and nothing provisioned. Written as a driver
+    #    of its own rather than by starving the Orca one: whether THIS machine
+    #    can find an orca CLI is a property of the machine -- /Applications is
+    #    on the candidate list and this suite runs on machines that have it --
+    #    and what is under test here is the CALLER, which must be the same for
+    #    any driver.
+    cat >"$WORK/repo/scripts/fleet/runner/down.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A driver whose runtime is not answering. Says why on stderr, in the shape
+# docs/RUNNERS.md asks of `runner_available`; the caller adds the consequence.
+runner_available() {
+  printf 'the down runtime is not answering here\n' >&2
+  printf '     tried: down --version (/nowhere/down)\n' >&2
+  printf '     install the down runtime and start it\n' >&2
+  return 1
+}
+# Everything else the dispatcher could reach records itself instead of doing
+# anything. $ORCA_CALLS cannot answer this question -- runner/orca.sh is never
+# sourced under AUTOFLEET_RUNNER=down, so the Orca stub that writes that file is
+# unreachable for the whole part and the assertion against it passed for a
+# reason other than the behaviour. Found by the self-review.
+runner_worktree_create() { printf 'worktree_create\n' >>"$DOWN_CALLS"; return 1; }
+runner_worktree_list()   { printf 'worktree_list\n'   >>"$DOWN_CALLS"; }
+runner_worktree_set()    { printf 'worktree_set\n'    >>"$DOWN_CALLS"; }
+runner_agent_states()    { printf 'agent_states\n'    >>"$DOWN_CALLS"; }
+runner_set_deadline()    { printf 'set_deadline\n'    >>"$DOWN_CALLS"; }
+DRIVER
+    : >"$WORK/down-calls"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/fleet.sh run --auto --max-prs 1 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "the dispatcher ran with a runtime that answers nothing: $out"
+    grep -q "not answering here" <<<"$out" \
+      || fail "the driver said why and the dispatcher swallowed it: $out"
+    grep -q "tried: down --version" <<<"$out" \
+      || fail "what was tried never reached the person reading the log: $out"
+    grep -q "nothing to dispatch with" <<<"$out" \
+      || fail "the driver's reason arrived without the consequence, which only the caller can add: $out"
+    [ -s "$WORK/down-calls" ] \
+      && fail "a dispatcher that had been told the runner is unusable still called into it: $(cat "$WORK/down-calls")"
+    # NOT a second check on $AUTOFLEET_DIR/worktrees: `make_worktree` is what
+    # creates that directory and this phase does not call it, so an emptiness
+    # test there passes on every machine whatever the dispatcher did. The
+    # recorded calls above are the whole of this claim. Found by the
+    # self-review, on an assertion this branch added.
+    :
+
+    # 3. ...AND setup.sh PROBES. It runs earliest of the three hooks and was the
+    #    only one that did not, while the runner holds the agent's tab until it
+    #    returns. Finding out late here reads as: submodules initialised,
+    #    containers built, a watcher started, and an agent tab that never
+    #    receives a prompt.
+    #
+    #    The probe sits AFTER env.sh -- which is milliseconds, and is where a
+    #    machine missing its basic tools says so -- and before everything that
+    #    costs anything. So what is asserted is that NOTHING BELOW IT RAN: no
+    #    project hook, no watcher, no "worktree ready". See the comment on the
+    #    probe for why in front of env.sh was wrong.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "setup.sh provisioned a worktree whose agent can never be started: $out"
+    grep -q "not answering here" <<<"$out" \
+      || fail "setup.sh stopped without the driver's reason: $out"
+    grep -q "project setup hook" <<<"$out" \
+      && fail "the project hook ran for a worktree whose agent the runner cannot start: $out"
+    grep -q "watching for the agent's issue prompt" <<<"$out" \
+      && fail "it started a watcher to poll a runtime it had already been told is not answering: $out"
+    grep -q "worktree ready" <<<"$out" \
+      && fail "it reported the worktree ready after refusing the runner that has to start its agent: $out"
+
+    # 4. THE SHIPPED DRIVER'S REFUSAL names the runner, what was tried, and what
+    #    to install. The candidate list is overridden rather than the resolve
+    #    stubbed out, because WHAT WAS TRIED is collected during the resolve --
+    #    stubbing the resolve asserts the message with its middle line empty,
+    #    which is the line this half of #13 adds.
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/orca-mute"
+    chmod +x "$WORK/bin/orca-mute"
+    # A CLI THAT HANGS, told apart from one that answers no. One second of it,
+    # which is what ORCA_CLI_PROBE_SECONDS is dropped to below: the wording is
+    # the assertion, not the wait.
+    printf '#!/usr/bin/env bash\nsleep 30\n' >"$WORK/bin/orca-hangs"
+    chmod +x "$WORK/bin/orca-hangs"
+    # stderr is closed over the SOURCE and reopened after it, so what is counted
+    # below is the refusal and only the refusal. `. lib.sh` can write to stderr
+    # itself -- config.sh relays a deprecated knob there -- and a three-line
+    # ceiling that includes the sourcing chatter is measuring the wrong thing.
+    # Found by the local review.
+    refusal="$( cd "$WORK/repo" && ORCA_CLI_PROBE_SECONDS=1 bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-absent-nowhere orca-mute orca-hangs; }
+      runner_available
+    ' 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "the driver said it was available with nothing on PATH that answers: $refusal"
+    # The HEADLINE, not just the word somewhere: the candidate names this phase
+    # injects both contain `orca`, so a grep for that alone passes with the
+    # first line gone entirely. Found by the local review.
+    grep -q "^no orca CLI" <<<"$refusal" \
+      || fail "the refusal's first line did not name the runner: $refusal"
+    # An ABSOLUTE candidate was never a PATH lookup, so it must not be reported
+    # as one -- the /Applications fallback is absolute, which makes this the
+    # common case on a Mac with no Orca. Found by the local review.
+    grep -q "/nonexistent/orca-not-installed (no such file, or not executable)" <<<"$refusal" \
+      || fail "an absolute candidate was reported as a PATH failure, which it cannot be: $refusal"
+    # ...and a BARE name is the case that genuinely cannot be told apart from
+    # here: absent, or right there and mode 0700, which is the Orca install
+    # CLAUDE.md names as the reason this probe exists. It says both.
+    grep -q "orca-absent-nowhere (not found on PATH, or found and not executable)" <<<"$refusal" \
+      || fail "a bare candidate that cannot be run was not named as tried, or claimed a cause it did not check: $refusal"
+    grep -q "orca-mute (--version exited 3)" <<<"$refusal" \
+      || fail "a candidate that is installed and answers no was not told apart from one that is absent: $refusal"
+    # ...and a HANG is a third thing. Both used to read "--version did not
+    # answer", which sent a person looking for a wedged app on the strength of
+    # an `exit 3` that had already answered. Only the deadline wrapper returns
+    # 124, so the two cannot be confused once the status is read rather than
+    # thrown away. Raised by the independent review.
+    grep -q "orca-hangs (no --version answer in 1s)" <<<"$refusal" \
+      || fail "a CLI that hangs was not told apart from one that is there and exits non-zero: $refusal"
+    grep -q "install Orca" <<<"$refusal" \
+      || fail "it named the runtime and not the remedy, which is what #13 calls a line that stops half way: $refusal"
+    # ...and ORCA_CLI_COMMAND is ONE candidate, not a word-split list. The old
+    # loop expanded it unquoted, so a path with spaces became several candidates
+    # and none of them existed; this pins the documented shape, which
+    # docs/CONFIGURATION.md now states because the refusal names the knob.
+    # Found by the local review.
+    mkdir -p "$WORK/bin/two words"
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/two words/orca-spaced"
+    chmod +x "$WORK/bin/two words/orca-spaced"
+    spaced="$( cd "$WORK/repo" && ORCA_CLI_COMMAND="$WORK/bin/two words/orca-spaced" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      orca_cli_candidates
+    ' 2>&1 )"
+    grep -qxF "$WORK/bin/two words/orca-spaced" <<<"$spaced" \
+      || fail "a CLI path containing a space was split into candidates that do not exist: $spaced"
+    # THREE LINES, which is the relay bound docs/RUNNERS.md sets and the reason
+    # what was tried is one comma-joined line rather than one line per
+    # candidate: `runner_worktree_create` prints this on the stream `launch`
+    # logs, and `launch` retries every pass.
+    lines="$(printf '%s\n' "$refusal" | wc -l)"
+    [ "$((lines))" -le 3 ] \
+      || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
+
+    # 5. THE DOCUMENTED OPT-OUT STILL OUTRANKS THE REFUSAL. `fleet_require_runner`
+    #    is fatal, and moving it up to precede the first `runner_*` put it in
+    #    front of AUTOFLEET_AGENT_AUTOSTART=0 -- which then exited 1 on a repo
+    #    whose driver is missing, where it had always exited 0. A person who
+    #    turned the watcher off is not asking about drivers.
+    #
+    #    Asserted rather than commented because `evals/lint.sh` 4h pulls the
+    #    other way: it requires the guard to come BEFORE the first `runner_*`
+    #    and says nothing about what must come before the guard, so the next
+    #    author to satisfy 4h by moving the guard up re-breaks this with 4h
+    #    green -- a guard that silently stops guarding, on the file that failed
+    #    this way once. Raised by the independent review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope AUTOFLEET_AGENT_AUTOSTART=0 \
+      ./scripts/fleet/agent-autostart.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the documented opt-out exited $rc because the runner was missing, on a path that starts nothing and asks the runner for nothing: $out"
+    grep -q "agent autostart disabled" <<<"$out" \
+      || fail "the opt-out did not say it was disabled, so the one line proving it took that branch is gone: $out"
+
+    echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
   runner_stub)
     # THE acceptance for #1, and the only assertion that keeps holding once the
@@ -4080,7 +4502,545 @@ GITSTUB
     echo "ok: status asked from a worktree still scopes to the repository"
     ;;
 
+  # ------------------------------------------------- the per-pass budget ---
+  # What one poll costs, asserted rather than re-derived by hand. The numbers in
+  # docs/WORKFLOW.md's budget table are these. armaatus/autofleet#69.
+  budget_idle_pass)
+    # The ordinary state of a fleet whose slate is all claimed: every `ready`
+    # issue already has a PR, so the launch loop scans the list to the end and
+    # starts nothing. Before the per-poll PR listing this pass made 13 `gh`
+    # calls -- one `pr list` per candidate scanned, plus two `issue list`, plus
+    # `count_startable`'s own `pr list` -- and every one of those grew with the
+    # backlog.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" \
+      || fail "the pass did not end on an empty slate, so what follows is not one pass: $out"
+    gh="$(grep -c . "$GH_CALLS" || true)"
+    [ "$gh" = 2 ] \
+      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 2: $(cat "$GH_CALLS")"
+    echo "ok: one idle pass costs 2 gh calls"
+    # ...and ONE worktree listing, which is #30's cache doing its job with
+    # `in_flight` reading it too. One cache, one invalidation point: this
+    # asserts the number, #30's own phases assert where it is dropped.
+    wt="$(grep -c "^worktree list" "$ORCA_CALLS" || true)"
+    [ "$wt" = 1 ] \
+      || fail "one idle pass made $wt \`worktree list\` calls, not 1: $(grep "^worktree list" "$ORCA_CALLS")"
+    echo "ok: ...and one worktree listing"
+    ;;
+
+  budget_scales)
+    # THE SLOPE, which is the number that matters. The measured figures live in
+    # docs/WORKFLOW.md, "What one poll costs", and are not restated here: this
+    # file said 46 `ready` and 3000/hour while the docs said 53 and 3400, which
+    # is two records of one measurement disagreeing about which day it was
+    # taken. What this phase asserts is the SHAPE -- the same count at 10 and at
+    # 50 -- which does not go stale when the backlog moves.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the 10-issue pass did not end: $out"
+    ten="$(grep -c . "$GH_CALLS" || true)"
+    make_fixture ok
+    backlog_all_claimed 50
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the 50-issue pass did not end: $out"
+    fifty="$(grep -c . "$GH_CALLS" || true)"
+    [ "$ten" = "$fifty" ] \
+      || fail "a pass over 10 ready issues made $ten \`gh\` calls and one over 50 made $fifty: the cost still scales with the backlog"
+    echo "ok: the gh calls a pass makes do not scale with the size of the backlog ($ten either way)"
+    ;;
+
+  budget_pr_list_once)
+    # One listing, shared. Two issues asked about, one `gh pr list` -- and the
+    # answers are still each issue's own.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_pass 'in_flight 2; echo "claimed=$?"; in_flight 9; echo "free=$?"' 2>&1)"
+    grep -q "claimed=0" <<<"$out" || fail "an issue with an open PR read as free: $out"
+    grep -q "free=1" <<<"$out" || fail "an issue with no PR did not read as free: $out"
+    n="$(grep -c "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "two in_flight questions cost $n open-PR listings, not 1: $(cat "$GH_CALLS")"
+    echo "ok: one open-PR listing answers every in_flight question in a pass"
+    ;;
+
+  budget_pr_list_blind)
+    # A `gh` that could not answer at all. "Could not tell" is cached AS SUCH --
+    # the second caller in the pass gets 2, not the 1 an empty cache file would
+    # mean -- because reading it as "no PR" opens a second worktree for work
+    # already in flight, which is the failure has_open_pr's third answer exists
+    # to prevent. The same contract poll_issue's `.unreadable` already keeps.
+    make_fixture ok
+    backlog_all_claimed 3
+    printf 'FAIL\n' >"$GH_PRS"
+    out="$(in_pass 'in_flight 2; echo "first=$?"; in_flight 9; echo "second=$?"' 2>&1)"
+    grep -q "first=2" <<<"$out" || fail "an unreadable PR listing did not answer 'could not tell': $out"
+    grep -q "second=2" <<<"$out" \
+      || fail "the cached failure came back as an answer rather than as 'could not tell': $out"
+    n="$(grep -c "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "the failed listing was re-asked $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: a PR listing that could not be read is cached as 'could not tell', and asked once"
+    # ...and the other shape of the same failure: `gh` exits 0 and hands back
+    # something that is not a listing. python printing nothing is what "no PR"
+    # looks like, so this one has to end at 2 as well.
+    make_fixture ok
+    backlog_all_claimed 3
+    printf 'not a listing\n' >"$GH_PRS"
+    out="$(in_pass 'in_flight 2; echo "first=$?"; in_flight 9; echo "second=$?"' 2>&1)"
+    grep -q "first=2" <<<"$out" || fail "a malformed PR listing read as 'no PR': $out"
+    grep -q "second=2" <<<"$out" || fail "a malformed PR listing read as 'no PR' on the second ask: $out"
+    echo "ok: ...and so is one that came back malformed"
+    # ...and the shape a length test alone cannot see: WELL-FORMED JSON that is
+    # not a listing. An error envelope `gh` hands back with status 0 has a
+    # `len()` like a list does, so the page-limit probe passed it through and it
+    # was cached as an answer -- which each caller then rediscovered by throwing.
+    make_fixture ok
+    backlog_all_claimed 3
+    printf '{"message":"Bad credentials"}\n' >"$GH_PRS"
+    out="$(in_pass 'in_flight 2; echo "first=$?"; in_flight 9; echo "second=$?"' 2>&1)"
+    grep -q "first=2" <<<"$out" || fail "a JSON object that is not a listing read as an answer: $out"
+    grep -q "second=2" <<<"$out" || fail "...and was cached as one: $out"
+    echo "ok: ...and so is well-formed JSON that is not a listing at all"
+    ;;
+
+  budget_launch_cost)
+    # WHAT ONE LAUNCH ADDS, measured rather than re-derived -- the row in
+    # docs/WORKFLOW.md's budget table is this number. In `--auto` the title and
+    # labels come out of the `ready` listing the pass already has, so a launch
+    # costs no `gh` call at all; what it costs is runner calls.
+    make_fixture ok
+    cat >"$GH_ISSUES" <<'JSON'
+[{"number":4,"title":"an ordinary one","body":"","labels":[{"name":"ready"}]}]
+JSON
+    echo '[]' >"$GH_PRS"
+    start_dispatcher --auto --max-prs 1
+    wait_for_log "opened 1 worktree"
+    stop_dispatcher
+    grep -q "^worktree create" "$ORCA_CALLS" || fail "nothing was launched: $(cat "$WORK/run.log")"
+    # No `gh issue view` for the title or the labels of what it picked.
+    # `--json title`, NOT `issue view 4`: `poll_issue` asks `issue view 4 --json
+    # state,labels` for the very same issue once `reap_abandoned` owns it, so the
+    # looser pattern matched a call this phase is not about and failed whenever a
+    # second pass started before `stop_dispatcher` landed -- at AUTOFLEET_POLL=1,
+    # a margin of under a second. Found by the local review.
+    n="$(grep -c -- "--json title" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] \
+      || fail "a launch in --auto still spent $n \`gh issue view --json title\` calls on an issue the ready listing already described: $(cat "$GH_CALLS")"
+    echo "ok: a launch in --auto costs no gh call of its own"
+    ;;
+
+  budget_pr_page_speaks)
+    # THE CLIFF SAYS SO. Refusing a listing at its page limit is right, and
+    # refusing it in silence is the worst property a stop can have: nothing
+    # launches, nothing is time-boxed, no build context is reset, and the run
+    # loop polls forever, with not one line in the log to read in the morning.
+    # Once per outage, through hold_say_into, not once a minute.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2; in_flight 3' 2>&1)"
+    grep -q "page limit" <<<"$out" \
+      || fail "the dispatcher refused every issue for the rest of the run and said nothing: $out"
+    [ "$(grep -c "page limit" <<<"$out")" = 1 ] \
+      || fail "it said it once per caller rather than once per outage: $out"
+    echo "ok: a PR listing at its page limit says so, once"
+    # ...and nothing at all when the listing is whole.
+    make_fixture ok
+    backlog_all_claimed 99
+    out="$(in_pass 'in_flight 2' 2>&1)"
+    grep -q "page limit" <<<"$out" && fail "it warned about a listing that was not truncated: $out"
+    echo "ok: ...and stays quiet when it is not"
+    # ...and says it AGAIN when the wedge recurs, rather than inheriting an
+    # hour-old marker from the last one. A say-once marker that outlives its
+    # condition is a stop nobody is told about twice.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2' 2>&1)"
+    grep -q "page limit" <<<"$out" || fail "the first wedge said nothing: $out"
+    backlog_all_claimed 99
+    in_pass 'in_flight 2' >/dev/null 2>&1
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2' 2>&1)"
+    grep -q "page limit" <<<"$out" \
+      || fail "a wedge that cleared and came back inside the hour was never mentioned: $out"
+    echo "ok: ...and says it again when the wedge clears and recurs"
+    ;;
+
+  budget_status_says_blind)
+    # `fleet.sh status` is what a person runs when nothing is launching, and at
+    # the page limit it was the most misleading thing in the tree: `in_flight`
+    # answers 2, the next-up loop reads 2 as "not running", and every `ready`
+    # issue printed as startable beside a dispatcher that would start none of
+    # them. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "could not be read" <<<"$out" \
+      || fail "status printed a full startable queue without saying the fleet cannot tell: $out"
+    echo "ok: status says so when the open-PR listing could not be read"
+    # ...and says nothing when it could.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "could not be read" <<<"$out" && fail "status warned about a listing it read fine: $out"
+    echo "ok: ...and stays quiet when it could"
+    ;;
+
+  budget_pass_signal)
+    # $AUTOFLEET_LOG_PASSES itself: off by default, because a line a minute is
+    # the log volume every say-once marker in fleet.sh exists to prevent.
+    # armaatus/autofleet#69 Design note 7.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "pass complete" <<<"$out" \
+      && fail "the dispatcher logged a line per pass without being asked: $out"
+    echo "ok: the per-pass line is off by default"
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(AUTOFLEET_LOG_PASSES=on in_fleet cmd_run --auto 2>&1)"
+    grep -q "pass complete" <<<"$out" \
+      || fail "AUTOFLEET_LOG_PASSES=on said nothing: $out"
+    # ...AFTER the last call a pass makes, which is what makes it usable as the
+    # end-of-pass signal budget_busy_pass waits on rather than a clock.
+    [ "$(grep -c . "$GH_CALLS")" = 2 ] \
+      || fail "the pass line landed before the pass was done: $(cat "$GH_CALLS")"
+    echo "ok: ...and on, it says so once the pass has spent everything it spends"
+
+    # ...and `0` is REFUSED rather than read as either. The first shape of this
+    # knob was `[ -n ]`, so `AUTOFLEET_LOG_PASSES=0` -- the one thing a host
+    # writes when it means off -- turned the line a minute ON, with nothing said
+    # about it. AUTOFLEET_CONTEXT_RESET's validator is the shape copied here.
+    # Found by the local review.
+    cfg_out="$( (cd "$WORK/repo" \
+      && AUTOFLEET_LOG_PASSES=0 bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
+    cfg_rc=$?
+    [ "$cfg_rc" = 2 ] \
+      || fail "AUTOFLEET_LOG_PASSES=0 was accepted (rc=$cfg_rc): $cfg_out"
+    grep -q "must be 'on' or 'off'" <<<"$cfg_out" \
+      || fail "it was refused without saying why: $cfg_out"
+    echo "ok: ...and a value that is neither on nor off is refused, not read as on"
+    ;;
+
+  budget_status_says_backlog_blind)
+    # The OTHER listing's failure, which had neither a caveat nor a phase. A
+    # `gh` outage printed an empty `next up` table under a header that had
+    # already gone out, and an empty table reads as "the backlog is finished" --
+    # the one wrong conclusion this block exists to prevent. Found by the local
+    # review.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q "not because the backlog is finished" <<<"$out" \
+      || fail "an unreadable issue listing printed as an empty queue: $out"
+    echo "ok: status says an empty next-up table is an outage, not an empty backlog"
+    ;;
+
+  budget_status_one_listing)
+    # ...and it costs ONE open-PR listing, not one per row. Outside a poll there
+    # is no $POLL_CACHE to read -- that gate is #35's -- so every `in_flight` in
+    # the next-up loop went to `gh` afresh: ~54 calls for one screen against this
+    # repository's own queue, which is the slope #69 removed from the dispatcher
+    # left standing in the command a person types. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    # Nothing claimed, so every row survives `in_flight` and the loop runs to the
+    # end -- which is the shape that made this expensive.
+    echo '[]' >"$GH_PRS"
+    in_fleet cmd_status >/dev/null 2>&1
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] \
+      || fail "one status screen over 10 ready issues took $n open-PR listings, not 1: $(cat "$GH_CALLS")"
+    echo "ok: one status screen costs one open-PR listing, whatever the queue holds"
+    # ...and it still writes nothing, which is what keeps that memo a variable
+    # rather than a fourth cache file. #35.
+    [ -e "$AUTOFLEET_DIR/poll-cache/open-prs" ] \
+      && fail "status wrote the poll cache; the out-of-poll memo must not be a file"
+    echo "ok: ...and leaves the poll cache alone"
+    ;;
+
+  budget_ready_blind_speaks)
+    # A `ready` listing that could not be read has to SAY so. Its two siblings
+    # both do. This one cached the failure in silence, so a persistent outage --
+    # expired auth, a broken $ISSUE_REFS -- left the dispatcher polling forever,
+    # launching nothing, with nothing in the log at all. Silencing the python's
+    # traceback made that worse: the traceback was ugly and it was also the only
+    # signal. Found by the local review.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    # TWICE IN ONE PASS, which is what makes the second assertion an assertion.
+    # Called once the count can only be 1 or 0, so "it said so more than once"
+    # was unreachable and the say-once marker went untested -- the same shape
+    # `budget_ready_list_blind` uses to prove the cached failure is not re-asked.
+    # Found by the local review.
+    out="$(in_pass 'ready_issues; ready_issues' 2>&1)"
+    grep -q "could not read the issue listing" <<<"$out" \
+      || fail "the dispatcher stopped starting anything and said nothing: $out"
+    [ "$(grep -c "could not read the issue listing" <<<"$out")" = 1 ] \
+      || fail "it said so more than once in one pass: $out"
+    echo "ok: an unreadable ready listing says so, once"
+    # ...and nothing when it reads fine.
+    make_fixture ok
+    backlog_all_claimed 3
+    out="$(in_pass 'ready_issues' 2>&1)"
+    grep -q "could not read the issue listing" <<<"$out" \
+      && fail "it warned about a listing it read fine: $out"
+    echo "ok: ...and stays quiet when it could read it"
+    ;;
+
+  budget_status_keeps_said)
+    # ...and it still writes NOTHING. #35's acceptance is that `status` leaves
+    # $STATE_DIR byte-identical, and the say-once marker's removal is a write:
+    # ungated, a `status` run beside a wedged dispatcher deleted the marker and
+    # the dispatcher said its lines again on the next poll. The same class of
+    # bug as the IN_POLL gate on the cache itself. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 3
+    mkdir -p "$AUTOFLEET_DIR"
+    printf '100' >"$AUTOFLEET_DIR/pr-page-full"
+    before="$(cat "$AUTOFLEET_DIR/pr-page-full")"
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/pr-page-full" ] \
+      || fail "status deleted a live dispatcher's say-once marker, so it will repeat itself next poll"
+    [ "$(cat "$AUTOFLEET_DIR/pr-page-full")" = "$before" ] \
+      || fail "status rewrote the say-once marker"
+    echo "ok: status does not drop the page-limit marker a dispatcher is holding"
+    # ...nor the OTHER say-once marker, which shipped a round later without the
+    # gate its sibling had. Two markers, one rule, and only one of them was
+    # covered.
+    printf 'ready' >"$AUTOFLEET_DIR/ready-unreadable"
+    in_fleet_keeping_cache cmd_status >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/ready-unreadable" ] \
+      || fail "status deleted the ready-listing say-once marker, so the dispatcher will repeat itself next poll"
+    echo "ok: ...nor the ready-listing one"
+    ;;
+
+  budget_busy_pass)
+    # THE OTHER ROW OF docs/WORKFLOW.md's table. The section claims the `budget_`
+    # phases assert its numbers; without this one it asserted the idle row and
+    # the launch row and left the busy figure to drift. Three owned worktrees,
+    # three open PRs, review mode `github`: the two shared listings, one
+    # merged-PR check per worktree, one issue lookup per worktree. Found by the
+    # local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    : >"$GH_MERGED"
+    worktree_list 1:wt 2:wt 3:wt
+    mkdir -p "$AUTOFLEET_DIR/worktrees"
+    # A REAL git repo, because `reap_merged` reads the branch name off it before
+    # it asks GitHub anything -- point the owned files at a bare directory and
+    # the merged-PR check this phase counts never happens at all.
+    make_worktree
+    rm -f "$AUTOFLEET_DIR/worktrees/42"
+    for n in 1 2 3; do
+      printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/$n"
+      # The build context already dropped for each, which is the steady state a
+      # full fleet spends its time-box in -- and what makes the prefetch's
+      # `live < MAX_WORKTREES` half do anything at all.
+      : >"$AUTOFLEET_DIR/context-reset-$n"
+    done
+    # A TOTAL, the way budget_idle_pass asserts the idle row -- `>= 3` of each
+    # kind would have let the 8 drift, which is the one thing this phase exists
+    # to stop. A total needs ONE pass and no second one racing it, so the poll is
+    # slowed right down: the fixture's default of 1s is what makes every other
+    # phase here cheap and is exactly wrong for this one.
+    #
+    # ASKED, not guessed. Three rounds of review went into tightening a quiet
+    # window -- 0.5s, then 2s -- that was always a wall-clock stand-in for one
+    # question: has the pass finished? Nothing guarantees two `gh` stub calls
+    # inside a pass are closer together than any chosen window; between them a
+    # pass forks `python3`, the runner stub and, because this fixture points
+    # `reap_merged` at a real repository, `git` three times. Under the parallel
+    # worktrees this repo runs at, a slow gap mid-pass broke the wait early and
+    # failed the phase with a drift report about a partial count.
+    #
+    # $AUTOFLEET_LOG_PASSES makes the dispatcher say so instead, once per pass,
+    # after `count_startable` -- which is the last call any pass makes. That is
+    # armaatus/autofleet#69's own Design note 7 ("count it, so this is not
+    # re-derived by hand") in the smallest form that answers this. The five
+    # minute poll stays as the second guarantee: even if the line were missed,
+    # no second pass exists to contaminate the count.
+    AUTOFLEET_POLL=300 AUTOFLEET_LOG_PASSES=on start_dispatcher --auto
+    wait_for_log "pass complete"
+    # The count is taken AFTER that line, which the dispatcher writes once
+    # `count_startable` -- the last call of a pass -- has returned. The five
+    # minute poll above is the second guarantee: no next pass can be underway
+    # while this reads $GH_CALLS.
+    n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
+    stop_dispatcher
+    [ "$n" = 8 ] \
+      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 8: $(cat "$GH_CALLS")"
+    # ...and a whole number of passes, which a count taken mid-pass would not be.
+    # Belt to the pass line's braces, and the thing that would say so if the
+    # signal were ever emitted before the last call of a pass rather than after.
+    [ $(( n % 8 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 8s): $(cat "$GH_CALLS")"
+    echo "ok: a full fleet of three worktrees costs 8 gh calls a pass"
+    ;;
+
+  budget_list_mode_no_listing)
+    # THE PREFETCH'S OWN CONDITION, which is the half hard rule 3 would
+    # otherwise have shipped unasserted. Named for LIST MODE and not for a full
+    # fleet, because list mode is the whole of what it covers: with every slot
+    # full the launch loop never runs, and in list mode `count_startable` is
+    # unreachable too (`queued` comes from `wanted`), so NOTHING in the pass
+    # reads the listing. In `--auto` `count_startable` takes it anyway, which is
+    # why docs/WORKFLOW.md's busy row counts it -- an earlier name for this
+    # phase said "full fleet" and would have had a maintainer believe otherwise.
+    # Drop `[ "$live" -lt "$MAX_WORKTREES" ]` and this fixture pays one `gh` call
+    # a minute for a whole time-box. Found by the local review.
+    make_fixture ok
+    : >"$GH_MERGED"
+    worktree_list 1:wt 2:wt 3:wt
+    start_dispatcher 42
+    i=0
+    while [ "$i" -lt 200 ] && [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -lt 2 ]; do
+      sleep 0.1; i=$((i + 1))
+    done
+    stop_dispatcher
+    [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -ge 2 ] \
+      || fail "no pass completed: $(cat "$WORK/run.log")"
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] \
+      || fail "a full fleet took $n open-PR listings for a launch loop that never runs: $(cat "$GH_CALLS")"
+    echo "ok: a pass that cannot launch does not pay for the listing that would tell it what to launch"
+    ;;
+
+  budget_drain_no_listing)
+    # ...and the drain half of the same condition. A drain launches nothing and
+    # forces `queued` to 0, so the listing answers nothing there either -- and a
+    # drain waiting on three PRs to merge can last hours.
+    make_fixture ok
+    backlog_all_claimed 10
+    # `--until 1`, an epoch already past. `deadline_from` takes `Nh`, `Nm`,
+    # `HH:MM` or a bare epoch, and `HH:MM` in the past rolls forward a day --
+    # so a bare epoch is the only spelling that is reliably behind us.
+    out="$(in_fleet cmd_run --auto --until 1 2>&1)"
+    grep -q "deadline passed" <<<"$out" || fail "the run did not enter a drain: $out"
+    n="$(grep -c -- "pr list --state open --json number,body" "$GH_CALLS" || true)"
+    [ "$n" = 0 ] || fail "a draining pass took $n open-PR listings it had no reader for: $(cat "$GH_CALLS")"
+    echo "ok: a draining pass does not pay for the listing either"
+    ;;
+
+  budget_ready_list_blind)
+    # The `ready` listing's half of the same contract. A `gh` that could not
+    # answer must not come back as an empty queue: `count_startable` reading one
+    # answers 0, and `queued == 0` with nothing owned is how `cmd_run` decides
+    # the backlog is finished and exits. One blip would end an overnight run.
+    make_fixture ok
+    printf 'FAIL\n' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "first=$?"; ready_issues; echo "second=$?"' 2>&1)"
+    grep -q "first=1" <<<"$out" || fail "an unreadable issue listing did not fail: $out"
+    grep -q "second=1" <<<"$out" \
+      || fail "the cached failure came back as an empty backlog rather than as a failure: $out"
+    n="$(grep -c "issue list --state open" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "the failed issue listing was re-asked $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: a ready listing that could not be read fails, is cached as a failure, and is asked once"
+    # ...and the run loop keeps polling on it rather than deciding the queue is
+    # empty. count_startable's documented non-zero is what carries that.
+    out="$(in_pass 'count_startable; echo "rc=$?"' 2>&1)"
+    grep -q "rc=1" <<<"$out" || fail "count_startable answered a number from a listing it could not read: $out"
+    echo "ok: ...and count_startable refuses to answer a number from it"
+    # ...and it does it QUIETLY. `gh`'s stderr was silenced and python's was not,
+    # so the JSONDecodeError this path relies on for its non-zero also put a raw
+    # traceback in $LOG once a poll, for as long as the outage lasted -- which is
+    # the log a person scans in the morning.
+    grep -qi "Traceback" <<<"$out" \
+      && fail "a gh outage put a python traceback in the dispatcher's log: $out"
+    echo "ok: ...and without a traceback in the log"
+    # A body that PARSES and is not a listing is the other shape. `{}` iterates
+    # no keys, prints nothing, and exits 0 -- so it cached as "the backlog is
+    # empty", which is how cmd_run decides there is no work left and stops for
+    # the night.
+    make_fixture ok
+    printf '{}\n' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "rc=$?"' 2>&1)"
+    grep -q "rc=1" <<<"$out" \
+      || fail "a JSON object that is not an issue listing read as an empty backlog: $out"
+    grep -qi "Traceback" <<<"$out" && fail "...and said so with a traceback: $out"
+    echo "ok: ...and well-formed JSON that is not a listing is not an empty backlog"
+    ;;
+
+  budget_ready_list_once)
+    # An empty backlog is an ANSWER and caches as one -- `-e`, not `-s`. Two
+    # readers, one `gh issue list`, and the second still gets the empty answer
+    # rather than a second call.
+    make_fixture ok
+    echo '[]' >"$GH_ISSUES"
+    out="$(in_pass 'ready_issues; echo "first=$?"; ready_issues; echo "second=$?"' 2>&1)"
+    grep -q "first=0" <<<"$out" || fail "an empty backlog did not read as an answer: $out"
+    grep -q "second=0" <<<"$out" || fail "the cached empty backlog did not read as an answer: $out"
+    n="$(grep -c "issue list --state open" "$GH_CALLS" || true)"
+    [ "$n" = 1 ] || fail "an empty backlog was asked for $n times in one pass: $(cat "$GH_CALLS")"
+    echo "ok: an empty ready listing is an answer, cached as one, asked once"
+    # ...and a real queue still round-trips whole, last record included. `$(...)`
+    # eats the trailing newline, and without `print_listing` putting it back the
+    # launch loop's `read` drops the last candidate -- so a one-issue backlog
+    # would never start at all.
+    make_fixture ok
+    backlog_all_claimed 1
+    out="$(in_pass 'ready_issues | wc -l; ready_issues | wc -l' 2>&1 | tr -d " ")"
+    [ "$out" = "$(printf '1\n1')" ] \
+      || fail "a one-issue ready listing did not survive the cache as one whole record: $out"
+    echo "ok: ...and a one-issue queue survives the cache with its last record intact"
+    ;;
+
+  budget_pr_list_truncated)
+    # A FULL PAGE is not an answer. At `--limit 100` we cannot tell an absent PR
+    # from one on page two, and this listing is the single authority the launch
+    # loop reads -- so a truncated page read as complete makes every issue whose
+    # PR fell past the boundary look free, and the fleet opens a second worktree
+    # for each. "Could not tell" instead, which starts nothing.
+    make_fixture ok
+    backlog_all_claimed 100
+    out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
+    grep -q "rc=2" <<<"$out" \
+      || fail "a PR listing at the page limit was read as complete, so an issue past the boundary reads as free: $out"
+    echo "ok: an open-PR listing at its page limit answers 'could not tell', not 'no PR'"
+    # One short of the limit is a whole listing and still answers.
+    make_fixture ok
+    backlog_all_claimed 99
+    out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
+    grep -q "rc=0" <<<"$out" || fail "a listing one short of the page limit stopped answering: $out"
+    echo "ok: ...and one short of it still does"
+    ;;
+
+  budget_listing_before_launch)
+    # THE LINE THE WINDOW RESTS ON. `open_pr_listing`'s header says the listing
+    # is taken no later than the line before the launch loop, because the launch
+    # loop is the one reader that acts on the answer by opening a worktree.
+    # Nothing else in the suite can tell: delete the prefetch and the counts stay
+    # at 2, because the loop's first `in_flight` fetches lazily instead. The
+    # ORDER is what changes -- lazily, `ready_issues` gets there first -- so the
+    # order is what this asserts. Hard rule 3: a guard with no assertion is not
+    # shipped. Found by the local review.
+    make_fixture ok
+    backlog_all_claimed 10
+    out="$(in_fleet cmd_run --auto 2>&1)"
+    grep -q "nothing startable left" <<<"$out" || fail "the pass did not end: $out"
+    first="$(head -1 "$GH_CALLS")"
+    case "$first" in
+      "pr list --state open --json number,body"*) : ;;
+      *) fail "the pass's first gh call was '$first', not the open-PR listing: the launch loop got there first, and the window named at the cache is no longer the one the code takes" ;;
+    esac
+    echo "ok: the pass takes its open-PR listing before the launch loop scans anything"
+    ;;
+
+  budget_pr_list_fresh_per_pass)
+    # The cache is the POLL's. A PR opened between passes is seen on the next
+    # one -- the window named at the cache is one poll wide, not the run's life.
+    make_fixture ok
+    backlog_all_claimed 1
+    out="$(in_pass 'in_flight 9; echo "before=$?"' 2>&1)"
+    grep -q "before=1" <<<"$out" || fail "#9 was not free to start with: $out"
+    backlog_all_claimed 9
+    out="$(in_pass 'in_flight 9; echo "after=$?"' 2>&1)"
+    grep -q "after=0" <<<"$out" \
+      || fail "a PR opened between passes was still invisible on the next one: $out"
+    echo "ok: the open-PR listing is re-read every pass"
+    ;;
+
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed" >&2
+    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_pass_signal|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
     exit 2 ;;
 esac
