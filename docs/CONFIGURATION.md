@@ -513,12 +513,18 @@ scripts:
 
 A fourth call site added without the export would be a knob that silently
 measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
-on any `scripts/fleet/*.sh` that starts a model call and contains no call to the
-seam. It is in `evals/` rather than `tests/` because `evals/` is vendored: a host
-project gets the guard along with the thing it guards. The check is **per
-script**, not per call — a script that already goes through the seam once and
-then gains a second, unwrapped call still passes; catching that needs a shell
-parser.
+on any `scripts/fleet/*.sh` that runs a `$AUTOFLEET_*_CMD` in command position
+and contains no call to the seam. It is in `evals/` rather than `tests/` because
+`evals/` is vendored: a host project gets the guard along with the thing it
+guards.
+
+What it does **not** catch, named here rather than left to be discovered: it is
+**per script**, not per call, so a script that goes through the seam once and
+then gains a second, unwrapped call still passes; it reads the command word, so a
+call captured into a variable (`out="$($AUTOFLEET_REVIEW_CMD …)"`) or a literal
+`claude -p` that bypasses the knob entirely is invisible to it. Both need a shell
+parser. `evals/shell_code.py --selftest` records the shapes it does and does not
+see, and `lint.sh` runs that selftest before trusting the scan.
 
 It does **not** cover the worktree agent. That process is started by the runtime,
 not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the

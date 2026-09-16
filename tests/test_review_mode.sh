@@ -3084,8 +3084,11 @@ XX
 
 # ----------------------------------------------------------------- headroom
   headroom)
-  # THE COMPRESSION SEAM in front of the one model call the dispatcher makes
-  # itself. Every call this fleet makes pays full price for its context and
+  # THE COMPRESSION SEAM in front of the model calls the fleet starts as a
+  # direct child of its own scripts -- the reviewer here, and validate.sh and
+  # self-review.sh through the same one writer in lib.sh, which
+  # `evals/lint.sh` check 7b holds to all three. Every call this fleet makes
+  # pays full price for its context and
   # nothing in the tree had ever tried a proxy in front of it -- so the seam is
   # opt-in, off by default, and the default has to be provably INERT. Which
   # means asserting an ABSENCE and not only a presence: a knob that is "off" by
@@ -3229,12 +3232,34 @@ $inner_body"
   # `:=` -- into a probe of whatever is on port 80. Anything answering there
   # made `status` say "answering" and exported the malformed string to every
   # model call the fleet starts.
-  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
-    && fleet_headroom_up "localhost:8787" ) \
+  #
+  # THE POSITIVE CONTROL FIRST, and it is the whole reason these three lines are
+  # in this order. `( . lib.sh && fleet_headroom_up X ) && fail` is satisfied by
+  # ANY non-zero exit -- lib.sh failing to source, the function not existing,
+  # python3 missing -- so on its own it was green before the fix too, which is
+  # not a test. The live URL going through the same subshell is what proves the
+  # subshell works, so the two refusals below mean the URL and not the harness.
+  # Found by the self-review.
+  stub_proxy
+  probe() { ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh && fleet_headroom_up "$1" ); }
+  probe "$PROXY_URL" \
+    || fail "the probe could not reach a listener that is there, so the refusals below prove nothing"
+  probe "localhost:8787" \
     && fail "a URL with no scheme was probed as something reachable"
-  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh && fleet_headroom_up "" ) \
+  probe "" \
     && fail "an empty URL was probed as something reachable"
-  ok "a URL with no scheme, and an empty one, read as unreachable"
+  # THE ROW THAT IS RED WITHOUT THE FIX, and it has to be this shape. The
+  # original bug was `host = u.hostname or "127.0.0.1"` turning a scheme-less
+  # URL into a probe of port 80 -- which a fixture cannot reproduce, because
+  # binding 80 needs root, so a no-scheme assertion is green either way. A
+  # scheme that is not http or https is the same bug reachable from user space:
+  # the old code took the hostname and port it parsed and connected, so a LIVE
+  # listener behind `ftp://` answered and the malformed string was exported as
+  # ANTHROPIC_BASE_URL. This points at the stub, which IS listening.
+  probe "ftp://127.0.0.1:${PROXY_URL##*:}" \
+    && fail "a non-HTTP scheme was probed as a usable proxy, and would have been exported as one"
+  kill_proxy
+  ok "a live URL is reachable; no scheme, no host, and a scheme that is not HTTP are not"
   ;;
 
 # ---------------------------------------------------------- headroom_status
@@ -3245,7 +3270,10 @@ $inner_body"
   # proxy up" is not answerable from a dispatcher that never says.
   make_fixture; stub_reviewer marked
   unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
-  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  # One spelling of "source fleet.sh and run the screen", because three copies is
+  # two too many and the copies are what let an assertion read a stale one.
+  status_out() { ( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 ); }
+  out="$(status_out)"
   grep -qi "headroom:.*off" <<<"$out" \
     || fail "status does not say the compression seam is off: $out"
   ok "status names the seam and says it is off"
@@ -3256,7 +3284,7 @@ $inner_body"
   stub_proxy
   export AUTOFLEET_HEADROOM=1
   export AUTOFLEET_HEADROOM_URL="$PROXY_URL"
-  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  out="$(status_out)"
   grep -qF "$PROXY_URL" <<<"$out" || fail "status does not name the URL: $out"
   grep -qi "answering" <<<"$out" || fail "status does not say the proxy answers: $out"
   grep -qi "NOT ANSWERING" <<<"$out" \
@@ -3264,7 +3292,7 @@ $inner_body"
   ok "...and on, with a listener, names the URL and says it answers"
 
   kill_proxy
-  out="$( cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && cmd_status 2>&1 )"
+  out="$(status_out)"
   grep -qi "NOT ANSWERING" <<<"$out" \
     || fail "status did not notice the proxy is gone: $out"
   grep -qi "unwrapped" <<<"$out" \

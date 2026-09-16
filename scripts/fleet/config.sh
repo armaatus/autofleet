@@ -611,6 +611,20 @@ esac
 #
 # So it is loud. A host repo hits this once, on the first run after upgrading,
 # with both replacements named in the message.
+# THE COMPRESSION KNOB IS A TOGGLE AND ONLY TWO VALUES ARE ONE. `fleet_headroom_on`
+# tests for the literal `1`, so `AUTOFLEET_HEADROOM=on` -- the spelling the two
+# knobs above this file take, which is exactly why somebody will write it --
+# read as OFF: every review quietly paid full token price, `fleet.sh status`
+# said "off", and nothing anywhere named the typo. A knob whose wrong value is
+# indistinguishable from its default is the silent-acceptance failure the rest of
+# this section exists to refuse. Found by the self-review.
+case "$AUTOFLEET_HEADROOM" in
+  0|1) ;;
+  *) echo "AUTOFLEET_HEADROOM must be '0' or '1'; got '$AUTOFLEET_HEADROOM'." >&2
+     echo "docs/CONFIGURATION.md has the row, and what turning it on costs." >&2
+     exit 2 ;;
+esac
+
 # `${VAR+set}`, not `-n "${VAR:-}"`. A host config that has been half-edited
 # leaves `AUTOFLEET_REVIEW_MAX_ROUNDS=` with nothing after the `=` -- still a
 # line about a knob nothing reads, and still someone who thinks they have

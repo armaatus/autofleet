@@ -34,6 +34,11 @@ _PREFIX = re.compile(
 # The expansion itself, in every spelling bash accepts: quoted or bare, braced
 # or not. The first version wanted the quotes and the bare brace-less form only,
 # which `"${AUTOFLEET_REVIEW_CMD}"` and `$AUTOFLEET_REVIEW_CMD` both walk past.
+# Where one command ends and the next begins. Crude on purpose -- an operator
+# inside quotes splits a line that was already going to be looked at whole, and
+# the worst that costs is one extra fragment that matches nothing.
+_SEPARATOR = re.compile(r"(?:;|&&|\|\||\|&|\|)")
+
 _CALL = re.compile(r'^"?\$\{?AUTOFLEET_[A-Z_]*_CMD\}?"?')
 
 
@@ -48,6 +53,13 @@ def code_of(line):
     Quote tracking is deliberately naive about backslash escapes: the callers
     ask "does this word appear in code", and an escaped quote moves where the
     comment starts, never whether the word is there.
+
+    LINE BY LINE, with two consequences worth naming rather than discovering. A
+    heredoc body and a multi-line string are read as ordinary lines, so quote
+    tracking can be wrong inside them; and a STRING counts as code, so
+    `echo fleet_headroom_env` satisfies 7b the way a comment used to. Both are
+    accepted: closing either needs a shell parser, and both fail toward
+    scanning more rather than less.
     """
     out, quote, prev = [], "", ""
     for c in line:
@@ -88,12 +100,20 @@ def starts_a_model_call(line):
     not a model -- and a check that read the whole line would demand the
     dispatcher export a base URL for it.
     """
-    line = code_of(line).strip()
-    while True:
-        shorter = _PREFIX.sub("", line, count=1)
-        if shorter == line:
-            return bool(_CALL.match(line))
-        line = shorter
+    # SPLIT ON THE SEPARATORS FIRST. `set -m; "$AUTOFLEET_REVIEW_CMD" ...` is
+    # one line with two commands in it, and a detector that only looks at the
+    # start of the line reports the second one as absent. Found by the
+    # self-review.
+    for part in _SEPARATOR.split(code_of(line)):
+        part = part.strip()
+        while True:
+            shorter = _PREFIX.sub("", part, count=1)
+            if shorter == part:
+                break
+            part = shorter
+        if _CALL.match(part):
+            return True
+    return False
 
 
 _CASES = [
@@ -113,6 +133,8 @@ _CASES = [
     # failure this whole file exists to stop. If the payload ever grows one,
     # this case changes to True and the prefix list grows with it.
     ('out="$($AUTOFLEET_REVIEW_CMD -p x)"', False),
+    ('set -m; "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('mkdir -p "$d" && "$AUTOFLEET_REVIEW_CMD" -p x', True),
     # ...and the mentions, which are not call sites.
     ('  say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue', False),
     ('command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {', False),

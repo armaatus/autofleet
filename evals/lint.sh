@@ -1678,15 +1678,23 @@ for path in sorted(calls):
         print(("site " if covered[path] else "LEAK ") + path)
 PYEOF
 )"; then
+  clean=1
+  # `fail` COUNTS AND RETURNS -- it does not exit, which is what lets this file
+  # report every breach in one run. So the `ok` has to be conditional or the log
+  # says both things about the same check, one line apart, and the reader has to
+  # know which of the two is the verdict. Found by the self-review.
   if leaks="$(printf '%s\n' "$sites" | sed -n 's/^LEAK //p')" && [ -n "$leaks" ]; then
+    clean=0
     fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
 $(printf '%s\n' "$leaks" | sed 's/^/    /')"
   fi
   for known in scripts/fleet/review.sh scripts/fleet/validate.sh scripts/fleet/self-review.sh; do
-    printf '%s\n' "$sites" | qgrep -xF "site $known" \
-      || fail "the model-call scan no longer sees $known, so it is asserting nothing about the compression seam"
+    printf '%s\n' "$sites" | qgrep -xF "site $known" && continue
+    clean=0
+    fail "the model-call scan no longer sees $known, so it is asserting nothing about the compression seam"
   done
-  ok "every fleet script that starts a model call goes through the compression seam"
+  [ "$clean" = 1 ] \
+    && ok "every fleet script that starts a model call goes through the compression seam"
 else
   fail "the model-call scan could not run, so it is asserting nothing"
 fi
