@@ -3093,6 +3093,14 @@ XX
   # assertion can see an environment variable either way. armaatus/autofleet#89.
   make_fixture; stub_reviewer marked
   unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
+  # ...AND THE TWO VARIABLES THEMSELVES, because this phase asserts an ABSENCE
+  # and `run_it` hands review.sh the caller's whole environment. The page this
+  # change adds tells a maintainer to run `headroom wrap claude`, which exports
+  # ANTHROPIC_BASE_URL for their `claude` -- and the agent that then runs
+  # `./tests/run.sh` inherits it. Without this the suite goes red for everybody
+  # who followed the docs, reporting a leak the seam did not cause. Found by the
+  # self-review.
+  unset ANTHROPIC_BASE_URL ENABLE_TOOL_SEARCH
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 0 ] || { cat "$WORK/out" >&2; fail "the unconfigured review did not submit (got $rc)"; }
   [ -s "$ENV_FILE" ] \
@@ -3158,7 +3166,11 @@ XX
   # branch, the branch has one writer, and two more copies of a reviewer stub
   # would assert the same line three times.
   stub_proxy
-  inner='. ./scripts/fleet/lib.sh
+  # The same script twice, once clearing the inherited variables and once
+  # keeping them: the first asks what the seam SETS, the second what it gives
+  # back. Building it from one string keeps the two steps -- probe, kill, probe
+  # -- from drifting apart.
+  inner_body='. ./scripts/fleet/lib.sh
 fleet_headroom_env
 printf "one=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
 kill -9 "$1" 2>/dev/null
@@ -3169,6 +3181,13 @@ done
 fleet_headroom_env
 printf "two=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
 printf "search=%s\n" "${ENABLE_TOOL_SEARCH:-unset}"'
+  # CLEARED, for the reason the top of this phase clears them: the suite may be
+  # running under an agent that followed docs/CONFIGURATION.md and wrapped its
+  # own `claude`, and this half asks what the seam SETS from nothing.
+  inner="unset ANTHROPIC_BASE_URL ENABLE_TOOL_SEARCH
+$inner_body"
+  # ...and KEPT, for the half that asks what it gives back.
+  inner_keep="$inner_body"
   out="$( cd "$WORK/repo" \
           && REPO_ROOT="$WORK/repo" AUTOFLEET_HEADROOM=1 \
              AUTOFLEET_HEADROOM_URL="$PROXY_URL" \
@@ -3184,6 +3203,25 @@ printf "search=%s\n" "${ENABLE_TOOL_SEARCH:-unset}"'
   grep -qF "AUTOFLEET_HEADROOM" <<<"$out" \
     || fail "the second call degraded silently: $out"
   ok "...and says so, rather than leaving the log claiming a wrap that is gone"
+
+  # AN OPERATOR'S OWN BASE URL COMES BACK. Somebody who points
+  # ANTHROPIC_BASE_URL at a company gateway and then turns the knob on had it
+  # replaced by the proxy on the first call; a degrade that merely UNSET it sent
+  # the next pass straight at Anthropic, past the gateway, where it can fail
+  # auth -- and lib.sh claimed it left the operator alone. Found by both
+  # self-review passes.
+  stub_proxy
+  out="$( cd "$WORK/repo" \
+          && REPO_ROOT="$WORK/repo" AUTOFLEET_HEADROOM=1 \
+             AUTOFLEET_HEADROOM_URL="$PROXY_URL" \
+             ANTHROPIC_BASE_URL="https://gateway.invalid" \
+             bash -c "$inner_keep" _ "$PROXY_PID" 2>&1 )"
+  PROXY_PID=""
+  grep -qxF "one=$PROXY_URL" <<<"$out" \
+    || fail "the first call did not take the proxy over the operator value: $out"
+  grep -qxF "two=https://gateway.invalid" <<<"$out" \
+    || fail "the degrade threw away a base URL the operator set, rather than putting it back: $out"
+  ok "...and a base URL the operator set themselves comes back, rather than vanishing"
 
   # A URL WITH NO SCHEME reads as unreachable rather than as 127.0.0.1:80.
   # `urlsplit("localhost:8787")` has no hostname, and a fallback pair turned

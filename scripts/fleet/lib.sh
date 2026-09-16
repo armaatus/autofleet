@@ -664,20 +664,38 @@ PY
 # exists to prevent, arriving through the function itself. Found by both
 # self-review passes.
 #
-# It unsets ONLY what it set (`_fleet_headroom_exported`), because an operator
-# who exported their own ANTHROPIC_BASE_URL before starting the dispatcher did
-# not ask this to take it away.
+# It RESTORES rather than unsets, which is the second round of this fix. An
+# operator who points ANTHROPIC_BASE_URL at a company gateway and then turns the
+# knob on had their value replaced by the proxy on the first call; a degrade that
+# `unset` it sent the next pass straight at Anthropic, past the gateway, where it
+# can fail auth outright -- and the comment here claimed the opposite. So the
+# first successful call records what was there, presence and value, and the
+# degrade puts it back. Found by both self-review passes, twice.
+_fleet_headroom_restore() {
+  # `$2` is "" when the variable was UNSET before we touched it, and
+  # "set:<value>" when it was set -- the two are different states and an empty
+  # string is a legal value for either.
+  case "${2:-}" in
+    set:*) export "$1=${2#set:}" ;;
+    *)     unset "$1" ;;
+  esac
+}
 fleet_headroom_env() {
   fleet_headroom_on || return 0
   if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
+    if [ "${_fleet_headroom_saved:-0}" != 1 ]; then
+      _fleet_headroom_was_url="${ANTHROPIC_BASE_URL+set:$ANTHROPIC_BASE_URL}"
+      _fleet_headroom_was_ts="${ENABLE_TOOL_SEARCH+set:$ENABLE_TOOL_SEARCH}"
+      _fleet_headroom_saved=1
+    fi
     export ANTHROPIC_BASE_URL="$AUTOFLEET_HEADROOM_URL"
     export ENABLE_TOOL_SEARCH=true
-    _fleet_headroom_exported=1
     return 0
   fi
-  if [ "${_fleet_headroom_exported:-0}" = 1 ]; then
-    unset ANTHROPIC_BASE_URL ENABLE_TOOL_SEARCH
-    _fleet_headroom_exported=0
+  if [ "${_fleet_headroom_saved:-0}" = 1 ]; then
+    _fleet_headroom_restore ANTHROPIC_BASE_URL "${_fleet_headroom_was_url:-}"
+    _fleet_headroom_restore ENABLE_TOOL_SEARCH "${_fleet_headroom_was_ts:-}"
+    _fleet_headroom_saved=0
   fi
   echo "AUTOFLEET_HEADROOM=1, but nothing answers at '${AUTOFLEET_HEADROOM_URL:-}'." >&2
   echo "    Running unwrapped, at full token price. Start the proxy, check the" >&2

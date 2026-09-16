@@ -597,10 +597,13 @@ so a `command -v headroom` added to the payload later fails the build.
 The probe is strict about the URL on purpose: **no scheme or no host reads as
 unreachable**, so `AUTOFLEET_HEADROOM_URL=localhost:8787` (no `http://`) and an
 empty value both degrade loudly instead of being probed against port 80 of your
-own machine and then exported as a broken base URL. If the proxy dies between
-two calls in one process — the two self-review passes are minutes apart — the
-second call takes the first one's exports back rather than leaving the agent
-pointed at a dead endpoint.
+own machine and then exported as a broken base URL.
+
+If the proxy dies between two calls in one process — the two self-review passes
+are minutes apart — the second call **puts back whatever was there before**
+rather than leaving the agent pointed at a dead endpoint. If you had your own
+`ANTHROPIC_BASE_URL` set (a company gateway, say) the knob borrows it while the
+proxy is up and returns it when the proxy goes away; it is not lost.
 
 ### Per-worktree isolation
 

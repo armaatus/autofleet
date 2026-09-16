@@ -1640,20 +1640,57 @@ fi
 #     CLAUDE.md's Layout table `tests/` is autofleet's own suite and does not
 #     ship, so a host project got the seam and not the guard on it while
 #     docs/CONFIGURATION.md sold the guard as the guarantee. `evals/` ships.
-#     Found by the self-review.
 #
-#     The detector is the CALL SHAPE, not one spelling of it: any line whose
-#     first word is a `$AUTOFLEET_*_CMD` expansion, optionally behind `exec`.
-#     The first version keyed on the literal `_CMD" -p `, which a continuation
-#     line, an `exec`, or `--print` would each have walked straight past -- a
-#     guard that silently stops guarding, which is the thing it is here to stop.
-if missing="$(grep -lE '^[[:space:]]*(exec[[:space:]]+)?"\$AUTOFLEET_[A-Z_]*_CMD"' \
-                   scripts/fleet/*.sh \
-              | while IFS= read -r f; do
-                  grep -q 'fleet_headroom_env' "$f" || printf '%s\n' "$f"
-                done)" && [ -n "$missing" ]; then
+#     BOTH SIDES READ CODE, NOT PROSE, and that is the second round of this
+#     check rather than a flourish. The first version asked `grep -q` twice on
+#     the raw file: a `$AUTOFLEET_*_CMD` named in a comment made a file a call
+#     site, and -- far worse -- a COMMENT mentioning `fleet_headroom_env` was
+#     enough to clear one. A guard a comment satisfies is a guard that has
+#     stopped guarding. Found by the self-review, twice.
+#
+#     COMMAND POSITION, not "appears on the line", and that is the difference
+#     between a call site and a mention. `fleet.sh:524` passes
+#     `"$AUTOFLEET_AGENT_CLEAR_CMD"` as an ARGUMENT -- keystrokes for a terminal,
+#     not a model -- and a check that read the line would demand the dispatcher
+#     export a base URL for it. A short prefix allowlist comes off first, so
+#     `timeout 600 "$AUTOFLEET_REVIEW_CMD"` and `exec "$..._CMD"` are still call
+#     sites; the first version keyed on the literal `_CMD" -p `, which both of
+#     those walked past.
+if leaks="$(python3 - <<'PYEOF'
+import glob, re, sys
+sys.path.insert(0, "evals")
+from shell_code import code_of
+
+# What may stand in front of the command and leave it a command: a wrapper that
+# still ends up exec-ing the agent in the environment of this process.
+#
+# NO BARE APOSTROPHE ANYWHERE IN THIS HEREDOC, in code or in prose. It sits
+# inside a "$( ... )" substitution and bash tracks quotes through that even for
+# a quoted heredoc body, so one unpaired single quote swallows the closing paren
+# and the file stops parsing 1900 lines further down, where the error is
+# reported. Write "of this process" rather than the possessive.
+PREFIX = re.compile(r"^(exec|command|nohup|time|timeout\s+[0-9smhd.]+|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+")
+CALL = re.compile(r'^"\$AUTOFLEET_[A-Z_]*_CMD"')
+
+def starts_a_model(line):
+    line = line.strip()
+    while True:
+        stripped = PREFIX.sub("", line, count=1)
+        if stripped == line:
+            break
+        line = stripped
+    return bool(CALL.match(line))
+
+for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
+    lines = [code_of(l) for l in open(path, encoding="utf-8")]
+    if not any(starts_a_model(l) for l in lines):
+        continue
+    if not any("fleet_headroom_env" in l for l in lines):
+        print(f"    {path}")
+PYEOF
+)" && [ -n "$leaks" ]; then
   fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
-$(printf '%s\n' "$missing" | sed 's/^/    /')"
+$leaks"
 else
   ok "every fleet script that starts a model call goes through the compression seam"
 fi
@@ -1667,7 +1704,7 @@ fi
 #     docs/CONFIGURATION.md states that as a guarantee, and hard rule 3's
 #     temperament is that a rule with no assertion is not shipped -- the same
 #     reasoning that makes 4c RUN the Orca grep instead of quoting it. So this
-#     runs it. Found by the self-review, which noticed the claim was prose.
+#     runs it.
 #
 #     WHAT IS ALLOWED is every identifier the fleet itself owns, plus the
 #     literal `headroom:` -- the label on `fleet.sh status`'s row, which is the
@@ -1676,32 +1713,16 @@ fi
 #     the check nothing. This differs from 4c on purpose: hard rule 4 forbids
 #     NAMING Orca in a message because the driver is meant to be invisible;
 #     here naming the vendor IS the rule, and only reaching for it is the leak.
-#
-#     Comments are stripped, for 4c's reason and with 4c's care: a `grep -v` on
-#     a leading `#` only sees whole-line comments, and this rule's prose is
-#     routinely a trailing one.
 if leaks="$(python3 - <<'PYEOF'
-import glob, re
+import glob, re, sys
+sys.path.insert(0, "evals")
+from shell_code import code_of
 
-OWNED = re.compile(r"(AUTOFLEET_HEADROOM(_URL)?|_?fleet_headroom_(on|up|env|exported)|headroom:)")
-
-def code(line):
-    """The line with any trailing comment removed, quotes respected."""
-    out, q = [], ""
-    for c in line:
-        if not q:
-            if c in "\"'":
-                q = c
-            elif c == "#":
-                break
-        elif c == q:
-            q = ""
-        out.append(c)
-    return "".join(out)
+OWNED = re.compile(r"(AUTOFLEET_HEADROOM(_URL)?|_?fleet_headroom_[a-z_]*|headroom:)")
 
 for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
     for n, line in enumerate(open(path, encoding="utf-8"), 1):
-        if "headroom" in OWNED.sub("", code(line)).lower():
+        if "headroom" in OWNED.sub("", code_of(line)).lower():
             print(f"    {path}:{n}: {line.strip()}")
 PYEOF
 )" && [ -n "$leaks" ]; then

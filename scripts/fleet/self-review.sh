@@ -237,7 +237,7 @@ run_pass() {
   # reasoning). PER PASS, not once at the top: the proxy can die between the two
   # passes, and lib.sh's re-probe is what takes the first pass's exports back.
   # armaatus/autofleet#89.
-fleet_headroom_env
+  fleet_headroom_env
 
   echo "==> $label  (${AUTOFLEET_SELF_REVIEW_TIMEOUT}s," \
        "${AUTOFLEET_SELF_REVIEW_MAX_TURNS} turns, $AUTOFLEET_SELF_REVIEW_CMD)" >&2
