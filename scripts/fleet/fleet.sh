@@ -404,6 +404,12 @@ card() {
 # that moment. A listing that could not be READ is said once, the way
 # `interrupt_agent_in` says it, because that is the difference between "nobody
 # is in there" and "somebody is and we could not reach them".
+#
+# 1 = nothing was sent: no agent, or the listing could not be read -- both may
+#     change by the next poll. 2 = there IS an agent and the driver would not
+#     type at it or submit, which a driver that cannot type will say on every
+#     poll for ever; a caller that retries per poll reads 2 as its exit
+#     (armaatus/autofleet#106).
 say_to_agent_in() {
   local path="$1" text="$2" handle
   if ! handle="$(runner_agent_terminal "$path")"; then
@@ -413,11 +419,11 @@ say_to_agent_in() {
   [ -n "$handle" ] || return 1
   runner_terminal_send "$handle" "$text" || {
     say "  the runner would not type into $path -- nothing was sent"
-    return 1
+    return 2
   }
   runner_terminal_enter "$handle" || {
     say "  the runner typed into $path but would not submit it"
-    return 1
+    return 2
   }
   return 0
 }
@@ -501,7 +507,7 @@ handoff_turn() {
 # earlier, and the agent is between turns there.
 reset_context_for_answering() {
   [ "${AUTOFLEET_CONTEXT_RESET:-on}" = on ] || return 0
-  local f num path
+  local f num path rc
   for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"
@@ -521,7 +527,16 @@ reset_context_for_answering() {
     fi
     handoff_turn "$num" "$path" || continue
     say "#$num: PR is open -- starting the answering work in a clean context"
-    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD"; rc=$?
+    # A driver that REFUSED is marked done, like the empty clear command above:
+    # retrying it is the same refusal and the same lines on every poll for as
+    # long as the PR is open. No agent yet (1) is left to the next poll.
+    if [ "$rc" -eq 2 ]; then
+      : >"$STATE_DIR/context-reset-$num"
+      say "#$num: the runner would not type at this agent, so the build context stays for the answering work"
+      continue
+    fi
+    [ "$rc" -eq 0 ] || continue
     # The marker goes down BEFORE the second prompt: a clear that landed and an
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
