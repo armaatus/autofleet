@@ -3065,8 +3065,11 @@ $bad"
   # in THIS file and require the written stub to equal it byte for byte.
   #
   # The reconstruction is deliberately narrow, which is where the assertion
-  # comes from: an ALLOWLIST of the five paths plus `$1` -- what the heredoc is
-  # unquoted FOR -- and nothing else. Any other unescaped `$NAME`, any `$(`, any
+  # comes from: an ALLOWLIST of the paths plus `$1` -- what the heredoc is
+  # unquoted FOR -- and nothing else. NOT "the five paths" or "the six": this
+  # sentence carried a count twice, and both times it was the count before the
+  # name that had just been added. The list is twenty lines below and is the one
+  # place to read it. Any other unescaped `$NAME`, any `$(`, any
   # backtick is a failure by NAME rather than by its effect, so `$HOME` eating
   # half a comment fails here whether or not it happens to be quiet, and so does
   # the next construct nobody has thought of. The backtick that hung CI for nine
@@ -3078,6 +3081,7 @@ $bad"
   STUB_SRC="${BASH_SOURCE[0]}" STUB_OUT="$WORK/bin/fake-reviewer" STUB_MODE=marked \
   REVIEWER_CALLS="$REVIEWER_CALLS" PROMPT_FILE="$PROMPT_FILE" ARGV_FILE="$ARGV_FILE" \
   GH_HEAD="$GH_HEAD" GH_REVIEWS="$GH_REVIEWS" REVIEWER_WORK="$REVIEWER_WORK" \
+  ENV_FILE="$ENV_FILE" \
   python3 - <<'RECONSTRUCT' || fail "the written reviewer stub is not the heredoc body in $(basename "${BASH_SOURCE[0]}")"
 import os, re, sys
 
@@ -3091,7 +3095,7 @@ body = m.group(1)
 # deliberate act; anything not on the list is the failure.
 allowed = {n: os.environ[n] for n in
            ("REVIEWER_CALLS", "PROMPT_FILE", "ARGV_FILE", "GH_HEAD", "GH_REVIEWS",
-            "REVIEWER_WORK")}
+            "REVIEWER_WORK", "ENV_FILE")}
 allowed["1"] = os.environ["STUB_MODE"]
 
 out, i = [], 0
