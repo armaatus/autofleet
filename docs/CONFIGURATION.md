@@ -655,6 +655,12 @@ your authentication, your compliance logging or your egress control, that is the
 thing to know before setting `AUTOFLEET_HEADROOM=1`, and the reason to point
 `AUTOFLEET_HEADROOM_URL` at a proxy you have configured to forward through it.
 
+**Keep a non-loopback URL on `https://`.** The probe accepts any `http://` host,
+and whatever the knob exports is where `claude` then sends its credential — so
+`http://proxy.corp:8787` puts an API key or OAuth bearer token on the wire in
+cleartext for anything between here and that host. The default is loopback,
+where that does not apply; the moment the proxy is not on this machine, it does.
+
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,
