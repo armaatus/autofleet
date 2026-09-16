@@ -1084,21 +1084,15 @@ PY
 # ------------------------------------------------- the compression proxy (#89)
 #
 # One of the three model calls the fleet starts as a direct child of its own
-# scripts -- this one, validate.sh and self-review.sh -- and therefore one it can
-# put a compressing proxy in front of without growing the runner contract. The
-# worktree agent is started by the runtime, not by fleet.sh, and
-# does NOT inherit this process's environment -- its terminal is a child of the
-# Orca app, not of the dispatcher (armaatus/autofleet#89 records the process
-# tree that says so), so covering it is `headroom wrap claude` on the machine
-# and docs/CONFIGURATION.md says so.
+# scripts -- this one, validate.sh and self-review.sh. The reasoning is in
+# lib.sh, canonically and once; what is local to here is the POSITION. Above
+# `set -m`, because the exports have to be in place before the background job
+# forks, and because the degrade line has to reach the log ahead of the
+# reviewer's own output rather than in the middle of it.
 #
-# Above `set -m` rather than inside the invocation: the exports have to be in
-# place before the background job forks, and the degrade line has to reach the
-# log ahead of the reviewer's own output rather than in the middle of it.
-#
-# AUTOFLEET_REVIEW_CMD is a wrapper seam and this composes with it: a wrapper
-# inherits what is exported here, which is why the knob is not spelled as a
-# second command prefix competing with the one that already exists.
+# The worktree agent is NOT covered and cannot be from here: it does not inherit
+# this process's environment (docs/CONFIGURATION.md has the process tree, and
+# armaatus/autofleet#130 is the contract change that would fix it).
 fleet_headroom_env
 
 set -m

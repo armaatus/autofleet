@@ -1627,6 +1627,90 @@ else
   fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
 fi
 
+# 7b. EVERY MODEL CALL THE FLEET STARTS GOES THROUGH THE COMPRESSION SEAM.
+#
+#     `AUTOFLEET_HEADROOM` (armaatus/autofleet#89) is worth exactly what it
+#     covers, and what it covers is every `scripts/fleet/*.sh` that runs an
+#     agent as a direct child. Three do: review.sh, validate.sh, self-review.sh.
+#     A fourth added without `fleet_headroom_env` is the failure with NO
+#     symptom -- the seam still works, its own tests still pass, and the number
+#     docs/CONFIGURATION.md publishes quietly becomes a fraction of the truth.
+#
+#     HERE AND NOT IN `tests/`, which was the first version and was wrong: per
+#     CLAUDE.md's Layout table `tests/` is autofleet's own suite and does not
+#     ship, so a host project got the seam and not the guard on it while
+#     docs/CONFIGURATION.md sold the guard as the guarantee. `evals/` ships.
+#     Found by the self-review.
+#
+#     The detector is the CALL SHAPE, not one spelling of it: any line whose
+#     first word is a `$AUTOFLEET_*_CMD` expansion, optionally behind `exec`.
+#     The first version keyed on the literal `_CMD" -p `, which a continuation
+#     line, an `exec`, or `--print` would each have walked straight past -- a
+#     guard that silently stops guarding, which is the thing it is here to stop.
+if missing="$(grep -lE '^[[:space:]]*(exec[[:space:]]+)?"\$AUTOFLEET_[A-Z_]*_CMD"' \
+                   scripts/fleet/*.sh \
+              | while IFS= read -r f; do
+                  grep -q 'fleet_headroom_env' "$f" || printf '%s\n' "$f"
+                done)" && [ -n "$missing" ]; then
+  fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
+$(printf '%s\n' "$missing" | sed 's/^/    /')"
+else
+  ok "every fleet script that starts a model call goes through the compression seam"
+fi
+
+# 7c. ...AND THE SEAM STAYS GENERIC. The knob is NAMED for headroom because a
+#     dependency is named rather than hidden -- but nothing in the payload may
+#     reach for it. No `command -v headroom`, no version probe, no config file
+#     of theirs: the mechanism is two environment variables and a TCP connect,
+#     so any Anthropic-compatible compressing proxy satisfies it.
+#
+#     docs/CONFIGURATION.md states that as a guarantee, and hard rule 3's
+#     temperament is that a rule with no assertion is not shipped -- the same
+#     reasoning that makes 4c RUN the Orca grep instead of quoting it. So this
+#     runs it. Found by the self-review, which noticed the claim was prose.
+#
+#     WHAT IS ALLOWED is every identifier the fleet itself owns, plus the
+#     literal `headroom:` -- the label on `fleet.sh status`'s row, which is the
+#     "named rather than hidden" half of the rule in the one place a person
+#     reads. A command word is never followed by a colon, so admitting it costs
+#     the check nothing. This differs from 4c on purpose: hard rule 4 forbids
+#     NAMING Orca in a message because the driver is meant to be invisible;
+#     here naming the vendor IS the rule, and only reaching for it is the leak.
+#
+#     Comments are stripped, for 4c's reason and with 4c's care: a `grep -v` on
+#     a leading `#` only sees whole-line comments, and this rule's prose is
+#     routinely a trailing one.
+if leaks="$(python3 - <<'PYEOF'
+import glob, re
+
+OWNED = re.compile(r"(AUTOFLEET_HEADROOM(_URL)?|_?fleet_headroom_(on|up|env|exported)|headroom:)")
+
+def code(line):
+    """The line with any trailing comment removed, quotes respected."""
+    out, q = [], ""
+    for c in line:
+        if not q:
+            if c in "\"'":
+                q = c
+            elif c == "#":
+                break
+        elif c == q:
+            q = ""
+        out.append(c)
+    return "".join(out)
+
+for path in sorted(glob.glob("scripts/fleet/**/*.sh", recursive=True)):
+    for n, line in enumerate(open(path, encoding="utf-8"), 1):
+        if "headroom" in OWNED.sub("", code(line)).lower():
+            print(f"    {path}:{n}: {line.strip()}")
+PYEOF
+)" && [ -n "$leaks" ]; then
+  fail "the compression seam is no longer generic -- these reach for headroom itself, which docs/CONFIGURATION.md promises the payload does not:
+$leaks"
+else
+  ok "the compression seam names headroom and reaches for nothing of theirs"
+fi
+
 # 8. THE GATE AND THE SHELL AGREE, spelling for spelling.
 #
 #    This is the assertion whose absence let the two disagree in the BLOCKING

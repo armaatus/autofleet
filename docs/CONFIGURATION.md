@@ -512,9 +512,10 @@ scripts:
 | both self-review passes | `scripts/fleet/self-review.sh` | the agent, in its worktree |
 
 A fourth call site added without the export would be a knob that silently
-measures a fraction of what this page says it does, so `tests/run.sh review_mode
-headroom` fails on any `scripts/fleet/*.sh` that starts a model call and does not
-go through the seam.
+measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
+on any `scripts/fleet/*.sh` that starts a model call and does not go through the
+seam. It is in `evals/` rather than `tests/` because `evals/` is vendored: a host
+project gets the guard along with the thing it guards.
 
 It does **not** cover the worktree agent. That process is started by the runtime,
 not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
@@ -590,7 +591,16 @@ either figure.
 `scripts/fleet/` imports headroom, probes for its CLI, or reads a file of its:
 the mechanism is two environment variables and a TCP connect. The knob carries
 the name because a dependency is named rather than hidden, not because the code
-knows about it.
+knows about it — and `evals/lint.sh` **runs** that rule rather than quoting it,
+so a `command -v headroom` added to the payload later fails the build.
+
+The probe is strict about the URL on purpose: **no scheme or no host reads as
+unreachable**, so `AUTOFLEET_HEADROOM_URL=localhost:8787` (no `http://`) and an
+empty value both degrade loudly instead of being probed against port 80 of your
+own machine and then exported as a broken base URL. If the proxy dies between
+two calls in one process — the two self-review passes are minutes apart — the
+second call takes the first one's exports back rather than leaving the agent
+pointed at a dead endpoint.
 
 ### Per-worktree isolation
 

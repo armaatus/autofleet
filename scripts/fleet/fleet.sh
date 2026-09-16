@@ -4116,11 +4116,12 @@ cmd_status() {
   # The probe costs one TCP connect, and only when the knob is on -- an
   # unconfigured repository pays nothing for a row it still gets.
   if fleet_headroom_on; then
-    if fleet_headroom_up "$AUTOFLEET_HEADROOM_URL"; then
-      echo "headroom:    on -- $AUTOFLEET_HEADROOM_URL, answering"
+    if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
+      echo "headroom:    on -- ${AUTOFLEET_HEADROOM_URL:-}, answering"
     else
-      echo "headroom:    on -- $AUTOFLEET_HEADROOM_URL, NOT ANSWERING"
-      echo "             (fleet-started agents run unwrapped, at full token price)"
+      echo "headroom:    on -- '${AUTOFLEET_HEADROOM_URL:-}', NOT ANSWERING"
+      echo "             (fleet-started agents run unwrapped, at full token price;"
+      echo "              a URL with no scheme or no host reads as unreachable)"
     fi
   else
     echo "headroom:    off (AUTOFLEET_HEADROOM=1 in .autofleet/config turns it on;"

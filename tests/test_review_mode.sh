@@ -190,7 +190,17 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
 
 WORK=""
-cleanup() { [ -n "$WORK" ] && rm -rf "$WORK"; return 0; }
+PROXY_PID=""
+# ...AND THE STUB PROXY, which is the one thing here that is a PROCESS rather
+# than a directory. `stub_proxy` forks a python spinning in `accept()`; any
+# `fail` between it and `kill_proxy` -- including `stub_proxy`'s own -- orphaned
+# one holding a listening port, forever, one per failing run. Found by the
+# self-review.
+cleanup() {
+  [ -n "$PROXY_PID" ] && kill -9 "$PROXY_PID" 2>/dev/null
+  [ -n "$WORK" ] && rm -rf "$WORK"
+  return 0
+}
 trap cleanup EXIT
 
 # A worktree holding the scripts under test, as its own git repo so the branch
@@ -490,6 +500,8 @@ while True:
         break
     conn.close()
 PROXY
+  # ASSIGNED BEFORE THE WAIT BELOW CAN `fail`, so the EXIT trap has a pid to
+  # kill even when the listener never came up.
   PROXY_PID=$!
   local i=0
   while [ ! -s "$PROXY_PORT_FILE" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
@@ -3133,19 +3145,58 @@ XX
   ok "...and the reviewer is not pointed at a proxy that is not there"
   unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
 
-  # EVERY CALL SITE, not just the one above. Three scripts start a model as a
-  # direct child of the fleet -- review.sh, validate.sh and self-review.sh --
-  # and a knob is worth exactly what it covers. The fourth one, added later
-  # without the export, is the failure with no symptom: the seam still works,
-  # the tests above still pass, and the measured saving quietly becomes a
-  # fraction of what docs/CONFIGURATION.md says it is. Static, because the
-  # alternative is three more fixtures asserting one function three times.
-  for f in "$REPO_ROOT"/scripts/fleet/*.sh; do
-    grep -q '_CMD" -p ' "$f" || continue
-    grep -q 'fleet_headroom_env' "$f" \
-      || fail "$(basename "$f") starts a model call and never goes through the seam"
-  done
-  ok "every fleet script that starts a model call goes through the seam"
+  # A SECOND CALL IN ONE PROCESS, with the proxy gone between the two.
+  # `self-review.sh` calls this once per pass and runs two passes minutes apart,
+  # against a daemon the fleet deliberately does not own -- so "up for pass one,
+  # gone for pass two" is an ordinary Tuesday. A degrade branch that only
+  # PRINTED left pass one's exports in place: the line said "running unwrapped"
+  # while the pass was still pointed at a dead endpoint and failed its model
+  # call outright. The one failure the seam exists to prevent, arriving through
+  # the seam. Found by both self-review passes.
+  #
+  # Against the function rather than through a third fixture: the bug is in the
+  # branch, the branch has one writer, and two more copies of a reviewer stub
+  # would assert the same line three times.
+  stub_proxy
+  inner='. ./scripts/fleet/lib.sh
+fleet_headroom_env
+printf "one=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
+kill -9 "$1" 2>/dev/null
+i=0
+while fleet_headroom_up "$AUTOFLEET_HEADROOM_URL" && [ "$i" -lt 200 ]; do
+  sleep 0.05; i=$((i + 1))
+done
+fleet_headroom_env
+printf "two=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
+printf "search=%s\n" "${ENABLE_TOOL_SEARCH:-unset}"'
+  out="$( cd "$WORK/repo" \
+          && REPO_ROOT="$WORK/repo" AUTOFLEET_HEADROOM=1 \
+             AUTOFLEET_HEADROOM_URL="$PROXY_URL" \
+             bash -c "$inner" _ "$PROXY_PID" 2>&1 )"
+  PROXY_PID=""
+  grep -qxF "one=$PROXY_URL" <<<"$out" \
+    || fail "the first call did not point at the proxy: $out"
+  grep -qxF "two=unset" <<<"$out" \
+    || fail "a proxy that died between two calls left the first call's export behind: $out"
+  grep -qxF "search=unset" <<<"$out" \
+    || fail "ENABLE_TOOL_SEARCH survived the degrade: $out"
+  ok "a proxy that dies between two calls takes both exports with it"
+  grep -qF "AUTOFLEET_HEADROOM" <<<"$out" \
+    || fail "the second call degraded silently: $out"
+  ok "...and says so, rather than leaving the log claiming a wrap that is gone"
+
+  # A URL WITH NO SCHEME reads as unreachable rather than as 127.0.0.1:80.
+  # `urlsplit("localhost:8787")` has no hostname, and a fallback pair turned
+  # that typo -- and an empty AUTOFLEET_HEADROOM_URL, which survives config.sh's
+  # `:=` -- into a probe of whatever is on port 80. Anything answering there
+  # made `status` say "answering" and exported the malformed string to every
+  # model call the fleet starts.
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+    && fleet_headroom_up "localhost:8787" ) \
+    && fail "a URL with no scheme was probed as something reachable"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh && fleet_headroom_up "" ) \
+    && fail "an empty URL was probed as something reachable"
+  ok "a URL with no scheme, and an empty one, read as unreachable"
   ;;
 
 # ---------------------------------------------------------- headroom_status

@@ -602,15 +602,30 @@ fleet_headroom_on() { [ "${AUTOFLEET_HEADROOM:-0}" = 1 ]; }
 # everything under this directory -- and it parses the URL, which bash would
 # have to do by hand to open /dev/tcp at all. A short timeout because this sits
 # in front of a review that must start either way.
+#
+# NO FALLBACK HOST AND NO FALLBACK SCHEME, which is the whole of the second
+# half. `urlsplit("localhost:8787")` -- a URL with the scheme left off, which is
+# how everybody writes one by hand -- yields `hostname=None` and `port=None`, and
+# an `or "127.0.0.1"` / `or 80` pair launders that typo into a probe of
+# 127.0.0.1:80. Anything on port 80 then answers, `status` says "answering", and
+# the malformed string is exported as ANTHROPIC_BASE_URL to every model call the
+# fleet starts. An EMPTY `AUTOFLEET_HEADROOM_URL=` in `.autofleet/config` gets
+# there too -- the `:=` default runs before the host config is sourced, so empty
+# survives -- and that is exactly the exported-but-empty base URL the knob
+# claims to avoid. So: no scheme, no host, or no port we can name is NOT
+# REACHABLE, and the degrade path says so with the value in it.
 fleet_headroom_up() {
   python3 - "${1:-}" 2>/dev/null <<'PY'
 import socket, sys
 from urllib.parse import urlsplit
 try:
     u = urlsplit(sys.argv[1])
-    host = u.hostname or "127.0.0.1"
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise SystemExit(1)
     port = u.port or (443 if u.scheme == "https" else 80)
-    socket.create_connection((host, port), timeout=2).close()
+    socket.create_connection((u.hostname, port), timeout=2).close()
+except SystemExit:
+    raise
 except Exception:
     raise SystemExit(1)
 PY
@@ -639,16 +654,35 @@ PY
 # knob at 0 this returns before it touches the environment at all, because an
 # exported-but-empty ANTHROPIC_BASE_URL is its own breakage and a repository
 # that never set the knob must behave exactly as it did before it existed.
+#
+# AND IT TAKES BACK WHAT IT SET. `self-review.sh` calls this ONCE PER PASS and
+# runs two passes minutes apart, against a daemon the fleet deliberately does
+# not own -- so "up for pass one, gone for pass two" is an ordinary Tuesday. A
+# degrade branch that only printed left pass one's exports in place: the line
+# said "running unwrapped" while the pass was still pointed at a dead endpoint
+# and failed its model call outright, which is the one failure this function
+# exists to prevent, arriving through the function itself. Found by both
+# self-review passes.
+#
+# It unsets ONLY what it set (`_fleet_headroom_exported`), because an operator
+# who exported their own ANTHROPIC_BASE_URL before starting the dispatcher did
+# not ask this to take it away.
 fleet_headroom_env() {
   fleet_headroom_on || return 0
-  if fleet_headroom_up "$AUTOFLEET_HEADROOM_URL"; then
+  if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
     export ANTHROPIC_BASE_URL="$AUTOFLEET_HEADROOM_URL"
     export ENABLE_TOOL_SEARCH=true
+    _fleet_headroom_exported=1
     return 0
   fi
-  echo "AUTOFLEET_HEADROOM=1, but nothing answers at $AUTOFLEET_HEADROOM_URL." >&2
-  echo "    Running unwrapped, at full token price. Start the proxy, or set" >&2
-  echo "    AUTOFLEET_HEADROOM=0 in .autofleet/config to stop asking." >&2
+  if [ "${_fleet_headroom_exported:-0}" = 1 ]; then
+    unset ANTHROPIC_BASE_URL ENABLE_TOOL_SEARCH
+    _fleet_headroom_exported=0
+  fi
+  echo "AUTOFLEET_HEADROOM=1, but nothing answers at '${AUTOFLEET_HEADROOM_URL:-}'." >&2
+  echo "    Running unwrapped, at full token price. Start the proxy, check the" >&2
+  echo "    URL has a scheme and a host, or set AUTOFLEET_HEADROOM=0 in" >&2
+  echo "    .autofleet/config to stop asking." >&2
 }
 # A file's mtime in epoch seconds, or non-zero if it cannot be had.
 #
