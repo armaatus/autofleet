@@ -546,6 +546,12 @@ FLEET_DIR="${AUTOFLEET_DIR:-$HOME/.autofleet}"
 FLEET_STOP="$FLEET_DIR/STOP"
 FLEET_DRAIN="$FLEET_DIR/DRAIN"
 FLEET_OWNED="$FLEET_DIR/worktrees"
+# ...and where the reviewer and validator locks and records live. Spelled here
+# rather than in `fleet.sh` because `review.sh` claims its own lock now
+# (armaatus/autofleet#64) and two spellings of a lock directory is one lock
+# nobody holds. `fleet.sh`'s REVIEWING_DIR is this, and the comment naming what
+# is in it is there, next to the four consumers that walk it.
+FLEET_REVIEWING="$FLEET_DIR/reviewing"
 # ...and what it HAS run, which is a different question. `own()` writes an
 # issue's worktree path here and `disown_issue` does NOT take it away, so the
 # record outlives the worktree -- `cost.sh` is built on it, and on $FLEET_OWNED
@@ -946,4 +952,291 @@ fleet_record_done() {
   printf '%s\n' "$head" >"$done_marker" 2>/dev/null || true
   [ -n "$tries_marker" ] && rm -f "$tries_marker" 2>/dev/null || true
   return 0
+}
+
+# Is $1 a pid of one of this fleet's agents, still running?
+#
+#   0  alive, and `ps` says it is a review.sh or a validate.sh
+#   1  gone, or alive and something else -- a recycled pid
+#   2  alive, but `ps` would not say what it is
+#
+# THE THIRD ANSWER IS NOT A ROUNDING ERROR. `kill -0` succeeds for a pid this
+# user owns whatever it is running, and a marker outlives its process -- nothing
+# clears $FLEET_REVIEWING across a dispatcher's death -- so the number is reused.
+# A two-way answer has to guess which way, and both guesses cost: read as dead,
+# the lock is stolen from a live reviewer and a second one starts; read as
+# alive, the PR is never reviewed again.
+#
+# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
+# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
+# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
+# the very review the dispatcher starts. `stop_reviewers` SIGTERMs what this
+# matches, so a recycled pid landing on an agent's wait would kill the wait.
+#
+# BOTH SCRIPTS. The validator's lock lives in the same directory under a `v-`
+# prefix and its pid is a `validate.sh`; matching only the reviewer read every
+# live validator as dead, deleted its lock, and started another every poll.
+#
+# Here rather than in fleet.sh because `review.sh` asks it too: a lock it may
+# not claim is one held by a live agent, and that is this question.
+fleet_agent_alive() {
+  local pid="${1:-}" line
+  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  line="$(ps -o command= -p "$pid" 2>/dev/null)"
+  [ -n "$line" ] || return 2
+  printf '%s\n' "$line" \
+    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
+}
+
+# Drop the lock $1, but ONLY if it still names this process.
+#
+# An unconditional `rm` is how a refusal undoes itself. `review.sh` drops its
+# lock on every exit path, and some of those exits happen BEFORE it has claimed
+# anything -- a `gh` that will not answer, a STOP that appeared. A hand-run that
+# won the lock in that window then had it deleted by the very run that stood
+# down, the dispatcher recreated the marker holding a pid that had just died,
+# `live_reviewers` reaped it, and a second reviewer started beside the first.
+# Found by the independent review of the change that added the lock.
+fleet_lock_release() {
+  local marker="${1:-}" held=""
+  [ -n "$marker" ] || return 0
+  read -r held _ 2>/dev/null <"$marker" || return 0
+  [ "${held:-}" = "$$" ] || return 0
+  rm -f "$marker" 2>/dev/null || true
+}
+
+# Remove the lock $1 only while it still names pid $2 -- for a SWEEPER, which
+# reaps somebody else's marker rather than its own.
+#
+# `fleet_lock_release` above guards on `$$` for a reason that applies just as
+# hard here, and the sweeps in fleet.sh did not have it: they read the pid,
+# asked whether it was alive -- a `ps`, the slow part of the loop -- and then
+# `rm -f`'d by PATH. A hand-run `review.sh` that takes the same stale lock over
+# in that window (`fleet_lock_claim`'s steal path recreates the marker under its
+# own pid) has its live claim deleted by the sweep, and the very same pass then
+# spawns a second reviewer on that head. That is armaatus/autofleet#64, through
+# the half of the lock that stayed unconditional. Found by both self-review
+# passes.
+#
+# The read-then-rm window that is left is the one `fleet_lock_release` already
+# accepts, and it no longer spans the liveness probe, which is where the time
+# went.
+fleet_lock_reap() {
+  local marker="${1:-}" pid="${2:-}" held=""
+  [ -n "$marker" ] || return 0
+  # EXISTENCE IS TESTED HERE, not inferred from `read`'s status. `read` fails at
+  # EOF exactly as it fails on an open error, and a ZERO-BYTE marker hits the
+  # EOF case -- so leaning on the status read "the file is empty" as "the file
+  # is already gone" and returned before the `rm`. An empty marker is a state
+  # this lock produces (`fleet_lock_publish`'s `set -C` window, a crash between
+  # create and write, `fleet_lock_claim` restoring a stolen file that was
+  # empty), the sweeps used to `rm -f` it unconditionally, and with the guard in
+  # front of them it became immortal: every poll saw a marker with no head,
+  # spawned a reviewer whose `fleet_lock_claim` returned 3, and `review.sh`
+  # exited 2 promising "the dispatcher clears it on its next poll". It never
+  # did, and that PR is never reviewed again. Found by the self-review.
+  [ -e "$marker" ] || return 0
+  read -r held _ 2>/dev/null <"$marker" || true
+  # An empty marker names NOBODY, and the sweeper that read that same emptiness
+  # passes an empty pid -- so the by-content guard still holds, and a sweeper
+  # that read a real pid will not delete a file that has since been blanked.
+  [ "${held:-}" = "$pid" ] || return 0
+  rm -f "$marker" 2>/dev/null || true
+}
+
+# One attempt to create the lock $1 holding `$$ $2`, with the content already
+# in it when it becomes visible.
+#
+#   0  created by us   1  something is already there   2  could not write at all
+#
+# WHY A LINK AND NOT `set -C` ALONE. `printf >file` under noclobber is
+# O_CREAT|O_EXCL and then a write: between the two the file EXISTS AND IS EMPTY.
+# Another claimer reading in that window sees no pid, `fleet_agent_alive ""`
+# says "gone", and the stale-lock takeover fires against a live owner --
+# and `live_reviewers` in fleet.sh, which reads the same file, deletes the
+# marker as dead and lets the next candidate in the same pass spawn a second
+# reviewer on one head. That is the failure this whole lock exists to prevent,
+# reintroduced by the lock. Found by the independent review.
+#
+# `ln` publishes a file that is already complete: one link(2), atomic, EEXIST if
+# the name is taken. The `set -C` fallback is for a filesystem with no hard
+# links, and is reached only when `ln` failed with the marker still absent.
+fleet_lock_publish() {
+  local marker="$1" pid="${2:-$$}" head="${3:-}" tmp
+  tmp="$(dirname "$marker")/.claim-$$-$(basename "$marker")"
+  # `2>/dev/null` BEFORE the redirection that can fail. The other order prints
+  # the open failure and only then silences the stream, which is the whole of
+  # the rule in CLAUDE.md's Code section -- and this is the exact path `return 2`
+  # exists to report cleanly. `evals/late_stderr_silence.py` scans input
+  # redirections only, so nothing but a reader catches the write form. Found by
+  # the independent review.
+  printf '%s %s\n' "$pid" "$head" 2>/dev/null >"$tmp" || return 2
+  if ln "$tmp" "$marker" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
+  rm -f "$tmp" 2>/dev/null
+  [ -e "$marker" ] && return 1
+  # No marker, so `ln` is not the reason -- no hard links here. Fall back, and
+  # accept the window: a filesystem without hard links is not one this fleet
+  # runs two dispatchers on.
+  ( set -C; printf '%s %s\n' "$pid" "$head" >"$marker" ) 2>/dev/null && return 0
+  [ -e "$marker" ] && return 1
+  return 2
+}
+
+_fleet_lock_try() { fleet_lock_publish "$1" "$$" "${2:-}"; }
+
+# Who holds the lock $1, once a claim has failed. Prints `pid head` and returns
+# 1 for a holder, 0 when the holder turns out to be US, 3 when the file names
+# nothing readable. Three copies of this tail is what the first version had.
+_fleet_lock_holder() {
+  local marker="$1" held="" for_head=""
+  read -r held for_head 2>/dev/null <"$marker" || true
+  [ "${held:-}" = "$$" ] && return 0
+  # A file that exists and names nothing is not a stale lock to take over: one
+  # with a reviewer behind it and one with nothing behind it are the same file,
+  # and guessing wrong puts two reviews on one head. `_fleet_lock_try` publishes
+  # the content with the name, so this is corruption rather than a young lock.
+  [ -n "${held:-}" ] || return 3
+  printf '%s %s\n' "$held" "${for_head:-?}"
+  return 1
+}
+
+# Claim the lock $1 for THIS process, at head $2.
+#
+#   0  claimed, or already ours
+#   1  another live agent holds it; its `pid head` line is printed on stdout
+#   2  the lock could not be written AT ALL -- an unwritable directory, a full
+#      disk, or no path given. Not contention, and the caller must not report it
+#      as such: a refusal that names a phantom holder sends a person looking for
+#      a process that does not exist, and hides the one thing they could fix.
+#   3  a lock file is there and names nothing this can read. Also not
+#      contention, and NOT a stale lock to take over either -- see above.
+#
+# CREATE-OR-FAIL, not `[ -e ] || printf >`. The dispatcher's spawn decision and
+# its write of the marker are two syscalls with a window between them, and the
+# window is exactly what a second dispatcher pass -- or a hand-run `review.sh`
+# beside a running one, which is what a maintainer clearing a backlog does --
+# lands in. Two reviewers then wrote two reviews against one head, and the
+# gate's answer slot could only ever hold one of them: armaatus/autofleet#64.
+#
+# ALREADY OURS IS SUCCESS, and it has to be. The dispatcher writes this file
+# AFTER the spawn, holding `$!` -- which is the pid of the very process running
+# this. A claim that read its own pid as a competitor would refuse every
+# dispatcher-started review, one time in however many the write lands first.
+#
+# A lock naming a pid that is gone is TAKEN OVER rather than obeyed: nothing
+# clears this directory across a dispatcher's death, and a stale marker read as
+# "one is running" retires that pull request from review for good, silently.
+# "ps would not say" is not gone -- see `fleet_agent_alive` -- and is obeyed.
+fleet_lock_claim() {
+  local marker="$1" head="${2:-}" held="" for_head="" rc is stolen moved=""
+  # NOT `return 0`. "No path" is not "you hold it": a caller that mis-derived
+  # the path would proceed unlocked with nothing saying so, which is the silent
+  # direction. Found by the independent review.
+  [ -n "$marker" ] || return 2
+  mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+  _fleet_lock_try "$marker" "$head"; rc=$?
+  [ "$rc" = 1 ] || return "$rc"
+  # ONE PRINT, and only once the answer is "somebody else holds it". The holder
+  # line used to be printed here AND by `_fleet_lock_holder` on each arm below,
+  # so `$holder` was two and three lines where the contract above says one --
+  # invisible only because the single caller writes `${holder%% *}`. Printing it
+  # before the liveness test would be the opposite error: a claim that goes on
+  # to take a stale lock over and succeed would announce a holder on its way.
+  # Found by the independent review.
+  read -r held for_head 2>/dev/null <"$marker" || true
+  [ "${held:-}" = "$$" ] && return 0
+  # A MARKER THAT VANISHED IS NOT A CORRUPT ONE. The holder's
+  # `fleet_lock_release` -- or `live_reviewers`, which removes exactly these
+  # dead-pid markers every poll -- can take the file away between the failed
+  # create and this read. Reported as corruption, the caller tells a person to
+  # delete a file that is already gone while the lock is in fact free: the
+  # phantom advice the `return 2` arm's own comment warns against, in the arm
+  # beside it. Retry the claim instead; one retry, because a marker that keeps
+  # vanishing is contention that will resolve on the next poll anyway. Found by
+  # the independent review.
+  if [ -z "${held:-}" ] && [ ! -e "$marker" ]; then
+    _fleet_lock_try "$marker" "$head"; rc=$?
+    [ "$rc" = 1 ] || return "$rc"
+    read -r held for_head 2>/dev/null <"$marker" || true
+    [ "${held:-}" = "$$" ] && return 0
+  fi
+  [ -n "${held:-}" ] || return 3
+  fleet_agent_alive "$held"; is=$?
+  if [ "$is" != 1 ]; then
+    printf '%s %s\n' "$held" "${for_head:-?}"
+    return 1
+  fi
+
+  # TAKING OVER A STALE LOCK, and this is the delicate half. `rm` then create is
+  # not a takeover, it is a second race: two claimers that both read the same
+  # dead pid both remove and both create, the second removing the FIRST's fresh
+  # lock, so two processes leave believing they hold it -- and the first's exit
+  # trap then deletes the second's. Found by the independent review.
+  #
+  # So the stale file is RENAMED out of the way instead. `mv` is one rename(2):
+  # of two claimers racing on the same path exactly one moves that file, and the
+  # loser's `mv` fails or moves something else. Which is why the content is
+  # checked after the move rather than trusted -- the loser's `mv` can land
+  # AFTER the winner has already recreated the marker, and what it then has in
+  # hand is the winner's live claim, not the dead one it read. Put it back and
+  # stand down; that is the conservative direction, and the alternative is two
+  # reviewers on one head, which is the whole of armaatus/autofleet#64.
+  #
+  # DOT-PREFIXED, and in the same directory because a rename has to be. The
+  # sweeps in fleet.sh walk `$FLEET_REVIEWING/*`, which does not match a leading
+  # dot -- so this file, which exists for the microseconds between the rename
+  # and the recreate, is never read as a lock for a pull request called
+  # "42.12345". A run killed inside that window leaks one short dot-file that
+  # nothing counts and nothing signals.
+  stolen="$(dirname "$marker")/.steal-$$-$(basename "$marker")"
+  # A FAILED `mv` IS TWO DIFFERENT ANSWERS, and this used to give the wrong one
+  # to the commoner of them. Another claimant taking the marker first is "it is
+  # held", which `_fleet_lock_holder` says correctly. But the holder's
+  # `fleet_lock_release` -- or `live_reviewers`, which sweeps dead-pid markers
+  # every poll -- can equally have removed it, and then `_fleet_lock_holder`
+  # reads an absent file, returns 3, and `review.sh` tells an operator the lock
+  # "names nothing this can read ... remove that file" about a file that is gone
+  # and a lock that is now free. That is the phantom advice the `return 2` arm
+  # warns against, and the create path twenty lines up was given a one-shot
+  # retry for exactly this; this arm is the same case and gets the same retry.
+  # Found by both self-review passes.
+  if ! mv "$marker" "$stolen" 2>/dev/null; then
+    if [ ! -e "$marker" ]; then
+      _fleet_lock_try "$marker" "$head"; rc=$?
+      [ "$rc" = 1 ] || return "$rc"
+    fi
+    _fleet_lock_holder "$marker"; return $?
+  fi
+  read -r moved _ 2>/dev/null <"$stolen" || true
+  if [ "${moved:-}" != "${held:-}" ]; then
+    # PUT BACK CREATE-OR-FAIL, not `mv`. The marker is absent between the
+    # rename above and this line, and a third claimant whose create lands in
+    # that window holds the lock -- a plain `mv` would overwrite its claim with
+    # the content read out of the moved file, and two processes would again both
+    # believe they hold it. It needs three claimants at once (two polls and a
+    # hand-run), which is narrow, and it is the one way this arm was not the
+    # conservative direction its comment claims. Found by the independent
+    # review of the change that added it.
+    # `ln`, not `set -C; cat >`: the same empty-file window this function opens
+    # with, twenty lines below the comment rejecting it. The stolen file is
+    # already complete, so linking it back publishes content and name together.
+    # Found by the independent review.
+    #
+    # ...WITH THE FALLBACK `fleet_lock_publish` HAS, because a filesystem with
+    # no hard links is one this explicitly supports -- and there `ln` fails
+    # silently, the `rm` below destroys the live winner's lock, and the next
+    # poll starts a second reviewer on one head. The `rm` is conditional on the
+    # restore for the same reason: a stolen file nothing could put back is the
+    # only copy of somebody's lock. Found by the independent review.
+    if ln "$stolen" "$marker" 2>/dev/null \
+       || ( set -C; cat "$stolen" >"$marker" ) 2>/dev/null; then
+      rm -f "$stolen" 2>/dev/null || true
+    fi
+    _fleet_lock_holder "$marker"; return $?
+  fi
+  rm -f "$stolen" 2>/dev/null || true
+  _fleet_lock_try "$marker" "$head"; rc=$?
+  [ "$rc" = 1 ] || return "$rc"
+  _fleet_lock_holder "$marker"
 }

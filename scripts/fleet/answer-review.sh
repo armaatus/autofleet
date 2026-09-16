@@ -120,18 +120,57 @@ fleet_pr_payload "$pr" "$payload" || {
 # collapsing them sends an agent to wait for a review that already arrived, for
 # a reason the message never names -- the same conflation the substance check
 # above is careful to avoid. Found by the independent review of this PR.
+# HOW MANY, not whether. One head can carry more than one independent review --
+# two overlapping polls used to start two reviewers, and armaatus/autofleet#64 is
+# what that cost -- and the gate requires an answer per review. One comment
+# answers them all, because `answered()` only asks that the comment came after
+# the review; what the count is for is the SENTENCE at the end, so an author who
+# answered two reviews knows they answered two.
 if ! reviewed="$(gate_py '
 import json
 pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
-print("yes" if any(merge_gate.is_substantive(r)
-                   for r in merge_gate.independent_reviews(pull, sys.argv[3]))
-      else "no")' "$payload" "$head")"; then
+on = [r for r in merge_gate.independent_reviews(pull, sys.argv[3])
+      if merge_gate.is_substantive(r)]
+# TWO NUMBERS, and the first is the one that decides. "Is there a review to
+# answer" is `is_substantive` and nothing else, because that is what
+# `await-review.sh` asks: filtered harder here, a head whose only review is
+# DISMISSED had await saying it arrived and this refusing with "wait for it",
+# which is a loop, and the #114 drift in the direction that traps an agent.
+# The second is for the SENTENCE at the end -- how many of them could be
+# waiting on an answer -- and it CALLS the gate predicate rather than
+# respelling it. It used to read `holds` and then respell the other half,
+# `!= "APPROVED"`, under a comment claiming it respelt nothing: that is half of
+# `awaiting_answer`, and the half it left out has since grown three cases the
+# sentence would have been wrong about. One spelling, in the file that decides.
+# NO APOSTROPHE anywhere in this block: it is a
+# single-quoted shell string, where nothing escapes one. Found by the independent review.
+print(len(on))
+print(len(merge_gate.awaiting_answer(on)))'\
+    "$payload" "$head")"; then
   echo "could not tell whether PR #$pr has a review on ${head:0:8}: the payload did not" >&2
   echo "load, or .github/scripts/merge_gate.py -- which decides which reviews count --" >&2
   echo "did not answer. Nothing here can say what to do until it does." >&2
   exit 2
 fi
-if [ "$reviewed" != yes ]; then
+waiting="$(printf '%s\n' "$reviewed" | sed -n 2p)"
+reviewed="$(printf '%s\n' "$reviewed" | sed -n 1p)"
+# NOT `=0`, which is a CLAIM. Unparseable output means this could not tell, and
+# reading it as "no review has been submitted yet" sends an agent to wait for
+# one that is already there. Everything else in this file routes that state to
+# exit 2 with a reason; this was the one place that did not. Found by the
+# independent review.
+case "${reviewed:-}" in (''|*[!0-9]*)
+  echo "could not count PR #$pr's reviews on ${head:0:8}: merge_gate.py answered" >&2
+  echo "something this cannot read. Nothing here can say what to do until it does." >&2
+  exit 2 ;;
+esac
+# ...and `waiting` IS the exception that sentence has, which is why it is named
+# here rather than left to read as an oversight: it decides nothing. It is the
+# count in the closing line, telling an author a second review was on the head
+# at all. Refusing to answer over a number that only phrases a sentence would
+# fail the whole step on cosmetics. Found by the self-review of the merge.
+case "${waiting:-}" in (''|*[!0-9]*) waiting=0 ;; esac
+if [ "$reviewed" -lt 1 ]; then
   echo "no independent review has been submitted against ${head:0:8} yet, so there is" >&2
   echo "nothing here to answer -- and an answer written now would be discarded by the" >&2
   echo "review that follows it. Wait for it:  ./scripts/fleet/await-review.sh $pr" >&2
@@ -143,6 +182,37 @@ marker="$(gate_py 'print(merge_gate.answer_marker(sys.argv[2]))' "$head")" || ma
   echo "could not build the answer marker from .github/scripts/merge_gate.py" >&2
   exit 2; }
 
+# ...AND THE HEADS THIS BRANCH HAS LEFT BEHIND. A review with findings on an
+# older head is kept by `abandoned_findings()`, and the only reader it can ever
+# have is a validation submitted while it was still the newest review. The
+# moment a review lands on the NEW head, `reviewed_sha()` moves past it for
+# good, so no future validation can read it -- and `needs_validation()` returns
+# False as soon as any validation exists on the current head. The gate then
+# refuses forever, and the refusal used to name this script as the one thing
+# that could NOT clear the line: a hand-typed marker or an admin merge were the
+# only ways out of a hold the fleet produced on its own.
+#
+# The gate has always keyed `answered()` on the abandoned review's own sha. The
+# missing half was this script ever writing that marker, and one comment
+# carrying several of them answers each -- `answered()` asks only that the
+# comment came after the review, by the author, with substance in it. Defaulting
+# to "every head still unanswered" is what an author writing one answer means,
+# which is the option armaatus/autofleet#64's Design notes put first.
+#
+# A failure to ASK is not a failure to answer: the current head's marker is
+# built and the answer still posts. Silently answering fewer heads than are
+# owed would be this script reporting done on a gate that still holds.
+if ! gone="$(gate_py '
+import json
+pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
+for _review, oid, _found in merge_gate.abandoned_findings(pull, sys.argv[3]):
+    print(oid)' "$payload" "$head")"; then
+  echo "could not tell which of PR #$pr's earlier heads still carry unanswered" >&2
+  echo "reviews: merge_gate.py did not answer. Answering ${head:0:8} alone would" >&2
+  echo "report done on a gate that still holds." >&2
+  exit 2
+fi
+
 # The marker and NOTHING ELSE in front of the answer. The gate measures what is
 # left after stripping the marker, so a preamble written here -- "answering the
 # review on abc1234", which the marker already says -- would be substance the
@@ -151,6 +221,15 @@ body="$(mktemp)"
 trap 'rm -f "$body" "$payload"' EXIT
 {
   printf '%s\n' "$marker"
+  # One marker per abandoned head, above the answer for the same reason the
+  # current head's is: the gate measures what is LEFT after stripping them, so
+  # anything written here in prose would be substance the author did not supply.
+  while IFS= read -r oid; do
+    [ -n "$oid" ] || continue
+    gate_py 'print(merge_gate.answer_marker(sys.argv[2]))' "$oid" || :
+  done <<EOF
+$gone
+EOF
   printf '%s\n' "$text"
 } >"$body"
 
@@ -158,7 +237,32 @@ if ! GH_PAGER=cat gh pr comment "$pr" --body-file "$body" >/dev/null 2>&1; then
   echo "could not post the answer on PR #$pr" >&2
   exit 1
 fi
-echo "answered the review on ${head:0:8} of PR #$pr"
+if [ "$waiting" -gt 1 ]; then
+  # WHAT IS ON THE HEAD, not what was discharged, and the distinction is the
+  # finding: some of these -- an approval, a review that found nothing -- were
+  # never holding the PR in the first place, and claiming to have answered them
+  # overstates it. What the sentence is for is the author who is about to read a
+  # gate that counts answers per review and needs to know a second review was
+  # there at all. The three states are the gate's own; a DISMISSED review is one
+  # somebody cleared and is not on this head for this purpose.
+  # "WHEN THIS RAN", because the count was taken before the comment was posted
+  # and a review can land in between. The gate is the authority on what is still
+  # owed; this sentence is only telling the author a second review was there.
+  echo "answered on ${head:0:8} of PR #$pr, which carried $waiting reviews waiting"
+  echo "when this ran -- one comment written after the last of them answers all of those."
+else
+  echo "answered the review on ${head:0:8} of PR #$pr"
+fi
+# NAMED, not merely answered. These are findings nobody has read -- the head
+# moved out from under them and no reader is coming -- so an author who is told
+# only "answered" has no reason to go and see what they just signed off. What
+# the answer discharges is the GATE's line; what the findings asked for is still
+# the author's to have done.
+n_gone="$(printf '%s\n' "$gone" | grep -c '[0-9a-f]' || :)"
+if [ "${n_gone:-0}" -gt 0 ]; then
+  echo "...and $n_gone head(s) this branch left behind, whose reviews nothing had read."
+  echo "Those findings are not clean; they are answered. Check the PR says what was done."
+fi
 
 # An issue comment is not one of merge-gate.yml's triggers and cannot be: an
 # `issue_comment` run attaches its check to the default branch, not to this PR's

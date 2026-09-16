@@ -789,6 +789,38 @@ Two things differ, and both are the agent's business:
   `~/.autofleet/fleet.log` and a transcript under `~/.autofleet/reviews/`, not a
   `verdict` comment on the PR.
 
+**One reviewer at a time, and an answer per review.** `#64`. Two reviewers
+landed on PR #1's head within fourteen minutes — 7 findings and then 10 — because
+the dispatcher decides to spawn from `[ -e "$REVIEWING_DIR/<pr>" ]` and writes
+that lock *after* the spawn, so a second poll, or a hand-run `review.sh` beside a
+running dispatcher (what clearing a backlog looks like), both saw no lock. The
+claim is the reviewer's own now, and it is a create-or-fail
+(`fleet_lock_claim`): of two racing claims exactly one wins and the other exits
+**9**, naming the pid that holds it. A lock whose process is gone is taken over
+rather than obeyed — nothing clears that directory across a dispatcher's death,
+and a stale marker read as "one is running" retires a pull request from review
+for good.
+
+The half that lost information was the gate's. `merge_gate` collapsed the
+reviews on a head to the latest one *per author*, and in `local` mode every
+reviewer is the same account — so the second review superseded the first, and
+the first's findings were never owed an answer. On PR #1 the author answered the
+07:13 review, that commit moved the head, and the 07:27 review's ten findings
+went unread with a green log beside them. Two changes: the findings condition is
+**per review** (the `CHANGES_REQUESTED` condition is still per author — that is
+a reviewer's standing verdict, which a later review from the same reviewer does
+supersede), and the gate names any review on an **abandoned** head whose
+findings nothing answered — on **every** path, not only the "no review on the
+current head" refusal it started inside. That arm already refuses, so reporting
+there added detail to a pull request that was blocked anyway and said nothing on
+the two paths a PR merges through: the exact sequence above, where a second
+review lands on the new head, is one of them. A PR held that way is also due a
+validation, because the validation is the reader the refusal names and a hold
+whose remedy never starts is a permanent one. One comment
+still answers every review on the head, because `answered()` only requires it to
+come after the review it answers; what changed is that it can no longer answer
+one and be counted for two.
+
 **The round count is the pull request's, not this fleet's.** `#91` bounded the
 rounds and `#65` made the number honest. `<pr>.rounds` was a tally `review.sh`
 incremented on exit 0, and its own comment recorded three reviews it could not

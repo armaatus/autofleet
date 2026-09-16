@@ -1887,7 +1887,7 @@ launch() {
 # arrive and `await-review.sh` waits out its deadline three times.
 #
 # In the default `github` mode this returns immediately and costs nothing.
-REVIEWING_DIR="$STATE_DIR/reviewing"
+REVIEWING_DIR="$FLEET_REVIEWING"
 # WHAT IS IN THIS DIRECTORY, in one place, because a fourth consumer that had to
 # work it out from three use sites is exactly how the third one came to disagree:
 #
@@ -2026,10 +2026,28 @@ start_validator() {
   # inherits it eats them -- the next PR in the pass then silently gets nothing.
   #
   # The marker is written AFTER the spawn, because the pid is what goes in it.
-  # The race that opens is the same benign one review.sh documents: an exit-8
-  # validator can remove a marker that does not exist yet, and the `printf` then
-  # recreates it holding a dead pid, which `live_reviewers` reaps on its next
-  # call.
+  # The race that opens is benign HERE and is no longer the one review.sh
+  # documents: since armaatus/autofleet#64 the REVIEWER's marker is a lock the
+  # reviewer claims for itself, create-or-fail, and `review.sh` releases it by
+  # content rather than by path. The validator's is still this file's private
+  # bookkeeping, so an exit-8 validator can remove a marker that does not exist
+  # yet and the write below recreates it holding a dead pid, which
+  # `live_reviewers` reaps on its next call.
+  #
+  # EXIT 8, and not exit 5. `validate.sh`'s 8 is the "wants no validation" path,
+  # two API calls, and it is the only exit fast enough to lose the microsecond
+  # race with a write that happens right after the spawn; its 5 is reached only
+  # after `wait "$validator"` returns, which is minutes. An edit to this comment
+  # said 5 and was wrong -- the second time a comment in this neighbourhood has
+  # been rewritten from true to false, which is the failure the hunk below
+  # already records. Found by the independent review.
+  #
+  # THE SAME RACE THAT #64 CLOSED FOR REVIEWS IS STILL OPEN HERE, and the
+  # difference in what it costs is why it was left: two validations on one head
+  # spend a verdict out of a cap of two, where two reviews on one head lost a
+  # review's findings entirely. `fleet_lock_claim` and `fleet_lock_release` are
+  # in lib.sh for whoever converts this half; do not read the paragraph above as
+  # "both halves are locked".
   # Written BEFORE the spawn, because the dispatcher has to decide from
   # something and the decision is made here. `validate.sh` refunds it on every
   # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
@@ -2058,38 +2076,17 @@ start_validator() {
 # here is to leave a possible reviewer running and its slot held, not to signal
 # an unidentified process.
 #
-# ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
-# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
-# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
-# the very review this file starts. `stop_reviewers()` SIGTERMs what this
-# matches, and it runs at every dispatcher start, so a recycled pid landing on an
-# agent's wait would have killed the wait: the exact failure this whole change
-# exists to remove, delivered by the machinery that removes it. Found by the
-# independent review.
+# THE PATTERN IS IN lib.sh, anchored, and why it must be is stated there. The
+# short of it: an unanchored `review\.sh` also matches `await-review.sh`, which
+# is where every worktree agent sits waiting for the review this file starts,
+# and `stop_reviewers` SIGTERMs whatever this matches.
 #
-# `dispatcher_alive` anchors for the same reason and was cited as this
-# function's model while not being followed. The pattern matches the path this
-# file actually spawns -- `<repo>/scripts/fleet/review.sh <pr>` -- with the
-# separator required on the left so `await-review.sh` cannot satisfy it.
-reviewer_alive() {
-  local pid="${1:-}" line
-  case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  line="$(ps -o command= -p "$pid" 2>/dev/null)"
-  [ -n "$line" ] || return 2
-  # BOTH SCRIPTS, and this matched only the reviewer for one commit. The
-  # validator's lock lives in the same directory under a `v-` prefix and its
-  # pid is a `validate.sh`, so `live_reviewers` read every live validator as
-  # dead: it deleted the lock, the next poll started another, and up to
-  # AUTOFLEET_REVIEW_MAX_TRIES of them ran at once against one head. The same
-  # hole made `stop_reviewers` skip validators, so `stop.sh --now` left one
-  # running with this machine's gh login for the rest of its timeout.
-  #
-  # The separator on the left is still required so `await-review.sh` cannot
-  # satisfy it, and `-\?` is not used: the names are matched whole.
-  printf '%s\n' "$line" \
-    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
-}
+# IN lib.sh SINCE armaatus/autofleet#64, because `review.sh` asks the same
+# question: the lock it may not claim is one a live agent holds. Kept as a name
+# here -- six call sites and the three-way answer they read is this file's
+# vocabulary -- but there is one copy of the pattern, and it is next to the lock
+# helper that depends on it.
+reviewer_alive() { fleet_agent_alive "$@"; }
 
 # Every reviewer this dispatcher started, stopped, and their markers cleared.
 #
@@ -2676,7 +2673,11 @@ print(len(json.load(sys.stdin)))
       # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
       # documents as treat-it-as-ours, so it keeps both its marker and its slot.
       # Only a definite 1 clears it.
-      if [ "$is" != 1 ]; then n=$((n + 1)); else rm -f "$m"; fi
+      # REAPED BY CONTENT, not by path: between the read above and this line a
+      # hand-run `review.sh` can have taken the stale lock over under its own
+      # pid, and deleting it here let the same pass spawn a second reviewer on
+      # that head. See `fleet_lock_reap`.
+      if [ "$is" != 1 ]; then n=$((n + 1)); else fleet_lock_reap "$m" "$p"; fi
     done
     printf '%s\n' "$n"
   }
@@ -2789,8 +2790,11 @@ for p in prs:
       reviewer_alive "$held"; local is=$?
       # Said only where it is true: the `2)` branch below declines to restart.
       [ "$is" = 0 ] && say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
+      # ...and both removals here are by content too, for the same reason: the
+      # liveness probe above is a `ps`, and a takeover landing during it turned
+      # this arm into the thing that deleted a live claim.
       case "$is" in
-        0) kill "$held" 2>/dev/null; rm -f "$marker" ;;
+        0) kill "$held" 2>/dev/null; fleet_lock_reap "$marker" "$held" ;;
         # "Alive, but ps would not say." Removing the marker here declined to
         # kill it AND freed its slot, which is an orphan nothing can ever reap --
         # the opposite of the documented contract two lines up. Keep the marker;
@@ -2798,7 +2802,7 @@ for p in prs:
         # killed or reaped normally. Found by the independent review.
         2) say "  (ps would not say what pid $held is; leaving it and its slot alone)"
            continue ;;
-        *) rm -f "$marker" ;;
+        *) fleet_lock_reap "$marker" "$held" ;;
       esac
       # ...and it is no longer running, so it must not keep occupying a slot.
       # Without this, three reviewers whose heads all moved in one pass are all
@@ -2852,19 +2856,79 @@ for p in prs:
     # file is its own.
     #
     # WRITTEN AFTER THE SPAWN, because the pid is what goes in it and there is no
-    # pid until the job exists. The race that opens is benign, and it is named
-    # here so the next reader need not work it out: a `review.sh` that exits
-    # before this `printf` runs -- the exit-8 path is two API calls -- removes a
-    # marker that does not exist yet, and the `printf` then recreates it holding
-    # a dead pid. `live_reviewers` reaps that on its next call, which is the very
-    # next candidate in this loop, so the slot is held for one iteration rather
-    # than leaked. An earlier version of this comment claimed the marker was
-    # written first; found by the independent review.
+    # pid until the job exists -- and CREATE-OR-FAIL, because since
+    # armaatus/autofleet#64 this file is a LOCK that `review.sh` claims for
+    # itself, not this loop's private bookkeeping.
+    #
+    # An unconditional write here undid that claim. A hand-run `review.sh` that
+    # wins the lock in the window between the `[ -e "$marker" ]` above and this
+    # line had its pid overwritten with the pid of the reviewer THIS pass
+    # spawned -- which then lost `fleet_lock_claim`, printed its exit-9 refusal
+    # and died, leaving the marker naming a dead process while the hand-run was
+    # still reviewing. `live_reviewers` reaps that on the next poll and starts a
+    # third, and two reviews land on one head: the failure this whole change
+    # exists to prevent, delivered by the half of it that was not converted.
+    # Found by both self-review passes.
+    #
+    # So it writes only when nothing holds the file. The child writes `$$ $head`
+    # and `$!` here IS that pid, so the two agree whenever both run; whichever
+    # lands first is right and the other is a no-op. The old benign race stays
+    # benign and is now smaller: a `review.sh` that exits before this line --
+    # the exit-8 path is two API calls -- leaves no marker, this recreates one
+    # holding a pid that has just died, and `live_reviewers` reaps it on the
+    # very next candidate in this loop.
     printf '%s %s\n' "$head" "$(( ${tries_n:-0} + 1 ))" >"$marker.tries"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
-    printf '%s %s\n' "$!" "$head" >"$marker"
-    say "reviewing PR #$pr at ${head:0:8} (pid $!)"
+    # CAPTURED, not read twice: `$!` inside the subshell below is the parent's
+    # value today and would be a subtle thing to depend on, and the `say` after
+    # it wants the same number the marker got.
+    local rpid=$!
+    # SAID FROM WHAT THE LOCK HOLDS, not from whether this write won it. The
+    # write fails for two reasons that mean opposite things: somebody else holds
+    # the marker -- a hand-run that won the window above, and the child just
+    # spawned will exit 9 -- or THE CHILD ITSELF claimed it first, which is the
+    # ordinary case and is a review that is running. The child writes `$$`,
+    # which is this same `$rpid`, so the file says which happened. Announcing
+    # "stands down" on the second put a false line in the one log a person reads
+    # to find out what the fleet did; announcing "reviewing" on the first put a
+    # review in it that never ran. Both found by the independent review.
+    # `fleet_lock_publish`, NOT `set -C` here either. This was the one write
+    # left using the construct lib.sh rejects: create-then-write leaves the file
+    # existing and EMPTY between two syscalls, and a hand-run claiming in that
+    # window reads no pid, gets "the lock names nothing this can read", and is
+    # told to delete a lock that is being written normally -- in exactly the
+    # hand-run-beside-a-dispatcher case #64's Design notes name. Found by the
+    # independent review.
+    fleet_lock_publish "$marker" "$rpid" "$head"; local published=$?
+    local lockpid=""
+    read -r lockpid _ 2>/dev/null <"$marker" || true
+    if [ "${lockpid:-}" = "$rpid" ]; then
+      say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
+    elif [ "$published" = 2 ]; then
+      # THE RETURN IS NOT DISCARDABLE, and this is the 1-vs-2 conflation
+      # `review.sh`'s own exit-2 arm exists to avoid. A state directory that
+      # cannot be written leaves no marker at all, so `lockpid` is empty and
+      # every poll announced a reviewer already in flight -- naming a holder
+      # that does not exist and never the one thing a person could fix. Found
+      # by the independent review.
+      say "PR #$pr: could not write $marker, so nothing here can stop a second"
+      say "  reviewer starting on this head. Check that directory is writable."
+    elif [ -z "${lockpid:-}" ]; then
+      # EMPTY IS NOT SOMEBODY ELSE'S PID, and the `else` below claimed it was.
+      # `validate.sh`'s exit 8 -- "this head wants no validation" -- is two API
+      # calls, and `review.sh` has a fast path of its own: the child can claim,
+      # decide, and `fleet_lock_release` before the parent reaches this read. The
+      # marker is then gone, `lockpid` is empty, and the log said "a reviewer is
+      # already in flight; the one just spawned stands down" about a child that
+      # ran to completion perfectly normally. A false line in the one log a
+      # person reads to find out what the fleet did -- the third case the comment
+      # above does not enumerate. Found by the independent review.
+      say "PR #$pr: the reviewer (pid $rpid) finished or stood down before this"
+      say "  poll could record it; its own exit is what says which"
+    else
+      say "PR #$pr: a reviewer is already in flight (pid $lockpid); the one just spawned stands down"
+    fi
   done
 
   # ...and the records of pull requests that are no longer open. They were

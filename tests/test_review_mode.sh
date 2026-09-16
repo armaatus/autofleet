@@ -36,6 +36,17 @@
 #                                 head and the next reviewer is silent -> still
 #                                 exit 5. The post-check asks merge_gate the same
 #                                 question the pre-check did, not a weaker one.
+#   test_review_mode.sh inflight  a reviewer is already being WRITTEN for this PR ->
+#                                 exit 9, naming the one that holds it, and no
+#                                 second reviewer. `skips` covers the other
+#                                 half, "a review is already ON this head"; this
+#                                 is the case that had no answer and produced
+#                                 two reviews on one head (#64).
+#   test_review_mode.sh lockrace  ...and two runs started at the same instant
+#                                 get the same answer. The lock is claimed by
+#                                 the reviewer, create-or-fail, because the
+#                                 dispatcher's `[ -e ]` and its write are two
+#                                 syscalls with this race between them.
 #   test_review_mode.sh timeout   the reviewer wedges -> killed at
 #                                 AUTOFLEET_REVIEW_TIMEOUT and exit 7, rather
 #                                 than holding the worktree until the time-box.
@@ -338,6 +349,12 @@ stub_reviewer() {
 printf 'ran\n' >>"$REVIEWER_CALLS"
 printf '%s' "\$2" >"$PROMPT_FILE"
 printf '%s\n' "\$@" >"$ARGV_FILE"
+# HOW LONG THE REVIEWER TAKES, for the one phase that needs two of them to
+# overlap. Every other phase leaves it unset and the stub is as immediate as it
+# was. \`hang\` is no use there: what \`lockrace\` needs is a reviewer that
+# holds the lock for a few seconds and then really submits. THE BACKTICKS ARE
+# ESCAPED -- this heredoc is unquoted, as the note at the bottom of it says.
+[ -n "\${AUTOFLEET_TEST_REVIEWER_DELAY:-}" ] && sleep "\$AUTOFLEET_TEST_REVIEWER_DELAY"
 case "$1" in
   marked|unmarked|json|text)
     trailer=""
@@ -842,10 +859,124 @@ GHSTUB
   run_it 42 >"$WORK/out" 2>&1; rc=$?
   [ "$rc" = 8 ] || { cat "$WORK/out" >&2; fail "a second run did not exit 8 (got $rc)"; }
   ok "a head that already has a review exits 8"
+  # ...AND IT SAYS WHICH REVIEW. "Already reviewed" is true and tells a person
+  # nothing: with two reviewers able to land on one head (#64) the next question
+  # is always which review this run is standing down for. The answer is in the
+  # payload the idempotence check has already fetched, so it costs no API call
+  # -- and a message that silently stopped naming it would leave nothing to
+  # read but the exit code.
+  grep -q "held by" "$WORK/out" \
+    || { cat "$WORK/out" >&2; fail "exit 8 did not name the review that holds the head"; }
+  ok "...and it names the review that holds the head"
   [ "$(n_reviews)" = 1 ] \
     || fail "a second review was submitted on the same head"
   ok "...and no second review is submitted"
   [ "$before" -gt 0 ] || fail "the stub was never called"
+  ;;
+
+# ------------------------------------------------------------------ inflight
+  inflight)
+  # A REVIEWER IS ALREADY BEING WRITTEN, which is not the same question as "a
+  # review is already on this head" and had no answer at all. `review.sh` run by
+  # hand read no lock and wrote none, so a maintainer clearing a backlog beside
+  # a running dispatcher got a second reviewer on the same head -- and two
+  # reviews on one head is armaatus/autofleet#64, where the second was never
+  # answered and its ten findings went unread.
+  make_fixture; stub_reviewer marked
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  # A live process that looks like a reviewer to `fleet_agent_alive`, which is
+  # what a dispatcher-started one is: `ps` says `review.sh`. A bare `sleep`
+  # would be read as a recycled pid and the lock stolen -- correctly, and it
+  # would make this phase pass for the wrong reason.
+  cat >"$WORK/bin/review.sh" <<'HOLDER'
+#!/usr/bin/env bash
+sleep 120
+HOLDER
+  chmod +x "$WORK/bin/review.sh"
+  "$WORK/bin/review.sh" & holder=$!
+  printf '%s %s\n' "$holder" "$(cat "$GH_HEAD")" >"$AUTOFLEET_DIR/reviewing/42"
+  run_it 42 >"$WORK/out" 2>&1; rc=$?
+  [ "$rc" = 9 ] || { cat "$WORK/out" >&2; kill "$holder" 2>/dev/null; \
+    fail "a hand-run beside a reviewer in flight did not exit 9 (got $rc)"; }
+  ok "a reviewer already in flight on this PR is exit 9, not a second reviewer"
+  grep -q "$holder" "$WORK/out" \
+    || { cat "$WORK/out" >&2; kill "$holder" 2>/dev/null; \
+         fail "the refusal did not say which reviewer holds the PR"; }
+  ok "...and it says which one holds it"
+  [ "$(n_started)" = 0 ] \
+    || { kill "$holder" 2>/dev/null; fail "a second reviewer was started anyway"; }
+  ok "...and no reviewer ran"
+  # THE LOCK IS NOT THIS RUN'S TO DROP. review.sh removes the marker on every
+  # exit path, and an exit-9 that took that path with it would free the running
+  # reviewer's slot and invite the next poll to start the second one it just
+  # refused -- the refusal undoing itself one second later.
+  [ -e "$AUTOFLEET_DIR/reviewing/42" ] \
+    || { kill "$holder" 2>/dev/null; fail "the refusal removed the other reviewer's lock"; }
+  ok "...and the lock it refused on is still the other reviewer's"
+  # ...and a run that stands down BEFORE it ever claims must not drop a lock it
+  # does not own either. `LOCK` is set from the dispatcher's marker at the top
+  # of the file -- it has to be, the trap is installed above the first exit that
+  # can take it -- so every path between there and the claim names a file this
+  # run may not own. The stop path is one of them, and an unconditional `rm`
+  # there deleted the hand-run's lock and let a second reviewer follow.
+  : >"$AUTOFLEET_DIR/STOP"
+  ( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
+      ./scripts/fleet/review.sh 42 ) >"$WORK/out3" 2>&1; rc=$?
+  rm -f "$AUTOFLEET_DIR/STOP"
+  [ "$rc" = 3 ] || { cat "$WORK/out3" >&2; kill "$holder" 2>/dev/null; \
+    fail "the stopped run exited $rc rather than 3"; }
+  [ -e "$AUTOFLEET_DIR/reviewing/42" ] \
+    || { kill "$holder" 2>/dev/null; fail "a run that exited before claiming deleted somebody else's lock"; }
+  ok "...and a run that exits before it claims drops no lock it does not hold"
+  kill "$holder" 2>/dev/null
+
+  # A LOCK NAMING NOTHING READABLE is neither contention nor a stale lock. One
+  # with a reviewer behind it and one with nothing behind it are the same file,
+  # so this declines and says which file rather than guessing -- guessing wrong
+  # is two reviews on one head, which is the whole of #64.
+  : >"$AUTOFLEET_DIR/reviewing/42"
+  run_it 42 >"$WORK/out4" 2>&1; rc=$?
+  [ "$rc" = 2 ] || { cat "$WORK/out4" >&2; fail "an unreadable lock exited $rc rather than 2"; }
+  grep -q "names nothing this can read" "$WORK/out4" \
+    || { cat "$WORK/out4" >&2; fail "it did not say the lock was unreadable"; }
+  ok "...and a lock naming nothing readable is declined, not stolen"
+  [ "$(n_started)" = 0 ] || fail "a reviewer ran against an unreadable lock"
+
+  # ...and a lock whose process is GONE is not a permanent refusal. Nothing
+  # clears $REVIEWING_DIR across a dispatcher's death, so a stale marker
+  # outlives its process; read as "one is running" forever, that PR is never
+  # reviewed again and nothing says why.
+  sleep 0 & dead=$!; wait "$dead" 2>/dev/null
+  printf '%s %s\n' "$dead" "$(cat "$GH_HEAD")" >"$AUTOFLEET_DIR/reviewing/42"
+  run_it 42 >"$WORK/out2" 2>&1; rc=$?
+  [ "$rc" = 0 ] || { cat "$WORK/out2" >&2; fail "a stale lock refused a review (got $rc)"; }
+  ok "...while a lock naming a dead pid is taken over, not obeyed"
+  ;;
+
+# ------------------------------------------------------------------ lockrace
+  lockrace)
+  # TWO OVERLAPPING POLLS, which is the half of armaatus/autofleet#64 that
+  # produces the two reviews in the first place. The dispatcher checks for the
+  # lock and writes it AFTER the spawn, so two passes -- or a hand-run beside a
+  # dispatcher -- both saw no lock and both started a reviewer. The claim is
+  # made by the reviewer itself now, and it is a create-or-fail rather than a
+  # test followed by a write: `[ -e ] || printf >` is two syscalls with exactly
+  # this race between them.
+  make_fixture; stub_reviewer marked
+  export AUTOFLEET_TEST_REVIEWER_DELAY=5
+  run_it 42 >"$WORK/out1" 2>&1 & a=$!
+  run_it 42 >"$WORK/out2" 2>&1 & b=$!
+  wait "$a"; rc1=$?
+  wait "$b"; rc2=$?
+  case "$rc1 $rc2" in
+    "0 9"|"9 0") ok "one of two concurrent reviewers wins the lock; the other exits 9" ;;
+    *) cat "$WORK/out1" "$WORK/out2" >&2
+       fail "two concurrent runs exited $rc1 and $rc2, not one 0 and one 9" ;;
+  esac
+  [ "$(n_reviews)" = 1 ] || fail "$(n_reviews) reviews were submitted against one head"
+  ok "...and exactly one review is on the head"
+  [ "$(n_started)" = 1 ] || fail "$(n_started) reviewers ran, not one"
+  ok "...and only one reviewer ever ran"
   ;;
 
 # ------------------------------------------------------------------- timeout
@@ -1320,6 +1451,12 @@ PY_FIX
     # branch and the whole suite stays green -- which is the silent-block
     # direction #33 calls "the whole of this issue". Found by the independent
     # review.
+    # ...and let the SECOND reviewer finish first. `n_started` counts the stub,
+    # which runs before review.sh's post-check -- so the count reaches two while
+    # the second run still holds the PR's lock, and the hand-run below then
+    # correctly refuses with exit 9 rather than reaching the deadline it is
+    # about. The phase measured the lock it had left held itself.
+    await lock_held no || fail "the second reviewer never released its lock"
     rm -f "$AUTOFLEET_DIR/reviewing/42.done" "$AUTOFLEET_DIR/reviewing/42.tries"
     stub_reviewer hang
     out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$AUTOFLEET_DIR/reviewing/42" \
@@ -2245,6 +2382,88 @@ PY2
     [ -e "$AUTOFLEET_DIR/reviewing/98" ] && fail "an unreadable marker was not cleared"
     ok "...and an unreadable marker is cleared rather than signalled"
     ;;
+
+# -------------------------------------------------------------------- reap
+  reap)
+  # THE SWEEP DELETES BY CONTENT, not by path. `live_reviewers` reads the pid,
+  # asks `ps` whether it is alive -- the slow part -- and only then removes the
+  # marker. A hand-run `review.sh` that takes the same stale lock over in that
+  # window recreates the marker under its OWN pid, and a path-keyed `rm -f`
+  # deleted that live claim; the same pass then spawned a second reviewer on the
+  # head, which is armaatus/autofleet#64 through the half of the lock that
+  # stayed unconditional. The window cannot be staged deterministically from
+  # out here, so what is asserted is the primitive that closes it and that the
+  # sweep still reaps what it should. Found by both self-review passes.
+  make_fixture
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+
+  # A marker whose content has MOVED ON since the sweep read it: the pid the
+  # sweep is about to reap is not the pid in the file any more.
+  sleep 120 & taker=$!
+  printf '%s %s\n' "$taker" "deadbeef" >"$AUTOFLEET_DIR/reviewing/77"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/77" 999999 )
+  if [ -e "$AUTOFLEET_DIR/reviewing/77" ]; then
+    ok "a lock taken over since the sweep read it is not reaped"
+  else
+    kill "$taker" 2>/dev/null
+    fail "fleet_lock_reap deleted a marker that names a different pid"
+  fi
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/77" "$taker" )
+  [ -e "$AUTOFLEET_DIR/reviewing/77" ] \
+    && { kill "$taker" 2>/dev/null; fail "the marker it does name was not reaped"; }
+  kill "$taker" 2>/dev/null
+  ok "...and the one it does name is"
+
+  # A ZERO-BYTE MARKER, which is the `set -C` window in `fleet_lock_publish`,
+  # a crash between create and write, or `fleet_lock_claim` restoring a stolen
+  # file that was empty. The sweeps used to `rm -f` this unconditionally; the
+  # by-content guard has to keep reaping it or it becomes immortal. `read`
+  # fails at EOF exactly as it fails on an open error, so leaning on its status
+  # turned "the file is empty" into "the file is gone" and returned early --
+  # and then every poll found a marker with no head, spawned a reviewer whose
+  # `fleet_lock_claim` returned 3, and `review.sh` exited 2 saying "the
+  # dispatcher clears it on its next poll", which it never did. That PR is
+  # never reviewed again. Found by the self-review of the merge.
+  : >"$AUTOFLEET_DIR/reviewing/76"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/76" "" )
+  [ -e "$AUTOFLEET_DIR/reviewing/76" ] \
+    && fail "a zero-byte marker is never reaped, so that PR is wedged forever"
+  ok "...and a marker holding no pid at all is reaped, not left immortal"
+
+  # ...but NOT under a caller that names a pid: an empty marker does not name
+  # 4242, and reaping it here would be the path-keyed `rm -f` coming back in
+  # through the guard that replaced it.
+  : >"$AUTOFLEET_DIR/reviewing/75"
+  ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh \
+      && fleet_lock_reap "$AUTOFLEET_DIR/reviewing/75" 4242 )
+  [ -e "$AUTOFLEET_DIR/reviewing/75" ] \
+    || fail "an empty marker was reaped by a sweeper that named a live pid"
+  ok "...and only for the sweeper that read that same emptiness"
+  rm -f "$AUTOFLEET_DIR/reviewing/75"
+
+  # ...AND THE SWEEPS ACTUALLY CALL IT. `live_reviewers` is nested inside
+  # `review_open_prs` and cannot be invoked on its own, so the wiring is
+  # asserted where it lives: no sweep in fleet.sh may remove a reviewer marker
+  # by path. Without this the primitive above can sit unused and every
+  # assertion here stays green -- which is hard rule 3's case exactly. The
+  # `.done` record at :1710 is not a lock (it holds a head, not a pid) and the
+  # drain at :1716 removes every marker on purpose, so both are named rather
+  # than matched loosely.
+  # Scoped to `review_open_prs`, which is where both sweeps live. The drain in
+  # `stop_reviewers` is deliberately unconditional -- it has just killed
+  # whatever held each marker -- and `$marker` names an unrelated handoff-ask
+  # file elsewhere in this script, so a file-wide grep would report both.
+  bad="$(cd "$WORK/repo" \
+         && awk '/^review_open_prs\(\) \{/,/^\}/' scripts/fleet/fleet.sh \
+          | grep -nE 'rm -f "\$(marker|m)"( |;|$)' || true)"
+  [ -z "$bad" ] \
+    || fail "a sweep in review_open_prs still removes a reviewer marker by path:
+$bad"
+  ok "...and no sweep in review_open_prs removes a marker by path"
+  ;;
 
 # ------------------------------------------------------------------- stale
   stale)
