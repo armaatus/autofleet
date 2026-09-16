@@ -164,6 +164,11 @@ case "${reviewed:-}" in (''|*[!0-9]*)
   echo "something this cannot read. Nothing here can say what to do until it does." >&2
   exit 2 ;;
 esac
+# ...and `waiting` IS the exception that sentence has, which is why it is named
+# here rather than left to read as an oversight: it decides nothing. It is the
+# count in the closing line, telling an author a second review was on the head
+# at all. Refusing to answer over a number that only phrases a sentence would
+# fail the whole step on cosmetics. Found by the self-review of the merge.
 case "${waiting:-}" in (''|*[!0-9]*) waiting=0 ;; esac
 if [ "$reviewed" -lt 1 ]; then
   echo "no independent review has been submitted against ${head:0:8} yet, so there is" >&2
@@ -177,6 +182,37 @@ marker="$(gate_py 'print(merge_gate.answer_marker(sys.argv[2]))' "$head")" || ma
   echo "could not build the answer marker from .github/scripts/merge_gate.py" >&2
   exit 2; }
 
+# ...AND THE HEADS THIS BRANCH HAS LEFT BEHIND. A review with findings on an
+# older head is kept by `abandoned_findings()`, and the only reader it can ever
+# have is a validation submitted while it was still the newest review. The
+# moment a review lands on the NEW head, `reviewed_sha()` moves past it for
+# good, so no future validation can read it -- and `needs_validation()` returns
+# False as soon as any validation exists on the current head. The gate then
+# refuses forever, and the refusal used to name this script as the one thing
+# that could NOT clear the line: a hand-typed marker or an admin merge were the
+# only ways out of a hold the fleet produced on its own.
+#
+# The gate has always keyed `answered()` on the abandoned review's own sha. The
+# missing half was this script ever writing that marker, and one comment
+# carrying several of them answers each -- `answered()` asks only that the
+# comment came after the review, by the author, with substance in it. Defaulting
+# to "every head still unanswered" is what an author writing one answer means,
+# which is the option armaatus/autofleet#64's Design notes put first.
+#
+# A failure to ASK is not a failure to answer: the current head's marker is
+# built and the answer still posts. Silently answering fewer heads than are
+# owed would be this script reporting done on a gate that still holds.
+if ! gone="$(gate_py '
+import json
+pull = json.load(open(sys.argv[2]))["data"]["repository"]["pullRequest"]
+for _review, oid, _found in merge_gate.abandoned_findings(pull, sys.argv[3]):
+    print(oid)' "$payload" "$head")"; then
+  echo "could not tell which of PR #$pr's earlier heads still carry unanswered" >&2
+  echo "reviews: merge_gate.py did not answer. Answering ${head:0:8} alone would" >&2
+  echo "report done on a gate that still holds." >&2
+  exit 2
+fi
+
 # The marker and NOTHING ELSE in front of the answer. The gate measures what is
 # left after stripping the marker, so a preamble written here -- "answering the
 # review on abc1234", which the marker already says -- would be substance the
@@ -185,6 +221,15 @@ body="$(mktemp)"
 trap 'rm -f "$body" "$payload"' EXIT
 {
   printf '%s\n' "$marker"
+  # One marker per abandoned head, above the answer for the same reason the
+  # current head's is: the gate measures what is LEFT after stripping them, so
+  # anything written here in prose would be substance the author did not supply.
+  while IFS= read -r oid; do
+    [ -n "$oid" ] || continue
+    gate_py 'print(merge_gate.answer_marker(sys.argv[2]))' "$oid" || :
+  done <<EOF
+$gone
+EOF
   printf '%s\n' "$text"
 } >"$body"
 
@@ -207,6 +252,16 @@ if [ "$waiting" -gt 1 ]; then
   echo "when this ran -- one comment written after the last of them answers all of those."
 else
   echo "answered the review on ${head:0:8} of PR #$pr"
+fi
+# NAMED, not merely answered. These are findings nobody has read -- the head
+# moved out from under them and no reader is coming -- so an author who is told
+# only "answered" has no reason to go and see what they just signed off. What
+# the answer discharges is the GATE's line; what the findings asked for is still
+# the author's to have done.
+n_gone="$(printf '%s\n' "$gone" | grep -c '[0-9a-f]' || :)"
+if [ "${n_gone:-0}" -gt 0 ]; then
+  echo "...and $n_gone head(s) this branch left behind, whose reviews nothing had read."
+  echo "Those findings are not clean; they are answered. Check the PR says what was done."
 fi
 
 # An issue comment is not one of merge-gate.yml's triggers and cannot be: an

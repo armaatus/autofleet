@@ -1344,13 +1344,15 @@ def evaluate(head_sha, pull_request, changed_files):
         problems.append(
             f"{review_name(review)} {what} on "
             f"{oid[:8]}, a head this branch has left behind. Nothing has "
-            "answered or validated them, and no review of them is coming -- "
-            "the reader they still have is the VALIDATION of this head, "
-            "which judges whether a review's findings were addressed. Say "
-            "in the PR what was done about them, so it has something to "
-            "judge against. `answer-review.sh` cannot clear this line: it "
-            "writes its marker for the head it is run against, and that is "
-            "no longer this review's."
+            "answered or validated them, and no review of them is coming. "
+            "A VALIDATION of this head reads them only if it was submitted "
+            "while this was still the newest review -- once a review lands "
+            "on a later head, `reviewed_sha()` has moved past this one for "
+            "good and no future validation can be briefed on it. So the "
+            "remedy is the ANSWER: `./scripts/fleet/answer-review.sh` names "
+            "every head still owed one, this among them. Say in it what was "
+            "actually done about these findings; answering them is not the "
+            "same as them being clean."
         )
 
     if not thread_list_is_complete(pull_request):

@@ -1024,8 +1024,23 @@ fleet_lock_release() {
 # went.
 fleet_lock_reap() {
   local marker="${1:-}" pid="${2:-}" held=""
-  [ -n "$marker" ] && [ -n "$pid" ] || return 0
-  read -r held _ 2>/dev/null <"$marker" || return 0
+  [ -n "$marker" ] || return 0
+  # EXISTENCE IS TESTED HERE, not inferred from `read`'s status. `read` fails at
+  # EOF exactly as it fails on an open error, and a ZERO-BYTE marker hits the
+  # EOF case -- so leaning on the status read "the file is empty" as "the file
+  # is already gone" and returned before the `rm`. An empty marker is a state
+  # this lock produces (`fleet_lock_publish`'s `set -C` window, a crash between
+  # create and write, `fleet_lock_claim` restoring a stolen file that was
+  # empty), the sweeps used to `rm -f` it unconditionally, and with the guard in
+  # front of them it became immortal: every poll saw a marker with no head,
+  # spawned a reviewer whose `fleet_lock_claim` returned 3, and `review.sh`
+  # exited 2 promising "the dispatcher clears it on its next poll". It never
+  # did, and that PR is never reviewed again. Found by the self-review.
+  [ -e "$marker" ] || return 0
+  read -r held _ 2>/dev/null <"$marker" || true
+  # An empty marker names NOBODY, and the sweeper that read that same emptiness
+  # passes an empty pid -- so the by-content guard still holds, and a sweeper
+  # that read a real pid will not delete a file that has since been blanked.
   [ "${held:-}" = "$pid" ] || return 0
   rm -f "$marker" 2>/dev/null || true
 }
