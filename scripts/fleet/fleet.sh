@@ -4103,6 +4103,29 @@ cmd_status() {
     echo "review:      github -- .github/workflows/claude-review.yml, which needs"
     echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
   fi
+  # ...and whether the fleet's own model calls are going through the compression
+  # proxy, on the same first screen and for the same reason: a seam whose whole
+  # point is that it changes nothing when off is a seam nobody can tell is on.
+  #
+  # IT PROBES rather than repeating the knob. `AUTOFLEET_HEADROOM=1` is what a
+  # person set; whether anything answers is what the next review will actually
+  # get, and those are the same sentence only while the daemon is up. The fleet
+  # never spawns it, so "up" is somebody else's state and this screen is where
+  # the two are compared.
+  #
+  # The probe costs one TCP connect, and only when the knob is on -- an
+  # unconfigured repository pays nothing for a row it still gets.
+  if fleet_headroom_on; then
+    if fleet_headroom_up "$AUTOFLEET_HEADROOM_URL"; then
+      echo "headroom:    on -- $AUTOFLEET_HEADROOM_URL, answering"
+    else
+      echo "headroom:    on -- $AUTOFLEET_HEADROOM_URL, NOT ANSWERING"
+      echo "             (fleet-started agents run unwrapped, at full token price)"
+    fi
+  else
+    echo "headroom:    off (AUTOFLEET_HEADROOM=1 in .autofleet/config turns it on;"
+    echo "             docs/CONFIGURATION.md says what it costs)"
+  fi
   # A stop and a running dispatcher are not alternatives: a drain leaves the
   # dispatcher up on purpose, because it is what reaps a worktree once its PR
   # merges -- and that draining dispatcher is running whatever code it parsed.

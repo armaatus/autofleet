@@ -3132,6 +3132,20 @@ XX
     && { cat "$ENV_FILE" >&2; fail "the reviewer was pointed at a proxy that is not there"; }
   ok "...and the reviewer is not pointed at a proxy that is not there"
   unset AUTOFLEET_HEADROOM AUTOFLEET_HEADROOM_URL
+
+  # EVERY CALL SITE, not just the one above. Three scripts start a model as a
+  # direct child of the fleet -- review.sh, validate.sh and self-review.sh --
+  # and a knob is worth exactly what it covers. The fourth one, added later
+  # without the export, is the failure with no symptom: the seam still works,
+  # the tests above still pass, and the measured saving quietly becomes a
+  # fraction of what docs/CONFIGURATION.md says it is. Static, because the
+  # alternative is three more fixtures asserting one function three times.
+  for f in "$REPO_ROOT"/scripts/fleet/*.sh; do
+    grep -q '_CMD" -p ' "$f" || continue
+    grep -q 'fleet_headroom_env' "$f" \
+      || fail "$(basename "$f") starts a model call and never goes through the seam"
+  done
+  ok "every fleet script that starts a model call goes through the seam"
   ;;
 
 # ---------------------------------------------------------- headroom_status

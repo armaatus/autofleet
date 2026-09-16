@@ -370,6 +370,15 @@ tools="$tools,Bash(./scripts/fleet/resolve-thread.sh:*)"
 [ -n "${AUTOFLEET_TEST_COMMAND:-}" ] \
   && tools="$tools,Bash($AUTOFLEET_TEST_COMMAND)"
 
+# The compression proxy, if this repository turned it on. Same seam, same one
+# writer of the two variables (lib.sh), and above `set -m` for the same reason
+# review.sh puts it there: the exports have to be in place before the background
+# job forks. A validation is the other half of the post-PR loop and reads the
+# same kind of payload -- a diff, review bodies, test output -- so a knob that
+# covered one of the two would be a knob whose measured saving is half of what
+# it says. armaatus/autofleet#89.
+fleet_headroom_env
+
 set -m
 "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
   --allowed-tools "$tools" \

@@ -579,6 +579,77 @@ fleet_review_mode() {
   esac
 }
 fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
+
+# ------------------------------------------------- the compression proxy (#89)
+#
+# Is the opt-in proxy in front of the fleet's own model calls turned on, and is
+# anything actually there. Two questions, kept apart on purpose: the KNOB is
+# what a person set, the ENDPOINT is what is true, and a screen or a launch path
+# that answers the first while meaning the second says "on" for a proxy that has
+# been dead since Tuesday.
+fleet_headroom_on() { [ "${AUTOFLEET_HEADROOM:-0}" = 1 ]; }
+
+# Does anything answer at `$1`. A TCP connect and nothing more.
+#
+# NOT `command -v headroom`, NOT a version endpoint, NOT a health route of
+# theirs. The seam is two environment variables and an address; any
+# Anthropic-compatible compressing proxy satisfies it, and the moment this asks
+# a vendor-shaped question the knob stops being generic and starts being an
+# undeclared dependency (hard rule 4's temperament, applied to a second vendor).
+#
+# python3 rather than `curl`: curl appears nowhere else in the payload, so it
+# would be a new dependency for a probe, while python3 is already required by
+# everything under this directory -- and it parses the URL, which bash would
+# have to do by hand to open /dev/tcp at all. A short timeout because this sits
+# in front of a review that must start either way.
+fleet_headroom_up() {
+  python3 - "${1:-}" 2>/dev/null <<'PY'
+import socket, sys
+from urllib.parse import urlsplit
+try:
+    u = urlsplit(sys.argv[1])
+    host = u.hostname or "127.0.0.1"
+    port = u.port or (443 if u.scheme == "https" else 80)
+    socket.create_connection((host, port), timeout=2).close()
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+# Point THIS process's children at the proxy, or say why not and leave them
+# alone. Callers export nothing themselves; this is the only writer of the two
+# variables, so "what does the knob do" has one answer.
+#
+# IT MUST DEGRADE, and this is the one behaviour the suite pins. A dispatcher
+# that refuses to dispatch because an optional optimiser is down is a worse
+# failure than paying full token price for one pass -- so a probe that fails
+# prints one line and returns 0, and the caller runs the agent unwrapped. If
+# this ever becomes a prerequisite, a stopped proxy is a stopped fleet.
+#
+# The line names the URL AND the knob: the person reading a dispatcher log has
+# to be able to find the thing that is off without knowing this file exists.
+#
+# ENABLE_TOOL_SEARCH rides along because it is a COST of the custom base URL and
+# not a second feature: `/context all` misreports without it. The other two
+# costs cannot be paid from here and are in docs/CONFIGURATION.md -- Claude
+# Remote Control is unavailable in a proxied session, and server-managed
+# settings are not fetched for any non-default base URL.
+#
+# OFF MEANS INERT. Not "exported empty", not "exported to the default": with the
+# knob at 0 this returns before it touches the environment at all, because an
+# exported-but-empty ANTHROPIC_BASE_URL is its own breakage and a repository
+# that never set the knob must behave exactly as it did before it existed.
+fleet_headroom_env() {
+  fleet_headroom_on || return 0
+  if fleet_headroom_up "$AUTOFLEET_HEADROOM_URL"; then
+    export ANTHROPIC_BASE_URL="$AUTOFLEET_HEADROOM_URL"
+    export ENABLE_TOOL_SEARCH=true
+    return 0
+  fi
+  echo "AUTOFLEET_HEADROOM=1, but nothing answers at $AUTOFLEET_HEADROOM_URL." >&2
+  echo "    Running unwrapped, at full token price. Start the proxy, or set" >&2
+  echo "    AUTOFLEET_HEADROOM=0 in .autofleet/config to stop asking." >&2
+}
 # A file's mtime in epoch seconds, or non-zero if it cannot be had.
 #
 # GNU first, BSD second, and THE ANSWER IS VALIDATED -- which is not belt and

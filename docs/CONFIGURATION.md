@@ -466,6 +466,111 @@ itself. A reviewer run from the main checkout (`AUTOFLEET_REVIEW_MODE=local`)
 lands under the main checkout's slug, not the worktree's, so its tokens are not
 in that issue's row.
 
+### Compressing what the agents read
+
+Off by default, and off costs nothing. At `AUTOFLEET_HEADROOM=0` — the default —
+nothing is exported, nothing is probed, and there is nothing to install, which is
+what keeps CLAUDE.md's "no build step, no dependencies to install" true for a
+repository that never touches this.
+
+At `1`, the fleet points the model calls **it makes itself** at a local HTTP
+proxy that compresses what the agent *reads* — tool output, logs, file reads,
+JSON, diffs — before those tokens are counted. It exports two variables:
+
+```
+ANTHROPIC_BASE_URL=$AUTOFLEET_HEADROOM_URL
+ENABLE_TOOL_SEARCH=true
+```
+
+| Knob | Default | Notes |
+|---|---|---|
+| `AUTOFLEET_HEADROOM` | `0` | `1` points fleet-started model calls at the compression proxy. `0` changes nothing anywhere. |
+| `AUTOFLEET_HEADROOM_URL` | `http://127.0.0.1:8787` | Where the proxy answers. **One host-level port**, shared by every worktree on the machine — deliberately not a per-worktree port out of `AUTOFLEET_PORTS`, and deliberately not in `.env`, which derives per-worktree values from the worktree path. |
+
+`./scripts/fleet/fleet.sh status` says which of the three states you are in: off,
+on and answering, or on and not answering.
+
+**It degrades, loudly, and never blocks.** Before it exports anything the fleet
+opens a TCP connection to that URL. If nothing answers it prints one line naming
+both the URL and the knob and runs the agent **unwrapped, at full token price**.
+A dispatcher that refuses to dispatch because an optional optimiser is down is a
+worse failure than one expensive pass.
+
+**The fleet probes the proxy and never spawns it.** Starting and stopping the
+daemon is yours; a dispatcher that owns a daemon's lifecycle is a dispatcher that
+can fail to start for a reason that has nothing to do with the backlog.
+
+#### What it covers, and what it does not
+
+The three model calls the fleet starts as a **direct child** of one of its own
+scripts:
+
+| Call | Script | Started by |
+|---|---|---|
+| the independent review | `scripts/fleet/review.sh` | the dispatcher, in `AUTOFLEET_REVIEW_MODE=local` |
+| the validation | `scripts/fleet/validate.sh` | the dispatcher |
+| both self-review passes | `scripts/fleet/self-review.sh` | the agent, in its worktree |
+
+A fourth call site added without the export would be a knob that silently
+measures a fraction of what this page says it does, so `tests/run.sh review_mode
+headroom` fails on any `scripts/fleet/*.sh` that starts a model call and does not
+go through the seam.
+
+It does **not** cover the worktree agent. That process is started by the runtime,
+not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
+Orca driver the agent's terminal is a child of the Orca app, not of the
+dispatcher — `printenv` inside a fleet-opened worktree shows no `AUTOFLEET_*` at
+all, and the process tree runs `Orca Helper → login → zsh → bash → claude` with
+`fleet.sh` nowhere in it. The `runner_*` contract in [RUNNERS.md](RUNNERS.md) has
+no environment parameter, and this knob did not add one.
+
+To cover the worktree agent, wrap `claude` on the machine instead. This is
+durable and global to your user, which is why it is a person's step and not the
+fleet's:
+
+```bash
+headroom wrap claude      # starts the proxy, sets ANTHROPIC_BASE_URL and
+                          # ENABLE_TOOL_SEARCH for `claude` from now on
+headroom unwrap claude    # undo the durable part
+```
+
+#### Installing it
+
+```bash
+uv tool install --python 3.13 "headroom-ai[all]"   # or: pip install "headroom-ai[all]"
+headroom proxy --port 8787
+```
+
+The npm package of the same name is SDK-only and ships no CLI. Compression runs
+locally: no prompt or file content leaves the machine to be compressed.
+
+#### What a custom base URL costs you
+
+All three are Claude-side and apply to **any** non-default `ANTHROPIC_BASE_URL`,
+not just this one. Turning the knob on trades them away:
+
+- **Claude Remote Control is unavailable** in a proxied session.
+- **Server-managed settings are not fetched.** Anthropic skips that fetch for any
+  non-default base URL. The OS-level `managed-settings.json` is unaffected — it
+  is read from disk.
+- **`/context all` misreports** without `ENABLE_TOOL_SEARCH=true`, which is why
+  the knob sets it alongside the base URL rather than leaving it to you.
+
+#### What it is worth here
+
+Savings scale with how repetitive the payload is: repeated JSON and log lines
+clear 90%, prose and already-dense output compress very little. This fleet's
+traffic is a mix — issue bodies and PR bodies are prose, `gh` JSON, test output
+and diffs are not — so the number that matters is a measured one for this
+repository, not the vendor's. It is in the pull request for
+armaatus/autofleet#89.
+
+**Any Anthropic-compatible compressing proxy satisfies this seam.** Nothing under
+`scripts/fleet/` imports headroom, probes for its CLI, or reads a file of its:
+the mechanism is two environment variables and a TCP connect. The knob carries
+the name because a dependency is named rather than hidden, not because the code
+knows about it.
+
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,

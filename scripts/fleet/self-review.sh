@@ -233,6 +233,13 @@ run_pass() {
   local slug="$1" label="$2"
   local out="$LOG_DIR/$slug-${sha:0:8}.md" err="$LOG_DIR/$slug-${sha:0:8}.log"
 
+  # The compression proxy, if this repository turned it on -- exported here
+  # rather than once at the top so the degrade line, if it comes, sits with the
+  # pass it is about rather than three screens above both. It is idempotent, and
+  # a second probe against a proxy that answered the first costs one connect.
+  # armaatus/autofleet#89.
+  fleet_headroom_env
+
   echo "==> $label  (${AUTOFLEET_SELF_REVIEW_TIMEOUT}s," \
        "${AUTOFLEET_SELF_REVIEW_MAX_TURNS} turns, $AUTOFLEET_SELF_REVIEW_CMD)" >&2
   set -m
