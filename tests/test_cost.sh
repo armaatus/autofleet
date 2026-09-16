@@ -379,11 +379,17 @@ $out"
     make_fixture
     make_transcripts
     # A driver that answers "there is no runtime here", which is what a CI
-    # runner has and what a laptop with the app shut has. Only the two functions
-    # the source-time path touches; nothing here dispatches anything.
+    # runner has and what a laptop with the app shut has. `runner_available` and
+    # `runner_worktree_create` because lib.sh requires both of any driver by the
+    # end of sourcing (docs/RUNNERS.md) -- without the second this is a driver
+    # that bailed part way, and `fleet.sh status` would refuse before the stub's
+    # own refusal was ever reached, which makes the guard below prove nothing.
+    # Found by the self-review, sweeping the contract change that took
+    # tests/test_handoff.sh and missed this file.
     cat >"$WORK/repo/scripts/fleet/runner/none.sh" <<'DRIVER'
 #!/usr/bin/env bash
 runner_available() { echo "no runtime here" >&2; return 1; }
+runner_worktree_create() { return 1; }
 runner_dispatcher_hint() { printf 'nothing to dispatch with
 '; }
 DRIVER

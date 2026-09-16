@@ -1389,6 +1389,216 @@ else
   fail "the slug rule in the docs is not the slug rule in cost.sh (above); config.sh ships to every host repo, and a wrong rule reports zeros rather than an error"
 fi
 
+# 4g. THE DRIVER THIS REPO IS CONFIGURED TO USE IS ONE THAT EXISTS.
+#
+#    4b asks whether every driver PRESENT implements the contract; nothing asked
+#    whether the name in `.autofleet/config` resolves to a file at all. A host
+#    project that sets AUTOFLEET_RUNNER to a driver it has not written yet -- or
+#    keeps one past a rename -- is green here and discovers it when the
+#    dispatcher opens its first worktree, which is after a person walked away
+#    expecting PRs. Red before an agent is opened is the whole point of this
+#    file. armaatus/autofleet#13.
+#
+#    The name is READ FROM config.sh rather than assumed to be `orca`, because
+#    `.autofleet/config` is sourced from inside it and is exactly where a host
+#    project overrides it.
+#
+#    A STRIPPED ENVIRONMENT, because the question is which driver THIS REPO is
+#    configured for, not which one the maintainer happens to
+#    have exported in the shell they ran the lint from. `bash -c` inherits the
+#    environment, so a `AUTOFLEET_RUNNER=stub` left over from a test run would
+#    fail the lint on a repo that is correctly configured -- and config.sh's own
+#    layering note says a config file that assigns outright overrides even the
+#    environment, so the ambient value is not authoritative here either way.
+#    EVERY autofleet knob rather than the two that were named, which is what
+#    three self-review rounds cost to arrive at: config.sh also sources
+#    `${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}`, so a stale
+#    AUTOFLEET_CONFIG answers this check about another repo's file -- and it
+#    `exit 2`s on several other ambient knobs, so a leftover
+#    AUTOFLEET_REVIEW_MAX_ROUNDS made the check report that the runner could not
+#    be established. Consequence as cause, in the check that closes that hole.
+#    The rest of the environment is KEPT: `env -i` was the round in between, and
+#    a host config that reads $USER or $TMPDIR would have failed under `set -u`
+#    with this check blaming the config. Found by the local review, then three
+#    times by the self-review.
+#
+#    `|| exit 1` after the source, because without it the "would not source"
+#    branch below was unreachable: `.` returning non-zero is discarded under
+#    `set -uo pipefail` with no `-e`, `printf` then exits 0, and a config.sh
+#    with a syntax error was reported as one that "leaves AUTOFLEET_RUNNER
+#    empty" -- the misattribution this comment claims to avoid, in the check
+#    that makes the claim. Found by the local review.
+# Every autofleet knob in the ambient environment, and nothing else. `env -i`
+# was the previous attempt and took the rest of the environment with it: a host
+# `.autofleet/config` that reads $USER or $TMPDIR then hits `set -u` and this
+# check reports "config.sh would not source" on a repo that is fine -- and the
+# remedy it prints, running the command by hand, works, so it is unreproducible
+# too. Found by the self-review, on the fix for the fix.
+fleet_lint_unset=()
+while IFS='=' read -r fleet_lint_name _; do
+  case "$fleet_lint_name" in
+    AUTOFLEET_*|ORCA_*|FLEET_*) fleet_lint_unset+=(-u "$fleet_lint_name") ;;
+  esac
+done < <(env)
+if runner="$(env ${fleet_lint_unset[@]+"${fleet_lint_unset[@]}"} bash -c '
+    set -uo pipefail
+    REPO_ROOT="$PWD"
+    . ./scripts/fleet/config.sh || exit 1
+    printf "%s" "${AUTOFLEET_RUNNER:-}"' 2>/dev/null)"; then
+  if [ -z "$runner" ]; then
+    fail "scripts/fleet/config.sh leaves AUTOFLEET_RUNNER empty, so lib.sh looks for scripts/fleet/runner/.sh and every command that reaches for the runtime stops"
+  elif [ -f "scripts/fleet/runner/$runner.sh" ]; then
+    ok "AUTOFLEET_RUNNER=$runner resolves to scripts/fleet/runner/$runner.sh"
+  else
+    fail "AUTOFLEET_RUNNER=$runner names no driver: scripts/fleet/runner/$runner.sh does not exist, so the dispatcher, the setup hook, the board and the autostart watcher all stop on it (4h below). Set it in .autofleet/config to one that ships, or write that file against docs/RUNNERS.md"
+  fi
+else
+  fail "scripts/fleet/config.sh would not source, so which runner this repo is configured for cannot be established; run it by hand to see what it refused"
+fi
+
+# 4h. EVERY SCRIPT THAT REACHES FOR THE RUNTIME STOPS ON A DRIVER THAT IS NOT
+#     THERE, and the ones that do not reach for it are left alone.
+#
+#     `lib.sh` says the driver is missing and finishes sourcing; it does not
+#     `exit`, because seven scripts source it and call no `runner_*` at all --
+#     the whole review and validation pipeline, which would otherwise refuse to
+#     answer a review comment for want of a driver none of them uses. The price
+#     of that choice is that the refusal is now the CALLER's to act on, and a
+#     caller that forgets calls a function that does not exist: `command not
+#     found`, rc 127, which fleet.sh's `runner_available || die` reported as
+#     "the runner is not usable here" -- the consequence named as the cause.
+#     That is precisely the failure armaatus/autofleet#13 exists to remove, so
+#     it is asserted rather than remembered. Hard rule 3.
+#
+#     Comments are stripped the same way 4b and 4c strip them, and for the same
+#     reason: a `runner_*` named in prose is not a call. What is asserted is the
+#     ORDER, not the presence: the guard has to come before the first call, or
+#     the `command not found` arrives first and splits the message in half.
+if python3 - <<'PYEOF'
+import re, sys, glob
+
+# `issue-command.sh` is exempt BY NAME and for a stated reason: it prints the
+# brief for an issue, which needs no runtime, and it asks `runner_available`
+# only to decide whether it can additionally resolve THIS worktree's issue --
+# behind `if [ -z "$ref" ] && runner_available 2>/dev/null`. With no driver that
+# call is rc 127, the `&&` is false, and the script carries on doing the thing
+# it was run for. Requiring a driver there would refuse an agent its own brief.
+EXEMPT = {"scripts/fleet/issue-command.sh"}
+
+def strip_comment(line):
+    out, quote = [], ""
+    for ch in line:
+        if not quote:
+            if ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                break
+        elif ch == quote:
+            quote = ""
+        out.append(ch)
+    return "".join(out)
+
+def code_only(text):
+    return "\n".join(strip_comment(line) for line in text.splitlines())
+
+lib = open("scripts/fleet/lib.sh").read()
+if "fleet_require_runner()" not in lib:
+    sys.exit("lib.sh no longer defines fleet_require_runner; this check now asserts nothing")
+lib_code = code_only(lib)
+defined_in_lib = set(re.findall(r"^(runner_[a-z_]+)\(\)", lib_code, re.M))
+
+# A lib-defined `runner_*` counts as "not reaching for the runtime" ONLY if it
+# does not itself reach, DIRECTLY OR THROUGH ANOTHER ONE. `runner_agent_terminal`
+# is a filter over the DRIVER's `runner_agent_terminals`, so a script whose only
+# reach is that wrapper does reach the driver, and without one gets rc 127 from
+# inside lib.sh. The first version of this check called every lib-defined name
+# safe -- which passed such a script unguarded and, worse, FAILED the build if
+# its author added the guard anyway, arguing for the removal of a correct one.
+#
+# TRANSITIVE, by shrinking to a fixpoint rather than looking one level down: a
+# lib `runner_a` calling a lib `runner_b` that calls the driver is a reach, and
+# the one-level version called it safe. That set is empty today -- lib.sh
+# defines exactly one of these and it reaches -- which is precisely why the
+# arithmetic has to be right before a second one is written. Named `lib_safe`
+# rather than `provided`, because check 4b above already binds `provided` in
+# this file to the whole set and two spellings of one word is a reader looking
+# at the wrong thing. Both found by the local review.
+lib_safe = set(defined_in_lib)
+while True:
+    body_of = {}
+    for name in lib_safe:
+        m = re.search(r"^%s\(\)\s*\{(.*?)^\}" % re.escape(name), lib_code, re.M | re.S)
+        body_of[name] = set(re.findall(r"\brunner_[a-z_]+", m.group(1))) if m else {"runner_unknown"}
+    shrunk = {n for n in lib_safe if not (body_of[n] - lib_safe)}
+    if shrunk == lib_safe:
+        break
+    lib_safe = shrunk
+
+bad, guarded = [], []
+for path in sorted(glob.glob("scripts/fleet/*.sh")):
+    if path == "scripts/fleet/lib.sh":
+        continue
+    code = code_only(open(path).read())
+    reaches = [m for m in re.finditer(r"\brunner_[a-z_]+", code) if m.group(0) not in lib_safe]
+    if not reaches:
+        # ...and the other direction: a guard in a script that needs none is a
+        # refusal nobody asked for, and it is how `cost` nearly lost the one
+        # property fleet.sh documents at length.
+        if "fleet_require_runner" in code:
+            bad.append(path + " calls fleet_require_runner and reaches for no runtime at all")
+        continue
+    if path in EXEMPT:
+        continue
+    guard = re.search(r"\bfleet_require_runner\b", code)
+    if not guard:
+        bad.append(path + " calls the driver and never calls fleet_require_runner")
+        continue
+    # PRESENT IS NOT ENOUGH. agent-autostart.sh called `runner_set_deadline` 33
+    # lines before its guard, so with no driver the rc-127 `command not found`
+    # landed BETWEEN lib.sh's refusal and the line that completes it -- the
+    # split message this whole change exists to remove. The check said ok.
+    # Found by the local review.
+    if reaches[0].start() < guard.start():
+        bad.append("%s calls %s at offset %d, before fleet_require_runner at %d"
+                   % (path, reaches[0].group(0), reaches[0].start(), guard.start()))
+        continue
+    guarded.append(path)
+if not guarded:
+    sys.exit("no script guards its driver calls; this check now asserts nothing")
+for path in sorted(EXEMPT):
+    if not glob.glob(path):
+        bad.append(path + " is exempted here and does not exist")
+# ...and the PAGE that enumerates them names the same set. Hard rule 4 makes
+# docs/RUNNERS.md the authority, and the count is restated in five places --
+# that page, docs/CONFIGURATION.md, config.sh, lib.sh and this check's own
+# comment -- with nothing asserting any of them. It has already gone stale once
+# inside this branch: the page said "five" while this check exempted one of
+# them. Only the page is checked, because it is the one a later reader is told
+# to trust; the other four are prose pointing at it. Found by the local review.
+doc = open("docs/RUNNERS.md").read()
+para = [p for p in doc.split("\n\n") if "call `fleet_require_runner`" in p]
+if len(para) != 1:
+    sys.exit("docs/RUNNERS.md no longer has exactly one paragraph enumerating the "
+             "guarded callers, so the count it publishes is unchecked")
+named = set(re.findall(r"`([a-z-]+\.sh)`", para[0]))
+want = {p.split("/")[-1] for p in guarded}
+# The paragraph also names the UNGUARDED exception by design, and `lib.sh`,
+# which DEFINES `fleet_require_runner` rather than calling it -- the same file
+# the loop above skips for the same reason. Neither is a mismatch.
+named -= {p.split("/")[-1] for p in EXEMPT} | {"lib.sh"}
+if named != want:
+    bad.append("docs/RUNNERS.md names {%s} as calling fleet_require_runner; the code says {%s}"
+               % (", ".join(sorted(named)), ", ".join(sorted(want))))
+if bad:
+    sys.exit("the missing-driver refusal is not acted on where it has to be:\n  "
+             + "\n  ".join(bad))
+PYEOF
+then
+  ok "every script that reaches for the runtime stops on a driver that is not there"
+else
+  fail "a script calls the driver without calling fleet_require_runner (above); without a driver that call is rc 127, and the caller reports the consequence as the cause"
+fi
+
 # 5. The dispatcher is what runs it. review.sh existing and never being called is
 #    the same outcome as it not existing.
 if grep -q 'review_open_prs' scripts/fleet/fleet.sh; then

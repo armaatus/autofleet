@@ -73,20 +73,136 @@ runner_set_deadline() {
 # Returns non-zero when nothing answers, so a caller can say so in one line
 # instead of making its first real call and reading the silence as data.
 ORCA_CLI_PROBE_SECONDS="${ORCA_CLI_PROBE_SECONDS:-10}"
+
+# The candidates, in the order they are tried, one per line.
+#
+# A function rather than a list inline in `orca_cli_resolve`, which is its only
+# caller, because the list is what a test has to be able to REPLACE: whether
+# this machine has an orca CLI is a property of the machine, and
+# `tests/test_fleet.sh runner_missing` overrides this to pin the refusal's
+# wording against candidates it controls. The earlier version of this comment
+# claimed `orca_unavailable_says` read it too; it reads $ORCA_CLI_REJECTS, and a
+# why a reader can falsify in one grep costs more than none. Found by the local
+# review.
+orca_cli_candidates() {
+  [ -n "${ORCA_CLI_COMMAND:-}" ] && printf '%s\n' "$ORCA_CLI_COMMAND"
+  printf '%s\n' orca orca-dev orca-ide \
+    /Applications/Orca.app/Contents/Resources/bin/orca
+}
+
+# What was tried and why each was turned down, as one comma-joined line.
+#
+# Collected DURING the resolve rather than re-derived after it, which is where
+# this departs from `fleet_python_rejections`: re-probing costs a second
+# `--version` per candidate, each with its own $ORCA_CLI_PROBE_SECONDS, and this
+# is the first call `setup.sh` makes while the runner holds the agent's tab. Five
+# candidates that all time out would be a hundred seconds of silence to explain
+# the fifty that came before it.
+ORCA_CLI_REJECTS=""
+orca_cli_reject() { ORCA_CLI_REJECTS="${ORCA_CLI_REJECTS:+$ORCA_CLI_REJECTS, }$1"; }
+
 orca_cli_resolve() {
   [ -n "${ORCA_CLI:-}" ] && return 0
-  local candidate probe_out
-  probe_out="$(mktemp)"
-  for candidate in ${ORCA_CLI_COMMAND:-} orca orca-dev orca-ide \
-      /Applications/Orca.app/Contents/Resources/bin/orca; do
-    command -v "$candidate" >/dev/null 2>&1 || continue
-    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" "$probe_out" \
-      "$candidate" --version || continue
+  local candidate where probe_rc
+  # Reset per resolve, not per source: a resolve that fails, then succeeds after
+  # the app starts, must not leave the first attempt's reasons behind for a
+  # later failure to print as if they were its own.
+  ORCA_CLI_REJECTS=""
+  # /dev/null, NOT A TEMP FILE. Nothing ever reads the probe's output -- only
+  # its exit status is the answer -- so the file existed solely to be written to
+  # and deleted.
+  #
+  # It cost three rounds of the local review to notice, and each of those rounds
+  # was a bug in the code that made it: the machine with no `mktemp` needed a
+  # third refusal shape of its own, a retry that SUCCEEDED had its file deleted
+  # and was refused anyway, and the diagnostic call that replaced it was itself
+  # unchecked. `tests/test_env.sh setup_fails_fast` caught the first, because
+  # its PATH holds one interpreter and nothing else. Sixty lines, a global, a
+  # branch in `orca_unavailable_says` and a test part went with it.
+  #
+  # WHAT WENT WITH THEM IS THE `mktemp` BINARY, not every temp file, and the
+  # wider claim stood here until the independent review took it down. The
+  # candidate list at the bottom of this function is a here-document, and bash
+  # 3.2 -- the `/bin/bash` every macOS ships, which this repo targets -- backs
+  # one with a real file: `stat -f %HT /dev/fd/3` inside the loop says `Regular
+  # File` on 3.2.57 and `Fifo File` on 5.1+, which is where bash started using a
+  # pipe for small ones. An unwritable `$TMPDIR` does not reach it, because bash
+  # falls back to `/tmp` when `$TMPDIR` is not a writable directory (checked
+  # both ways on 3.2.57). A machine that can write a temp file NOWHERE loses the
+  # list instead: the loop body never runs, and the refusal reads `tried:
+  # nothing was probed` -- which names no candidate rather than naming the wrong
+  # one, so it is still not the confident lie about the machine that #13 exists
+  # to remove.
+  # ON FD 3, and the list is what a candidate CLI must not be able to drain: it
+  # would eat the rest of the heredoc, `read` would hit EOF, and the loop would
+  # end after that one candidate -- the refusal then naming it as everything
+  # that was tried while the /Applications fallback the 0700 install needs sits
+  # last and untried. Fd 3 does NOT give that on its own, which is the whole
+  # point: `fleet_run_with_deadline` forks with `&` and, with job control off,
+  # bash points only STDIN at /dev/null, so the stdin form this replaced was
+  # protected by the shell and fd 3 is inherited untouched. The `3<&-` on the
+  # probe call below is what closes it, and without that line the rewrite was
+  # strictly worse than what it replaced. Raised by the local review, which
+  # caught the rationale pointing the wrong way; stated once here by the
+  # self-review, which found it stated wrongly and then corrected 25 lines
+  # further down.
+  while IFS= read -r -u 3 candidate; do
+    [ -n "$candidate" ] || continue
+    if ! where="$(command -v "$candidate" 2>/dev/null)"; then
+      # NOT "not on PATH", twice over. `command -v` turns down a file that is
+      # right there and not executable by this user exactly as it turns down one
+      # that is absent -- and the 0700-root:wheel wrapper CLAUDE.md names as the
+      # reason this probe exists at all is precisely the first case, so telling
+      # that person their PATH is wrong sends them to check something correct
+      # and to distrust the rest of the message. For a BARE NAME the two are not
+      # distinguishable from here without walking PATH, so the line says both.
+      # For an ABSOLUTE PATH -- the /Applications fallback below, and an
+      # absolute ORCA_CLI_COMMAND -- there was never a PATH lookup to fail, and
+      # on the common case of a Mac with no Orca the `tried:` line ended with a
+      # sentence about PATH for a path. Both halves found by the local review.
+      # `*/*`, not `/*`: `command -v` skips PATH for ANY name containing a
+      # slash, so a relative `bin/orca` was never a PATH lookup either and was
+      # being reported as one. Found by the local review.
+      case "$candidate" in
+        */*) orca_cli_reject "$candidate (no such file, or not executable)" ;;
+        *)   orca_cli_reject "$candidate (not found on PATH, or found and not executable)" ;;
+      esac
+      continue
+    fi
+    # `3<&-` closes the candidate list for the child -- see the top of the loop
+    # for why fd 3 needs it and stdin did not.
+    # 124 IS THE WRAPPER'S DEADLINE, and the two failures a reader has to tell
+    # apart no longer share a sentence: a CLI that
+    # HANGS is an app mid-start or wedged and is worth waiting out, while one
+    # that is there and exits non-zero has already answered. "did not answer"
+    # for an instant `exit 3` sent the reader to look for a wedged app. Captured
+    # into a variable because `if ! cmd` sets `$?` to the negation, so the
+    # branch that wants the status cannot read it. Raised by the independent
+    # review.
+    #
+    # It is not a status only the wrapper can produce: `fleet_run_with_deadline`
+    # ends in `wait "$child"`, so a candidate that is itself a `timeout` wrapper
+    # propagating 124 reads here as a hang. That misreads a CLI which did answer
+    # as one that did not -- the same class as before, one candidate wide
+    # instead of all of them, and the remedy line is the same either way.
+    # Distinguishing them needs the wrapper to report the deadline out of band,
+    # which is a change to a function eleven callers share and is not this
+    # issue. Found by the self-review.
+    probe_rc=0
+    fleet_run_with_deadline "$ORCA_CLI_PROBE_SECONDS" /dev/null \
+      "$candidate" --version 3<&- || probe_rc=$?
+    if [ "$probe_rc" != 0 ]; then
+      case "$probe_rc" in
+        124) orca_cli_reject "$where (no --version answer in ${ORCA_CLI_PROBE_SECONDS}s)" ;;
+        *)   orca_cli_reject "$where (--version exited $probe_rc)" ;;
+      esac
+      continue
+    fi
     ORCA_CLI="$candidate"
-    rm -f "$probe_out"
     return 0
-  done
-  rm -f "$probe_out"
+  done 3<<EOF
+$(orca_cli_candidates)
+EOF
   return 1
 }
 
@@ -126,7 +242,20 @@ orca_json() {
 # `runner_available` is a probe nobody captures, while `runner_worktree_create`
 # and `runner_worktree_set` print where their callers read. Found by the
 # independent review.
-orca_unavailable_says() { printf 'no orca CLI answers here; is the Orca app running?\n'; }
+#
+# THREE LINES, and that is a ceiling rather than a coincidence: docs/RUNNERS.md
+# caps a relay at three, `runner_worktree_create` prints this one on the stream
+# `launch` logs, and `launch` retries every pass. So what was tried is one
+# comma-joined line however many candidates there were, not one line each.
+# The three carry the three things a person needs: which runner, what was tried,
+# and what to do about it. Today's line named the runtime and stopped there, so
+# the answer to "and now what" was a file nobody reads twice.
+# armaatus/autofleet#13.
+orca_unavailable_says() {
+  printf 'no orca CLI answers here; is the Orca app running?\n'
+  printf '     tried: %s\n' "${ORCA_CLI_REJECTS:-nothing was probed}"
+  printf '     install Orca (https://orca.computer) and start it, or set ORCA_CLI_COMMAND to a CLI that answers --version\n'
+}
 
 runner_available() {
   orca_cli_resolve && return 0

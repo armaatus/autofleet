@@ -1208,6 +1208,396 @@ case "${1:-}" in
 
     echo "ok: a driver call with nothing resolved answers, rather than dying on \$ORCA_CLI"
     ;;
+  runner_missing)
+    # A machine with no usable runner is told so, ONCE, AT THE START --
+    # armaatus/autofleet#13, both of its acceptance lines and the two hooks that
+    # were still finding out late.
+    #
+    # The failure this replaces is not an error at all, which is what made it
+    # expensive: an unreachable runtime came back as an ANSWER. The CLI printed
+    # nothing, the JSON never parsed, and the caller reported "this worktree has
+    # no linked issue" -- leaving a fully provisioned worktree whose agent sat on
+    # an unsent prompt forever. Every assertion below is about a refusal arriving
+    # before anything is spent, carrying enough to act on.
+    make_fixture ok
+
+    # 1. THE DRIVER THAT DOES NOT EXIST. lib.sh names the FILE it looked for.
+    #    "no runner driver for AUTOFLEET_RUNNER=nope" alone sends the reader to
+    #    `.autofleet/config`, where the name is the one thing that is not wrong.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "fleet.sh status succeeded with a runner driver that does not exist: $out"
+    grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
+      || fail "the refusal did not name the file it looked for, which is the only place the remedy is: $out"
+    # ANCHORED LOOSELY: the list is every driver in the directory, so a second
+    # one sorting before `orca` would break a fixed substring. Found by the
+    # local review.
+    grep -qE "drivers here: .*orca" <<<"$out" \
+      || fail "it did not say which drivers do ship, so the next step is a guess: $out"
+    # ...and it stops THERE. fleet.sh runs `set -uo pipefail` without `-e`, so a
+    # lib.sh that only `return 1`s let the script sail on into a shell with no
+    # driver, where the next runner_* is `command not found` -- rc 127 through
+    # `runner_available ||`, which printed "the nope runner is not usable here"
+    # as if the name were the problem. The cause had scrolled past; the sentence
+    # the reader acts on named the consequence.
+    grep -q "is not usable here" <<<"$out" \
+      && fail "it carried on past the missing driver and reported the consequence as the cause: $out"
+    # ...AND THE SCRIPTS THAT NEED NO DRIVER ARE UNTOUCHED, which is the half
+    # this nearly got wrong. `cost` reads transcripts off disk and calls no
+    # runner_* at all -- "what did last night cost" is asked from exactly the
+    # machines where the runner is not there, a CI box, a laptop with the app
+    # shut -- and behind it sit the seven review and validation scripts, which
+    # would otherwise have refused to answer a review comment for want of a
+    # driver none of them uses. A refusal at source time takes all of them;
+    # `fleet_require_runner` takes only the four that call it.
+    # Found by the local review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope ./scripts/fleet/fleet.sh cost 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the one subcommand that needs no runner died on a driver it never calls: $out"
+    grep -q "so it stops here" <<<"$out" \
+      && fail "cost was given the consequence of a driver it never asks for: $out"
+    # ONCE, which is the issue's title: fleet.sh execs cost.sh and both source
+    # lib.sh, so the block had two chances to print for one command. Found by
+    # the local review.
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "the refusal printed $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
+    # ...and the rest of lib.sh is still there. `return 1` at the driver source
+    # left FLEET_DIR and the stop files undefined, which is how the first
+    # attempt at this died two lines into fleet.sh instead of saying anything.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>/dev/null
+      echo "source rc=$?"
+      echo "dir=${FLEET_DIR:-UNSET}"
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^source rc=0$" <<<"$out" \
+      || fail "sourcing lib.sh without a driver answered non-zero, which every -e caller reads as fatal: $out"
+    grep -q "dir=UNSET" <<<"$out" \
+      && fail "lib.sh stopped at the driver and left the library half sourced: $out"
+    grep -q "^missing=1$" <<<"$out" \
+      || fail "nothing recorded that the driver was missing, so fleet_require_runner has nothing to act on: $out"
+    # ...AND THE ENVIRONMENT CANNOT DISARM IT. `FLEET_RUNNER_MISSING` is set on
+    # both arms rather than defaulted, and the comment beside it says why; a
+    # later author writing `FLEET_RUNNER_MISSING="${FLEET_RUNNER_MISSING:-0}"`
+    # turns the whole refusal off with the suite green, which is the shape hard
+    # rule 3 exists against. Check 4g closes the sibling hole for
+    # AUTOFLEET_RUNNER with `env -u`; this closes this one. Found by the
+    # self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope FLEET_RUNNER_MISSING=0 \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an exported FLEET_RUNNER_MISSING=0 disarmed the refusal, which is the whole guard: $out"
+    grep -q "scripts/fleet/runner/nope.sh" <<<"$out" \
+      || fail "the refusal stopped naming the file once the environment claimed a driver was present: $out"
+
+    # 1b. A DRIVER THAT IS THERE AND DEFINES NOTHING -- a host driver with a
+    #     syntax error, or one that returns early when a dependency it needs is
+    #     absent. The file test alone called that a working driver, every
+    #     `runner_*` was then `command not found`, and rc 127 through
+    #     `runner_available ||` printed "the <name> runner is not usable here":
+    #     #13's own failure, arriving through the code that fixes it. Found by
+    #     the self-review.
+    printf '#!/usr/bin/env bash\n# defines nothing\nreturn 0 2>/dev/null || true\n' \
+      >"$WORK/repo/scripts/fleet/runner/hollow.sh"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=hollow ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that defines no runner_* was accepted as working: $out"
+    grep -q "runner/hollow.sh is there and did not finish implementing" <<<"$out" \
+      || fail "the refusal did not say the driver sourced and implemented nothing, which is the only thing that separates it from a missing file: $out"
+    grep -q "is not usable here" <<<"$out" \
+      && fail "the undefined runner_* was reported as an unusable runtime, which is the consequence named as the cause: $out"
+    # ...and the LAST line, which is `fleet_require_runner`'s and is the only
+    # one a descendant shell gets, must not say the file is absent. It is right
+    # there. "no <path>, so it stops here" under a file that exists is the same
+    # confident wrong sentence one layer down, and both self-review axes
+    # converged on it.
+    grep -q "hollow.sh did not finish implementing the runner_\* contract, so it stops here" <<<"$out" \
+      || fail "the line that stops the script did not say what is wrong with a driver that is present: $out"
+    grep -qE "no [^ ]*hollow\.sh, so it stops here" <<<"$out" \
+      && fail "the refusal told the reader to create a driver file that is already there: $out"
+
+    #     ...AND THE SAME UNDER `set -e`, which is `setup.sh`: a driver that
+    #     `return`s when a dependency it needs is absent makes the `.` non-zero,
+    #     and errexit killed the hook there before anything could be said. The
+    #     driver is written in that documented shape rather than stubbed, since
+    #     what is under test is the source failing, not the file being empty.
+    #     Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/bails.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A host driver that bails when something it needs is not installed.
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_available() { return 0; }
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=bails ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a worktree was provisioned against a driver whose source did not finish: $out"
+    grep -q "bails.sh is there and did not finish implementing" <<<"$out" \
+      || fail "errexit killed the hook on the failed source, so the reason never printed: $out"
+    grep -q "project setup hook" <<<"$out" \
+      && fail "the project hook ran for a worktree whose driver never finished sourcing: $out"
+
+    #     ...AND AN INHERITED SENTENCE CANNOT SURVIVE INTO THE OTHER ARM. The
+    #     string is exported so it crosses `fleet.sh`'s exec of `cost.sh`, which
+    #     means a shell that sourced lib.sh under a hollow driver passes it to
+    #     one whose driver is simply absent -- where it would name a file that
+    #     is not the missing one. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope \
+      FLEET_RUNNER_MISSING_SAYS="/somewhere/else.sh did not finish implementing" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"
+    grep -q "somewhere/else.sh" <<<"$out" \
+      && fail "an inherited sentence named a driver that has nothing to do with this failure: $out"
+    grep -qE "no [^ ]*runner/nope\.sh, so it stops here" <<<"$out" \
+      || fail "the missing-file arm did not say the file is missing once an unrelated sentence was in the environment: $out"
+
+    #     ...AND A DRIVER THAT BAILS AFTER DEFINING ITS PROBE. docs/RUNNERS.md
+    #     imposes no ordering, so `command -v runner_available` alone called
+    #     this one working: the guard passed, `runner_available ||` passed, and
+    #     `launch`'s `runner_worktree_create` was `command not found` with
+    #     "could not create it:" and nothing under it. The source's own status
+    #     is the only thing that knows. Found by the self-review.
+    cat >"$WORK/repo/scripts/fleet/runner/lateba.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A driver that defines its probe and THEN discovers it cannot work.
+runner_available() { return 0; }
+command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
+runner_worktree_create() { :; }
+DRIVER
+
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=lateba ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a driver that returned before implementing the contract was accepted because its probe happened to be defined first: $out"
+    grep -q "lateba.sh is there and did not finish implementing" <<<"$out" \
+      || fail "the refusal did not say the driver stopped part way, which is the only thing separating it from a working one: $out"
+    grep -q "defines no runner_worktree_create" <<<"$out" \
+      || fail "the refusal did not name which of the two conditions failed, so the driver's author has to guess: $out"
+
+    #     ...AND A CONFORMANT DRIVER THAT MERELY SOURCES NON-ZERO IS ACCEPTED.
+    #     `[ -n "${FOO:-}" ] && export FOO` with FOO empty is a routine last
+    #     line, and refusing a driver that implements everything because of it
+    #     would be this issue's own confident lie about a machine that is fine.
+    #     The status raises the bar to runner_worktree_create; it does not
+    #     decide. Found by the self-review, which caught the first fix
+    #     overreaching.
+    cat >"$WORK/repo/scripts/fleet/runner/trailer.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# Implements the two lib.sh looks for, and ends on a false test.
+runner_available() { return 0; }
+runner_worktree_create() { :; }
+runner_worktree_list() { :; }
+[ -n "${DEFINITELY_UNSET_HERE:-}" ] && export DEFINITELY_UNSET_HERE
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=trailer bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>&1
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^missing=0$" <<<"$out" \
+      || fail "a driver that implements the contract was refused because its last line was a false test: $out"
+    grep -q "did not finish implementing" <<<"$out" \
+      && fail "a conformant driver was told it stopped part way: $out"
+
+    # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
+    #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here
+    #     empty -- and the once-per-tree test was `"" = ""`, true, which
+    #     suppressed the four lines carrying the remedy. Found by the
+    #     self-review.
+    #     Through a config FILE, which is the only way it is reachable: an empty
+    #     AUTOFLEET_RUNNER in the environment is replaced by config.sh's
+    #     `:=orca` default, and the host config is sourced after it.
+    printf 'AUTOFLEET_RUNNER=""\n' >"$WORK/empty-runner-config"
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "an empty AUTOFLEET_RUNNER was accepted: $out"
+    grep -q "no runner driver for AUTOFLEET_RUNNER=" <<<"$out" \
+      || fail "an empty runner name suppressed the block that names the drivers that do ship: $out"
+    grep -qE "drivers here: .*orca" <<<"$out" \
+      || fail "the remedy for an empty name did not list the drivers that ship: $out"
+    # ...ONCE for one command, which the first fix for the empty name broke: the
+    # sentinel it exports is itself empty, so an emptiness test never matched it
+    # again and `fleet.sh cost` -- which execs cost.sh, both sourcing lib.sh --
+    # printed the four lines twice. Found by the self-review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_CONFIG="$WORK/empty-runner-config" \
+      ./scripts/fleet/fleet.sh cost 2>&1 )"
+    [ "$(grep -c "no runner driver for" <<<"$out")" = 1 ] \
+      || fail "an empty runner name printed the refusal $(grep -c "no runner driver for" <<<"$out") times for one command: $out"
+
+    # 2. A DRIVER PRESENT, ITS RUNTIME UNREACHABLE. The driver's own words plus
+    #    the caller's consequence, and nothing provisioned. Written as a driver
+    #    of its own rather than by starving the Orca one: whether THIS machine
+    #    can find an orca CLI is a property of the machine -- /Applications is
+    #    on the candidate list and this suite runs on machines that have it --
+    #    and what is under test here is the CALLER, which must be the same for
+    #    any driver.
+    cat >"$WORK/repo/scripts/fleet/runner/down.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# A driver whose runtime is not answering. Says why on stderr, in the shape
+# docs/RUNNERS.md asks of `runner_available`; the caller adds the consequence.
+runner_available() {
+  printf 'the down runtime is not answering here\n' >&2
+  printf '     tried: down --version (/nowhere/down)\n' >&2
+  printf '     install the down runtime and start it\n' >&2
+  return 1
+}
+# Everything else the dispatcher could reach records itself instead of doing
+# anything. $ORCA_CALLS cannot answer this question -- runner/orca.sh is never
+# sourced under AUTOFLEET_RUNNER=down, so the Orca stub that writes that file is
+# unreachable for the whole part and the assertion against it passed for a
+# reason other than the behaviour. Found by the self-review.
+runner_worktree_create() { printf 'worktree_create\n' >>"$DOWN_CALLS"; return 1; }
+runner_worktree_list()   { printf 'worktree_list\n'   >>"$DOWN_CALLS"; }
+runner_worktree_set()    { printf 'worktree_set\n'    >>"$DOWN_CALLS"; }
+runner_agent_states()    { printf 'agent_states\n'    >>"$DOWN_CALLS"; }
+runner_set_deadline()    { printf 'set_deadline\n'    >>"$DOWN_CALLS"; }
+DRIVER
+    : >"$WORK/down-calls"
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/fleet.sh run --auto --max-prs 1 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "the dispatcher ran with a runtime that answers nothing: $out"
+    grep -q "not answering here" <<<"$out" \
+      || fail "the driver said why and the dispatcher swallowed it: $out"
+    grep -q "tried: down --version" <<<"$out" \
+      || fail "what was tried never reached the person reading the log: $out"
+    grep -q "nothing to dispatch with" <<<"$out" \
+      || fail "the driver's reason arrived without the consequence, which only the caller can add: $out"
+    [ -s "$WORK/down-calls" ] \
+      && fail "a dispatcher that had been told the runner is unusable still called into it: $(cat "$WORK/down-calls")"
+    # NOT a second check on $AUTOFLEET_DIR/worktrees: `make_worktree` is what
+    # creates that directory and this phase does not call it, so an emptiness
+    # test there passes on every machine whatever the dispatcher did. The
+    # recorded calls above are the whole of this claim. Found by the
+    # self-review, on an assertion this branch added.
+    :
+
+    # 3. ...AND setup.sh PROBES. It runs earliest of the three hooks and was the
+    #    only one that did not, while the runner holds the agent's tab until it
+    #    returns. Finding out late here reads as: submodules initialised,
+    #    containers built, a watcher started, and an agent tab that never
+    #    receives a prompt.
+    #
+    #    The probe sits AFTER env.sh -- which is milliseconds, and is where a
+    #    machine missing its basic tools says so -- and before everything that
+    #    costs anything. So what is asserted is that NOTHING BELOW IT RAN: no
+    #    project hook, no watcher, no "worktree ready". See the comment on the
+    #    probe for why in front of env.sh was wrong.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=down DOWN_CALLS="$WORK/down-calls" \
+      ./scripts/fleet/setup.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "setup.sh provisioned a worktree whose agent can never be started: $out"
+    grep -q "not answering here" <<<"$out" \
+      || fail "setup.sh stopped without the driver's reason: $out"
+    grep -q "project setup hook" <<<"$out" \
+      && fail "the project hook ran for a worktree whose agent the runner cannot start: $out"
+    grep -q "watching for the agent's issue prompt" <<<"$out" \
+      && fail "it started a watcher to poll a runtime it had already been told is not answering: $out"
+    grep -q "worktree ready" <<<"$out" \
+      && fail "it reported the worktree ready after refusing the runner that has to start its agent: $out"
+
+    # 4. THE SHIPPED DRIVER'S REFUSAL names the runner, what was tried, and what
+    #    to install. The candidate list is overridden rather than the resolve
+    #    stubbed out, because WHAT WAS TRIED is collected during the resolve --
+    #    stubbing the resolve asserts the message with its middle line empty,
+    #    which is the line this half of #13 adds.
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/orca-mute"
+    chmod +x "$WORK/bin/orca-mute"
+    # A CLI THAT HANGS, told apart from one that answers no. One second of it,
+    # which is what ORCA_CLI_PROBE_SECONDS is dropped to below: the wording is
+    # the assertion, not the wait.
+    printf '#!/usr/bin/env bash\nsleep 30\n' >"$WORK/bin/orca-hangs"
+    chmod +x "$WORK/bin/orca-hangs"
+    # stderr is closed over the SOURCE and reopened after it, so what is counted
+    # below is the refusal and only the refusal. `. lib.sh` can write to stderr
+    # itself -- config.sh relays a deprecated knob there -- and a three-line
+    # ceiling that includes the sourcing chatter is measuring the wrong thing.
+    # Found by the local review.
+    refusal="$( cd "$WORK/repo" && ORCA_CLI_PROBE_SECONDS=1 bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      orca_cli_candidates() { printf "%s\n" /nonexistent/orca-not-installed orca-absent-nowhere orca-mute orca-hangs; }
+      runner_available
+    ' 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "the driver said it was available with nothing on PATH that answers: $refusal"
+    # The HEADLINE, not just the word somewhere: the candidate names this phase
+    # injects both contain `orca`, so a grep for that alone passes with the
+    # first line gone entirely. Found by the local review.
+    grep -q "^no orca CLI" <<<"$refusal" \
+      || fail "the refusal's first line did not name the runner: $refusal"
+    # An ABSOLUTE candidate was never a PATH lookup, so it must not be reported
+    # as one -- the /Applications fallback is absolute, which makes this the
+    # common case on a Mac with no Orca. Found by the local review.
+    grep -q "/nonexistent/orca-not-installed (no such file, or not executable)" <<<"$refusal" \
+      || fail "an absolute candidate was reported as a PATH failure, which it cannot be: $refusal"
+    # ...and a BARE name is the case that genuinely cannot be told apart from
+    # here: absent, or right there and mode 0700, which is the Orca install
+    # CLAUDE.md names as the reason this probe exists. It says both.
+    grep -q "orca-absent-nowhere (not found on PATH, or found and not executable)" <<<"$refusal" \
+      || fail "a bare candidate that cannot be run was not named as tried, or claimed a cause it did not check: $refusal"
+    grep -q "orca-mute (--version exited 3)" <<<"$refusal" \
+      || fail "a candidate that is installed and answers no was not told apart from one that is absent: $refusal"
+    # ...and a HANG is a third thing. Both used to read "--version did not
+    # answer", which sent a person looking for a wedged app on the strength of
+    # an `exit 3` that had already answered. Only the deadline wrapper returns
+    # 124, so the two cannot be confused once the status is read rather than
+    # thrown away. Raised by the independent review.
+    grep -q "orca-hangs (no --version answer in 1s)" <<<"$refusal" \
+      || fail "a CLI that hangs was not told apart from one that is there and exits non-zero: $refusal"
+    grep -q "install Orca" <<<"$refusal" \
+      || fail "it named the runtime and not the remedy, which is what #13 calls a line that stops half way: $refusal"
+    # ...and ORCA_CLI_COMMAND is ONE candidate, not a word-split list. The old
+    # loop expanded it unquoted, so a path with spaces became several candidates
+    # and none of them existed; this pins the documented shape, which
+    # docs/CONFIGURATION.md now states because the refusal names the knob.
+    # Found by the local review.
+    mkdir -p "$WORK/bin/two words"
+    printf '#!/usr/bin/env bash\nexit 3\n' >"$WORK/bin/two words/orca-spaced"
+    chmod +x "$WORK/bin/two words/orca-spaced"
+    spaced="$( cd "$WORK/repo" && ORCA_CLI_COMMAND="$WORK/bin/two words/orca-spaced" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      exec 3>&2 2>/dev/null
+      . ./scripts/fleet/lib.sh
+      exec 2>&3 3>&-
+      orca_cli_candidates
+    ' 2>&1 )"
+    grep -qxF "$WORK/bin/two words/orca-spaced" <<<"$spaced" \
+      || fail "a CLI path containing a space was split into candidates that do not exist: $spaced"
+    # THREE LINES, which is the relay bound docs/RUNNERS.md sets and the reason
+    # what was tried is one comma-joined line rather than one line per
+    # candidate: `runner_worktree_create` prints this on the stream `launch`
+    # logs, and `launch` retries every pass.
+    lines="$(printf '%s\n' "$refusal" | wc -l)"
+    [ "$((lines))" -le 3 ] \
+      || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
+
+    # 5. THE DOCUMENTED OPT-OUT STILL OUTRANKS THE REFUSAL. `fleet_require_runner`
+    #    is fatal, and moving it up to precede the first `runner_*` put it in
+    #    front of AUTOFLEET_AGENT_AUTOSTART=0 -- which then exited 1 on a repo
+    #    whose driver is missing, where it had always exited 0. A person who
+    #    turned the watcher off is not asking about drivers.
+    #
+    #    Asserted rather than commented because `evals/lint.sh` 4h pulls the
+    #    other way: it requires the guard to come BEFORE the first `runner_*`
+    #    and says nothing about what must come before the guard, so the next
+    #    author to satisfy 4h by moving the guard up re-breaks this with 4h
+    #    green -- a guard that silently stops guarding, on the file that failed
+    #    this way once. Raised by the independent review.
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope AUTOFLEET_AGENT_AUTOSTART=0 \
+      ./scripts/fleet/agent-autostart.sh 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "the documented opt-out exited $rc because the runner was missing, on a path that starts nothing and asks the runner for nothing: $out"
+    grep -q "agent autostart disabled" <<<"$out" \
+      || fail "the opt-out did not say it was disabled, so the one line proving it took that branch is gone: $out"
+
+    echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
+    ;;
   runner_stub)
     # THE acceptance for #1, and the only assertion that keeps holding once the
     # move has been made: with a driver that is not Orca, a dispatcher, a
