@@ -174,7 +174,12 @@ forget_poll_answers() {
   # ...and the out-of-poll memo with it. See $OPEN_PR_MEMO below.
   OPEN_PR_MEMO=""; OPEN_PR_MEMO_STATE=""
   # ...and the sweeps' shared answer about each PR's state. See $PR_STATE_MEMO.
-  PR_STATE_MEMO=" "
+  # BOTH halves: the memo AND the variable the answer comes back in. Resetting
+  # only the memo left a stale $PR_STATE_ANSWER outliving its pass, safe solely
+  # because the one read follows the write that fills it -- which is the exact
+  # coupling `pr_state_once`'s own header warns against. Found by
+  # `/mattpocock-skills:code-review`.
+  PR_STATE_MEMO=" "; PR_STATE_ANSWER=""
 }
 
 # THE POLL CACHE IS THE POLL'S, and this is the line that says so rather than
@@ -745,9 +750,15 @@ why_parked() {
 # the whole reason it is parked is that removing it would destroy something" --
 # and the dispatcher kept that promise itself while breaking it through the
 # operator, two lines apart. Found by the independent review.
+# NO `$3` FOR THE MARKER, unlike `why_parked` above. One was added on the same
+# cost argument and had no caller: both production callsites -- `cmd_status` and
+# `farewell_parked` -- reach this through `parked_for_person`, which has already
+# returned by the time they call it, so neither is holding the marker to pass.
+# A parameter whose fast path nothing can take is the comment claiming a saving
+# nobody gets. Found by both self-review passes. #71.
 how_to_release() {
-  local n="$1" path="$2" marker="${3:-}"
-  [ -n "$marker" ] || marker="$(parked_marker "$n")"
+  local n="$1" path="$2" marker
+  marker="$(parked_marker "$n")"
   # By the marker's NAME, like the gate -- not by testing a file this function
   # would then be the second place to spell. #71.
   if [ "$marker" = stuck ]; then
@@ -906,10 +917,13 @@ count_parked_owned() {
   # Surviving a pass costs one poll of waiting on a worktree that really is
   # parked, and costs nothing at all on `stuck-`, which is still there next pass.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
-    if ! why_parked "$n" >/dev/null; then
-      rm -f "$STATE_DIR/parked-since-$n"
-      continue
-    fi
+    # ONE CALL, NOT TWO. There used to be a `why_parked` pre-check on this line
+    # with the same outcome as the gate below -- `parked_for_person` opens with
+    # `parked_marker "$n" || return 1`, so a worktree that is not parked at all
+    # leaves through the same `rm` and `continue`. Two forks per owned worktree
+    # per pass for an answer already being computed, in the function
+    # `parked_marker` was extracted to make cheap. Found by `/code-review`.
+    #
     # ...and the agent gate, through the shared predicate so `status` cannot
     # disagree with this count about the same worktree.
     if ! parked_for_person "$n" say >/dev/null; then
@@ -2167,7 +2181,12 @@ start_validator() {
   # attempts that reached an agent and got nothing back.
   # Through `fleet_try_write`, like every other touch of this record: the
   # `head n` format used to be respelled at each of its writers. #71.
-  fleet_try_write "$marker.tries" "$head" "$(( tries_n + 1 ))"
+  # ...AND THE STATUS IS READ. A `.tries` that will not take the write reads 0
+  # on the next pass and forever after, so the cap never trips and this PR gets
+  # a validator every poll with nothing in the log saying why. Found by
+  # `/code-review`. #71.
+  fleet_try_write "$marker.tries" "$head" "$(( tries_n + 1 ))" \
+    || say "PR #$pr: could not write $marker.tries -- the validation cap is not counting"
   AUTOFLEET_VALIDATE_MARKER="$marker" \
     "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
   printf '%s %s\n' "$!" "$head" >"$marker"
@@ -3073,11 +3092,13 @@ for p in prs:
     # THROUGH `fleet_try_write`, like every other touch of this record since
     # armaatus/autofleet#71: the open failure is silenced before the redirection
     # rather than after it, and the STATUS comes back to the caller. An
-    # open-coded `printf >` here swallowed bash's own diagnostic, and a `.tries`
-    # that cannot be written reads 0 forever -- `AUTOFLEET_REVIEW_MAX_TRIES`
-    # becomes a guard that silently stopped guarding while a reviewer respawns
-    # every poll. Found by `/code-review`.
-    fleet_try_write "$marker.tries" "$head" "$(( ${tries_n:-0} + 1 ))"
+    # open-coded `printf >` swallowed bash's own diagnostic, and a `.tries` that
+    # cannot be written reads 0 forever -- `AUTOFLEET_REVIEW_MAX_TRIES` becomes a
+    # guard that silently stopped guarding while a reviewer respawns every poll.
+    # So the status is READ here, for the reason on the validator's gate above.
+    # Found by `/code-review`.
+    fleet_try_write "$marker.tries" "$head" "$(( ${tries_n:-0} + 1 ))" \
+      || say "PR #$pr: could not write $marker.tries -- the review cap is not counting"
     AUTOFLEET_REVIEW_MARKER="$marker" \
       "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     # CAPTURED, not read twice: `$!` inside the subshell below is the parent's
@@ -4691,7 +4712,13 @@ farewell_parked() {
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
     why="$(parked_for_person "$n" quiet)" || continue
     named=$((named + 1))
-    parked_lines="$parked_lines  #$n -- $why
+    # `worktree_label`, not a bare `#$n`: this is the THIRD reader of "how a
+    # worktree is named in a line a person reads", and it was the one that did
+    # not move when the other two were made to agree. $OWNED_DIR holds issue
+    # numbers by construction, so `-` cannot reach here today -- which is a
+    # guard holding because of something elsewhere, the shape #71 is about.
+    # Found by `/mattpocock-skills:code-review`.
+    parked_lines="$parked_lines  $(worktree_label "$n" "$(owned_path "$n")") -- $why
     $(how_to_release "$n" "$(owned_path "$n")")
 "
   done
@@ -4712,13 +4739,22 @@ farewell_parked() {
   # makes them differ. Either way two numbers for one thing with nothing
   # explaining them is worse than either alone. Found by
   # `/mattpocock-skills:code-review`, the second direction on its second pass.
+  #
+  # NEITHER BRANCH NAMES ONE CAUSE, because neither has one. A shortfall is a
+  # runner that would not answer OR an agent that picked the work back up; a
+  # surplus is an agent that finished OR a worktree that parked on the final
+  # pass, which this function counts and `count_parked_owned`'s survive-a-pass
+  # rule does not. Naming the likelier half only sends a person to look for an
+  # outage that is not happening. Found by both passes, one branch each.
   if [ "$named" -lt "$parked" ]; then
-    say "  ...and $(( parked - named )) more that were waiting a moment ago:"
-    say "  the runner would not say what their agents are doing just now."
-    say "  ./scripts/fleet/fleet.sh status once it answers again."
+    say "  ...and $(( parked - named )) fewer than the line above says: either"
+    say "  the runner would not say what their agents are doing just now, or an"
+    say "  agent went back to work. The list is the current one."
+    say "  ./scripts/fleet/fleet.sh status to see which."
   elif [ "$named" -gt "$parked" ]; then
     say "  ...$(( named - parked )) more than the line above says: an agent"
-    say "  finished between the last poll and now. The list is the current one."
+    say "  finished, or a worktree parked, between the last poll and now. The"
+    say "  list is the current one."
   fi
 }
 

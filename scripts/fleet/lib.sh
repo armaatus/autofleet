@@ -1080,17 +1080,28 @@ fleet_try_record() {
   printf '%s %s\n' "$h" "$n"
 }
 
-# ...and the one writer. $1 the marker, $2 the head, $3 the count. Silent on a
-# $STATE_DIR that will not take the file, like every other marker write here: a
-# fleet that cannot write its bookkeeping must not die in the middle of a poll.
+# ...and the one writer. $1 the marker, $2 the head, $3 the count.
+#
+# SILENT, BUT NOT SUCCESSFUL. A $STATE_DIR that will not take the file must not
+# kill the poll -- that half is like every other marker write here. What changed
+# when the seventeen open-coded `printf > marker` lines came through this
+# function is that they used to let bash's own diagnostic out, and a swallowed
+# one turns `.tries` into a file that reads 0 forever: the cap never trips, and
+# `AUTOFLEET_REVIEW_MAX_TRIES` becomes a guard that silently stopped guarding
+# while a reviewer respawns every poll. So the STATUS is the caller's to read,
+# and both spawn gates say it in the fleet's own voice. Found by `/code-review`.
+#
+# `fleet_try_refund` drops it deliberately -- a refund that cannot write is one
+# attempt miscounted, not a cap that does not exist.
+#
+# `2>/dev/null` BEFORE the redirection that can fail: written the other way
+# round, a marker directory that has been swept from under us prints bash's
+# own "No such file or directory" and only then silences the stream.
+# CLAUDE.md's rule, in the direction `evals/late_stderr_silence.py` does not
+# scan (it reads the `<"$f"` form).
 fleet_try_write() {
   [ -n "$1" ] || return 0
-  # `2>/dev/null` BEFORE the redirection that can fail: written the other way
-  # round, a marker directory that has been swept from under us prints bash's
-  # own "No such file or directory" and only then silences the stream. `|| true`
-  # hides the status, not the diagnostic. CLAUDE.md's rule, in the direction
-  # `evals/late_stderr_silence.py` does not scan (it reads the `<"$f"` form).
-  printf '%s %s\n' "$2" "$3" 2>/dev/null >"$1" || true
+  printf '%s %s\n' "$2" "$3" 2>/dev/null >"$1"
 }
 
 # Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty
@@ -1111,7 +1122,7 @@ fleet_try_refund() {
   # here did by a different route. One route now.
   n=$(( n - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$marker" 2>/dev/null || true
-  else fleet_try_write "$marker" "$h" "$n"
+  else fleet_try_write "$marker" "$h" "$n" || true
   fi
 }
 

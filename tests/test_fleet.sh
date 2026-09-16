@@ -2039,8 +2039,13 @@ print(json.dumps({"result": {"worktrees": [
     grep -q -- "#42 --" <<<"$out" || fail "it did not name the one it could: $out"
     grep -q -- "#99 --" <<<"$out" \
       && fail "it named a worktree whose agent is working, and told a person to discard what is in there: $out"
-    grep -q "1 more that were waiting a moment ago" <<<"$out" \
+    grep -q "1 fewer than the line above says" <<<"$out" \
       || fail "the farewell said 1 under a line that said 2, with nothing reconciling them: $out"
+    # ...NAMING BOTH CAUSES. A shortfall is a runner that would not answer or an
+    # agent that went back to work, and naming only the outage sends a person to
+    # look for one that is not happening. Found by `/code-review`. #71.
+    grep -q "agent went back to work" <<<"$out" \
+      || fail "the shortfall line blamed the runner for a difference an agent at work also makes: $out"
     echo "ok: ...and says so when it can name fewer than the poll counted"
 
     # ...and the other direction, which is an agent that FINISHED in between:

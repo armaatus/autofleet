@@ -1007,6 +1007,32 @@ import merge_gate; print(merge_gate.review_mode())'); }
   [ "$(tries_now)" = 1 ] \
     || fail "a reviewer interrupted at the terminal was charged for a run nobody let finish (tries now $(tries_now))"
   ok "a TERM mid-review refunds this head's try, and only this head's"
+
+  # ...AND THE OTHER HALF OF `trap ... TERM INT`. The trap names two signals and
+  # only TERM was ever sent, so dropping `INT` from the list left the suite
+  # green -- while INT is the signal a person at the terminal actually sends.
+  # Same handler, so this pins the SIGNAL LIST rather than the refund logic.
+  # Found by `/mattpocock-skills:code-review`. armaatus/autofleet#71.
+  arm_try "$PR_HEAD"
+  : >"$REVIEWER_CALLS"
+  # `set -m` AROUND THE LAUNCH, and it is the whole reason this row can exist.
+  # A command started with `&` by a shell WITHOUT job control has SIGINT set to
+  # ignore -- POSIX, so the trap never runs and the first spelling of this row
+  # failed at the timeout instead. Job control makes the runner its own group
+  # leader, and `kill -INT -$runner` signals the group the way a terminal does.
+  # Same construction as `tests/test_runner_bound.sh`'s INT phase.
+  set -m
+  ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+      AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out2" 2>&1 &
+  runner=$!
+  set +m
+  await n_started 1 60 || fail "the reviewer never started, so the trap was never armed"
+  kill -INT -"$runner" 2>/dev/null || true
+  wait "$runner"; rc=$?
+  [ "$rc" = 143 ] || { cat "$WORK/out2" >&2; fail "an INT mid-review exited $rc rather than 143, so the trap does not cover INT"; }
+  [ "$(tries_now)" = 1 ] \
+    || fail "an INT mid-review spent an attempt the trap's own signal list says it refunds (tries now $(tries_now))"
+  ok "...and an INT does the same, which is the signal a person at the terminal sends"
   ;;
 
 # ------------------------------------------------------------------- stopped
@@ -1491,6 +1517,18 @@ HOLDER
     [ -e "$m" ] \
       && fail "a junk count refunded to something rather than being dropped: $(cat "$m")"
     ok "the refund and the count read one junk record the same way"
+
+    # A WRITE THAT CANNOT LAND IS NOT A WRITE THAT LANDED. The writer silences
+    # bash's own diagnostic -- a fleet that cannot write its bookkeeping must not
+    # die mid-poll -- and silencing the STATUS with it made `.tries` read 0
+    # forever: the cap never trips and the PR draws a reviewer every poll with
+    # nothing in the log. The two spawn gates say it; this is the row that says
+    # they can. Found by `/code-review`. armaatus/autofleet#71.
+    in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 \
+      && fail "a write into a directory that does not exist reported success, so the cap silently does not exist"
+    [ -z "$(in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 2>&1)" ] \
+      || fail "the failed write let bash's own diagnostic out: $(in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 2>&1)"
+    ok "...and a write that could not land says so, silently, to its caller"
     # A RECORD WITH NO TRAILING NEWLINE, which is the shape a hand-written
     # marker leaves -- and the behaviour change `fleet_try_record` was rewritten
     # for. `read` returns non-zero at EOF with no delimiter as well as on a file
@@ -1994,14 +2032,21 @@ PY_FIX
   ok "...and the grace marker goes with them"
 
   # ...AND ONE `gh pr view --json state` PER PULL REQUEST PER PASS, however many
-  # sweeps ask. There are two -- the transcripts and the records -- each with its
-  # own grace marker, so on the passes they both ask, the same PR cost two
-  # identical calls. For the host the confirmation exists for, whose PRs are
-  # opened under another account and always answer OPEN, that is one call per
-  # poll per PR forever, which is what the alternation is there to avoid. The
-  # bound is the reason for asking at all. armaatus/autofleet#71.
-  mkdir -p "$AUTOFLEET_DIR/reviews"
+  # sweeps ask. There are THREE -- `prune_review_logs` runs once for `reviews/`
+  # and once for `validations/`, and the record sweep adds `$REVIEWING_DIR` --
+  # each with its own grace marker, so on the passes they all ask, the same PR
+  # cost three identical calls. For the host the confirmation exists for, whose
+  # PRs are opened under another account and always answer OPEN, that is calls
+  # every poll per PR forever, which is what the alternation is there to avoid.
+  # The bound is the reason for asking at all. armaatus/autofleet#71.
+  #
+  # ALL THREE STORES ARE PLANTED, and an earlier version of this comment said
+  # two and planted two -- so the row held under a memo that was only per pair,
+  # which is the arithmetic the production header had already been corrected
+  # for. Found by `/mattpocock-skills:code-review`.
+  mkdir -p "$AUTOFLEET_DIR/reviews" "$AUTOFLEET_DIR/validations"
   : >"$AUTOFLEET_DIR/reviews/pr-97-11111111.log"
+  : >"$AUTOFLEET_DIR/validations/pr-97-11111111.log"
   printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.done"
   printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.tries"
   poll_review_open_prs                 # the grace pass: neither sweep asks
