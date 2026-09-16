@@ -692,7 +692,10 @@ disown_issue() {
 # `why_parked <issue>` prints the reason, or nothing when that issue is not
 # parked. Order is deliberate where two can coexist: a refused removal is the
 # one a person acts on, so it wins over "git could not say".
-# THERE IS NO `PARK_REASONS` LIST, and that is deliberate. One was added here
+# THERE IS NO LIST OF THE REASON SENTENCES, and that is deliberate. `PARK_MARKERS`
+# below is not one: it holds the five marker NAMES in precedence order and has a
+# reader, `parked_marker`, which is why it is load-bearing where a list of the
+# sentences would not be. One was added here
 # under a comment promising "one list, three readers", and it had NO reader:
 # `why_parked`, `how_to_release` and the phase each enumerated the five by hand,
 # so the list was the drift it was added to prevent, one indirection later. An
@@ -898,7 +901,9 @@ count_parked_owned() {
   local parked=0 n
   # Over OWNED issues rather than over markers: one worktree can carry two
   # reasons at once, and counting markers made `parked` exceed the worktrees it
-  # described. `why_parked` is the same predicate `status` and the farewell use.
+  # described. `parked_for_person` is the same predicate `status` and the farewell
+  # use -- `why_parked` answers the narrower "does it carry a keep-marker", which
+  # is the distinction that function's own header is about.
   #
   # A MARKER MUST SURVIVE A PASS BEFORE IT COUNTS, and that is the difference
   # between ending a drain and ending it too early. `stuck-` is terminal --
@@ -2485,8 +2490,9 @@ prune_review_logs() {
   for num_seen in $closed; do
     # THE GRACE PASS AND THE CONFIRMATION, both of them `pr_sweep_verdict`'s since
     # armaatus/autofleet#71 -- the record sweep needed the same two and had
-    # neither, and a second copy of them is what drifts. The paragraphs above
-    # this loop are its header now; what is left here is what THIS sweep does
+    # neither, and a second copy of them is what drifts. Why the grace pass and
+    # the confirmation are both needed is `pr_sweep_verdict`'s header now, where
+    # the code that applies them went; what is left here is what THIS sweep does
     # with each answer.
     pr_sweep_verdict "$num_seen" "$dir"
     case $? in

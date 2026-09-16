@@ -1030,6 +1030,24 @@ wait_for_log() {
   fail "the dispatcher never said '$1': $(cat "$WORK/run.log" 2>/dev/null)"
 }
 
+# ...and the same wait for the Nth time it says something, which `wait_for_log`
+# cannot do: it greps the whole log, so asking twice for a line already there
+# returns at once. Passes are what a phase that must outlast one of them waits
+# on, and they need $AUTOFLEET_LOG_PASSES=on to be said at all.
+wait_for_passes() {
+  local want="$1" i=0 seen
+  while [ "$i" -lt 200 ]; do
+    # `grep -c` prints 0 AND exits 1 on no match, so a `|| echo 0` fallback makes
+    # the substitution two lines and the test says `integer expression expected`.
+    # The status is not the test here either: normalise what came back.
+    seen="$(grep -c "pass complete" "$WORK/run.log" 2>/dev/null)" || true
+    case "${seen:-}" in ''|*[!0-9]*) seen=0 ;; esac
+    [ "$seen" -ge "$want" ] && return 0
+    sleep 0.1; i=$((i + 1))
+  done
+  fail "the dispatcher did not finish $want passes: $(cat "$WORK/run.log" 2>/dev/null)"
+}
+
 # A real dispatcher in its OWN PROCESS GROUP, and the way to stop it again.
 #
 # `cmd_stop` cannot: the dispatcher records `$$`, and inside the subshell
@@ -2113,11 +2131,26 @@ print(json.dumps({"result": {"worktrees": [
     # `FAIL` makes `ready_issues` fail, which is one of count_startable's three
     # `|| return 1`s -- and the one an outage actually produces.
     printf 'FAIL\n' >"$GH_ISSUES"
+    # ON THE SIGNAL, NOT ON A CLOCK. This waited `sleep 3` -- "three passes at a
+    # 1s poll" -- and on a machine loaded enough that no pass reached the test
+    # in three seconds, the revert-failing row was green because the line it
+    # greps for had not been written yet. $AUTOFLEET_LOG_PASSES is the one thing
+    # that can answer "has a pass finished" without guessing from a clock.
+    # Found by the independent review of 2b00a3a.
+    #
+    # TWO, and one is not enough for a reason that is not "two passes are
+    # safer": the discard speaks from `[ "$queued" -eq 0 ]`, which runs just
+    # AFTER the `pass complete` line of the same pass. So pass 1's line is
+    # printed with the test still ahead of it, and waiting for one would race it
+    # by a few statements. Pass 2's line is the first proof that pass 1 got
+    # through the test. Do not tidy this to `wait_for_passes 1`. The count is
+    # `/mattpocock-skills:code-review`'s: the first version of this comment said
+    # two passes were needed because one might not have happened, which is the
+    # wrong reason and the one a reader would tidy away.
+    export AUTOFLEET_LOG_PASSES=on
     start_dispatcher --auto
     wait_for_log "fleet up"
-    # Three passes at a 1s poll, which is enough for the empty-queue exit to
-    # have fired several times if it were going to.
-    sleep 3
+    wait_for_passes 2
     grep -q "integer expression expected" "$WORK/run.log" \
       && fail "a gh outage wrote a bash error into the dispatcher's log once a poll: $(cat "$WORK/run.log")"
     echo "ok: an unreadable backlog does not put a shell error in the log every poll"

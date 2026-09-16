@@ -1134,9 +1134,11 @@ fleet_try_refund() {
 # ALWAYS A NUMBER, never an empty string: `[ "" -ge 3 ]` is `integer expression
 # expected` and exit 2, which a caller reads as FALSE -- a cap that silently does
 # not exist, and the reason this is one function rather than a shape each caller
-# remembers. The `[ -f ]` test and the normalisation that used to be written out
-# here live in `fleet_try_record` now, which is what the `h=""; n=0` below leans
-# on when that reader answers non-zero.
+# remembers. The readability test and the normalisation that used to be written
+# out here live in `fleet_try_record` now -- and the test is no longer an
+# `[ -f ]`, which is the point: that reader decides on whether a HEAD came out,
+# so an unreadable marker and one that exists but holds nothing answer the same.
+# The `h=""; n=0` below is what leans on that when the reader answers non-zero.
 fleet_tries_count() {
   local marker="$1" want="${2:-}" record h n
   h=""; n=0
