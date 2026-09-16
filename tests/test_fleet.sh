@@ -2043,6 +2043,15 @@ DRIVER
     # the FUNCTION; the behaviour it buys is one level up, in the loop that
     # decides whether the backlog is finished. armaatus/autofleet#71.
     #
+    # WHICH ROW FAILS ON REVERT, said because three of the four do not:
+    # `[ "" -eq 0 ]` exits 2 and reads as FALSE, so the run kept polling before
+    # the fix as well as after. Only the `integer expression expected` grep
+    # catches the discard. The three rows below it are there for the OTHER way
+    # this goes wrong -- `|| queued=0`, which reads "could not tell" as "nothing
+    # left" and signs the dispatcher off during an outage -- and they would
+    # catch that. Both failures live on the same line, which is why they are in
+    # one phase. Found by `/mattpocock-skills:code-review`.
+    #
     # `FAIL` makes `ready_issues` fail, which is one of count_startable's three
     # `|| return 1`s -- and the one an outage actually produces.
     printf 'FAIL\n' >"$GH_ISSUES"
@@ -2077,8 +2086,17 @@ DRIVER
     printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
     worktree_list "42:wt" "99:wt99"
     # #42 is parked -- its removal was refused, the one reason that needs no
-    # agent check -- and #99 has no marker at all and an agent mid-work.
+    # agent check -- and #99 CARRIES A MARKER TOO, with its agent mid-work.
+    #
+    # The marker on #99 is what makes this phase about the sentence its comment
+    # names. With no marker, `why_parked 99` returns 1 and `parked_for_person`
+    # returns before the agent gate is ever reached -- delete the gate and the
+    # phase still passed, so it asserted the separation and not the reason for
+    # it. `held-99` is the ordinary case: a worktree whose issue went blocked
+    # with a commit in it, while its agent is still writing.
+    # Found by `/mattpocock-skills:code-review`.
     : >"$AUTOFLEET_DIR/stuck-42"
+    : >"$AUTOFLEET_DIR/held-99"
     python3 -c '
 import json, sys
 print(json.dumps({"result": {"worktrees": [
@@ -2316,6 +2334,42 @@ print(json.dumps({"result": {"worktrees": [
         || fail "$marker-42 with an idle agent did not count, so the drain waits forever"
     done
     echo "ok: ...and both blind markers are gated on the agent, in each direction"
+
+    # ...AND THE GATE SURVIVES THE SENTENCE BEING REWORDED, which is the
+    # assertion that would have failed before the gate was re-keyed and the only
+    # one that can: the change is behaviour-identical, so every outcome row
+    # above passes on revert. The old `case` matched `$reason` -- the human line
+    # `why_parked` prints -- so editing that line silently switched the gate off
+    # and the worktree counted as waiting for a person while its agent wrote.
+    # Rewording it in the fixture's own copy of fleet.sh is the fixture for that.
+    # armaatus/autofleet#71, and found by `/mattpocock-skills:code-review` of the
+    # change that claimed this without asserting it.
+    # THE `printf` ONLY, not every occurrence of the sentence: a blanket
+    # replace rewrites the old `case` pattern too, and then the prose-keyed gate
+    # still matches its own reworded prose and the row passes on revert. The
+    # fixture has to change what a PERSON reads and nothing else, which is
+    # exactly the edit the gate must survive.
+    sed -i.bak "s/printf 'git could not say what it holds/printf 'git will not say what is in there/" \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    grep -q "git will not say what is in there" "$WORK/repo/scripts/fleet/fleet.sh" \
+      || fail "the reword did not land, so this asserts nothing"
+    rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+          "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+          "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state working
+    : >"$AUTOFLEET_DIR/git-blind-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "rewording the sentence took the agent gate off git-blind-; the dispatcher would sign off with an agent still writing"
+    echo "ok: ...and rewording the reason a person reads does not switch the gate off"
+    # ...and put the fixture back, or every row after this one runs against a
+    # fleet.sh this phase edited and an agent it left working.
+    sed -i.bak "s/printf 'git will not say what is in there/printf 'git could not say what it holds/" \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state idle
 
     # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
     # worktree as waiting for someone and then never naming it is worse than not
@@ -5432,6 +5486,14 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_pass_signal|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
+    # NOT A SECOND REGISTRY. This used to spell out every phase, and it was
+    # already ten names behind `tests/run.sh` before this change added five more
+    # -- a list nothing reads and nothing checks. The fleet row of SUITES in
+    # tests/run.sh is the registry `evals/lint.sh` asserts against, so that is
+    # where a reader is sent. Found by `/mattpocock-skills:code-review`, which
+    # reported the drift; the copy is the reason for the drift.
+    echo "usage: tests/test_fleet.sh <phase>" >&2
+    echo "  the phases are the \`fleet:\` row of SUITES in tests/run.sh --" >&2
+    echo "  one registry, which is what evals/lint.sh checks against." >&2
     exit 2 ;;
 esac

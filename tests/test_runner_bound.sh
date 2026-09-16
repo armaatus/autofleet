@@ -165,8 +165,8 @@ cleanup() {
   # most. Reaping only $BLOCK_NAP left the one sleep this file is about. Found by
   # the independent review.
   [ -n "$WORK" ] && {
-    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null
-    pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    pkill -9 -f "sleep ${BLOCK_NAP}\$" 2>/dev/null
+    pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     rm -rf "$WORK"
   }
   return 0
@@ -194,6 +194,14 @@ trap cleanup EXIT
 # `pid_max` may be as large as 4194304, and 9000000 is clear of 4000 plus any
 # pid that can exist. Both stay in the range `sleep` accepts; neither is ever
 # waited out, because every phase that starts one kills it.
+#
+# ...AND EVERY PATTERN IS ANCHORED, `"sleep ${NAP}\$"`, because `-f` matches an
+# unanchored SUBSTRING of the whole command line and a unique number is not a
+# unique substring: pid 123 gets `sleep 4123`, pid 37234 gets `sleep 41234`, and
+# the first pattern is inside the second. Unanchored, `cleanup` SIGKILLs the
+# other run's live fixture and `orphans` fails at its own `before` guard -- the
+# same misattribution one digit narrower, which is the shape armaatus/autofleet#71
+# is about surviving its own fix. Found by `/mattpocock-skills:code-review`.
 BLOCK_NAP=$(( 9000000 + $$ ))   # what the blocking fixture waits on
 WATCH_NAP=$((    4000 + $$ ))   # what the watchdog waits on, i.e. the bound itself
 
@@ -385,7 +393,7 @@ case "${1:-}" in
   # Those phases are scoped to their own fixture since armaatus/autofleet#71 and
   # would no longer notice; this row is what is left watching.
   sleep 2
-  strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
+  strays="$(pgrep -f "sleep ${BLOCK_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \
     || fail "the bound left ${strays} descendant(s) of the killed phase running"
   ok "...and takes the phase's descendants with it, own process group or not"
@@ -845,7 +853,7 @@ EOF
   # A long bound, so nothing here finishes on its own: what ends the run must be
   # the signal. $WATCH_NAP doubles as the watchdog's sleep, which is what the
   # leak half of this phase counts.
-  [ "$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)" = 0 ] \
+  [ "$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)" = 0 ] \
     || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
 
   # `set -m` around the launch, and it is not incidental. A command started with
@@ -880,7 +888,7 @@ EOF
   done
   if kill -0 "$runner" 2>/dev/null; then
     kill -9 "$runner" 2>/dev/null
-    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null; pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    pkill -9 -f "sleep ${BLOCK_NAP}\$" 2>/dev/null; pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     fail "the runner survived SIGINT, so Ctrl-C stops a phase and not the run"
   fi
   ok "a SIGINT ends the run rather than skipping one phase"
@@ -893,12 +901,12 @@ EOF
   # Nothing left behind. The watchdog's sleep is the one the round-one leak was
   # about, and the INT path is where it came back.
   sleep 2
-  strays="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  strays="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \
     || fail "SIGINT orphaned ${strays} watchdog sleep(s); the trap does not cover INT"
   ok "...and the watchdog takes its sleep with it on INT, not only on TERM"
 
-  phase_strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
+  phase_strays="$(pgrep -f "sleep ${BLOCK_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${phase_strays:-0}" = 0 ] \
     || fail "SIGINT left ${phase_strays} descendant(s) of the running phase behind"
   ok "...and the running phase is reaped with its descendants"
@@ -907,7 +915,7 @@ EOF
 # ---------------------------------------------------------------- orphans
   orphans)
   make_runner quick
-  before="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  before="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${before:-0}" = 0 ] \
     || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
 
@@ -919,7 +927,7 @@ EOF
   # The watchdog is signalled after the phase is reaped; give the trap a moment
   # to run before counting, so this measures a leak rather than a schedule.
   sleep 2
-  after="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  after="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${after:-0}" = 0 ] \
     || fail "the watchdog orphaned ${after} sleep(s); killing the subshell does not reap its sleep"
   ok "a cancelled watchdog takes its sleep with it, leaving nothing behind"

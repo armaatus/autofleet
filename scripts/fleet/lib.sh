@@ -1106,11 +1106,13 @@ fleet_try_refund() {
 # marker names another head -- a new head is a new question -- and zero for an
 # empty or corrupt one.
 #
-# `[ -f ]` FIRST, and the count assigned before it is tested: an empty marker
-# leaves `n` empty, and `[ "" -ge 3 ]` is `integer expression expected` and exit
-# 2, which a caller reads as FALSE. That is a cap that silently does not exist,
-# and it is the reason this is one function rather than a shape each caller
-# remembers.
+# ALWAYS A NUMBER, never an empty string: `[ "" -ge 3 ]` is `integer expression
+# expected` and exit 2, which a caller reads as FALSE -- a cap that silently does
+# not exist, and the reason this is one function rather than a shape each caller
+# remembers. The `[ -f ]` test and the normalisation that used to be written out
+# here live in `fleet_try_record` now, which is what `h=""; n=0` above leans on
+# when that reader answers non-zero. Said rather than left pointing at code that
+# moved; found by `/mattpocock-skills:code-review` of the change that moved it.
 fleet_tries_count() {
   local marker="$1" want="${2:-}" record h n
   h=""; n=0

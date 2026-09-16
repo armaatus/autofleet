@@ -648,6 +648,15 @@ await() {
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
 
+# `pgrep -f` MATCHES AN EXTENDED REGEX, not a fixed string, and the strings these
+# phases hand it are `mktemp` paths. A `+` anywhere in the temp directory -- and
+# on macOS `$TMPDIR` is a generated component nobody chose -- makes the pattern
+# match NOTHING, and every use here is `pgrep … && fail`, so a pattern that
+# cannot match reports the absence it was asked to prove. A guard that passes
+# because it stopped asking is the shape armaatus/autofleet#71 is about, in a
+# phase added for #71. Found by `/code-review` of the branch.
+ere() { printf '%s' "$1" | sed 's/[][(){}.*+?^$|\\]/\\&/g'; }
+
 # ------------------------------------------------ the delta-scope helpers (#65)
 #
 # What a round-N review needs that round one does not: a history with more than
@@ -1024,7 +1033,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
     || fail "called the way the dispatcher calls it, a stopped fleet exited $rc rather than 3: $out"
   grep -q "unbound variable" <<<"$out" \
     && fail "the stopped path died on a shell variable instead of exiting 3: $out"
-  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  read -r _h n 2>/dev/null <"$AUTOFLEET_DIR/reviewing/42.tries" || n=""
   [ "${n:-}" = 1 ] \
     || fail "a stopped run did not refund the try the dispatcher spent before the spawn (tries now ${n:-gone})"
   ok "...and refunds the try the dispatcher spent, with the marker set"
@@ -1064,7 +1073,7 @@ GHSTUB
   # still retired the head -- which is the failure this whole knob exists to
   # avoid, and which docs/CONFIGURATION.md and config.sh both promise against.
   # Found by the independent review.
-  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  read -r _h n 2>/dev/null <"$AUTOFLEET_DIR/reviewing/42.tries" || n=""
   [ "${n:-}" = 1 ] \
     || fail "a gh that cannot name the repository spent a try; three outages a poll apart retire the head (tries now ${n:-gone})"
   ok "...and a gh that cannot name the repository exits 2 and refunds"
@@ -1254,14 +1263,14 @@ HOLDER
   # branch and everything above stays green. The midstop phase checks this; the
   # phase whose whole subject is the kill did not. Found by the independent
   # review.
-  pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+  pgrep -f "$(ere "$WORK/bin/fake-reviewer")" >/dev/null 2>&1 \
     && fail "the wedged reviewer is still running after the deadline"
   ok "...and the reviewer is gone, not merely given up on"
   # THE WORK, not the wrapper. Signalling the direct child reaps the stub and
   # orphans what it started -- which with any AUTOFLEET_REVIEW_CMD wrapper is the
   # agent holding this machine's gh login. Both this phase and midstop checked
   # only the wrapper. Found by the independent review.
-  pgrep -f "$REVIEWER_WORK" >/dev/null 2>&1 \
+  pgrep -f "$(ere "$REVIEWER_WORK")" >/dev/null 2>&1 \
     && fail "the wedged reviewer's own child outlived the kill"
   ok "...and so is what it had started"
   ;;
@@ -1997,11 +2006,21 @@ PY_FIX
   # be signalled, and nothing guarantees a future record's first field is not
   # numeric. Said rather than asserted, because a phase claiming to pin it would
   # be the inert kind this suite has shipped twice.
+  # ...INCLUDING THE SWEEP'S OWN GRACE MARKER, which no glob over this directory
+  # can see -- it is a dotfile, which is what keeps the three loops that read
+  # every other entry as a lock away from it. `stop_reviewers` clears every
+  # record, so a marker it orphans costs that number its grace pass if it comes
+  # round again, which is the one thing the marker is for.
+  # Found by `/code-review` of this branch.
+  : >"$AUTOFLEET_DIR/reviewing/.closed-43"
   printf '3\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
   in_poll stop_reviewers >/dev/null 2>&1
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
   ok "...and a stop clears the records"
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-43" ] \
+    && fail "the grace marker outlived the records stop_reviewers deleted; no glob here can see it, so nothing else ever will"
+  ok "...and the grace marker no glob can see goes with them"
 
   # ...EXCEPT `.rounds`, and this is the assertion that rule did not have. The
   # exemption is one `case ... continue` inside a loop whose stated purpose is
@@ -2700,10 +2719,10 @@ PY2
     wait "$runner"; rc=$?
     [ "$rc" = 3 ] || { cat "$WORK/out" >&2; fail "a stop mid-review did not exit 3 (got $rc)"; }
     ok "a stop that appears mid-review kills the reviewer and exits 3"
-    pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+    pgrep -f "$(ere "$WORK/bin/fake-reviewer")" >/dev/null 2>&1 \
       && fail "the reviewer is still running after the stop"
     ok "...and does not leave it running"
-    pgrep -f "$REVIEWER_WORK" >/dev/null 2>&1 \
+    pgrep -f "$(ere "$REVIEWER_WORK")" >/dev/null 2>&1 \
       && fail "the reviewer's own child outlived the stop"
     ok "...nor anything it had started"
     ;;

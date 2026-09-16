@@ -284,7 +284,9 @@ say() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 # opening complaint -- "nothing says the drain has become unbounded" -- answered
 # on the wrong channel. `$( )` captures stdout and not stderr, so this reaches
 # both the log and the operator. armaatus/autofleet#71.
-say_err() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
+# ...and it IS `say`, with the pipeline's stdout sent to fd 2. Two copies of one
+# `printf | tee` is two places for the timestamp format to drift.
+say_err() { say "$@" >&2; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
 # The two cases you would otherwise not learn about until morning: the fleet
@@ -2178,6 +2180,16 @@ reviewer_alive() { fleet_agent_alive "$@"; }
 stop_reviewers() {
   local marker held stopped=0
   [ -d "$REVIEWING_DIR" ] || return 0
+  # THE SWEEP'S OWN BOOKKEEPING GOES WITH THE RECORDS, and it needs saying here
+  # because `"$REVIEWING_DIR"/*` cannot see it: `.closed-<pr>` is a dotfile, which
+  # is exactly what keeps it out of the three loops that would read it as a lock.
+  # The loop below clears every record, so without this line a grace marker whose
+  # records this function deleted is orphaned for good -- and the number it names
+  # is then swept with no grace at all if it comes round again, which is the one
+  # thing the marker exists to prevent. `prune_review_records` collects the ones
+  # it graces itself; this is the other path out. Found by `/code-review` of the
+  # branch that added it.
+  rm -f "$REVIEWING_DIR"/.closed-*
   for marker in "$REVIEWING_DIR"/*; do
     [ -e "$marker" ] || continue
     # The records go too: a dispatcher starting fresh re-derives what has been
@@ -2337,13 +2349,16 @@ pr_sweepable() {
 
 # WHAT GITHUB SAYS PR $1 IS, asked at most once per pass however many sweeps ask.
 #
-# There are TWO callers of `pr_sweepable` with two grace markers of their own --
-# the transcript store's and the record store's -- and both run every pass. The
-# alternation the header above describes is per marker, so on the passes they
-# both ask, the same pull request cost two identical `gh pr view` calls: for a
-# host whose PRs are opened under another account, one call per poll per PR
-# forever, which is the "every one" that paragraph promises to avoid. The bound
-# is the point of asking at all. Found by `/mattpocock-skills:code-review`.
+# `pr_sweepable` is called against THREE grace-marker stores every pass --
+# `prune_review_logs` runs twice, once for `reviews/` and once for
+# `validations/`, and the record sweep adds `$REVIEWING_DIR` -- and the
+# alternation the header above describes is per STORE. So on the passes they
+# ask, one pull request cost three identical `gh pr view` calls: for a host whose
+# PRs are opened under another account, and which therefore always answers OPEN,
+# that is calls every poll per PR forever, which is the "every one" that
+# paragraph promises to avoid. The bound is the point of asking at all. Found by
+# `/mattpocock-skills:code-review`, twice -- the first version of this paragraph
+# said two stores and did the arithmetic for two.
 #
 # A VARIABLE and not a file, for $OPEN_PR_MEMO's reason, and dropped by
 # `forget_poll_answers` with the rest of the pass's answers. Pure parameter
@@ -3132,12 +3147,17 @@ for p in prs:
     esac
     case " $verdict_keep " in *" $num "*) continue ;; esac
     case " $verdict_go "   in *" $num "*) rm -f "$rec"; continue ;; esac
-    if pr_sweepable "$num" "$REVIEWING_DIR"; then
-      verdict_go="$verdict_go$num "
-      rm -f "$rec"
-    else
-      verdict_keep="$verdict_keep$num "
-    fi
+    # `case $?`, not `if`: `pr_sweepable` has THREE answers and only one of them
+    # deletes. Read as a boolean the OPEN answer disappears into an `else` that
+    # happens to do the right thing, which is a callsite that stops saying what
+    # it knows. Found by `/mattpocock-skills:code-review`.
+    pr_sweepable "$num" "$REVIEWING_DIR"
+    case $? in
+      0) verdict_go="$verdict_go$num "; rm -f "$rec" ;;
+      # 1 is "first pass, or gh would not say" and 2 is "GitHub says it is open".
+      # Both keep the records; only the second is a statement about the PR.
+      *) verdict_keep="$verdict_keep$num " ;;
+    esac
   done
   # The grace marker goes with the records it graced. Left behind, a number that
   # comes round again -- a PR reopened, or a fresh dispatcher on a long-lived
@@ -4332,12 +4352,11 @@ cmd_status() {
     # named nothing, and the hold in the poll printed the same directory by its
     # basename. Two readers of one listing, two names. #71.
     label="$(worktree_label "$num" "$path")"
+    # The row is the same either way; a parked one gets two lines under it.
+    printf '  %-6s %s\n' "$label" "$path"
     if [ -n "$why" ]; then
-      printf '  %-6s %s\n' "$label" "$path"
       printf '         %s\n' "$why"
       printf '         %s\n' "$(how_to_release "$num" "$path")"
-    else
-      printf '  %-6s %s\n' "$label" "$path"
     fi
   done
   echo
@@ -5081,13 +5100,33 @@ while that one is up."
   # hundred lines away is the shape armaatus/autofleet#71 is about. In the QUIET
   # voice, like `cmd_status`: nothing after the loop should be writing to
   # $STATE_DIR. Found by the same pass.
+  #
+  # THE LIST IS BUILT BEFORE THE HEADER IS SAID. `parked_for_person` asks the
+  # runner, and a runner that stops answering between the last poll and this
+  # line makes every one of these return 1 -- so a header announcing N worktrees
+  # with nothing under it, which is the "one line short" failure this block was
+  # moved to fix. The old reading was pure filesystem and could not do it; the
+  # gate is worth the ordering. Found by `/mattpocock-skills:code-review`.
   if [ "${parked:-0}" -gt 0 ]; then
-    say "$parked worktree(s) are waiting for you rather than for an agent:"
+    local parked_lines="" named=0
     for n in $(ls "$OWNED_DIR" 2>/dev/null); do
       why="$(parked_for_person "$n" quiet)" || continue
-      say "  #$n -- $why"
-      say "    $(how_to_release "$n" "$(owned_path "$n")")"
+      named=$((named + 1))
+      parked_lines="$parked_lines  #$n -- $why
+    $(how_to_release "$n" "$(owned_path "$n")")
+"
     done
+    if [ "$named" -gt 0 ]; then
+      say "$named worktree(s) are waiting for you rather than for an agent:"
+      # One `say` per line, so each keeps its own timestamp and the log reads the
+      # way every other multi-line message here does.
+      printf '%s' "$parked_lines" | while IFS= read -r line; do say "$line"; done
+    else
+      # NOT silence: `parked` said there were some, and this is the only line
+      # that can say why none could be named.
+      say "$parked worktree(s) are waiting for you, and the runner would not say"
+      say "  which -- ./scripts/fleet/fleet.sh status once it answers again"
+    fi
   fi
   notify "fleet down" "$reason. $opened worktree(s) opened."
 }
