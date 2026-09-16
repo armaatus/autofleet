@@ -1403,21 +1403,24 @@ fi
 #    `.autofleet/config` is sourced from inside it and is exactly where a host
 #    project overrides it.
 #
-#    `env -i`, because the question is which driver THIS REPO is configured for, not which one the maintainer happens to
+#    A STRIPPED ENVIRONMENT, because the question is which driver THIS REPO is
+#    configured for, not which one the maintainer happens to
 #    have exported in the shell they ran the lint from. `bash -c` inherits the
 #    environment, so a `AUTOFLEET_RUNNER=stub` left over from a test run would
 #    fail the lint on a repo that is correctly configured -- and config.sh's own
 #    layering note says a config file that assigns outright overrides even the
 #    environment, so the ambient value is not authoritative here either way.
-#    AN EMPTY ENVIRONMENT rather than two `-u`s, which is what two self-review
-#    rounds cost to arrive at: config.sh also sources
+#    EVERY autofleet knob rather than the two that were named, which is what
+#    three self-review rounds cost to arrive at: config.sh also sources
 #    `${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}`, so a stale
 #    AUTOFLEET_CONFIG answers this check about another repo's file -- and it
 #    `exit 2`s on several other ambient knobs, so a leftover
 #    AUTOFLEET_REVIEW_MAX_ROUNDS made the check report that the runner could not
 #    be established. Consequence as cause, in the check that closes that hole.
-#    PATH and HOME are kept because bash and config.sh need them. Found by the
-#    local review, then twice by the self-review.
+#    The rest of the environment is KEPT: `env -i` was the round in between, and
+#    a host config that reads $USER or $TMPDIR would have failed under `set -u`
+#    with this check blaming the config. Found by the local review, then three
+#    times by the self-review.
 #
 #    `|| exit 1` after the source, because without it the "would not source"
 #    branch below was unreachable: `.` returning non-zero is discarded under
@@ -1425,7 +1428,19 @@ fi
 #    with a syntax error was reported as one that "leaves AUTOFLEET_RUNNER
 #    empty" -- the misattribution this comment claims to avoid, in the check
 #    that makes the claim. Found by the local review.
-if runner="$(env -i PATH="$PATH" HOME="$HOME" bash -c '
+# Every autofleet knob in the ambient environment, and nothing else. `env -i`
+# was the previous attempt and took the rest of the environment with it: a host
+# `.autofleet/config` that reads $USER or $TMPDIR then hits `set -u` and this
+# check reports "config.sh would not source" on a repo that is fine -- and the
+# remedy it prints, running the command by hand, works, so it is unreproducible
+# too. Found by the self-review, on the fix for the fix.
+fleet_lint_unset=()
+while IFS='=' read -r fleet_lint_name _; do
+  case "$fleet_lint_name" in
+    AUTOFLEET_*|ORCA_*|FLEET_*) fleet_lint_unset+=(-u "$fleet_lint_name") ;;
+  esac
+done < <(env)
+if runner="$(env ${fleet_lint_unset[@]+"${fleet_lint_unset[@]}"} bash -c '
     set -uo pipefail
     REPO_ROOT="$PWD"
     . ./scripts/fleet/config.sh || exit 1

@@ -1370,7 +1370,7 @@ DRIVER
       && fail "a driver that returned before implementing the contract was accepted because its probe happened to be defined first: $out"
     grep -q "lateba.sh is there and did not finish implementing" <<<"$out" \
       || fail "the refusal did not say the driver stopped part way, which is the only thing separating it from a working one: $out"
-    grep -q "stopped before runner_worktree_create" <<<"$out" \
+    grep -q "defines no runner_worktree_create" <<<"$out" \
       || fail "the refusal did not name which of the two conditions failed, so the driver's author has to guess: $out"
 
     #     ...AND A CONFORMANT DRIVER THAT MERELY SOURCES NON-ZERO IS ACCEPTED.

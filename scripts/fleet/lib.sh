@@ -338,15 +338,18 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
   # But a non-zero status ALONE is not a broken driver: a conformant one that
   # ends on `[ -n "${FOO:-}" ] && export FOO` with FOO empty sources non-zero
   # and implements everything, and refusing it would be this issue's own
-  # confident lie about a machine that is fine. So the status only raises the
-  # bar: `runner_worktree_create` -- the first call the dispatcher makes after
-  # the probe, and the one whose failure #13 opens with -- must be there too.
-  # The pair, and the requirement, are stated in docs/RUNNERS.md, which hard
-  # rule 4 makes the authority for the contract. Both halves found by the
-  # self-review; the second is the one that caught the first overreaching.
+  # confident lie about a machine that is fine. So the status decides nothing
+  # and the FUNCTIONS decide everything: `runner_available`, the probe every
+  # guarded caller reaches first, and `runner_worktree_create`, the first call
+  # the dispatcher makes after it and the one whose failure #13 opens with.
+  # BOTH, UNCONDITIONALLY -- the round before this required the second one only
+  # when the source status was non-zero, which accepted a driver that sourced
+  # cleanly with a misspelled or conditionally defined create function and left
+  # the same "could not create it:" with nothing under it. It also disagreed
+  # with docs/RUNNERS.md, which hard rule 4 makes the authority and which states
+  # the pair. Three self-review rounds, each catching the last one's shape.
   if command -v runner_available >/dev/null 2>&1 \
-    && { [ "$fleet_runner_source_rc" = 0 ] \
-         || command -v runner_worktree_create >/dev/null 2>&1; }; then
+    && command -v runner_worktree_create >/dev/null 2>&1; then
     # Set on BOTH arms, never defaulted from the environment. An exported
     # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
     # refusal below, which is the same hole `evals/lint.sh` 4g closes with
@@ -371,7 +374,7 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
       && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
       echo "autofleet: $FLEET_RUNNER_DRIVER is there and did not finish implementing the runner_* contract"
-      echo "     it sourced with status $fleet_runner_source_rc and $(command -v runner_available >/dev/null 2>&1 && echo "stopped before runner_worktree_create" || echo "defined no runner_available"); the contract is in docs/RUNNERS.md"
+      echo "     it sourced with status $fleet_runner_source_rc and $(command -v runner_available >/dev/null 2>&1 && echo "defines no runner_worktree_create" || echo "defines no runner_available"); the contract is in docs/RUNNERS.md"
       echo "     check it for an early return when something it needs is missing, and for names that match the contract"
     } >&2
     # WHAT IS WRONG WITH IT, carried to `fleet_require_runner`, because the two
