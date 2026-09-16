@@ -850,7 +850,13 @@ runner_terminal_draft() {
   [ -s "$STUB_DIR/draft" ] || return 0
   printf '%s %s\n' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
 }
-runner_terminal_send()      { stub_say "terminal send $1";      return 0; }
+runner_terminal_send() {
+  stub_say "terminal send $1"
+  # A driver that cannot type at all. The contract lets it fail the send, and
+  # the caller interrupts as it always did (armaatus/autofleet#106).
+  [ -e "$STUB_DIR/send-refuses" ] && return 1
+  return 0
+}
 runner_terminal_enter()     { stub_say "terminal enter $1";     return 0; }
 runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
 STUBDRIVER
@@ -2481,6 +2487,65 @@ print(json.dumps({"result": {"worktrees": [
     grep -q "handoff note written" <<<"$out" \
       || fail "it stopped the agent without noticing the note it asked for: $out"
     echo "ok: ...and stops it once the note is written"
+    ;;
+
+  handoff_order_stub)
+    # armaatus/autofleet#106's acceptance, on a driver that is NOT Orca: the ask
+    # goes through `runner_terminal_send` + `_enter` and lands BEFORE
+    # `runner_terminal_interrupt`, because an interrupt cancels the turn the
+    # note would have been written in.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    in_fleet enforce_timebox >/dev/null 2>&1
+    mkdir -p "$WORK/wt/.autofleet/run"
+    printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
+    out="$(in_fleet enforce_timebox 2>&1)"
+    send_at="$(grep -n "^terminal send t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    enter_at="$(grep -n "^terminal enter t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    int_at="$(grep -n "^terminal interrupt t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    [ -n "$send_at" ] && [ -n "$enter_at" ] \
+      || fail "the handoff request never went through the driver: $(cat "$STUB_CALLS")"
+    [ -n "$int_at" ] || fail "the agent was never interrupted: $out"
+    [ "$send_at" -lt "$enter_at" ] && [ "$enter_at" -lt "$int_at" ] \
+      || fail "the request did not land before the interrupt: $(cat "$STUB_CALLS")"
+    [ -s "$ORCA_CALLS" ] \
+      && fail "a call went to the CLI instead of the driver: $(cat "$ORCA_CALLS")"
+    echo "ok: the handoff request is sent and submitted before the interrupt, through the driver"
+    ;;
+
+  handoff_send_refused)
+    # A driver that cannot send still gets the interrupt, IN THE SAME PASS: the
+    # grace is for an agent that was asked, and this one was not. And said once:
+    # a line per poll for a driver that will never type is noise.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    : >"$STUB_DIR/send-refuses"
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q "^terminal interrupt t1" "$STUB_CALLS" \
+      || fail "a refused send left the agent running: $out / $(cat "$STUB_CALLS")"
+    grep -q "^terminal enter" "$STUB_CALLS" \
+      && fail "it submitted after a send that failed, which submits the agent's own half-typed text"
+    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
+      || fail "the refused send was not said exactly once: $out"
+    [ -e "$AUTOFLEET_DIR/handoff-asked-42" ] \
+      && fail "a request that never went out left a marker that defers the next attempt"
+    echo "ok: a driver that refuses the send still gets the interrupt, in the same pass"
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q "would not type into" <<<"$out" \
+      && fail "it says so again on the next poll: $out"
+    echo "ok: ...and says so once, not once a poll"
     ;;
 
   handoff_expires)
