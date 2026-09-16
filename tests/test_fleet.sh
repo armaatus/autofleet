@@ -2583,9 +2583,11 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$STUB_DIR/send-refuses"
     : >"$STUB_CALLS"
     export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
-    in_fleet reset_context_for_answering >/dev/null 2>&1
+    out="$(in_fleet reset_context_for_answering 2>&1)"
     grep -q "^terminal enter t1" "$STUB_CALLS" \
       || fail "a send that recovered was never retried: $(cat "$STUB_CALLS")"
+    grep -q "starting the answering work in a clean context" <<<"$out" \
+      || fail "the reset that finally landed left no line in the log: $out"
     [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
       || fail "the reset did not complete once the driver typed again"
     [ -e "$AUTOFLEET_DIR/send-refused-42" ] \

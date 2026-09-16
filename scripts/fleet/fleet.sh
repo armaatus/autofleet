@@ -411,6 +411,9 @@ card() {
 # retries every poll must keep retrying -- a one-off timeout on the poll a PR
 # opened is not a reason to give up its context reset for good -- and only the
 # line is throttled. A send that lands clears it, so the next refusal is news.
+# The submit gets its own `.submit` beside it: one marker for both meant a
+# refused send silenced a later refused submit, which is the one that leaves
+# text piling up in the agent's composer.
 say_to_agent_in() {
   local path="$1" text="$2" said="${3:-}" handle
   if ! handle="$(runner_agent_terminal "$path")"; then
@@ -424,13 +427,14 @@ say_to_agent_in() {
     [ -z "$said" ] || : >"$said"
     return 1
   }
+  [ -z "$said" ] || rm -f "$said"
   runner_terminal_enter "$handle" || {
-    [ -n "$said" ] && [ -e "$said" ] \
+    [ -n "$said" ] && [ -e "$said.submit" ] \
       || say "  the runner typed into $path but would not submit it"
-    [ -z "$said" ] || : >"$said"
+    [ -z "$said" ] || : >"$said.submit"
     return 1
   }
-  [ -z "$said" ] || rm -f "$said"
+  [ -z "$said" ] || rm -f "$said.submit"
   return 0
 }
 
@@ -533,10 +537,10 @@ reset_context_for_answering() {
       continue
     fi
     handoff_turn "$num" "$path" || continue
-    # Retried every poll while the driver refuses, so said only while it has not.
-    [ -e "$STATE_DIR/send-refused-$num" ] \
-      || say "#$num: PR is open -- starting the answering work in a clean context"
     say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
+    # Said once the clear LANDED, not before it: the attempt is retried every
+    # poll while a driver refuses, and a line ahead of it repeated each time.
+    say "#$num: PR is open -- starting the answering work in a clean context"
     # The marker goes down BEFORE the second prompt: a clear that landed and an
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
@@ -613,7 +617,7 @@ clear_issue_markers() {
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
-        "$STATE_DIR/send-refused-$1" \
+        "$STATE_DIR/send-refused-$1" "$STATE_DIR/send-refused-$1.submit" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
