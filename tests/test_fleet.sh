@@ -2502,7 +2502,11 @@ print(json.dumps({"result": {"worktrees": [
     printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
     issue_labels "ready"
     export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
-    in_fleet enforce_timebox >/dev/null 2>&1
+    out="$(in_fleet enforce_timebox 2>&1)"
+    # Same-pass send-enter-interrupt would still pass the order check below, and
+    # is #106's own bug: the interrupt cancels the turn the note is written in.
+    grep -q "^terminal interrupt" "$STUB_CALLS" \
+      && fail "it interrupted in the pass that asked, leaving no turn to write in: $out"
     mkdir -p "$WORK/wt/.autofleet/run"
     printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
     out="$(in_fleet enforce_timebox 2>&1)"
@@ -2521,8 +2525,10 @@ print(json.dumps({"result": {"worktrees": [
 
   handoff_send_refused)
     # A driver that cannot send still gets the interrupt, IN THE SAME PASS: the
-    # grace is for an agent that was asked, and this one was not. And said once:
-    # a line per poll for a driver that will never type is noise.
+    # grace is for an agent that was asked, and this one was not. Said once
+    # because the time-box CLOSES on that pass (its `started` marker goes), not
+    # because anything suppresses the line -- the context reset has no such
+    # exit, and `context_reset_send_refused` is its phase.
     make_fixture ok
     make_worktree
     make_overdue
@@ -2545,7 +2551,41 @@ print(json.dumps({"result": {"worktrees": [
     out="$(in_fleet enforce_timebox 2>&1)"
     grep -q "would not type into" <<<"$out" \
       && fail "it says so again on the next poll: $out"
-    echo "ok: ...and says so once, not once a poll"
+    echo "ok: ...and the time-box closes, so it is not said again next poll"
+    ;;
+
+  context_reset_send_refused)
+    # The other caller that meets a driver which cannot type, and the one with
+    # no exit of its own: the reset is only marked done once the clear lands, so
+    # a send that is always refused said so -- three lines -- on every poll for
+    # as long as the PR stayed open. Found by the self-review of #106's PR.
+    make_fixture ok
+    make_worktree
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    : >"$STUB_DIR/send-refuses"
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q "would not type into" <<<"$out" \
+      || fail "a refused send was not said at all: $out"
+    grep -q "^terminal enter" "$STUB_CALLS" \
+      && fail "it submitted after a send that failed"
+    echo "ok: a driver that refuses the send is told about on the first poll"
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q "would not type into" <<<"$out" \
+      && fail "it says so again every poll: $out"
+    echo "ok: ...and not again on the next one"
+    # Refused is not "no agent": an agent that is simply not there yet must
+    # still be reset once it is, so that case must leave no marker.
+    rm -f "$AUTOFLEET_DIR/context-reset-42" "$STUB_DIR/send-refuses"
+    : >"$STUB_DIR/terminals"
+    in_fleet reset_context_for_answering >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
+      && fail "a worktree with no agent at that moment was marked reset for good"
+    echo "ok: ...while a worktree with no agent yet is still reset later"
     ;;
 
   handoff_expires)
