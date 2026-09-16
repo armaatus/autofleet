@@ -356,6 +356,16 @@ except Exception:
 # back and still exits 0, so `common` comes back as `--path-format=absolute` plus
 # `.git`, `dirname` refuses the leading `--`, and a guard reading the assembled
 # `path:$(dirname ...)` sees a non-empty literal `path:` and lets it through.
+#
+# ...and it is an ALLOWLIST -- a leading slash -- because that is the whole
+# requirement: `path:` names an absolute ROOT. The denylist it replaced (empty,
+# or a leading dash) enumerated one way the pre-2.31 answer goes wrong, and
+# depended on the local `dirname` refusing `--path-format=absolute` rather than
+# reading a slashless string as a path and answering `.`. It also had nothing at
+# all to say about the case that reaches this by a different door: a git that
+# prints the common dir RELATIVELY, where `dirname` answers `.` and `path:.`
+# ships -- the same permanent `repo_not_found` stall this function exists to
+# prevent, arriving through the guard against it. armaatus/autofleet#71.
 orca_resolve_repo_selector() {
   # `$1` is the checkout to resolve FROM, defaulting to this one. It exists so
   # `runner_worktree_create` can pass the `<repo>` its contract gives it rather
@@ -366,7 +376,7 @@ orca_resolve_repo_selector() {
               --git-common-dir 2>/dev/null)" || common=""
   if [ -n "$common" ]; then
     root="$(dirname "$common" 2>/dev/null)" || root=""
-    case "$root" in ''|-*) root="" ;; esac
+    case "$root" in /*) ;; *) root="" ;; esac
     [ -n "$root" ] && { printf 'path:%s\n' "$root"; return 0; }
   fi
   printf 'path:%s\n' "$from"

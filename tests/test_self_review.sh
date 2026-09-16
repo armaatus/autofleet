@@ -178,9 +178,13 @@ case "$mode" in
   # wrapper seam, so the process doing the work is routinely a child of what
   # self-review.sh signals -- and a kill that reaps only the direct child leaves
   # a full-budget agent running with nothing left to enforce a deadline.
-  # 3613, not 3607: test_review_mode.sh's orphan phases `pgrep` MACHINE-WIDE for
-  # their own `sleep 3607`, and tests/run.sh already carries a note about that
-  # exact collision misattributing a failure. A duration of its own.
+  # 3613, not 3607: test_review_mode.sh's orphan phases used to `pgrep`
+  # MACHINE-WIDE for their own `sleep 3607`, and tests/run.sh carries a note
+  # about that exact collision misattributing a failure. They are scoped to
+  # their own fixture since armaatus/autofleet#71, so the collision is gone --
+  # but a duration of its own still costs nothing, and this phase's own reaping
+  # is by pid rather than by pattern, so nothing here depends on the number
+  # being unique.
   hang)   sleep 3613 & printf '%s\n' "$!" >>"$SELF_CHILD"; wait ;;
 esac
 exit 0

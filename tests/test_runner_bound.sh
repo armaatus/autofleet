@@ -156,28 +156,82 @@ cleanup() {
   # assertion, or died before reaching it, must not leave the stray behind: this
   # file would then be causing the machine-wide contamination it is here to
   # catch, and the next phase to ask `pgrep` a question would pay for it.
-  # BOTH naps. $WATCH_NAP is 82 minutes and is the subject of `orphans`: when the
+  # BOTH naps, and both are this process's own numbers -- see their definition:
+  # an unscoped `pkill -f` here would signal another fleet's sleep, not merely
+  # read one. $WATCH_NAP is the subject of `orphans`: when the
   # regression that phase guards against is present, the phase fails AND leaves
   # the stray -- after which every later `orphans` on this machine hard-fails at
   # its own `before` guard, so the guard is off for exactly as long as it matters
   # most. Reaping only $BLOCK_NAP left the one sleep this file is about. Found by
   # the independent review.
   [ -n "$WORK" ] && {
-    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null
-    pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    pkill -9 -f "$(ere "$WORK/block-nap")" 2>/dev/null
+    pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     rm -rf "$WORK"
   }
   return 0
 }
 trap cleanup EXIT
 
-# Distinctive durations, so `pgrep` cannot match some unrelated process on the
-# machine and answer a question this test did not ask. The `timeout` phase in
-# test_review_mode.sh greps for a bare `sleep 3607` machine-wide and does fail
-# when an unrelated one is running; that is armaatus/autofleet#71's territory,
-# not something to reproduce here.
-BLOCK_NAP=5507   # what the blocking fixture waits on
-WATCH_NAP=4931   # what the watchdog waits on, i.e. the bound itself
+# THIS PROCESS'S OWN durations, so neither the `pgrep`s that decide nor the
+# `pkill`s that reap can reach a process this run did not start.
+#
+# Distinctive constants made a collision unlikely and left the construction
+# wrong: `pkill -9 -f "sleep 5507"` is a question -- and a signal -- aimed at the
+# whole machine, which is what armaatus/autofleet#71 is about. A stray from
+# another worktree answered the assertion; worse, the cleanup would have KILLED
+# it. The watchdog's sleep belongs to the payload's `tests/run.sh` and has no
+# path to match on, so the number is the only handle either of them has.
+#
+# THE WHOLE PID, not `$$ % 1000`. Two live processes cannot share a pid, so the
+# whole of it is unique by construction; a remainder is not -- two concurrent
+# runs whose pids are congruent mod 1000 got the SAME two numbers, and then
+# `cleanup`'s `pkill -9` SIGKILLed the other run's live watchdog. That is the
+# machine-wide signalling this change exists to remove, arriving through its own
+# fix. Found by `/code-review`.
+#
+# The bases keep the two apart from each other whatever the pid is: a Linux
+# `pid_max` may be as large as 4194304, and 9000000 is clear of 4000 plus any
+# pid that can exist. Both stay in the range `sleep` accepts; neither is ever
+# waited out, because every phase that starts one kills it.
+#
+# `pgrep -f` MATCHES AN EXTENDED REGEX, not a fixed string, so a path handed to
+# it needs escaping -- a `+` in a generated $TMPDIR component makes the pattern
+# match nothing, and a `pgrep ... && fail` that cannot match proves the absence
+# it was asked for.
+#
+# DUPLICATED from test_review_mode.sh, deliberately: every tests/test_*.sh here
+# is a standalone script -- `tests/run.sh` runs each with `bash <file>` and there
+# is no shared library for them to source. Adding one for six characters of sed
+# would be a new seam for every suite to know about; the comment on both copies
+# is the link. Raised by `/mattpocock-skills:code-review` as a judgement call.
+ere() { printf '%s' "$1" | sed 's/[][(){}.*+?^$|\\]/\\&/g'; }
+
+# ...AND $WATCH_NAP'S PATTERN IS ANCHORED, `"sleep ${WATCH_NAP}\$"`, because
+# `-f` matches an unanchored SUBSTRING of the whole command line and a unique
+# number is not a unique substring: pid 123 gets `sleep 4123`, pid 37234 gets
+# `sleep 41234`, and the first pattern is inside the second. Unanchored,
+# `cleanup` SIGKILLs the other run's live fixture and `orphans` fails at its own
+# `before` guard -- the same misattribution one digit narrower.
+# Found by `/mattpocock-skills:code-review`.
+#
+# $BLOCK_NAP DOES NOT NEED THE NUMBER AT ALL, and does not use it as a pattern:
+# the blocking fixture is written by this file, so it can carry a $WORK-derived
+# argv0 (`exec -a "$WORK/block-nap"`) and every `pgrep`/`pkill` for it matches
+# that path. That is what armaatus/autofleet#71 §6 asks for, and what §1's two
+# phases got. The duration stays distinctive so a human reading `ps` can still
+# tell the two fixtures apart.
+#
+# $WATCH_NAP CANNOT HAVE ONE, and this is the departure, stated rather than
+# glossed: the process is the payload's own `sleep "$timeout"` inside
+# `tests/run.sh`, which this file may not reshape to suit a test of it. Its
+# number plus the anchor is the whole handle there, so the `pkill` for it is
+# still, in principle, aimed at any process on the machine whose command line
+# ends in that number. Two live processes cannot share a pid, so reaching one
+# needs a process started by a DEAD run whose pid has since been reused --
+# which is the case `orphans`' own `before` guard refuses to answer under.
+BLOCK_NAP=$(( 9000000 + $$ ))   # what the blocking fixture waits on
+WATCH_NAP=$((    4000 + $$ ))   # what the watchdog waits on, i.e. the bound itself
 
 # A copy of the real runner, registering ONLY the throwaway suites named in "$@".
 #
@@ -247,7 +301,7 @@ PY2
 #!/usr/bin/env bash
 echo "got this far before wedging"
 set -m
-sleep $BLOCK_NAP &
+( exec -a "$WORK/block-nap" sleep $BLOCK_NAP ) &
 wait
 EOF
         ;;
@@ -360,12 +414,14 @@ case "${1:-}" in
   ok "...keeping what the phase managed to say, which is the diagnosis"
 
   # The descendants die with it. `timeout` and `midstop` in test_review_mode.sh
-  # ask `pgrep` a machine-wide question about a `sleep 3607`, so a descendant of
-  # one bounded phase surviving fails a later, unrelated phase -- measured, with
-  # "the wedged reviewer's own child outlived the kill". A bound that creates the
-  # misattribution it exists to remove is the worst of the two.
+  # USED TO ask `pgrep` a machine-wide question about a `sleep 3607`, so a
+  # descendant of one bounded phase surviving failed a later, unrelated phase --
+  # measured, with "the wedged reviewer's own child outlived the kill". A bound
+  # that creates the misattribution it exists to remove is the worst of the two.
+  # Those phases are scoped to their own fixture since armaatus/autofleet#71 and
+  # would no longer notice; this row is what is left watching.
   sleep 2
-  strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
+  strays="$(pgrep -f "$(ere "$WORK/block-nap")" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \
     || fail "the bound left ${strays} descendant(s) of the killed phase running"
   ok "...and takes the phase's descendants with it, own process group or not"
@@ -825,7 +881,7 @@ EOF
   # A long bound, so nothing here finishes on its own: what ends the run must be
   # the signal. $WATCH_NAP doubles as the watchdog's sleep, which is what the
   # leak half of this phase counts.
-  [ "$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)" = 0 ] \
+  [ "$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)" = 0 ] \
     || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
 
   # `set -m` around the launch, and it is not incidental. A command started with
@@ -860,7 +916,7 @@ EOF
   done
   if kill -0 "$runner" 2>/dev/null; then
     kill -9 "$runner" 2>/dev/null
-    pkill -9 -f "sleep $BLOCK_NAP" 2>/dev/null; pkill -9 -f "sleep $WATCH_NAP" 2>/dev/null
+    pkill -9 -f "$(ere "$WORK/block-nap")" 2>/dev/null; pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     fail "the runner survived SIGINT, so Ctrl-C stops a phase and not the run"
   fi
   ok "a SIGINT ends the run rather than skipping one phase"
@@ -873,12 +929,12 @@ EOF
   # Nothing left behind. The watchdog's sleep is the one the round-one leak was
   # about, and the INT path is where it came back.
   sleep 2
-  strays="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  strays="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \
     || fail "SIGINT orphaned ${strays} watchdog sleep(s); the trap does not cover INT"
   ok "...and the watchdog takes its sleep with it on INT, not only on TERM"
 
-  phase_strays="$(pgrep -f "sleep $BLOCK_NAP" 2>/dev/null | grep -c . || true)"
+  phase_strays="$(pgrep -f "$(ere "$WORK/block-nap")" 2>/dev/null | grep -c . || true)"
   [ "${phase_strays:-0}" = 0 ] \
     || fail "SIGINT left ${phase_strays} descendant(s) of the running phase behind"
   ok "...and the running phase is reaped with its descendants"
@@ -887,7 +943,7 @@ EOF
 # ---------------------------------------------------------------- orphans
   orphans)
   make_runner quick
-  before="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  before="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${before:-0}" = 0 ] \
     || fail "a sleep $WATCH_NAP was already running; this phase cannot answer"
 
@@ -899,7 +955,7 @@ EOF
   # The watchdog is signalled after the phase is reaped; give the trap a moment
   # to run before counting, so this measures a leak rather than a schedule.
   sleep 2
-  after="$(pgrep -f "sleep $WATCH_NAP" 2>/dev/null | grep -c . || true)"
+  after="$(pgrep -f "sleep ${WATCH_NAP}\$" 2>/dev/null | grep -c . || true)"
   [ "${after:-0}" = 0 ] \
     || fail "the watchdog orphaned ${after} sleep(s); killing the subshell does not reap its sleep"
   ok "a cancelled watchdog takes its sleep with it, leaving nothing behind"

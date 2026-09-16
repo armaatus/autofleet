@@ -388,6 +388,28 @@ nothing to trim them — and drops the `.closed-<n>` marker, so the question is
 asked again on the pass after next rather than on every one. The sweep says how
 many it took.
 
+**The review records go the same way.** `$FLEET_DIR/reviewing/` holds four small
+records per pull request beside the reviewer's lock — `.done`, `.tries`,
+`.rounds` and `.said` — and the same four again under a `v-` prefix for the
+validator; what each one holds is written out once, in `scripts/fleet/fleet.sh`'s
+header above `is_review_record`, and not restated here. What a host operator
+needs from this page is that they are swept on **the same rule and through the
+same code** as the transcripts above — `pr_sweep_verdict`, which both call: not
+on the pass the PR drops off the open list, not without a confirming
+`gh pr view <n> --json state`, and one decision per pull request per pass rather
+than one per file, with `reviewing/.closed-<n>` as that sweep's bookkeeping. Two
+things are NOT shared, and both are deliberate. A PR whose reviewer is still
+running is skipped by the transcript sweep and not by this one — the record
+sweep only ever reaches a PR GitHub has confirmed closed, and a reviewer still
+writing against one of those is finishing work on a PR that is already gone. And
+`<pr>.rounds` outlives a `stop.sh`: it counts what the PULL REQUEST has cost
+rather than what this dispatcher's run has, nothing re-derives it, and clearing
+it on a restart would hand every open PR a fresh set of rounds — the cap not
+existing for anybody who restarts the fleet. The record sweep described here is
+what prunes it, once the PR has closed. The protection is not decoration — the
+file at stake is `<pr>.done`, and a `.done` deleted under an open PR hands that
+head a reviewer every poll.
+
 **The rotation** is `mv` rather than truncate-in-place, and **not while a
 reviewer is running** — `review.sh` is spawned with `>>` on `fleet.log` and holds
 the inode for up to `AUTOFLEET_REVIEW_TIMEOUT`, so rotating under it sends its

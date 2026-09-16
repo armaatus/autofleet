@@ -763,6 +763,18 @@ in_fleet() {
   in_fleet_keeping_cache "$@"
 }
 
+# THE LAUNCH GATE'S OWN COUNT, spelled the way `cmd_run` spells it: one
+# `live_worktrees`, counted by `count_worktrees`. These phases used to call a
+# `live_count` wrapper in fleet.sh that no production caller had left, so they
+# asserted a route the dispatcher does not take -- armaatus/autofleet#71. The
+# pair runs inside ONE source of fleet.sh, because the point is that the count
+# comes from the listing the gate already holds and not from a second read.
+gate_count() {
+  rm -rf "$AUTOFLEET_DIR/poll-cache"
+  (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh \
+    && { list="$(live_worktrees)" || exit 1; count_worktrees "$list"; })
+}
+
 # ...and the raw form, for the one phase whose subject IS the cache's survival.
 # `status_keeps_cache` asserts that `cmd_status` leaves the poll cache alone, so
 # running it through a helper that empties the cache first would assert nothing
@@ -1016,6 +1028,24 @@ wait_for_log() {
     sleep 0.1; i=$((i + 1))
   done
   fail "the dispatcher never said '$1': $(cat "$WORK/run.log" 2>/dev/null)"
+}
+
+# ...and the same wait for the Nth time it says something, which `wait_for_log`
+# cannot do: it greps the whole log, so asking twice for a line already there
+# returns at once. Passes are what a phase that must outlast one of them waits
+# on, and they need $AUTOFLEET_LOG_PASSES=on to be said at all.
+wait_for_passes() {
+  local want="$1" i=0 seen
+  while [ "$i" -lt 200 ]; do
+    # `grep -c` prints 0 AND exits 1 on no match, so a `|| echo 0` fallback makes
+    # the substitution two lines and the test says `integer expression expected`.
+    # The status is not the test here either: normalise what came back.
+    seen="$(grep -c "pass complete" "$WORK/run.log" 2>/dev/null)" || true
+    case "${seen:-}" in ''|*[!0-9]*) seen=0 ;; esac
+    [ "$seen" -ge "$want" ] && return 0
+    sleep 0.1; i=$((i + 1))
+  done
+  fail "the dispatcher did not finish $want passes: $(cat "$WORK/run.log" 2>/dev/null)"
 }
 
 # A real dispatcher in its OWN PROCESS GROUP, and the way to stop it again.
@@ -1630,7 +1660,7 @@ DRIVER
     printf '42' >"$STUB_DIR/issue"
     printf 'read the issue and get to work' >"$STUB_DIR/draft"
 
-    [ "$(in_fleet live_count)" = 1 ] \
+    [ "$(gate_count)" = 1 ] \
       || fail "the dispatcher could not count its own worktrees through a non-Orca driver"
 
     # The stall watcher: the agent state and the board, one poll of each.
@@ -1994,6 +2024,199 @@ DRIVER
       && fail "a second dispatcher was refused after a drain that ended with a parked worktree: $out"
     echo "ok: ...and a second dispatcher is not refused afterwards"
     ;;
+  farewell_runner_blind)
+    make_fixture ok
+    mkdir -p "$AUTOFLEET_DIR/worktrees" "$WORK/wt99"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
+    # THE TWO BRANCHES A DRAIN CANNOT REACH ON PURPOSE. The farewell re-derives
+    # its list by asking the runner, and the count in `fleet down: $reason` came
+    # from the last poll -- so a runner that stops answering in between leaves
+    # the two disagreeing, or leaves a header with nothing under it. Reached
+    # inline that is a race no fixture can arrange, which is why it is a
+    # function. Both branches could be deleted with the suite green.
+    # Found by `/code-review`. armaatus/autofleet#71.
+    : >"$AUTOFLEET_DIR/held-42"
+    : >"$AUTOFLEET_DIR/held-99"
+    printf 'not json' >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 2 2>&1)"
+    grep -q "the runner would not say" <<<"$out" \
+      || fail "the farewell announced 2 worktrees and named none, with nothing saying why: $out"
+    grep -q "waiting for you rather than for an agent" <<<"$out" \
+      && fail "it printed the header for a list it could not build: $out"
+    echo "ok: a farewell that cannot name any of them says so instead of printing an empty header"
+
+    # ...and the SHORTFALL: one nameable, and the poll had counted two.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 2 2>&1)"
+    grep -q -- "#42 --" <<<"$out" || fail "it did not name the one it could: $out"
+    grep -q -- "#99 --" <<<"$out" \
+      && fail "it named a worktree whose agent is working, and told a person to discard what is in there: $out"
+    grep -q "1 fewer than the line above says" <<<"$out" \
+      || fail "the farewell said 1 under a line that said 2, with nothing reconciling them: $out"
+    # ...NAMING BOTH CAUSES. A shortfall is a runner that would not answer or an
+    # agent that went back to work, and naming only the outage sends a person to
+    # look for one that is not happening. Found by `/code-review`. #71.
+    grep -q "agent went back to work" <<<"$out" \
+      || fail "the shortfall line blamed the runner for a difference an agent at work also makes: $out"
+    echo "ok: ...and says so when it can name fewer than the poll counted"
+
+    # ...and the other direction, which is an agent that FINISHED in between:
+    # both name-able now, against a farewell line that counted one.
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "idle"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    out="$(in_fleet farewell_parked 1 2>&1)"
+    grep -q -- "#99 --" <<<"$out" \
+      || fail "the worktree whose agent went idle was not named: $out"
+    grep -q "more than the line above says" <<<"$out" \
+      || fail "the farewell named more worktrees than the farewell line said, with nothing reconciling them: $out"
+    echo "ok: ...and when it can name more"
+    ;;
+
+  parked_since_swept_at_start)
+    make_fixture ok
+    # `parked-since-$n` is the survive-a-pass marker: a keep-marker counts only
+    # once it has been seen on two consecutive passes, which is what stops one
+    # transient `blocked` label from ending a drain with an agent still writing.
+    # It lives in $STATE_DIR rather than the poll cache, and nothing at startup
+    # cleared it -- `release_dispatcher_files` is on the EXIT trap, so a
+    # `kill -9`'d dispatcher leaves its markers behind and the NEXT dispatcher
+    # counts those worktrees as parked on its FIRST pass. That is precisely the
+    # case the rule exists to rule out, arriving through the rule's own
+    # bookkeeping. It self-heals from the second poll onward, and the window is
+    # the one pass where a wrong `parked` signs the dispatcher off on top of an
+    # agent. armaatus/autofleet#71.
+    mkdir -p "$AUTOFLEET_DIR"
+    : >"$AUTOFLEET_DIR/parked-since-42"
+    : >"$AUTOFLEET_DIR/parked-since-99"
+    # An empty backlog, so the run reaches its own exit rather than launching.
+    echo '[]' >"$GH_ISSUES"
+    in_fleet cmd_run --auto >"$WORK/run.log" 2>&1
+    [ -e "$AUTOFLEET_DIR/parked-since-42" ] \
+      && fail "a marker left by a dead dispatcher survived into this one, which counts that worktree as parked on its first pass: $(cat "$WORK/run.log")"
+    [ -e "$AUTOFLEET_DIR/parked-since-99" ] \
+      && fail "the sweep cleared one marker and not the rest"
+    echo "ok: a dispatcher starting clears the survive-a-pass markers a dead one left"
+    ;;
+
+  queued_blind_keeps_polling)
+    make_fixture ok
+    # `count_startable`'s DOCUMENTED NON-ZERO, driven through the run loop.
+    # `queued="$(count_startable)"` used to discard it: `queued` came back empty,
+    # `[ "" -eq 0 ]` wrote `integer expression expected` to stderr every poll for
+    # as long as the outage lasted -- into the log a person scans in the morning,
+    # at exactly the moment it most needs to be readable -- and the fix shipped
+    # with nothing driving it. `budget_ready_list_blind` asserts the non-zero at
+    # the FUNCTION; the behaviour it buys is one level up, in the loop that
+    # decides whether the backlog is finished. armaatus/autofleet#71.
+    #
+    # WHICH ROW FAILS ON REVERT, said because three of the four do not:
+    # `[ "" -eq 0 ]` exits 2 and reads as FALSE, so the run kept polling before
+    # the fix as well as after. Only the `integer expression expected` grep
+    # catches the discard. The three rows below it are there for the OTHER way
+    # this goes wrong -- `|| queued=0`, which reads "could not tell" as "nothing
+    # left" and signs the dispatcher off during an outage -- and they would
+    # catch that. Both failures live on the same line, which is why they are in
+    # one phase. Found by `/mattpocock-skills:code-review`.
+    #
+    # `FAIL` makes `ready_issues` fail, which is one of count_startable's three
+    # `|| return 1`s -- and the one an outage actually produces.
+    printf 'FAIL\n' >"$GH_ISSUES"
+    # ON THE SIGNAL, NOT ON A CLOCK. This waited `sleep 3` -- "three passes at a
+    # 1s poll" -- and on a machine loaded enough that no pass reached the test
+    # in three seconds, the revert-failing row was green because the line it
+    # greps for had not been written yet. $AUTOFLEET_LOG_PASSES is the one thing
+    # that can answer "has a pass finished" without guessing from a clock.
+    # Found by the independent review of 2b00a3a.
+    #
+    # TWO, and one is not enough for a reason that is not "two passes are
+    # safer": the discard speaks from `[ "$queued" -eq 0 ]`, which runs just
+    # AFTER the `pass complete` line of the same pass. So pass 1's line is
+    # printed with the test still ahead of it, and waiting for one would race it
+    # by a few statements. Pass 2's line is the first proof that pass 1 got
+    # through the test. Do not tidy this to `wait_for_passes 1`. The count is
+    # `/mattpocock-skills:code-review`'s: the first version of this comment said
+    # two passes were needed because one might not have happened, which is the
+    # wrong reason and the one a reader would tidy away.
+    export AUTOFLEET_LOG_PASSES=on
+    start_dispatcher --auto
+    wait_for_log "fleet up"
+    wait_for_passes 2
+    grep -q "integer expression expected" "$WORK/run.log" \
+      && fail "a gh outage wrote a bash error into the dispatcher's log once a poll: $(cat "$WORK/run.log")"
+    echo "ok: an unreadable backlog does not put a shell error in the log every poll"
+    grep -q "fleet down" "$WORK/run.log" \
+      && fail "a backlog that could not be READ was taken for a backlog that is EMPTY, and the run signed off: $(cat "$WORK/run.log")"
+    kill -0 "$HELD_PID" 2>/dev/null \
+      || fail "the dispatcher exited during a gh outage: $(cat "$WORK/run.log")"
+    echo "ok: ...and the run keeps polling rather than deciding the backlog is finished"
+    stop_dispatcher
+    ;;
+
+  status_parked_beside_working)
+    make_fixture ok
+    # THE SEPARATION, which is the state a person actually meets: a drain that
+    # ended with one outstanding leaves ONE parked worktree beside one that is
+    # still being written. #37 asks `status` to name the parked one separately
+    # from the working one, and every phase that touched this planted a single
+    # worktree -- so the naming was asserted and the separation never was. A
+    # `status` that printed the reason and the recovery line against every row
+    # would have passed all of them, and it tells a person to go and discard
+    # what an agent is writing. armaatus/autofleet#71.
+    mkdir -p "$AUTOFLEET_DIR/worktrees" "$WORK/wt99"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/worktrees/99"
+    worktree_list "42:wt" "99:wt99"
+    # #42 is parked -- its removal was refused, the one reason that needs no
+    # agent check -- and #99 CARRIES A MARKER TOO, with its agent mid-work.
+    #
+    # The marker on #99 is what makes this phase about the sentence its comment
+    # names. With no marker, `why_parked 99` returns 1 and `parked_for_person`
+    # returns before the agent gate is ever reached -- delete the gate and the
+    # phase still passed, so it asserted the separation and not the reason for
+    # it. `held-99` is the ordinary case: a worktree whose issue went blocked
+    # with a commit in it, while its agent is still writing.
+    # Found by `/mattpocock-skills:code-review`.
+    : >"$AUTOFLEET_DIR/stuck-42"
+    : >"$AUTOFLEET_DIR/held-99"
+    python3 -c '
+import json, sys
+print(json.dumps({"result": {"worktrees": [
+    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
+    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
+' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    dispatcher_running
+    in_fleet record_dispatcher
+    out="$(in_fleet cmd_status 2>&1)"
+
+    # Both are listed...
+    grep -q -- "#42" <<<"$out" || fail "status dropped the parked worktree: $out"
+    grep -q -- "#99" <<<"$out" || fail "status dropped the working worktree: $out"
+    # ...and exactly one of them carries a reason and a recovery line.
+    n="$(grep -c "waiting for you" <<<"$out" || true)"
+    [ "$n" = 1 ] \
+      || fail "$n of 2 worktrees were named as waiting for a person; only the parked one is: $out"
+    grep -q "$WORK/wt99" <<<"$(grep -A2 -- "#42" <<<"$out")" \
+      && fail "the parked worktree's recovery line points at the working one: $out"
+    # The recovery line is the parked worktree's, by path -- so a `status` that
+    # printed one recovery line for the whole listing cannot pass this.
+    recovery="$(grep "worktree remove --force\|status --short" <<<"$out" || true)"
+    grep -q "'$WORK/wt'" <<<"$recovery" \
+      || fail "the parked worktree got no recovery line naming its own directory: $out"
+    grep -q "wt99" <<<"$recovery" \
+      && fail "status handed a person a recovery line for a directory an agent is writing to: $out"
+    echo "ok: a parked worktree is named with its reason and its recovery line, beside a working one that is not"
+    ;;
+
   drain_parked_counted_once)
     # Two markers, ONE worktree. `reap_merged` keeps a merged worktree owned as
     # `merge-blind-42` when its upstream was pruned, and `reap_abandoned` can
@@ -2088,6 +2311,31 @@ DRIVER
       || fail "a runner that would not say what its agents are doing left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
     echo "ok: ...and says so rather than stalling in silence"
 
+    # ...AND ON THE SCREEN, which is the channel #37 asks for. This function
+    # returns its count on STDOUT and the poll reads it through
+    # `parked="$(count_parked_owned)"`, so a `say` here would land inside
+    # `$parked` -- which is why the callsite is `>/dev/null` and why the one
+    # message the issue asks for reached `fleet.log` alone, never the terminal
+    # running `fleet.sh run --auto`, while every other line in the poll body
+    # appeared on screen. The phase asserting it against the log was green on the
+    # wrong channel. armaatus/autofleet#71.
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    : >"$AUTOFLEET_DIR/held-42"
+    printf 'not json' >"$ORCA_PS"
+    # `2>&1 >/dev/null` in that ORDER: stderr onto the capture, then stdout away.
+    onscreen="$(in_fleet count_parked_owned 2>&1 >/dev/null)"
+    grep -q "could not read the agent states" <<<"$onscreen" \
+      || fail "the warning about an unbounded drain goes to the log and nowhere a person watching the dispatcher can see it: [$onscreen]"
+    echo "ok: ...on the operator's screen and not only in the log"
+    # ...and STDOUT still carries nothing but the count, or the poll's next line
+    # is arithmetic on a sentence.
+    rm -f "$AUTOFLEET_DIR/ps-blind-42"
+    n="$(in_fleet count_parked_owned 2>/dev/null)"
+    case "$n" in ''|*[!0-9]*) fail "the count the poll reads is not a number: [$n]" ;; esac
+    echo "ok: ...and the count the poll reads is still a bare number"
+    agent_state idle
+    rm -f "$AUTOFLEET_DIR/held-42" "$AUTOFLEET_DIR/ps-blind-42"
+
     # MERGE-HELD AND MERGE-BLIND ARE GATED TOO. They were reached only when a
     # `held-`/`git-blind-` marker was also on disk, so they were counted with no
     # agent check -- and `reap_merged`'s own comment says why that tree is dirty:
@@ -2152,6 +2400,98 @@ DRIVER
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever:: $out"
     echo "ok: ...and all five keep-markers count"
+
+    # ...AND THE TWO BLIND MARKERS ARE GATED ON A WORKING AGENT TOO, which
+    # nothing armed. `held-` and `merge-held-` were pinned with `agent_state
+    # working`; `git-blind-` and `merge-blind-` never were, so the gate they
+    # shared could have stopped applying to them and the suite would have said
+    # nothing. It could, and it nearly did: the gate matched the human sentence
+    # `why_parked` prints, so rewording the blind line took the check off BOTH of
+    # these at once. `merge-blind-` is the marker `reap_merged` writes in the
+    # window its own comment says an agent is making review fixes.
+    # armaatus/autofleet#71.
+    for marker in git-blind merge-blind; do
+      rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+            "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+            "$AUTOFLEET_DIR"/stuck-*
+      agent_state working
+      : >"$AUTOFLEET_DIR/$marker-42"
+      in_fleet count_parked_owned >/dev/null 2>&1
+      [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+        || fail "$marker-42 counted as waiting for a person while its agent is WORKING, and the dispatcher would sign off on top of it"
+      agent_state idle
+      in_fleet count_parked_owned >/dev/null 2>&1
+      [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+        || fail "$marker-42 with an idle agent did not count, so the drain waits forever"
+    done
+    echo "ok: ...and both blind markers are gated on the agent, in each direction"
+
+    # ...AND THE GATE SURVIVES THE SENTENCE BEING REWORDED, which is the
+    # assertion that would have failed before the gate was re-keyed and the only
+    # one that can: the change is behaviour-identical, so every outcome row
+    # above passes on revert. The old `case` matched `$reason` -- the human line
+    # `why_parked` prints -- so editing that line silently switched the gate off
+    # and the worktree counted as waiting for a person while its agent wrote.
+    # Rewording it in the fixture's own copy of fleet.sh is the fixture for that.
+    # armaatus/autofleet#71, and found by `/mattpocock-skills:code-review` of the
+    # change that claimed this without asserting it.
+    # THE `printf` ONLY, not every occurrence of the sentence: a blanket
+    # replace rewrites the old `case` pattern too, and then the prose-keyed gate
+    # still matches its own reworded prose and the row passes on revert. The
+    # fixture has to change what a PERSON reads and nothing else, which is
+    # exactly the edit the gate must survive.
+    sed -i.bak "s/printf 'git could not say what it holds/printf 'git will not say what is in there/" \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    grep -q "git will not say what is in there" "$WORK/repo/scripts/fleet/fleet.sh" \
+      || fail "the reword did not land, so this asserts nothing"
+    rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+          "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+          "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state working
+    : >"$AUTOFLEET_DIR/git-blind-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "rewording the sentence took the agent gate off git-blind-; the dispatcher would sign off with an agent still writing"
+    echo "ok: ...and rewording the reason a person reads does not switch the gate off"
+    # ...AND REORDERING THE REASONS DOES NOT EITHER. The gate briefly keyed on
+    # the ABSENCE of `stuck-`, which is the same answer only while `stuck-` is
+    # the first entry in $PARK_MARKERS -- so a sixth reason added above it would
+    # have ungated all five in silence. Moving `git-blind` to the front of that
+    # list is the fixture for exactly that edit: precedence changes, and whether
+    # `git-blind-` is gated must not. Found by `/mattpocock-skills:code-review`.
+    sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="git-blind stuck merge-held held merge-blind"/' \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    grep -q '^PARK_MARKERS="git-blind ' "$WORK/repo/scripts/fleet/fleet.sh" \
+      || fail "the reorder did not land, so this asserts nothing"
+    # BOTH MARKERS, which is what makes this row distinguish the two keyings.
+    # With `git-blind` first the reason IS `git-blind`, which is gated; the
+    # absence-keyed version asks only whether `stuck-` is on disk, finds it, and
+    # counts the worktree with its agent mid-work.
+    rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+          "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+          "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state working
+    : >"$AUTOFLEET_DIR/git-blind-42"
+    : >"$AUTOFLEET_DIR/stuck-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "the gate asked whether stuck- is on disk rather than which reason this is, so a reason ahead of stuck- is counted with its agent mid-work"
+    echo "ok: ...and neither does reordering them"
+    sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="stuck merge-held held merge-blind git-blind"/' \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/stuck-* \
+          "$AUTOFLEET_DIR"/parked-since-*
+    agent_state idle
+    # ...and put the fixture back, or every row after this one runs against a
+    # fleet.sh this phase edited and an agent it left working.
+    sed -i.bak "s/printf 'git will not say what is in there/printf 'git could not say what it holds/" \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state idle
 
     # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
     # worktree as waiting for someone and then never naming it is worse than not
@@ -2275,6 +2615,21 @@ print(json.dumps({"result": {"worktrees": [
       || fail "it ended without naming what is parked: $(cat "$WORK/run.log")"
     grep -q "#42" "$WORK/run.log" || fail "it did not name which: $(cat "$WORK/run.log")"
     echo "ok: ...and names it on the way out"
+    # ...AS ITS LAST LINES, which is what #37's third acceptance bullet asks and
+    # what it got one line short of. The naming block ran inside the loop and
+    # `fleet down: $reason` printed after it -- and `$reason` carries a COUNT
+    # ("and 1 worktree(s) are waiting for you"), not which issue and not the
+    # command that releases it. A reader stops at the last line. Nothing pinned
+    # the ordering, because this phase greps the whole log.
+    # armaatus/autofleet#71.
+    down="$(grep -n "fleet down" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    named="$(grep -n -- "#42 --" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    freed="$(grep -n "worktree remove --force" "$WORK/run.log" | tail -1 | cut -d: -f1)"
+    [ -n "$down" ] && [ -n "$named" ] && [ -n "$freed" ] \
+      || fail "the farewell, the name or the release command is missing: $(cat "$WORK/run.log")"
+    [ "$named" -gt "$down" ] && [ "$freed" -gt "$named" ] \
+      || fail "\`fleet down\` is the last line a person reads, and it carries a count rather than which issue or how to free it (down=$down named=$named freed=$freed): $(cat "$WORK/run.log")"
+    echo "ok: ...as its LAST lines, naming the issue and the command that frees it"
     [ -d "$WORK/wt" ] \
       || fail "it released the parked worktree, which is what parking exists to prevent"
     echo "ok: ...and leaves it alone"
@@ -2902,6 +3257,45 @@ JSON
     echo "ok: ...and says itself again once the interval has passed"
     ;;
 
+  waiting_names_foreign)
+    make_fixture ok
+    # THE DASH BRANCH, which is the branch the hold is about. `live_worktrees`
+    # writes `-` for a worktree with no linked issue -- hand-opened, or another
+    # repository's -- and that is precisely the one a person most needs named,
+    # because it is the one nobody in this repository can close. #31/#46 were
+    # holds that could not say which kind they were waiting on; nothing passed a
+    # `-` through `waiting_worktrees` until now.
+    #
+    # And the two readers of one listing have to agree. `cmd_status` printed
+    # `#-` for such a worktree while the hold printed its basename, so the line
+    # a person reads on screen and the line in the log named the same directory
+    # two ways. armaatus/autofleet#71.
+    worktree_list "42:wt" "-:handmade"
+    named="$(in_fleet waiting_worktrees "$(in_fleet live_worktrees)")"
+    grep -q "handmade" <<<"$named" \
+      || fail "the hold does not name the worktree nobody here can close: [$named]"
+    grep -q -- "#-" <<<"$named" \
+      && fail "the hold printed a dash where a person needs a name: [$named]"
+    grep -q -- "#42" <<<"$named" \
+      || fail "the linked worktree stopped being named by its issue: [$named]"
+
+    dispatcher_running
+    in_fleet record_dispatcher
+    out="$(in_fleet cmd_status 2>&1)"
+    grep -q -- "#-" <<<"$out" \
+      && fail "status prints a bare dash for a worktree the hold names by its directory: $out"
+    # ANCHORED ON THE LABEL COLUMN. A bare `grep handmade` is satisfied by the
+    # PATH column beside it, so a `cmd_status` that still rendered `#-` in the
+    # label and printed the path unchanged would pass -- which is the row
+    # asserting nothing that this phase exists to stop.
+    # Found by `/mattpocock-skills:code-review`.
+    grep -q "^  handmade " <<<"$out" \
+      || fail "status does not name the unlinked worktree the way the hold does: $out"
+    grep -q -- "#42" <<<"$out" \
+      || fail "status stopped naming the linked worktree by its issue: $out"
+    echo "ok: an unlinked worktree is named by its directory, in the hold and on screen"
+    ;;
+
   foundation_waiting_once)
     # THE OTHER HOLD: a foundation CANDIDATE declining to join ordinary
     # worktrees. It is the older of the two and it had no phase at all, which is
@@ -3349,8 +3743,8 @@ JSON
   foundation_cli_blind)
     # ...and the same when the worktree list itself will not answer. There is
     # then nothing to reason from at all -- not even the count -- so holding is
-    # the only honest answer. `live_count` already refuses to guess from this
-    # shape; this is the same refusal one question later.
+    # the only honest answer. `live_worktrees` already refuses to guess from
+    # this shape; this is the same refusal one question later.
     make_fixture ok
     # A list that comes back in a shape nothing can read, which is what the
     # dispatcher actually sees when the CLI half-answers -- the stub's
@@ -4356,6 +4750,26 @@ JSON
     reapable_worktree_at "$launched"
     echo '[{"number":9,"body":"Closes #148"}]' >"$GH_PRS"
     echo 9 >"$GH_MERGED"
+    # THE REAP RUNS ON THE PASSES AFTER THE CAP, asserted before the exit rather
+    # than inferred from it. #36's bullet asks for this by name; what shipped
+    # asserted the run ENDS, which is a different property -- a cap that stopped
+    # reaping as well as launching fails that assertion as a TIMEOUT, read as
+    # "some other failure" rather than as the reap having stopped. The say at the
+    # latch promises "still reaping what is in flight"; this is the line that
+    # holds it to it. armaatus/autofleet#71.
+    # `wait_for_log` calls `fail` itself, so it needs no `|| fail` here: the
+    # absence of this line IS "the cap stopped reaping as well as launching".
+    wait_for_log "is merged; marking it done"
+    # `awk 'NR==1'`, NOT `head -1`: `head` exits on line one, `grep` dies of
+    # EPIPE, and `set -o pipefail` makes the pipeline 141 -- on a long enough log
+    # only, which is green on a Mac and red in CI. It is CLAUDE.md's `grep -q`
+    # rule one construct over, and these were the only `head -1 |` in tests/.
+    # Found by `/mattpocock-skills:code-review`.
+    latched="$(grep -n "launching nothing more" "$WORK/run.log" | awk -F: 'NR==1{print $1}')"
+    reaped="$(grep -n "is merged; marking it done" "$WORK/run.log" | awk -F: 'NR==1{print $1}')"
+    [ -n "$latched" ] && [ "$reaped" -gt "$latched" ] \
+      || fail "the reap ran before the cap latched the drain (latch line $latched, reap line $reaped), so this asserts nothing about the passes after it: $(cat "$WORK/run.log")"
+    echo "ok: the reap still runs on the passes after the cap"
     run_ended "$HELD_PID" \
       || fail "the run never ended after its one PR merged -- \`wanted\` still holds #148 because the prune lives inside the loop the drain just closed: $(cat "$WORK/run.log")"
     HELD_PID=""
@@ -4512,7 +4926,7 @@ JSON
     # One worktree of ours, one belonging to a different repository entirely --
     # which is the ordinary state of a machine running more than one fleet.
     worktree_list "42:wt" "7:foreign:other"
-    n="$(in_fleet live_count 2>&1)"
+    n="$(gate_count 2>&1)"
     [ "$n" = 1 ] \
       || fail "counted $n live worktree(s); another repo's worktree is taking a slot from MAX_WORKTREES"
     grep -q -- "--repo path:$WORK/repo" "$ORCA_CALLS" \
@@ -4542,7 +4956,7 @@ JSON
 [{"number":196,"title":"the foundation one","body":"","labels":[{"name":"ready"},{"name":"foundation"}]}]
 JSON
     worktree_list "198:foreign:other"
-    n="$(in_fleet live_count 2>&1)"
+    n="$(gate_count 2>&1)"
     [ "$n" = 0 ] \
       || fail "counted $n live worktree(s) with only another repo's open, so the foundation gate never opens"
     out="$(in_fleet foundation_in_flight 2>&1)"; rc=$?
@@ -4590,6 +5004,38 @@ GITSTUB
     [ "$sel" = "path:$WORK/repo" ] \
       || fail "an unusable answer from git was passed to the CLI as a selector: [$sel]"
     echo "ok: git answering unusably falls back to this checkout, not to a selector the CLI refuses"
+    ;;
+
+  selector_relative_common)
+    make_fixture ok
+    # THE RULE, not one way to break it. `--repo path:` needs an ABSOLUTE root,
+    # and the guard used to be a denylist -- empty, or a leading dash -- which
+    # reaches the fallback only because the local `dirname` happens to refuse
+    # `--path-format=absolute`. A git that answers the common dir RELATIVELY --
+    # which is what `--git-common-dir` prints without `--path-format`, the very
+    # option the pre-2.31 case above is about not having -- makes `dirname`
+    # answer `.`: non-empty, no leading dash, and `path:.` goes to the CLI,
+    # which is the same permanent `repo_not_found` stall the selector exists to
+    # prevent. Matching a leading slash states the requirement instead.
+    # armaatus/autofleet#71.
+    real_git="$(command -v git)"
+    cat >"$WORK/bin/git" <<GITSTUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in --git-common-dir) printf '.git\n'; exit 0 ;; esac
+done
+exec "$real_git" "\$@"
+GITSTUB
+    chmod +x "$WORK/bin/git"
+    sel="$( cd "$WORK/repo" && PATH="$WORK/bin:$PATH" bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh >/dev/null 2>&1
+      orca_resolve_repo_selector
+    ' 2>&1 )"
+    [ "$sel" = "path:$WORK/repo" ] \
+      || fail "a relative common dir became a selector the CLI refuses: [$sel]"
+    echo "ok: a selector that is not an absolute root reaches the fallback"
     ;;
 
   create_scoped)
@@ -5167,6 +5613,14 @@ JSON
     ;;
 
   *)
-    echo "usage: tests/test_fleet.sh foundation_holds|foundation_break_is_local|foundation_resays|foundation_waiting_once|foundation_closed_frees|foundation_cold_start|foundation_restart_speaks|foundation_launch_held|foundation_said_once|foundation_one_lookup|foundation_frees|foundation_none|foundation_blind|foundation_cli_blind|create_says|create_warns|card_says|card_quiet|remove_forces|remove_advice|remove_keeps_stack|remove_sweeps_stack|merged_keeps_dirty|merged_keeps_owned|merged_unknown_git|merged_cli_silent|remove_scoped_sweep|stall_expected|stall_reports|timebox_waits|timebox_stops|queue_skips|list_declines|timebox_rearms|labels_unknown|outage_once|one_lookup|timebox_clears|stop_clears|own_clears|one_card|abandon_blocked|abandon_closed|abandon_human_step|abandon_keeps_dirty|abandon_keeps_commits|abandon_unknown_git|abandon_leaves_working|abandon_timebox|gaveup_not_restarted|gaveup_retry|abandon_warns_first|abandon_warned_saved|abandon_two_keeps|gaveup_pruned|list_says_declined|abandon_reason_flickers|abandon_lookup_blind|status_stale|status_current|status_unrecorded|status_from_worktree|status_draining|status_stopped|status_drained|status_behind|status_behind_revert|status_unreadable|status_names_root|run_refuses|run_stale_recycled|run_stale_gone|status_recycled|stop_spares_stranger|stop_stops_dispatcher|run_blind_ps|status_blind_ps|stop_blind_ps|drain_ends_on_merge|drain_after_stop|stop_writes_drain|stop_now_writes_both|drain_lets_agents_finish|stop_freezes_agents|drain_launches_nothing|resume_clears_both|stop_drain_blind_dispatcher|runner_stub|runner_unresolved|selector_git_unusable|create_scoped|live_scoped|foundation_foreign|status_worktree_scope|reap_blind_upstream|poll_empties_cache|restart_after_parked_drain|drain_parked_counted_once|drain_ends_with_parked|status_keeps_cache|cap_ends_on_merge|priority_first|status_priority|priority_renamed|budget_idle_pass|budget_scales|budget_pr_list_once|budget_pr_list_blind|budget_pr_list_fresh_per_pass|budget_ready_list_blind|budget_ready_list_once|budget_pr_list_truncated|budget_listing_before_launch|budget_launch_cost|budget_pr_page_speaks|budget_busy_pass|budget_status_says_blind|budget_pass_signal|budget_status_says_backlog_blind|budget_status_one_listing|budget_ready_blind_speaks|budget_status_keeps_said|budget_list_mode_no_listing|budget_drain_no_listing" >&2
+    # NOT A SECOND REGISTRY. This used to spell out every phase, and it was
+    # already ten names behind `tests/run.sh` before this change added five more
+    # -- a list nothing reads and nothing checks. The fleet row of SUITES in
+    # tests/run.sh is the registry `evals/lint.sh` asserts against, so that is
+    # where a reader is sent. Found by `/mattpocock-skills:code-review`, which
+    # reported the drift; the copy is the reason for the drift.
+    echo "usage: tests/test_fleet.sh <phase>" >&2
+    echo "  the phases are the \`fleet:\` row of SUITES in tests/run.sh --" >&2
+    echo "  one registry, which is what evals/lint.sh checks against." >&2
     exit 2 ;;
 esac

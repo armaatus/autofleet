@@ -379,6 +379,34 @@ stub_reviewer() {
   ENV_FILE="$WORK/reviewer-env"
   : >"$ENV_FILE"
   export ENV_FILE
+  # THE WORK THE WRAPPER STARTS, as a script under $WORK rather than a bare
+  # `sleep 3607`. Two phases decide whether the kill reached the reviewer's own
+  # child by asking `pgrep -f "sleep 3607"` -- a question about the WHOLE
+  # MACHINE. Any unrelated `sleep 3607` (another worktree, another run of this
+  # suite, a stray left by a killed phase) answered for the fixture, and the
+  # phase failed with "the wedged reviewer's own child outlived the kill" about
+  # a process it had never started. Verified both ways in armaatus/autofleet#42:
+  # green on a clean machine, red with one unrelated sleep running, and read by
+  # a reviewer as pre-existing breakage rather than as contamination -- which is
+  # the defect, because the phase cannot tell the two apart. $WORK is this
+  # phase's own mktemp directory, so a pgrep on this path can match nothing
+  # else. NOT a prefix of `fake-reviewer`, or `-f` would match the wrapper too
+  # and the two assertions would answer for each other.
+  # armaatus/autofleet#71.
+  REVIEWER_WORK="$WORK/bin/reviewer-work"
+  cat >"$REVIEWER_WORK" <<'CHILD'
+#!/usr/bin/env bash
+# `exec -a "$0"`, so THIS PROCESS IS THE SLEEP rather than a shell waiting on
+# one. The assertion is about the LEAF the wrapper started -- with a shell in
+# between, a scoped `pgrep` matches only the shell and an orphaned `sleep` is
+# neither caught nor reaped, which moves the check one process up instead of
+# scoping it. argv is then `<path> 3607`: the path scopes it to this fixture and
+# the distinctive duration is still there for a human reading `ps`.
+# Found by `/code-review`.
+exec -a "$0" sleep 3607
+CHILD
+  chmod +x "$REVIEWER_WORK"
+  export REVIEWER_WORK
   cat >"$WORK/bin/fake-reviewer" <<STUB
 #!/usr/bin/env bash
 printf 'ran\n' >>"$REVIEWER_CALLS"
@@ -439,7 +467,7 @@ PY
   # what review.sh signals -- and a kill that reaps only the direct child leaves
   # it running. The sleep is given a distinctive duration so a test can tell the
   # wrapper's death from the work's.
-  hang)   sleep 3607 ;;
+  hang)   "$REVIEWER_WORK" ;;
   # NOTE: no default arm, deliberately-for-now. An unknown mode falls through and
   # behaves like \`silent\`, which is how \`stub_reviewer submits\` -- a mode that
   # was never defined -- read as the opposite of what it did. Adding
@@ -619,6 +647,15 @@ await() {
 }
 
 run_it() { (cd "$WORK/repo" && ./scripts/fleet/review.sh "$@"); }
+
+# `pgrep -f` MATCHES AN EXTENDED REGEX, not a fixed string, and the strings these
+# phases hand it are `mktemp` paths. A `+` anywhere in the temp directory -- and
+# on macOS `$TMPDIR` is a generated component nobody chose -- makes the pattern
+# match NOTHING, and every use here is `pgrep … && fail`, so a pattern that
+# cannot match reports the absence it was asked to prove. A guard that passes
+# because it stopped asking is the shape armaatus/autofleet#71 is about, in a
+# phase added for #71. Found by `/code-review` of the branch.
+ere() { printf '%s' "$1" | sed 's/[][(){}.*+?^$|\\]/\\&/g'; }
 
 # ------------------------------------------------ the delta-scope helpers (#65)
 #
@@ -842,6 +879,168 @@ import merge_gate; print(merge_gate.review_mode())'); }
   ok "...and submits nothing"
   ;;
 
+# -------------------------------------------------------------- refund_paths
+  refund_paths)
+  # THE OTHER FOUR REFUND CALLSITES. `review.sh` refunds an unspent attempt
+  # through two helpers, and which one is right depends on whether `head` has
+  # been resolved yet: `unspent_try` matches on the head, `unspent_try_any`
+  # decrements whatever head the marker names, and the pre-head exits need the
+  # second because there is no head to match against. Three separate review
+  # rounds got one path or another wrong.
+  #
+  # Only two callsites were pinned -- the `stopped` phase above -- and they are
+  # the two that shipped the wrong helper and were caught by it. At the rest,
+  # SWAPPING THE TWO HELPERS LEFT THE SUITE GREEN, because with the marker
+  # naming the run's own head both forms refund identically. So every block here
+  # arms the marker with a head that is NOT the run's, which is the only fixture
+  # that tells them apart: the head-matching form must refund NOTHING and the
+  # blind form must decrement. Each block then re-arms on the right head to show
+  # a refund happens at all.
+  #
+  # What a missing refund costs is quiet and cumulative: an attempt never spent
+  # counts against AUTOFLEET_REVIEW_MAX_TRIES, so a PR reaches the cap early and
+  # stops being reviewed with a line in a log nobody reads.
+  # armaatus/autofleet#71.
+  make_fixture; stub_reviewer marked
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  MARKER="$AUTOFLEET_DIR/reviewing/42"
+  OTHER_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+
+  arm_try()   { printf '%s 2\n' "$1" >"$MARKER.tries"; }
+  # `2>/dev/null` BEFORE the redirection it is there for, per CLAUDE.md: with it
+  # second, a missing marker still prints bash's own open failure.
+  tries_now() { local h n; read -r h n 2>/dev/null <"$MARKER.tries" || n=gone; printf '%s' "${n:-gone}"; }
+  as_dispatcher() { (cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" ./scripts/fleet/review.sh "$@" 2>&1); }
+
+  # ---- 1. the head GitHub holds cannot be read. PRE-head: refund blind.
+  printf '' >"$GH_HEAD"
+  arm_try "$OTHER_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$rc" = 2 ] || fail "an unreadable PR head exited $rc rather than 2: $out"
+  [ "$(tries_now)" = 1 ] \
+    || fail "an unreadable head did not refund blind; \`unspent_try\` there matches a head this run never read, and refunds nothing (tries now $(tries_now))"
+  ok "an unreadable PR head refunds the try the dispatcher spent, whatever head the marker names"
+  printf '%s' "$PR_HEAD" >"$GH_HEAD"
+
+  # ---- 2. merge_gate.py will not import. POST-head: match on the head.
+  cp "$WORK/repo/.github/scripts/merge_gate.py" "$WORK/merge_gate.py.working"
+  printf 'def independent_reviews(  # unbalanced\n' >"$WORK/repo/.github/scripts/merge_gate.py"
+  arm_try "$OTHER_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$rc" = 2 ] || fail "a merge_gate.py that will not import exited $rc rather than 2: $out"
+  [ "$(tries_now)" = 2 ] \
+    || fail "it refunded against a head that is not this run's; \`.tries\` is per head and the blind form does not belong at a post-head exit (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  out="$(as_dispatcher 42)"; rc=$?
+  [ "$(tries_now)" = 1 ] \
+    || fail "a broken merge_gate.py spent a try no reviewer ever used: $out (tries now $(tries_now))"
+  ok "a merge_gate.py that will not import refunds this head's try, and only this head's"
+  cp "$WORK/merge_gate.py.working" "$WORK/repo/.github/scripts/merge_gate.py"
+
+  # ---- 3. the reviewer command is not on PATH. POST-head.
+  arm_try "$OTHER_HEAD"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" \
+            AUTOFLEET_REVIEW_CMD=not-a-reviewer-on-this-machine \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$rc" = 6 ] || fail "a missing reviewer command exited $rc rather than 6: $out"
+  [ "$(tries_now)" = 2 ] \
+    || fail "the missing-reviewer exit refunded against another head's count (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  out="$( cd "$WORK/repo" && AUTOFLEET_REVIEW_MARKER="$MARKER" \
+            AUTOFLEET_REVIEW_CMD=not-a-reviewer-on-this-machine \
+            ./scripts/fleet/review.sh 42 2>&1 )"; rc=$?
+  [ "$(tries_now)" = 1 ] \
+    || fail "no reviewer on PATH spent a try; a host with the knob unset retires the head in three polls: $out (tries now $(tries_now))"
+  ok "a reviewer command that is not on PATH refunds this head's try, and only this head's"
+
+  # ---- 4. a stop that appears MID-review. POST-head, and the one the
+  # dispatcher heals for itself -- `stop_reviewers` deletes the records -- so
+  # only a hand-started run depends on this.
+  stub_reviewer hang
+  # `exec`, for the reason spelled out at the trap below: without it the signal
+  # and the exit code belong to a wrapper that carries no trap.
+  stopped_mid_review() {
+    : >"$REVIEWER_CALLS"
+    rm -f "$AUTOFLEET_DIR/STOP"
+    ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+        AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out" 2>&1 &
+    runner=$!
+    await n_started 1 60 || fail "the reviewer never started, so the mid-review path was never reached"
+    : >"$AUTOFLEET_DIR/STOP"
+    wait "$runner"; rc=$?
+    rm -f "$AUTOFLEET_DIR/STOP"
+    [ "$rc" = 3 ] || { cat "$WORK/out" >&2; fail "a stop mid-review exited $rc rather than 3"; }
+  }
+  arm_try "$OTHER_HEAD"
+  stopped_mid_review
+  [ "$(tries_now)" = 2 ] \
+    || fail "the mid-review stop refunded against a head that is not this run's (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  stopped_mid_review
+  [ "$(tries_now)" = 1 ] \
+    || fail "a reviewer killed by a stop was charged for a run it never finished (tries now $(tries_now))"
+  ok "a stop that lands mid-review refunds this head's try, and only this head's"
+
+  # ---- 5. the TERM/INT trap: a person pressing Ctrl-C at the terminal. Nothing
+  # heals this one -- there is no dispatcher to delete the record.
+  # `exec`, so `$!` IS review.sh and not a subshell wrapping it. Without it the
+  # TERM reached the wrapper, which died at 143 on its own -- the exit code this
+  # phase wanted, from a process that has no trap -- while review.sh carried on
+  # and refunded nothing. The refund assertion is what caught that; the rc alone
+  # passed either way, which is this phase's own subject one level up.
+  termed_mid_review() {
+    : >"$REVIEWER_CALLS"
+    ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+        AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out2" 2>&1 &
+    runner=$!
+    await n_started 1 60 || fail "the reviewer never started, so the trap was never armed"
+    kill -TERM "$runner" 2>/dev/null || true
+    wait "$runner"; rc=$?
+    [ "$rc" = 143 ] || { cat "$WORK/out2" >&2; fail "a TERM mid-review exited $rc rather than 143"; }
+  }
+  arm_try "$OTHER_HEAD"
+  termed_mid_review
+  [ "$(tries_now)" = 2 ] \
+    || fail "the TERM trap refunded against a head that is not this run's (tries now $(tries_now))"
+  arm_try "$PR_HEAD"
+  termed_mid_review
+  [ "$(tries_now)" = 1 ] \
+    || fail "a reviewer interrupted at the terminal was charged for a run nobody let finish (tries now $(tries_now))"
+  ok "a TERM mid-review refunds this head's try, and only this head's"
+
+  # ...AND THE OTHER HALF OF `trap ... TERM INT`. The trap names two signals and
+  # only TERM was ever sent, so dropping `INT` from the list left the suite
+  # green -- while INT is the signal a person at the terminal actually sends.
+  # Same handler, so this pins the SIGNAL LIST rather than the refund logic.
+  # Found by `/mattpocock-skills:code-review`. armaatus/autofleet#71.
+  arm_try "$PR_HEAD"
+  : >"$REVIEWER_CALLS"
+  # `set -m` AROUND THE LAUNCH, and it is the whole reason this row can exist.
+  # A command started with `&` by a shell WITHOUT job control has SIGINT set to
+  # IGNORE -- POSIX -- so the trap never runs and the first spelling of this row
+  # died at the timeout instead. Job control gives the job its own process group
+  # and leaves INT deliverable.
+  #
+  # ...AND THE SIGNAL GOES TO THE PID, not to `-$runner`. Signalling the group is
+  # what `tests/test_runner_bound.sh` does, and it needs the `setpgid` to have
+  # succeeded; under a `tests/run.sh` that is not the session leader it does not
+  # always, which printed `child setpgid: Operation not permitted` into the suite
+  # output on one run in four. The subshell `exec`s, so `$!` IS review.sh and the
+  # pid is the whole handle.
+  set -m
+  ( cd "$WORK/repo" && exec env AUTOFLEET_REVIEW_MARKER="$MARKER" \
+      AUTOFLEET_REVIEW_TIMEOUT=120 ./scripts/fleet/review.sh 42 ) >"$WORK/out2" 2>&1 &
+  runner=$!
+  set +m
+  await n_started 1 60 || fail "the reviewer never started, so the trap was never armed"
+  kill -INT "$runner" 2>/dev/null || true
+  wait "$runner"; rc=$?
+  [ "$rc" = 143 ] || { cat "$WORK/out2" >&2; fail "an INT mid-review exited $rc rather than 143, so the trap does not cover INT"; }
+  [ "$(tries_now)" = 1 ] \
+    || fail "an INT mid-review spent an attempt the trap's own signal list says it refunds (tries now $(tries_now))"
+  ok "...and an INT does the same, which is the signal a person at the terminal sends"
+  ;;
+
 # ------------------------------------------------------------------- stopped
   stopped)
   make_fixture; stub_reviewer marked
@@ -866,7 +1065,7 @@ import merge_gate; print(merge_gate.review_mode())'); }
     || fail "called the way the dispatcher calls it, a stopped fleet exited $rc rather than 3: $out"
   grep -q "unbound variable" <<<"$out" \
     && fail "the stopped path died on a shell variable instead of exiting 3: $out"
-  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  read -r _h n 2>/dev/null <"$AUTOFLEET_DIR/reviewing/42.tries" || n=""
   [ "${n:-}" = 1 ] \
     || fail "a stopped run did not refund the try the dispatcher spent before the spawn (tries now ${n:-gone})"
   ok "...and refunds the try the dispatcher spent, with the marker set"
@@ -906,7 +1105,7 @@ GHSTUB
   # still retired the head -- which is the failure this whole knob exists to
   # avoid, and which docs/CONFIGURATION.md and config.sh both promise against.
   # Found by the independent review.
-  read -r _h n <"$AUTOFLEET_DIR/reviewing/42.tries" 2>/dev/null || n=""
+  read -r _h n 2>/dev/null <"$AUTOFLEET_DIR/reviewing/42.tries" || n=""
   [ "${n:-}" = 1 ] \
     || fail "a gh that cannot name the repository spent a try; three outages a poll apart retire the head (tries now ${n:-gone})"
   ok "...and a gh that cannot name the repository exits 2 and refunds"
@@ -1096,14 +1295,14 @@ HOLDER
   # branch and everything above stays green. The midstop phase checks this; the
   # phase whose whole subject is the kill did not. Found by the independent
   # review.
-  pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+  pgrep -f "$(ere "$WORK/bin/fake-reviewer")" >/dev/null 2>&1 \
     && fail "the wedged reviewer is still running after the deadline"
   ok "...and the reviewer is gone, not merely given up on"
   # THE WORK, not the wrapper. Signalling the direct child reaps the stub and
   # orphans what it started -- which with any AUTOFLEET_REVIEW_CMD wrapper is the
   # agent holding this machine's gh login. Both this phase and midstop checked
   # only the wrapper. Found by the independent review.
-  pgrep -f "sleep 3607" >/dev/null 2>&1 \
+  pgrep -f "$(ere "$REVIEWER_WORK")" >/dev/null 2>&1 \
     && fail "the wedged reviewer's own child outlived the kill"
   ok "...and so is what it had started"
   ;;
@@ -1309,8 +1508,73 @@ HOLDER
       || fail "an empty marker did not read as zero, so the cap compares against nothing"
     [ "$(in_fleet_fn fleet_tries_count "$m.absent" abc123)" = 0 ] \
       || fail "an absent marker did not read as zero"
-    rm -f "$m"
     ok "...and fleet_tries_count answers with a number for junk, empty, absent and another head"
+
+    # ...AND THE OTHER READER OF THE SAME FORMAT AGREES WITH IT. `head n` was
+    # parsed by a bare `read -r` in three places, each free to decide what a
+    # corrupt count means: the refund defaulted a missing one to 1 and the
+    # counter normalised it to 0, by hand, five lines apart. One reader now, and
+    # this is the row that says the two answer the same question the same way.
+    # armaatus/autofleet#71.
+    printf 'abc123 two\n' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 0" ] \
+      || fail "the shared reader did not normalise a junk count: $(in_fleet_fn fleet_try_record "$m")"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ -e "$m" ] \
+      && fail "a junk count refunded to something rather than being dropped: $(cat "$m")"
+    ok "the refund and the count read one junk record the same way"
+
+    # A WRITE THAT CANNOT LAND IS NOT A WRITE THAT LANDED. The writer silences
+    # bash's own diagnostic -- a fleet that cannot write its bookkeeping must not
+    # die mid-poll -- and silencing the STATUS with it made `.tries` read 0
+    # forever: the cap never trips and the PR draws a reviewer every poll with
+    # nothing in the log. The two spawn gates say it; this is the row that says
+    # they can. Found by `/code-review`. armaatus/autofleet#71.
+    in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 \
+      && fail "a write into a directory that does not exist reported success, so the cap silently does not exist"
+    [ -z "$(in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 2>&1)" ] \
+      || fail "the failed write let bash's own diagnostic out: $(in_fleet_fn fleet_try_write "$WORK/no-such-dir/x.tries" abc123 1 2>&1)"
+    ok "...and a write that could not land says so, silently, to its caller"
+    # A RECORD WITH NO TRAILING NEWLINE, which is the shape a hand-written
+    # marker leaves -- and the behaviour change `fleet_try_record` was rewritten
+    # for. `read` returns non-zero at EOF with no delimiter as well as on a file
+    # it could not open, so the old `|| return 1` read this as unreadable: the
+    # count came back 0 and the refund refunded nothing. What decides is whether
+    # a HEAD came out. Found by `/mattpocock-skills:code-review`, which noted the
+    # comment claimed a fix nothing drove.
+    printf 'abc123 4' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 4" ] \
+      || fail "a record with no trailing newline read as unreadable: $(in_fleet_fn fleet_try_record "$m")"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 4 ] \
+      || fail "the cap counted 0 against a marker holding 4, so the cap silently does not exist"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 3" ] \
+      || fail "the refund refunded nothing against a marker with no trailing newline: $(cat "$m")"
+    ok "...and a record with no trailing newline is a record"
+
+    # A head with no count at all -- the shape a half-written marker leaves.
+    printf 'abc123\n' >"$m"
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 0" ] \
+      || fail "a record with no count did not read as zero: $(in_fleet_fn fleet_try_record "$m")"
+    [ "$(in_fleet_fn fleet_tries_count "$m" abc123)" = 0 ] \
+      || fail "the counter disagreed with the reader about a record with no count"
+    # ...and a record it cannot read at all is a failure, not `" 0"`.
+    : >"$m"
+    in_fleet_fn fleet_try_record "$m" >/dev/null 2>&1 \
+      && fail "an empty marker read as a record; every caller would then charge a try to an empty head"
+    in_fleet_fn fleet_try_record "$m.absent" >/dev/null 2>&1 \
+      && fail "an absent marker read as a record"
+    ok "...and a record with no head at all is a failure rather than an answer"
+    # The writer round-trips through the reader, which is what makes them one
+    # format rather than two that happen to agree today.
+    in_fleet_fn fleet_try_write "$m" abc123 4
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 4" ] \
+      || fail "what the writer wrote is not what the reader reads: $(cat "$m")"
+    in_fleet_fn fleet_try_refund "$m" abc123
+    [ "$(in_fleet_fn fleet_try_record "$m")" = "abc123 3" ] \
+      || fail "the refund did not write the record back in the format the reader reads: $(cat "$m")"
+    ok "...and the one writer round-trips through the one reader"
+    rm -f "$m"
 
     # THE KNOB THAT WAS REPLACED IS AN ERROR, NOT AN ALIAS. A host project that
     # tuned `AUTOFLEET_REVIEW_MAX_ROUNDS` meant "give this repository more
@@ -1566,6 +1830,19 @@ PY_FIX
     [ -e "$AUTOFLEET_DIR/reviewing/42.done" ] \
       && fail "a reviewer KILLED at the deadline wrote the done record, so that head is never reviewed again -- the silent block #33 exists to remove"
     ok "...and a reviewer killed at the deadline is not recorded as done"
+
+    # ...AND IT IS RETRIED, which is the property #33's Acceptance actually
+    # states. The absence of `.done` is the MECHANISM that produces the retry,
+    # so the row above infers the property from its cause -- exit 5 has the
+    # positive row (`await n_started 2`) and exit 7 had none, and a change that
+    # stopped the poll reaching a PR with no `.done` would pass it.
+    # armaatus/autofleet#71.
+    stub_reviewer marked
+    before="$(n_started)"
+    poll_review_open_prs
+    await n_started "$(( before + 1 ))" \
+      || fail "a reviewer killed at its deadline was never retried; #33 groups exit 5 and exit 7 as the two retryable cases"
+    ok "...and the next pass starts one"
     ;;
 
 # --------------------------------------------------------------------- capped
@@ -1721,12 +1998,88 @@ PY_FIX
   # this pull request is closed. The two halves of that rule are asserted in the
   # two places they differ. Found by the independent review.
   printf '3\n' >"$AUTOFLEET_DIR/reviewing/99.rounds"
+  # ONE GRACE PASS FIRST, and then a CONFIRMATION -- the two protections the
+  # transcript sweep has had since #70 and this one had neither of. It deleted
+  # as soon as a number was absent from `gh pr list --author "@me"`, which is
+  # right for deciding whom to review and wrong for "is this PR still open": on
+  # a host whose worktrees open PRs under another account, every one of them
+  # reads as closed. The file deleted is `<pr>.done`, and a `.done` deleted in
+  # error is the re-spawn loop #42 exists to remove, back for a poll.
+  # armaatus/autofleet#71.
+  poll_review_open_prs
+  for f in 99.done 99.said 99.tries 99.rounds; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      || fail "$f went on the pass its PR dropped off the listing; one blip in that listing is then a .done deleted under an open PR, which is the re-spawn loop"
+  done
+  ok "...and a closed PR's records survive the pass they become eligible on"
+
+  # ...and NOT AT ALL while GitHub says the pull request is open, whatever the
+  # author-scoped listing says. This is the protection the grace pass cannot
+  # give: a systematic mismatch is wrong on every pass, not just the first.
+  printf 'OPEN' >"$WORK/prstate"
+  GH_PR_STATE="$WORK/prstate" poll_review_open_prs
+  for f in 99.done 99.said 99.tries 99.rounds; do
+    [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
+      || fail "$f was deleted for a pull request GitHub says is OPEN, on the strength of an author-scoped listing that cannot answer that question"
+  done
+  ok "...and are never swept while GitHub says the PR is open"
+
+  # ...and go once it is graced AND confirmed. The stub's `--json state` arm
+  # answers CLOSED by default, which is the ordinary case: a PR that has merged.
+  poll_review_open_prs
   poll_review_open_prs
   for f in 99.done 99.said 99.tries 99.rounds; do
     [ -e "$AUTOFLEET_DIR/reviewing/$f" ] \
       && fail "a closed PR's $f survived the pass, so the directory grows for as long as the dispatcher lives -- and these are the files the count above reads"
   done
   ok "...and a closed PR's records are swept, .rounds included"
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-99" ] \
+    && fail "the grace marker outlived the records it graced; a number that comes round again is then swept with no grace at all"
+  ok "...and the grace marker goes with them"
+
+  # ...AND ONE `gh pr view --json state` PER PULL REQUEST PER PASS, however many
+  # sweeps ask. There are THREE -- `prune_review_logs` runs once for `reviews/`
+  # and once for `validations/`, and the record sweep adds `$REVIEWING_DIR` --
+  # each with its own grace marker, so on the passes they all ask, the same PR
+  # cost three identical calls. For the host the confirmation exists for, whose
+  # PRs are opened under another account and always answer OPEN, that is calls
+  # every poll per PR forever, which is what the alternation is there to avoid.
+  # The bound is the reason for asking at all. armaatus/autofleet#71.
+  #
+  # ALL THREE STORES ARE PLANTED, and an earlier version of this comment said
+  # two and planted two -- so the row held under a memo that was only per pair,
+  # which is the arithmetic the production header had already been corrected
+  # for. Found by `/mattpocock-skills:code-review`.
+  mkdir -p "$AUTOFLEET_DIR/reviews" "$AUTOFLEET_DIR/validations"
+  : >"$AUTOFLEET_DIR/reviews/pr-97-11111111.log"
+  : >"$AUTOFLEET_DIR/validations/pr-97-11111111.log"
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.done"
+  printf '%s 2\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.tries"
+  poll_review_open_prs                 # the grace pass: neither sweep asks
+  asked="$(grep -c "pr view 97 --json state" "$GH_CALLS" || true)"
+  [ "${asked:-0}" = 0 ] \
+    || fail "a PR was asked about on the pass it became eligible ($asked call(s)): $(grep 'pr view 97' "$GH_CALLS")"
+  : >"$GH_CALLS"
+  poll_review_open_prs                 # ...and the pass that does
+  asked="$(grep -c "pr view 97 --json state" "$GH_CALLS" || true)"
+  [ "${asked:-0}" = 1 ] \
+    || fail "the two sweeps each asked GitHub about PR 97 ($asked call(s) in one pass), so the bound the alternation buys is spent twice"
+  ok "...and one pass asks GitHub about a pull request once, however many sweeps want to know"
+
+  # ...AND A PR THAT COMES BACK LOSES ITS GRACE MARKER WITH IT. Absent on one
+  # pass (marker written), back on the listing the next -- reopened, or the
+  # listing flapped -- and then closed for good: with the marker still on disk
+  # the close costs no grace pass at all, and every record goes on the first
+  # absent pass on one `gh` answer. `prune_review_logs` clears it on this branch;
+  # this sweep did not. Found by `/code-review` of the branch.
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"},{"number":97,"isDraft":false,"headRefOid":"%s"}]\n' \
+    "$PR_HEAD" "$PR_HEAD" >"$GH_PRLIST"
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.done"
+  : >"$AUTOFLEET_DIR/reviewing/.closed-97"
+  poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-97" ] \
+    && fail "PR 97 is back on the open list and kept the marker saying it had already been seen closed; its records lose the grace pass when it really closes"
+  ok "...and a PR back on the open list drops the marker saying it was seen closed"
 
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a
@@ -1736,11 +2089,21 @@ PY_FIX
   # be signalled, and nothing guarantees a future record's first field is not
   # numeric. Said rather than asserted, because a phase claiming to pin it would
   # be the inert kind this suite has shipped twice.
+  # ...INCLUDING THE SWEEP'S OWN GRACE MARKER, which no glob over this directory
+  # can see -- it is a dotfile, which is what keeps the three loops that read
+  # every other entry as a lock away from it. `stop_reviewers` clears every
+  # record, so a marker it orphans costs that number its grace pass if it comes
+  # round again, which is the one thing the marker is for.
+  # Found by `/code-review` of this branch.
+  : >"$AUTOFLEET_DIR/reviewing/.closed-43"
   printf '3\n' >"$AUTOFLEET_DIR/reviewing/43.rounds"
   in_poll stop_reviewers >/dev/null 2>&1
   [ -e "$AUTOFLEET_DIR/reviewing/43.done" ] \
     && fail "stop_reviewers left 43.done behind, so the next dispatcher inherits a stale record"
   ok "...and a stop clears the records"
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-43" ] \
+    && fail "the grace marker outlived the records stop_reviewers deleted; no glob here can see it, so nothing else ever will"
+  ok "...and the grace marker no glob can see goes with them"
 
   # ...EXCEPT `.rounds`, and this is the assertion that rule did not have. The
   # exemption is one `case ... continue` inside a loop whose stated purpose is
@@ -2439,10 +2802,10 @@ PY2
     wait "$runner"; rc=$?
     [ "$rc" = 3 ] || { cat "$WORK/out" >&2; fail "a stop mid-review did not exit 3 (got $rc)"; }
     ok "a stop that appears mid-review kills the reviewer and exits 3"
-    pgrep -f "$WORK/bin/fake-reviewer" >/dev/null 2>&1 \
+    pgrep -f "$(ere "$WORK/bin/fake-reviewer")" >/dev/null 2>&1 \
       && fail "the reviewer is still running after the stop"
     ok "...and does not leave it running"
-    pgrep -f "sleep 3607" >/dev/null 2>&1 \
+    pgrep -f "$(ere "$REVIEWER_WORK")" >/dev/null 2>&1 \
       && fail "the reviewer's own child outlived the stop"
     ok "...nor anything it had started"
     ;;
@@ -2654,15 +3017,13 @@ $bad"
   # failure, no output and no name to read -- nine minutes of silence and exit
   # 143 in CI run 34658821929.
   #
-  # WHAT IT DOES NOT CATCH, said plainly because this file has twice been bitten
-  # by a phase that claimed more than it asserted: a write-time expansion that
-  # succeeds SILENTLY and eats text this does not name -- `\`date\``, `$HOME` --
-  # passes all four rows. Only two shapes are caught: one that writes to stderr,
-  # and the loss of the one line named below. The general case wants the written
-  # file compared against the heredoc body, which is worth doing and is not this
-  # change; it is noted on armaatus/autofleet#71 with the other guards aimed
-  # slightly off. Both review passes raised this, and narrowing the claim is the
-  # answer rather than leaving the comment to be believed.
+  # The four rows below catch two SHAPES -- a write-time expansion that writes to
+  # stderr, and the loss of one named line. They never caught the class: an
+  # expansion that succeeds SILENTLY and eats text they do not name -- `\`date\``,
+  # `$HOME` -- passed all four. The last row of this phase is the general
+  # assertion and is what the rest of it is now a cheap prefix of: the written
+  # file compared against the heredoc body in this file, byte for byte.
+  # armaatus/autofleet#71.
   make_fixture
   err="$WORK/stub-err"
   stub_reviewer marked 2>"$err"
@@ -2699,6 +3060,93 @@ $bad"
   grep -qF "$ARGV_FILE" "$WORK/bin/fake-reviewer" \
     || fail "the stub cannot record the argv; \$ARGV_FILE did not expand"
   ok "...and the prompt- and argv-capture paths are baked in, so both are assertable"
+
+  # THE CLASS, not two shapes of it. Reconstruct the stub from the heredoc body
+  # in THIS file and require the written stub to equal it byte for byte.
+  #
+  # The reconstruction is deliberately narrow, which is where the assertion
+  # comes from: an ALLOWLIST of the paths plus `$1` -- what the heredoc is
+  # unquoted FOR -- and nothing else. NOT "the five paths" or "the six": this
+  # sentence carried a count twice, and both times it was the count before the
+  # name that had just been added. The list is twenty lines below and is the one
+  # place to read it. Any other unescaped `$NAME`, any `$(`, any
+  # backtick is a failure by NAME rather than by its effect, so `$HOME` eating
+  # half a comment fails here whether or not it happens to be quiet, and so does
+  # the next construct nobody has thought of. The backtick that hung CI for nine
+  # minutes fails on row one of this check rather than by the suite going
+  # silent.
+  #
+  # `\$1` is an expansion too, and it is the stub's MODE: this phase wrote the
+  # stub with `marked`, so that is what the reconstruction substitutes.
+  STUB_SRC="${BASH_SOURCE[0]}" STUB_OUT="$WORK/bin/fake-reviewer" STUB_MODE=marked \
+  REVIEWER_CALLS="$REVIEWER_CALLS" PROMPT_FILE="$PROMPT_FILE" ARGV_FILE="$ARGV_FILE" \
+  GH_HEAD="$GH_HEAD" GH_REVIEWS="$GH_REVIEWS" REVIEWER_WORK="$REVIEWER_WORK" \
+  ENV_FILE="$ENV_FILE" \
+  python3 - <<'RECONSTRUCT' || fail "the written reviewer stub is not the heredoc body in $(basename "${BASH_SOURCE[0]}")"
+import os, re, sys
+
+src = open(os.environ["STUB_SRC"]).read()
+m = re.search(r'cat >"\$WORK/bin/fake-reviewer" <<STUB\n(.*?)\nSTUB\n', src, re.S)
+if not m:
+    sys.exit("could not find the stub heredoc in the source; this phase asserts nothing")
+body = m.group(1)
+
+# The paths the heredoc is unquoted for, and the mode. Adding a name here is a
+# deliberate act; anything not on the list is the failure.
+allowed = {n: os.environ[n] for n in
+           ("REVIEWER_CALLS", "PROMPT_FILE", "ARGV_FILE", "GH_HEAD", "GH_REVIEWS",
+            "REVIEWER_WORK", "ENV_FILE")}
+allowed["1"] = os.environ["STUB_MODE"]
+
+out, i = [], 0
+while i < len(body):
+    c = body[i]
+    # An unquoted heredoc's backslash escapes `$`, backtick and backslash, and
+    # is literal before anything else. Escaped text is text.
+    #
+    # `\<newline>` IS NOT IN THAT LIST: it is a line continuation, and BOTH
+    # characters come out -- where the other three leave the character behind.
+    # Folding it in with them put the newline back and failed a correct stub.
+    # Found by `/mattpocock-skills:code-review`.
+    if c == "\\" and i + 1 < len(body):
+        nxt = body[i + 1]
+        if nxt == "\n":
+            i += 2
+            continue
+        out.append(nxt if nxt in "$`\\" else c + nxt)
+        i += 2
+        continue
+    if c == "`":
+        sys.exit("an unescaped backtick in the stub heredoc: it runs as the stub "
+                 "is written. That is the nine-minute CI hang, at line %d"
+                 % (body[:i].count("\n") + 1))
+    if c == "$":
+        mm = re.match(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9])\}?", body[i:])
+        if not mm:
+            sys.exit("an unescaped `$` the allowlist cannot name at line %d: %r"
+                     % (body[:i].count("\n") + 1, body[i:i + 24]))
+        name = mm.group(1)
+        if name not in allowed:
+            sys.exit("`$%s` expands as the stub is written and is not one of the "
+                     "paths this heredoc is unquoted for (line %d). Escape it, or "
+                     "add it to the allowlist in the stubwrite phase."
+                     % (name, body[:i].count("\n") + 1))
+        out.append(allowed[name])
+        i += mm.end()
+        continue
+    out.append(c)
+    i += 1
+
+expected = "".join(out) + "\n"
+written = open(os.environ["STUB_OUT"]).read()
+if written != expected:
+    import difflib
+    diff = "".join(difflib.unified_diff(expected.splitlines(True),
+                                        written.splitlines(True),
+                                        "the heredoc body", "what reached the file"))
+    sys.exit("text was consumed on the way to the stub:\n" + diff[:2000])
+RECONSTRUCT
+  ok "...and the written stub IS the heredoc body: nothing expanded that was not meant to"
   ;;
 
 # -------------------------------------------------------------- await_threads

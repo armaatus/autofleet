@@ -1045,6 +1045,66 @@ fleet_venv_is_usable() {
 # see the comments on their own `unspent_try` and round functions. What is
 # shared is the file format and the arithmetic, which is what drifted.
 
+# THE `head n` RECORD, read in one place and written in one place.
+#
+# The format had three spellings and the arithmetic two: `fleet_try_refund`
+# defaulted a missing count to 1 and `fleet_tries_count` normalised it to 0,
+# both by hand, and the dispatcher's two spawn gates wrote the pair back with
+# their own `printf`. That is the naming half of what `is_review_record` was
+# introduced to stop -- one format, several readers, each free to disagree about
+# junk. armaatus/autofleet#71.
+#
+# Prints `head count` and returns 0; returns 1 when there is no marker, when it
+# cannot be read, or when it names no head. The count is normalised HERE, so a
+# corrupt one is 0 for every caller rather than 0 for whichever caller
+# remembered: `[ "" -ge 3 ]` is `integer expression expected` and exit 2, which
+# reads as FALSE, and a cap that silently does not exist is what this file's
+# other normalisation comment is about.
+#
+# `2>/dev/null` BEFORE the redirection it is there for -- see the note above on
+# the seventeen places this was re-typed the other way round.
+fleet_try_record() {
+  local marker="$1" h="" n=""
+  [ -n "$marker" ] || return 1
+  # THE STATUS IS NOT THE TEST, and `|| return 1` here was wrong: `read` returns
+  # non-zero at EOF with no delimiter as well as on a file it could not open, so
+  # a marker whose last line has no trailing newline -- written by hand, or by a
+  # future caller that is not `fleet_try_write` -- read as unreadable and every
+  # count came back 0. That is the "cap that silently does not exist" this file's
+  # other normalisation comment is about, arriving through the reader added to
+  # prevent it. What decides is whether a HEAD came out. Found by
+  # `/mattpocock-skills:code-review`.
+  read -r h n 2>/dev/null <"$marker"
+  [ -n "${h:-}" ] || return 1
+  case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s %s\n' "$h" "$n"
+}
+
+# ...and the one writer. $1 the marker, $2 the head, $3 the count.
+#
+# SILENT, BUT NOT SUCCESSFUL. A $STATE_DIR that will not take the file must not
+# kill the poll -- that half is like every other marker write here. What changed
+# when the two open-coded `printf >"$marker.tries"` writes came through this
+# function -- the reviewer's spawn gate and the validator's -- is that they used
+# to let bash's own diagnostic out, and a swallowed one turns `.tries` into a
+# file that reads 0 forever: the cap never trips, and
+# `AUTOFLEET_REVIEW_MAX_TRIES` becomes a guard that silently stopped guarding
+# while a reviewer respawns every poll. So the STATUS is the caller's to read,
+# and both spawn gates say it in the fleet's own voice. Found by `/code-review`.
+#
+# `fleet_try_refund` drops it deliberately -- a refund that cannot write is one
+# attempt miscounted, not a cap that does not exist.
+#
+# `2>/dev/null` BEFORE the redirection that can fail: written the other way
+# round, a marker directory that has been swept from under us prints bash's
+# own "No such file or directory" and only then silences the stream.
+# CLAUDE.md's rule, in the direction `evals/late_stderr_silence.py` does not
+# scan (it reads the `<"$f"` form).
+fleet_try_write() {
+  [ -n "$1" ] || return 0
+  printf '%s %s\n' "$2" "$3" 2>/dev/null >"$1"
+}
+
 # Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty
 # means "whatever head the marker names", which is the right refund for an exit
 # that failed before the head was known: the dispatcher spent that try for this
@@ -1054,14 +1114,16 @@ fleet_venv_is_usable() {
 # hand has no marker at all, and a refund with nothing to refund is a no-op, not
 # an error.
 fleet_try_refund() {
-  local marker="$1" want="${2:-}" h n
-  [ -n "$marker" ] || return 0
-  read -r h n 2>/dev/null <"$marker" || return 0
-  [ -n "${h:-}" ] || return 0
+  local marker="$1" want="${2:-}" record h n
+  record="$(fleet_try_record "$marker")" || return 0
+  read -r h n <<<"$record"
   [ -z "$want" ] || [ "$h" = "$want" ] || return 0
-  n=$(( ${n:-1} - 1 ))
+  # A count of 0 -- an absent or corrupt one, normalised by the reader -- goes
+  # to -1 and the marker is dropped, which is what the hand-rolled `${n:-1}`
+  # here did by a different route. One route now.
+  n=$(( n - 1 ))
   if [ "$n" -le 0 ]; then rm -f "$marker" 2>/dev/null || true
-  else printf '%s %s\n' "$h" "$n" >"$marker" 2>/dev/null || true
+  else fleet_try_write "$marker" "$h" "$n" || true
   fi
 }
 
@@ -1069,18 +1131,19 @@ fleet_try_refund() {
 # marker names another head -- a new head is a new question -- and zero for an
 # empty or corrupt one.
 #
-# `[ -f ]` FIRST, and the count assigned before it is tested: an empty marker
-# leaves `n` empty, and `[ "" -ge 3 ]` is `integer expression expected` and exit
-# 2, which a caller reads as FALSE. That is a cap that silently does not exist,
-# and it is the reason this is one function rather than a shape each caller
-# remembers.
+# ALWAYS A NUMBER, never an empty string: `[ "" -ge 3 ]` is `integer expression
+# expected` and exit 2, which a caller reads as FALSE -- a cap that silently does
+# not exist, and the reason this is one function rather than a shape each caller
+# remembers. The readability test and the normalisation that used to be written
+# out here live in `fleet_try_record` now -- and the test is no longer an
+# `[ -f ]`, which is the point: that reader decides on whether a HEAD came out,
+# so an unreadable marker and one that exists but holds nothing answer the same.
+# The `h=""; n=0` below is what leans on that when the reader answers non-zero.
 fleet_tries_count() {
-  local marker="$1" want="${2:-}" h n
+  local marker="$1" want="${2:-}" record h n
   h=""; n=0
-  [ -n "$marker" ] && [ -f "$marker" ] && read -r h n <"$marker"
+  record="$(fleet_try_record "$marker")" && read -r h n <<<"$record"
   [ "${h:-}" = "$want" ] || n=0
-  n="${n:-0}"
-  case "$n" in (*[!0-9]*) n=0 ;; esac
   printf '%s\n' "$n"
 }
 
