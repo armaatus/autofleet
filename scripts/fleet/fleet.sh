@@ -404,17 +404,33 @@ card() {
 # that moment. A listing that could not be READ is said once, the way
 # `interrupt_agent_in` says it, because that is the difference between "nobody
 # is in there" and "somebody is and we could not reach them".
+#
+# The third argument, when given, is a marker that makes a REFUSED send said
+# once rather than once a poll (armaatus/autofleet#106). The contract cannot
+# tell "this driver never types" from "this send timed out", so a caller that
+# retries every poll must keep retrying -- a one-off timeout on the poll a PR
+# opened is not a reason to give up its context reset for good -- and only the
+# line is throttled. A send that lands clears it, so the next refusal is news.
+# The marker is per ISSUE, not per caller: a refusal said by one caller stays
+# unsaid for another until some send lands in between.
+#
+# A refused SUBMIT is never throttled. The text was typed, so every retry adds
+# another copy to the agent's composer, and a log that fell silent after the
+# first poll would hide exactly that pile-up.
 say_to_agent_in() {
-  local path="$1" text="$2" handle
+  local path="$1" text="$2" refused_marker="${3:-}" handle
   if ! handle="$(runner_agent_terminal "$path")"; then
     say "  the runner would not say whether an agent is in $path -- nothing was sent"
     return 1
   fi
   [ -n "$handle" ] || return 1
   runner_terminal_send "$handle" "$text" || {
-    say "  the runner would not type into $path -- nothing was sent"
+    [ -n "$refused_marker" ] && [ -e "$refused_marker" ] \
+      || say "  the runner would not type into $path -- nothing was sent"
+    [ -z "$refused_marker" ] || : >"$refused_marker"
     return 1
   }
+  [ -z "$refused_marker" ] || rm -f "$refused_marker"
   runner_terminal_enter "$handle" || {
     say "  the runner typed into $path but would not submit it"
     return 1
@@ -480,6 +496,7 @@ handoff_turn() {
   # exactly when the caller wants to get on with it.
   say_to_agent_in "$path" \
     "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
+    "$STATE_DIR/send-refused-$num" \
     || return 0
   printf '%s %s\n' "$now" "$(fleet_mtime "$note")" >"$marker"
   say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
@@ -520,8 +537,10 @@ reset_context_for_answering() {
       continue
     fi
     handoff_turn "$num" "$path" || continue
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
+    # Said once the clear LANDED, not before it: the attempt is retried every
+    # poll while a driver refuses, and a line ahead of it repeated each time.
     say "#$num: PR is open -- starting the answering work in a clean context"
-    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue
     # The marker goes down BEFORE the second prompt: a clear that landed and an
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
@@ -598,6 +617,7 @@ clear_issue_markers() {
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
+        "$STATE_DIR/send-refused-$1" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.

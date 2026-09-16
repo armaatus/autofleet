@@ -850,8 +850,18 @@ runner_terminal_draft() {
   [ -s "$STUB_DIR/draft" ] || return 0
   printf '%s %s\n' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
 }
-runner_terminal_send()      { stub_say "terminal send $1";      return 0; }
-runner_terminal_enter()     { stub_say "terminal enter $1";     return 0; }
+runner_terminal_send() {
+  stub_say "terminal send $1"
+  # A driver that cannot type at all. The contract lets it fail the send, and
+  # the caller interrupts as it always did (armaatus/autofleet#106).
+  [ -e "$STUB_DIR/send-refuses" ] && return 1
+  return 0
+}
+runner_terminal_enter() {
+  stub_say "terminal enter $1"
+  [ -e "$STUB_DIR/enter-refuses" ] && return 1
+  return 0
+}
 runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
 STUBDRIVER
   export AUTOFLEET_RUNNER=stub
@@ -2481,6 +2491,122 @@ print(json.dumps({"result": {"worktrees": [
     grep -q "handoff note written" <<<"$out" \
       || fail "it stopped the agent without noticing the note it asked for: $out"
     echo "ok: ...and stops it once the note is written"
+    ;;
+
+  handoff_order_stub)
+    # armaatus/autofleet#106's acceptance, on a driver that is NOT Orca: the ask
+    # goes through `runner_terminal_send` + `_enter` and lands BEFORE
+    # `runner_terminal_interrupt`, because an interrupt cancels the turn the
+    # note would have been written in.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet enforce_timebox 2>&1)"
+    # Same-pass send-enter-interrupt would still pass the order check below, and
+    # is #106's own bug: the interrupt cancels the turn the note is written in.
+    grep -q "^terminal interrupt" "$STUB_CALLS" \
+      && fail "it interrupted in the pass that asked, leaving no turn to write in: $out"
+    mkdir -p "$WORK/wt/.autofleet/run"
+    printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
+    out="$(in_fleet enforce_timebox 2>&1)"
+    send_at="$(grep -n "^terminal send t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    enter_at="$(grep -n "^terminal enter t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    int_at="$(grep -n "^terminal interrupt t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
+    [ -n "$send_at" ] && [ -n "$enter_at" ] \
+      || fail "the handoff request never went through the driver: $(cat "$STUB_CALLS")"
+    [ -n "$int_at" ] || fail "the agent was never interrupted: $out"
+    [ "$send_at" -lt "$enter_at" ] && [ "$enter_at" -lt "$int_at" ] \
+      || fail "the request did not land before the interrupt: $(cat "$STUB_CALLS")"
+    [ -s "$ORCA_CALLS" ] \
+      && fail "a call went to the CLI instead of the driver: $(cat "$ORCA_CALLS")"
+    echo "ok: the handoff request is sent and submitted before the interrupt, through the driver"
+    ;;
+
+  handoff_send_refused)
+    # A driver that cannot send still gets the interrupt, IN THE SAME PASS: the
+    # grace is for an agent that was asked, and this one was not. The second
+    # poll is quiet because the time-box CLOSES on that pass (its `started`
+    # marker goes); the `send-refused-` throttle is what the context reset,
+    # which has no such exit, relies on -- `context_reset_send_refused`.
+    make_fixture ok
+    make_worktree
+    make_overdue
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    : >"$STUB_DIR/send-refuses"
+    issue_labels "ready"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q "^terminal interrupt t1" "$STUB_CALLS" \
+      || fail "a refused send left the agent running: $out / $(cat "$STUB_CALLS")"
+    grep -q "^terminal enter" "$STUB_CALLS" \
+      && fail "it submitted after a send that failed, which submits the agent's own half-typed text"
+    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
+      || fail "the refused send was not said exactly once: $out"
+    [ -e "$AUTOFLEET_DIR/handoff-asked-42" ] \
+      && fail "a request that never went out left a marker that defers the next attempt"
+    echo "ok: a driver that refuses the send still gets the interrupt, in the same pass"
+    out="$(in_fleet enforce_timebox 2>&1)"
+    grep -q "would not type into" <<<"$out" \
+      && fail "it says so again on the next poll: $out"
+    echo "ok: ...and the time-box closes, so it is not said again next poll"
+    ;;
+
+  context_reset_send_refused)
+    # The other caller that meets a driver which cannot type, and the one with
+    # no exit of its own: the reset retries every poll until the clear lands, so
+    # a send that is always refused said so -- three lines -- on every poll for
+    # as long as the PR stayed open. Found by the self-review of #106's PR.
+    make_fixture ok
+    make_worktree
+    stub_runner
+    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
+    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
+    : >"$STUB_DIR/send-refuses"
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
+      || fail "a refused send was not said exactly once on the first poll: $out"
+    grep -q "^terminal enter" "$STUB_CALLS" \
+      && fail "it submitted after a send that failed"
+    echo "ok: a driver that refuses the send is said once on the first poll"
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    [ -z "$out" ] || fail "it says something again on the next poll: $out"
+    echo "ok: ...and nothing on the next one"
+    # ...but it is still RETRIED. The contract cannot tell a driver that never
+    # types from a send that timed out once, and giving up the reset for good on
+    # one timeout costs every review round the whole build context.
+    rm -f "$STUB_DIR/send-refuses"
+    : >"$STUB_CALLS"
+    export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q "^terminal enter t1" "$STUB_CALLS" \
+      || fail "a send that recovered was never retried: $(cat "$STUB_CALLS")"
+    grep -q "starting the answering work in a clean context" <<<"$out" \
+      || fail "the reset that finally landed left no line in the log: $out"
+    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
+      || fail "the reset did not complete once the driver typed again"
+    [ -e "$AUTOFLEET_DIR/send-refused-42" ] \
+      && fail "a send that landed left the refusal marker, silencing the next one"
+    echo "ok: ...and retried, so a send that recovers still resets the context"
+
+    # A refused SUBMIT is said every poll: the text was typed, each retry adds
+    # a copy to the composer, and a throttled line would hide the pile-up.
+    rm -f "$AUTOFLEET_DIR/context-reset-42"
+    : >"$STUB_DIR/enter-refuses"
+    in_fleet reset_context_for_answering >/dev/null 2>&1
+    out="$(in_fleet reset_context_for_answering 2>&1)"
+    grep -q "would not submit it" <<<"$out" \
+      || fail "a submit refused on every poll went quiet after the first: $out"
+    echo "ok: a refused submit is said on every poll it happens"
     ;;
 
   handoff_expires)
