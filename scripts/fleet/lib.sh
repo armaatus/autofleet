@@ -1064,9 +1064,17 @@ fleet_venv_is_usable() {
 # `2>/dev/null` BEFORE the redirection it is there for -- see the note above on
 # the seventeen places this was re-typed the other way round.
 fleet_try_record() {
-  local marker="$1" h n
+  local marker="$1" h="" n=""
   [ -n "$marker" ] || return 1
-  read -r h n 2>/dev/null <"$marker" || return 1
+  # THE STATUS IS NOT THE TEST, and `|| return 1` here was wrong: `read` returns
+  # non-zero at EOF with no delimiter as well as on a file it could not open, so
+  # a marker whose last line has no trailing newline -- written by hand, or by a
+  # future caller that is not `fleet_try_write` -- read as unreadable and every
+  # count came back 0. That is the "cap that silently does not exist" this file's
+  # other normalisation comment is about, arriving through the reader added to
+  # prevent it. What decides is whether a HEAD came out. Found by
+  # `/mattpocock-skills:code-review`.
+  read -r h n 2>/dev/null <"$marker"
   [ -n "${h:-}" ] || return 1
   case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s %s\n' "$h" "$n"

@@ -165,7 +165,7 @@ cleanup() {
   # most. Reaping only $BLOCK_NAP left the one sleep this file is about. Found by
   # the independent review.
   [ -n "$WORK" ] && {
-    pkill -9 -f "sleep ${BLOCK_NAP}\$" 2>/dev/null
+    pkill -9 -f "$(ere "$WORK/block-nap")" 2>/dev/null
     pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     rm -rf "$WORK"
   }
@@ -195,13 +195,35 @@ trap cleanup EXIT
 # pid that can exist. Both stay in the range `sleep` accepts; neither is ever
 # waited out, because every phase that starts one kills it.
 #
-# ...AND EVERY PATTERN IS ANCHORED, `"sleep ${NAP}\$"`, because `-f` matches an
-# unanchored SUBSTRING of the whole command line and a unique number is not a
-# unique substring: pid 123 gets `sleep 4123`, pid 37234 gets `sleep 41234`, and
-# the first pattern is inside the second. Unanchored, `cleanup` SIGKILLs the
-# other run's live fixture and `orphans` fails at its own `before` guard -- the
-# same misattribution one digit narrower, which is the shape armaatus/autofleet#71
-# is about surviving its own fix. Found by `/mattpocock-skills:code-review`.
+# `pgrep -f` MATCHES AN EXTENDED REGEX, not a fixed string, so a path handed to
+# it needs escaping -- a `+` in a generated $TMPDIR component makes the pattern
+# match nothing, and a `pgrep ... && fail` that cannot match proves the absence
+# it was asked for. Same helper, same reason, as test_review_mode.sh's.
+ere() { printf '%s' "$1" | sed 's/[][(){}.*+?^$|\\]/\\&/g'; }
+
+# ...AND $WATCH_NAP'S PATTERN IS ANCHORED, `"sleep ${WATCH_NAP}\$"`, because
+# `-f` matches an unanchored SUBSTRING of the whole command line and a unique
+# number is not a unique substring: pid 123 gets `sleep 4123`, pid 37234 gets
+# `sleep 41234`, and the first pattern is inside the second. Unanchored,
+# `cleanup` SIGKILLs the other run's live fixture and `orphans` fails at its own
+# `before` guard -- the same misattribution one digit narrower.
+# Found by `/mattpocock-skills:code-review`.
+#
+# $BLOCK_NAP DOES NOT NEED THE NUMBER AT ALL, and does not use it as a pattern:
+# the blocking fixture is written by this file, so it can carry a $WORK-derived
+# argv0 (`exec -a "$WORK/block-nap"`) and every `pgrep`/`pkill` for it matches
+# that path. That is what armaatus/autofleet#71 §6 asks for, and what §1's two
+# phases got. The duration stays distinctive so a human reading `ps` can still
+# tell the two fixtures apart.
+#
+# $WATCH_NAP CANNOT HAVE ONE, and this is the departure, stated rather than
+# glossed: the process is the payload's own `sleep "$timeout"` inside
+# `tests/run.sh`, which this file may not reshape to suit a test of it. Its
+# number plus the anchor is the whole handle there, so the `pkill` for it is
+# still, in principle, aimed at any process on the machine whose command line
+# ends in that number. Two live processes cannot share a pid, so reaching one
+# needs a process started by a DEAD run whose pid has since been reused --
+# which is the case `orphans`' own `before` guard refuses to answer under.
 BLOCK_NAP=$(( 9000000 + $$ ))   # what the blocking fixture waits on
 WATCH_NAP=$((    4000 + $$ ))   # what the watchdog waits on, i.e. the bound itself
 
@@ -273,7 +295,7 @@ PY2
 #!/usr/bin/env bash
 echo "got this far before wedging"
 set -m
-sleep $BLOCK_NAP &
+( exec -a "$WORK/block-nap" sleep $BLOCK_NAP ) &
 wait
 EOF
         ;;
@@ -393,7 +415,7 @@ case "${1:-}" in
   # Those phases are scoped to their own fixture since armaatus/autofleet#71 and
   # would no longer notice; this row is what is left watching.
   sleep 2
-  strays="$(pgrep -f "sleep ${BLOCK_NAP}\$" 2>/dev/null | grep -c . || true)"
+  strays="$(pgrep -f "$(ere "$WORK/block-nap")" 2>/dev/null | grep -c . || true)"
   [ "${strays:-0}" = 0 ] \
     || fail "the bound left ${strays} descendant(s) of the killed phase running"
   ok "...and takes the phase's descendants with it, own process group or not"
@@ -888,7 +910,7 @@ EOF
   done
   if kill -0 "$runner" 2>/dev/null; then
     kill -9 "$runner" 2>/dev/null
-    pkill -9 -f "sleep ${BLOCK_NAP}\$" 2>/dev/null; pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
+    pkill -9 -f "$(ere "$WORK/block-nap")" 2>/dev/null; pkill -9 -f "sleep ${WATCH_NAP}\$" 2>/dev/null
     fail "the runner survived SIGINT, so Ctrl-C stops a phase and not the run"
   fi
   ok "a SIGINT ends the run rather than skipping one phase"
@@ -906,7 +928,7 @@ EOF
     || fail "SIGINT orphaned ${strays} watchdog sleep(s); the trap does not cover INT"
   ok "...and the watchdog takes its sleep with it on INT, not only on TERM"
 
-  phase_strays="$(pgrep -f "sleep ${BLOCK_NAP}\$" 2>/dev/null | grep -c . || true)"
+  phase_strays="$(pgrep -f "$(ere "$WORK/block-nap")" 2>/dev/null | grep -c . || true)"
   [ "${phase_strays:-0}" = 0 ] \
     || fail "SIGINT left ${phase_strays} descendant(s) of the running phase behind"
   ok "...and the running phase is reaped with its descendants"

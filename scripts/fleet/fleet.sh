@@ -698,14 +698,35 @@ disown_issue() {
 # `why_parked` below IS the single source: it is the only place that knows what
 # parks a worktree and what a person is told about it, and the three readers ask
 # IT rather than a list beside it. Found by the independent review.
-why_parked() {
-  local n="$1"
-  [ -e "$STATE_DIR/stuck-$n" ]       && { printf 'its removal was refused\n'; return 0; }
-  [ -e "$STATE_DIR/merge-held-$n" ]  && { printf 'merged, and it holds uncommitted work\n'; return 0; }
-  [ -e "$STATE_DIR/held-$n" ]        && { printf 'it holds uncommitted work\n'; return 0; }
-  [ -e "$STATE_DIR/merge-blind-$n" ] && { printf 'merged, and git could not say what it holds\n'; return 0; }
-  [ -e "$STATE_DIR/git-blind-$n" ]   && { printf 'git could not say what it holds\n'; return 0; }
+# WHICH MARKER PARKS $1, as the marker's own name, in precedence order. One
+# list, and it is the only place the five are ordered.
+#
+# Split out from `why_parked` because three readers need to know WHICH reason
+# this is and only one of them wants the sentence: the agent gate, which applies
+# to four of the five, and `how_to_release`, whose answer differs for the fifth.
+# Both used to infer it -- the gate from the prose `why_parked` printed, then
+# from the ABSENCE of `stuck-`, which is correct only while `stuck-` is the first
+# test here and is a coupling nothing pins. A sixth reason added above it would
+# have silently ungated all five. armaatus/autofleet#71, found by
+# `/mattpocock-skills:code-review` of the change that keyed on the absence.
+PARK_MARKERS="stuck merge-held held merge-blind git-blind"
+parked_marker() {
+  local n="$1" m
+  for m in $PARK_MARKERS; do
+    [ -e "$STATE_DIR/$m-$n" ] && { printf '%s\n' "$m"; return 0; }
+  done
   return 1
+}
+
+why_parked() {
+  case "$(parked_marker "$1")" in
+    stuck)       printf 'its removal was refused\n' ;;
+    merge-held)  printf 'merged, and it holds uncommitted work\n' ;;
+    held)        printf 'it holds uncommitted work\n' ;;
+    merge-blind) printf 'merged, and git could not say what it holds\n' ;;
+    git-blind)   printf 'git could not say what it holds\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 # ...and what to DO about it, which is not the same line for all five.
@@ -721,7 +742,9 @@ why_parked() {
 # operator, two lines apart. Found by the independent review.
 how_to_release() {
   local n="$1" path="$2"
-  if [ -e "$STATE_DIR/stuck-$n" ]; then
+  # By the marker's NAME, like the gate -- not by testing a file this function
+  # would then be the second place to spell. #71.
+  if [ "$(parked_marker "$n")" = stuck ]; then
     printf "$BY_HAND_REMOVAL" "$path"
     return 0
   fi
@@ -790,7 +813,8 @@ how_to_release() {
 # Only `count_parked_owned`, which runs in the poll body, passes `say`. Found by
 # the independent review.
 parked_for_person() {
-  local n="$1" voice="${2:-quiet}" reason listing state
+  local n="$1" voice="${2:-quiet}" marker reason listing state
+  marker="$(parked_marker "$n")" || return 1
   reason="$(why_parked "$n")" || return 1
   # EVERY reason that means "there is something in there" is gated, not just the
   # two `reap_abandoned` writes. The gate used to be reached only when a `held-`
@@ -817,38 +841,42 @@ parked_for_person() {
   # working agent, so rewording the blind sentence took the check off
   # `git-blind-` and `merge-blind-` with the suite still green.
   #
-  # `why_parked` returns the FIRST marker it finds and `stuck-` is first, so
-  # "the reason is not a refused removal" is exactly "no `stuck-` marker" -- one
-  # test, and it states the rule the paragraph above is about rather than
-  # enumerating the prose that happens to express it. armaatus/autofleet#71.
-  if [ ! -e "$STATE_DIR/stuck-$n" ]; then
-    if ! listing="$(runner_agent_states)"; then
-      # SAID, once per pass. Taking the safe direction silently is #37's own
-      # complaint -- "nothing says the drain has become unbounded". One
-      # unreadable `worktree ps` is a hiccup; a persistent one means this
-      # worktree never counts, `owned` never reaches 0 and the drain never
-      # ends, and the operator has no way to know why. `live_worktrees`
-      # already says the equivalent for its own call. Found by the independent
-      # review.
-      # The `*-blind-` family idiom: one marker per issue, said once, and
-      # swept with the rest when the issue is released.
-      # `say_err`, NOT `say`: this function's stdout is inside the poll's
-      # `$(count_parked_owned)` substitution. See say_err.
-      if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
-        : >"$STATE_DIR/ps-blind-$n"
-        say_err "  could not read the agent states, so whether #$n is still being"
-        say_err "  worked in cannot be answered -- it is NOT counted as waiting for"
-        say_err "  you, and a drain will not end while that stays true"
+  # BY NAME, and the four names are written out: that is the rule, and it does
+  # not move when `parked_marker`'s precedence does. An earlier version of this
+  # tested the ABSENCE of `stuck-`, which is the same answer only while `stuck-`
+  # is the first entry in $PARK_MARKERS -- so a sixth reason added above it would
+  # have ungated all five in silence, which is the drift this whole issue is
+  # about, one function to the left again. Adding a reason now forces a decision
+  # here. armaatus/autofleet#71, and found by `/mattpocock-skills:code-review`.
+  case "$marker" in
+    merge-held|held|merge-blind|git-blind)
+      if ! listing="$(runner_agent_states)"; then
+        # SAID, once per pass. Taking the safe direction silently is #37's own
+        # complaint -- "nothing says the drain has become unbounded". One
+        # unreadable `worktree ps` is a hiccup; a persistent one means this
+        # worktree never counts, `owned` never reaches 0 and the drain never
+        # ends, and the operator has no way to know why. `live_worktrees`
+        # already says the equivalent for its own call. Found by the independent
+        # review.
+        # The `*-blind-` family idiom: one marker per issue, said once, and
+        # swept with the rest when the issue is released.
+        # `say_err`, NOT `say`: this function's stdout is inside the poll's
+        # `$(count_parked_owned)` substitution. See say_err.
+        if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
+          : >"$STATE_DIR/ps-blind-$n"
+          say_err "  could not read the agent states, so whether #$n is still being"
+          say_err "  worked in cannot be answered -- it is NOT counted as waiting for"
+          say_err "  you, and a drain will not end while that stays true"
+        fi
+        return 1
       fi
-      return 1
-    fi
-    # Releasing the latch is the milder half of the same write -- it makes the
-    # dispatcher re-say a line it already said -- but it is still a write, so
-    # it is the poll's to make too.
-    if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
-    state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
-    case "$state" in working) return 1 ;; esac
-  fi
+      # Releasing the latch is the milder half of the same write -- it makes the
+      # dispatcher re-say a line it already said -- but it is still a write, so
+      # it is the poll's to make too.
+      if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
+      state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
+      case "$state" in working) return 1 ;; esac ;;
+  esac
   printf '%s\n' "$reason"
 }
 
@@ -1987,7 +2015,7 @@ REVIEWING_DIR="$FLEET_REVIEWING"
 #                listing"; the records go on the pass AFTER that, and only once
 #                `gh pr view --json state` confirms it. Same name and same
 #                meaning as the transcript store's, because it is the same
-#                function that writes it -- see `pr_sweepable`.
+#                function that writes it -- see `pr_sweep_verdict`.
 #
 #   v-<pr>       ...and the same four, for the VALIDATOR, under a `v-` prefix.
 #   v-<pr>.done  One directory rather than two, deliberately: `live_reviewers`,
@@ -2289,7 +2317,9 @@ EOF
 # empty for the reviewer, `v-` for the validator -- because the "a run is still
 # writing this one" test has to ask about the right lock. Defaulted, so the
 # reviewer call site reads as it did.
-# IS PR $1 SAFE TO SWEEP? $2 is the directory its `.closed-` grace marker lives
+# WHAT THIS PASS MAY DO WITH PR $1's FILES -- a VERDICT and not a predicate, so
+# the name says `if` is the wrong construct at a callsite. $2 is the directory
+# its `.closed-` grace marker lives
 # in. Two protections, and they are not decoration:
 #
 #   the GRACE PASS -- never prune on the pass a PR drops off the open listing.
@@ -2329,7 +2359,7 @@ EOF
 # default 60s poll that is ~18,700 calls a day against the same budget
 # `next_issue` and `review_open_prs` spend, and gh's secondary rate limit is how
 # this dispatcher breaks.
-pr_sweepable() {
+pr_sweep_verdict() {
   local num="$1" dir="$2"
   if [ ! -e "$dir/.closed-$num" ]; then
     : >"$dir/.closed-$num"
@@ -2349,7 +2379,7 @@ pr_sweepable() {
 
 # WHAT GITHUB SAYS PR $1 IS, asked at most once per pass however many sweeps ask.
 #
-# `pr_sweepable` is called against THREE grace-marker stores every pass --
+# `pr_sweep_verdict` is called against THREE grace-marker stores every pass --
 # `prune_review_logs` runs twice, once for `reviews/` and once for
 # `validations/`, and the record sweep adds `$REVIEWING_DIR` -- and the
 # alternation the header above describes is per STORE. So on the passes they
@@ -2428,12 +2458,12 @@ prune_review_logs() {
     case " $closed " in *" $num_seen "*) ;; *) closed="$closed$num_seen " ;; esac
   done
   for num_seen in $closed; do
-    # THE GRACE PASS AND THE CONFIRMATION, both of them `pr_sweepable`'s since
+    # THE GRACE PASS AND THE CONFIRMATION, both of them `pr_sweep_verdict`'s since
     # armaatus/autofleet#71 -- the record sweep needed the same two and had
     # neither, and a second copy of them is what drifts. The paragraphs above
     # this loop are its header now; what is left here is what THIS sweep does
     # with each answer.
-    pr_sweepable "$num_seen" "$dir"
+    pr_sweep_verdict "$num_seen" "$dir"
     case $? in
       0) graced="$graced$num_seen " ;;
       # An OPEN answer puts the PR BACK ON THE OPEN LIST for the rest of this
@@ -3122,7 +3152,7 @@ for p in prs:
   # the one signal, which is the point of #72 having made it a signal.
   [ "${prs_answered:-no}" = yes ] || return 0
   # ...and NOT on the pass a number drops off the listing, nor without asking
-  # GitHub. Both are `pr_sweepable`'s, and this sweep had neither: it deleted as
+  # GitHub. Both are `pr_sweep_verdict`'s, and this sweep had neither: it deleted as
   # soon as a number was absent. The file it deletes is `<pr>.done`, and a
   # `.done` deleted in error is the re-spawn loop armaatus/autofleet#42 exists to
   # remove, back for a poll. armaatus/autofleet#71.
@@ -3142,16 +3172,23 @@ for p in prs:
     # is deleted on the first poll after it is written -- which starts a fresh
     # validator every minute for the life of the PR.
     base="$(basename "$rec")"; base="${base#v-}"; num="${base%%.*}"
+    # ...AND THE GRACE GOES WITH IT, the way the transcript sweep's does. A PR
+    # that drops off the listing (marker written), comes back -- reopened, or the
+    # listing flapped -- and later closes for good would otherwise find its
+    # marker already there and lose the grace pass entirely: every record gone on
+    # the first absent pass, on one `gh` answer. That is the case the cleanup
+    # loop at the bottom of this function names, arriving through the other door.
+    # Found by `/code-review` of the branch.
     case " ${open_prs:-} " in
-      *" $num "*) continue ;;
+      *" $num "*) rm -f "$REVIEWING_DIR/.closed-$num"; continue ;;
     esac
     case " $verdict_keep " in *" $num "*) continue ;; esac
     case " $verdict_go "   in *" $num "*) rm -f "$rec"; continue ;; esac
-    # `case $?`, not `if`: `pr_sweepable` has THREE answers and only one of them
+    # `case $?`, not `if`: `pr_sweep_verdict` has THREE answers and only one of them
     # deletes. Read as a boolean the OPEN answer disappears into an `else` that
     # happens to do the right thing, which is a callsite that stops saying what
     # it knows. Found by `/mattpocock-skills:code-review`.
-    pr_sweepable "$num" "$REVIEWING_DIR"
+    pr_sweep_verdict "$num" "$REVIEWING_DIR"
     case $? in
       0) verdict_go="$verdict_go$num "; rm -f "$rec" ;;
       # 1 is "first pass, or gh would not say" and 2 is "GitHub says it is open".
@@ -5121,6 +5158,17 @@ while that one is up."
       # One `say` per line, so each keeps its own timestamp and the log reads the
       # way every other multi-line message here does.
       printf '%s' "$parked_lines" | while IFS= read -r line; do say "$line"; done
+      # TWO COUNTS, RECONCILED. `$reason` above already carries `$parked` -- the
+      # number the last poll counted -- and this block re-derives its own by
+      # asking the runner again. An agent that starts writing in between makes
+      # them differ, and "2 worktree(s) are waiting for you" over a list of one,
+      # with nothing saying why, is worse than either number alone. Found by
+      # `/mattpocock-skills:code-review`.
+      if [ "$named" -lt "${parked:-0}" ]; then
+        say "  ...and $(( parked - named )) more that were waiting a moment ago:"
+        say "  the runner would not say what their agents are doing just now."
+        say "  ./scripts/fleet/fleet.sh status once it answers again."
+      fi
     else
       # NOT silence: `parked` said there were some, and this is the only line
       # that can say why none could be named.

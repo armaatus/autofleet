@@ -2363,6 +2363,37 @@ print(json.dumps({"result": {"worktrees": [
     [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
       || fail "rewording the sentence took the agent gate off git-blind-; the dispatcher would sign off with an agent still writing"
     echo "ok: ...and rewording the reason a person reads does not switch the gate off"
+    # ...AND REORDERING THE REASONS DOES NOT EITHER. The gate briefly keyed on
+    # the ABSENCE of `stuck-`, which is the same answer only while `stuck-` is
+    # the first entry in $PARK_MARKERS -- so a sixth reason added above it would
+    # have ungated all five in silence. Moving `git-blind` to the front of that
+    # list is the fixture for exactly that edit: precedence changes, and whether
+    # `git-blind-` is gated must not. Found by `/mattpocock-skills:code-review`.
+    sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="git-blind stuck merge-held held merge-blind"/' \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    grep -q '^PARK_MARKERS="git-blind ' "$WORK/repo/scripts/fleet/fleet.sh" \
+      || fail "the reorder did not land, so this asserts nothing"
+    # BOTH MARKERS, which is what makes this row distinguish the two keyings.
+    # With `git-blind` first the reason IS `git-blind`, which is gated; the
+    # absence-keyed version asks only whether `stuck-` is on disk, finds it, and
+    # counts the worktree with its agent mid-work.
+    rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
+          "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
+          "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
+    agent_state working
+    : >"$AUTOFLEET_DIR/git-blind-42"
+    : >"$AUTOFLEET_DIR/stuck-42"
+    in_fleet count_parked_owned >/dev/null 2>&1
+    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      || fail "the gate asked whether stuck- is on disk rather than which reason this is, so a reason ahead of stuck- is counted with its agent mid-work"
+    echo "ok: ...and neither does reordering them"
+    sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="stuck merge-held held merge-blind git-blind"/' \
+      "$WORK/repo/scripts/fleet/fleet.sh"
+    rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
+    rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/stuck-* \
+          "$AUTOFLEET_DIR"/parked-since-*
+    agent_state idle
     # ...and put the fixture back, or every row after this one runs against a
     # fleet.sh this phase edited and an agent it left working.
     sed -i.bak "s/printf 'git will not say what is in there/printf 'git could not say what it holds/" \

@@ -1998,6 +1998,21 @@ PY_FIX
     || fail "the two sweeps each asked GitHub about PR 97 ($asked call(s) in one pass), so the bound the alternation buys is spent twice"
   ok "...and one pass asks GitHub about a pull request once, however many sweeps want to know"
 
+  # ...AND A PR THAT COMES BACK LOSES ITS GRACE MARKER WITH IT. Absent on one
+  # pass (marker written), back on the listing the next -- reopened, or the
+  # listing flapped -- and then closed for good: with the marker still on disk
+  # the close costs no grace pass at all, and every record goes on the first
+  # absent pass on one `gh` answer. `prune_review_logs` clears it on this branch;
+  # this sweep did not. Found by `/code-review` of the branch.
+  printf '[{"number":42,"isDraft":false,"headRefOid":"%s"},{"number":97,"isDraft":false,"headRefOid":"%s"}]\n' \
+    "$PR_HEAD" "$PR_HEAD" >"$GH_PRLIST"
+  printf '%s\n' "$PR_HEAD" >"$AUTOFLEET_DIR/reviewing/97.done"
+  : >"$AUTOFLEET_DIR/reviewing/.closed-97"
+  poll_review_open_prs
+  [ -e "$AUTOFLEET_DIR/reviewing/.closed-97" ] \
+    && fail "PR 97 is back on the open list and kept the marker saying it had already been seen closed; its records lose the grace pass when it really closes"
+  ok "...and a PR back on the open list drops the marker saying it was seen closed"
+
   # `stop_reviewers` clears all three. NOT asserted: that it does not SIGNAL
   # them. Treated as locks, their first field is a head sha, `kill` is handed a
   # non-number and fails, and `rm -f` follows on both paths -- so the two
