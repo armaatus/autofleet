@@ -1084,9 +1084,10 @@ fleet_try_record() {
 #
 # SILENT, BUT NOT SUCCESSFUL. A $STATE_DIR that will not take the file must not
 # kill the poll -- that half is like every other marker write here. What changed
-# when the seventeen open-coded `printf > marker` lines came through this
-# function is that they used to let bash's own diagnostic out, and a swallowed
-# one turns `.tries` into a file that reads 0 forever: the cap never trips, and
+# when the two open-coded `printf >"$marker.tries"` writes came through this
+# function -- the reviewer's spawn gate and the validator's -- is that they used
+# to let bash's own diagnostic out, and a swallowed one turns `.tries` into a
+# file that reads 0 forever: the cap never trips, and
 # `AUTOFLEET_REVIEW_MAX_TRIES` becomes a guard that silently stopped guarding
 # while a reviewer respawns every poll. So the STATUS is the caller's to read,
 # and both spawn gates say it in the fleet's own voice. Found by `/code-review`.
@@ -1134,9 +1135,8 @@ fleet_try_refund() {
 # expected` and exit 2, which a caller reads as FALSE -- a cap that silently does
 # not exist, and the reason this is one function rather than a shape each caller
 # remembers. The `[ -f ]` test and the normalisation that used to be written out
-# here live in `fleet_try_record` now, which is what `h=""; n=0` above leans on
-# when that reader answers non-zero. Said rather than left pointing at code that
-# moved; found by `/mattpocock-skills:code-review` of the change that moved it.
+# here live in `fleet_try_record` now, which is what the `h=""; n=0` below leans
+# on when that reader answers non-zero.
 fleet_tries_count() {
   local marker="$1" want="${2:-}" record h n
   h=""; n=0

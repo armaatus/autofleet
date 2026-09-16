@@ -2233,12 +2233,15 @@ stop_reviewers() {
   # THE SWEEP'S OWN BOOKKEEPING GOES WITH THE RECORDS, and it needs saying here
   # because `"$REVIEWING_DIR"/*` cannot see it: `.closed-<pr>` is a dotfile, which
   # is exactly what keeps it out of the three loops that would read it as a lock.
-  # The loop below clears every record, so without this line a grace marker whose
-  # records this function deleted is orphaned for good -- and the number it names
-  # is then swept with no grace at all if it comes round again, which is the one
-  # thing the marker exists to prevent. the record sweep in `review_open_prs`
-  # collects the ones it graces itself; this is the other path out. Found by `/code-review` of the
-  # branch that added it.
+  # The loop below clears the records this function is allowed to clear -- not
+  # `.rounds`, which it skips on purpose -- so without this line a grace marker
+  # is orphaned for good, and the number it names is then swept with no grace at
+  # all if it comes round again, which is the one thing the marker exists to
+  # prevent. Unconditional for that reason: a PR whose `.rounds` survives loses
+  # its marker too, which costs one extra grace pass and cannot cost a record.
+  # The record sweep in `review_open_prs` collects the markers it graces itself;
+  # this is the other path out. Found by `/code-review` of the branch that added
+  # it, and its "every record" corrected by the next round of the other pass.
   rm -f "$REVIEWING_DIR"/.closed-*
   for marker in "$REVIEWING_DIR"/*; do
     [ -e "$marker" ] || continue

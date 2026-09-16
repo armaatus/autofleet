@@ -3097,11 +3097,19 @@ allowed["1"] = os.environ["STUB_MODE"]
 out, i = [], 0
 while i < len(body):
     c = body[i]
-    # An unquoted heredoc's backslash escapes `$`, backtick, backslash and a
-    # newline, and is literal before anything else. Escaped text is text.
+    # An unquoted heredoc's backslash escapes `$`, backtick and backslash, and
+    # is literal before anything else. Escaped text is text.
+    #
+    # `\<newline>` IS NOT IN THAT LIST: it is a line continuation, and BOTH
+    # characters come out -- where the other three leave the character behind.
+    # Folding it in with them put the newline back and failed a correct stub.
+    # Found by `/mattpocock-skills:code-review`.
     if c == "\\" and i + 1 < len(body):
         nxt = body[i + 1]
-        out.append(nxt if nxt in "$`\\\n" else c + nxt)
+        if nxt == "\n":
+            i += 2
+            continue
+        out.append(nxt if nxt in "$`\\" else c + nxt)
         i += 2
         continue
     if c == "`":
