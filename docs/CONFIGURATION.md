@@ -489,7 +489,10 @@ the file it looked for and the drivers that do ship — and stops the four scrip
 that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
 caught before a worktree is opened rather than by an agent sitting on a prompt
 that never sends.
-`ORCA_CLI_COMMAND` (Orca driver only) — the CLI to try first, ahead of
+`ORCA_CLI_COMMAND` (Orca driver only) — **behaviour changed:** it used to be
+expanded unquoted, so two words were two candidates; it is now exactly one. A
+host that set two commands there keeps only the first, and a path containing
+spaces now works. The CLI to try first, ahead of
 `orca`, `orca-dev`, `orca-ide` and the `/Applications` fallback. ONE command, not
 a word-split list: a path containing spaces is a single candidate. The driver's
 refusal names this knob, so it is listed here rather than left to be found in

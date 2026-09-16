@@ -1364,11 +1364,40 @@ runner_available() { return 0; }
 command -v definitely-not-on-this-machine >/dev/null 2>&1 || return 1
 runner_worktree_create() { :; }
 DRIVER
+
     out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=lateba ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
     [ "$rc" = 0 ] \
       && fail "a driver that returned before implementing the contract was accepted because its probe happened to be defined first: $out"
     grep -q "lateba.sh is there and did not finish implementing" <<<"$out" \
       || fail "the refusal did not say the driver stopped part way, which is the only thing separating it from a working one: $out"
+    grep -q "stopped before runner_worktree_create" <<<"$out" \
+      || fail "the refusal did not name which of the two conditions failed, so the driver's author has to guess: $out"
+
+    #     ...AND A CONFORMANT DRIVER THAT MERELY SOURCES NON-ZERO IS ACCEPTED.
+    #     `[ -n "${FOO:-}" ] && export FOO` with FOO empty is a routine last
+    #     line, and refusing a driver that implements everything because of it
+    #     would be this issue's own confident lie about a machine that is fine.
+    #     The status raises the bar to runner_worktree_create; it does not
+    #     decide. Found by the self-review, which caught the first fix
+    #     overreaching.
+    cat >"$WORK/repo/scripts/fleet/runner/trailer.sh" <<'DRIVER'
+#!/usr/bin/env bash
+# Implements the two lib.sh looks for, and ends on a false test.
+runner_available() { return 0; }
+runner_worktree_create() { :; }
+runner_worktree_list() { :; }
+[ -n "${DEFINITELY_UNSET_HERE:-}" ] && export DEFINITELY_UNSET_HERE
+DRIVER
+    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=trailer bash -c '
+      set -uo pipefail
+      REPO_ROOT="$PWD"
+      . ./scripts/fleet/lib.sh 2>&1
+      echo "missing=${FLEET_RUNNER_MISSING:-UNSET}"
+    ' 2>&1 )"
+    grep -q "^missing=0$" <<<"$out" \
+      || fail "a driver that implements the contract was refused because its last line was a false test: $out"
+    grep -q "did not finish implementing" <<<"$out" \
+      && fail "a conformant driver was told it stopped part way: $out"
 
     # 1c. AN EMPTY RUNNER NAME. `.autofleet/config` is sourced after config.sh's
     #     `:=orca` default, so `AUTOFLEET_RUNNER=` in that file arrives here

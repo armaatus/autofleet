@@ -1403,18 +1403,21 @@ fi
 #    `.autofleet/config` is sourced from inside it and is exactly where a host
 #    project overrides it.
 #
-#    `env -u AUTOFLEET_RUNNER -u AUTOFLEET_CONFIG`, because the question is which
-#    driver THIS REPO is configured for, not which one the maintainer happens to
+#    `env -i`, because the question is which driver THIS REPO is configured for, not which one the maintainer happens to
 #    have exported in the shell they ran the lint from. `bash -c` inherits the
 #    environment, so a `AUTOFLEET_RUNNER=stub` left over from a test run would
 #    fail the lint on a repo that is correctly configured -- and config.sh's own
 #    layering note says a config file that assigns outright overrides even the
 #    environment, so the ambient value is not authoritative here either way.
-#    BOTH variables, which is the half that was missing: config.sh sources
-#    `${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}`, so an AUTOFLEET_CONFIG
-#    pointing at another repo's file answers this check about that repo -- red on
-#    a correct repo, or green on a broken one, which is the guard that stops
-#    guarding. First half found by the local review, second by the self-review.
+#    AN EMPTY ENVIRONMENT rather than two `-u`s, which is what two self-review
+#    rounds cost to arrive at: config.sh also sources
+#    `${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}`, so a stale
+#    AUTOFLEET_CONFIG answers this check about another repo's file -- and it
+#    `exit 2`s on several other ambient knobs, so a leftover
+#    AUTOFLEET_REVIEW_MAX_ROUNDS made the check report that the runner could not
+#    be established. Consequence as cause, in the check that closes that hole.
+#    PATH and HOME are kept because bash and config.sh need them. Found by the
+#    local review, then twice by the self-review.
 #
 #    `|| exit 1` after the source, because without it the "would not source"
 #    branch below was unreachable: `.` returning non-zero is discarded under
@@ -1422,7 +1425,7 @@ fi
 #    with a syntax error was reported as one that "leaves AUTOFLEET_RUNNER
 #    empty" -- the misattribution this comment claims to avoid, in the check
 #    that makes the claim. Found by the local review.
-if runner="$(env -u AUTOFLEET_RUNNER -u AUTOFLEET_CONFIG bash -c '
+if runner="$(env -i PATH="$PATH" HOME="$HOME" bash -c '
     set -uo pipefail
     REPO_ROOT="$PWD"
     . ./scripts/fleet/config.sh || exit 1

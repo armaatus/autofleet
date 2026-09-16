@@ -303,12 +303,14 @@ runner_agent_terminal() {
 # the driver that sources and defines nothing, and the file that is not there.
 FLEET_RUNNER_DRIVER="$(dirname "${BASH_SOURCE[0]}")/runner/${AUTOFLEET_RUNNER}.sh"
 if [ -f "$FLEET_RUNNER_DRIVER" ]; then
-  # `if !`, because `setup.sh` runs `set -e` and a driver that RETURNS non-zero
+  # `|| <capture>`, because `setup.sh` runs `set -e` and a driver that RETURNS non-zero
   # -- the documented shape for one that bails when a dependency it needs is
   # absent -- makes the `.` non-zero too. Errexit then killed the hook before
   # the check below could say anything, on the one path where the runner is
   # holding an agent's tab. A condition context is exempt from errexit, so the
-  # status arrives here instead of ending the script. Measured, so the limit is
+  # status arrives here instead of ending the script -- and it is KEPT rather
+  # than discarded, because it is half of what tells a driver that bailed from
+  # one that finished. Measured, so the limit is
   # recorded with it: a driver with a SYNTAX ERROR is not reachable this way at
   # all -- bash aborts a non-interactive shell on a parse error in a sourced
   # file, `if !` or not -- and bash's own parser error naming the file and line
@@ -325,15 +327,26 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
   # right. `runner_available` is the probe every guarded caller reaches first
   # and the function docs/RUNNERS.md requires first, so it is the one tested
   # for. Found by the self-review.
-  # THE STATUS IS KEPT, not just the probe. A driver is free to define
-  # `runner_available` and THEN bail -- define the probe, discover the helper
-  # file it needs is absent, `return 1` -- and `command -v` alone called that
-  # working: the first real call was `command not found`, and `launch` relayed
-  # "could not create it:" with nothing under it. docs/RUNNERS.md imposes no
-  # ordering on a driver, so the source's own status is the only thing that
-  # knows. Found by the self-review, which also had the earlier half of this.
-  if [ "$fleet_runner_source_rc" = 0 ] \
-    && command -v runner_available >/dev/null 2>&1; then
+  # TWO FUNCTIONS, and a non-zero source status is only a question rather than
+  # an answer. A driver is free to define `runner_available` and THEN bail --
+  # define the probe, discover the helper file it needs is absent, `return 1` --
+  # and `command -v runner_available` alone called that working: the first real
+  # call was `command not found`, and `launch` relayed "could not create it:"
+  # with nothing under it. docs/RUNNERS.md imposes no ordering on a driver, so
+  # the source's status is what notices.
+  #
+  # But a non-zero status ALONE is not a broken driver: a conformant one that
+  # ends on `[ -n "${FOO:-}" ] && export FOO` with FOO empty sources non-zero
+  # and implements everything, and refusing it would be this issue's own
+  # confident lie about a machine that is fine. So the status only raises the
+  # bar: `runner_worktree_create` -- the first call the dispatcher makes after
+  # the probe, and the one whose failure #13 opens with -- must be there too.
+  # The pair, and the requirement, are stated in docs/RUNNERS.md, which hard
+  # rule 4 makes the authority for the contract. Both halves found by the
+  # self-review; the second is the one that caught the first overreaching.
+  if command -v runner_available >/dev/null 2>&1 \
+    && { [ "$fleet_runner_source_rc" = 0 ] \
+         || command -v runner_worktree_create >/dev/null 2>&1; }; then
     # Set on BOTH arms, never defaulted from the environment. An exported
     # FLEET_RUNNER_MISSING=0 from the invoking shell would otherwise disarm the
     # refusal below, which is the same hole `evals/lint.sh` 4g closes with
@@ -347,21 +360,28 @@ if [ -f "$FLEET_RUNNER_DRIVER" ]; then
     # which is the failure class this issue removes, one branch over. Found by
     # the self-review, on both axes.
     unset FLEET_RUNNER_MISSING_SAYS
+    # ...AND THE SAY-ONCE KEY, for the same reason. A tree that goes broken
+    # driver, working driver, broken driver again kept the stale key, and the
+    # second refusal's four lines were suppressed as already said -- leaving
+    # `fleet_require_runner`'s one line about a file that exists. Found by the
+    # self-review.
+    unset FLEET_RUNNER_REPORTED_FOR
     unset fleet_runner_source_rc
   else
     [ "${FLEET_RUNNER_REPORTED_FOR+set}" = set ] \
       && [ "$FLEET_RUNNER_REPORTED_FOR" = "$AUTOFLEET_RUNNER" ] || {
       echo "autofleet: $FLEET_RUNNER_DRIVER is there and did not finish implementing the runner_* contract"
-      echo "     it sourced with status $fleet_runner_source_rc and $(command -v runner_available >/dev/null 2>&1 && echo "returned before it finished" || echo "defined no runner_available"); the contract is in docs/RUNNERS.md"
+      echo "     it sourced with status $fleet_runner_source_rc and $(command -v runner_available >/dev/null 2>&1 && echo "stopped before runner_worktree_create" || echo "defined no runner_available"); the contract is in docs/RUNNERS.md"
       echo "     check it for an early return when something it needs is missing, and for names that match the contract"
     } >&2
     # WHAT IS WRONG WITH IT, carried to `fleet_require_runner`, because the two
     # arms are not the same sentence: here the file EXISTS. "no <path>" sent the
     # reader to create a file that is right there -- and in a descendant shell,
     # where the block above is suppressed, that line is the only thing printed.
-    # Exported for exactly that case. Found by the self-review, on both axes.
+    # Exported for exactly that case -- unlike the driver path, which every
+    # process recomputes. Found by the self-review, on both axes.
     export FLEET_RUNNER_MISSING_SAYS="$FLEET_RUNNER_DRIVER did not finish implementing the runner_* contract"
-    export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
+    export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER"
     FLEET_RUNNER_MISSING=1
     unset fleet_runner_source_rc
   fi
@@ -426,7 +446,7 @@ else
   # `handoff.sh` and `issue-command.sh`. Keyed on the path, the block printed
   # again the first time it crossed that spelling boundary. Both found by the
   # local review.
-  export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER" FLEET_RUNNER_DRIVER
+  export FLEET_RUNNER_REPORTED_FOR="$AUTOFLEET_RUNNER"
   # ...and the other arm's sentence goes with it. `fleet_require_runner` falls
   # back to "no <driver path>" when this is unset, which is exactly this arm's
   # case; an inherited "<other driver> defines no runner_available" would

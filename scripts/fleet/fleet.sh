@@ -347,13 +347,18 @@ fi
 # by the local review.
 fleet_require_runner
 
-mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
-
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep
 # reports the consequence instead of the cause. The driver has already said why
 # on stderr; this is the consequence.
 runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so there is nothing to dispatch with"
+
+# BELOW BOTH REFUSALS, which is the rationale the guard above was given and the
+# probe below it was not: a command about to be refused should not create state
+# directories first. `fleet.sh status` on a machine whose app is not running was
+# making three directories under ~/.autofleet and then declining to do
+# anything. Found by the self-review.
+mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 
 # The runner's board is the status surface: `in-progress` while it builds,
 # `in-review` once the PR is up (the agent sets that itself), `completed` on

@@ -119,6 +119,18 @@ where a machine missing its basic tools says so, and a probe in front of it
 answers a missing `shasum` with "is the runtime running?", which is the wrong
 machine named confidently.
 
+**Your driver must have defined `runner_available` and `runner_worktree_create`
+by the time sourcing ends.** They are the two `lib.sh` looks for, and they are
+those two because they are the first calls every guarded caller makes: the probe,
+and then the one whose failure this issue opens with. A driver that defines the
+probe and then `return`s -- the documented shape for one that bails when a
+dependency it needs is absent -- used to pass as working, and its first real call
+was `command not found` relayed as "could not create it:" with nothing under it.
+A non-zero status from sourcing the file is not by itself a refusal: a conformant
+driver that ends on `[ -n "${FOO:-}" ] && export FOO` sources non-zero and
+implements everything. It raises the bar to that second function rather than
+deciding on its own.
+
 A driver that is **not there at all** is a different question and is answered
 one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
 drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
