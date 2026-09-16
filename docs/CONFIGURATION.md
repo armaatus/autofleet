@@ -513,7 +513,8 @@ scripts:
 
 A fourth call site added without the export would be a knob that silently
 measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
-on any `scripts/fleet/*.sh` that runs a `$AUTOFLEET_*_CMD` in command position
+on any shell file anywhere under `scripts/fleet/` that runs a
+`$AUTOFLEET_*_CMD` in command position
 and contains no call to the seam. It is in `evals/` rather than `tests/` because
 `evals/` is vendored: a host project gets the guard along with the thing it
 guards.
@@ -633,7 +634,9 @@ either figure.
 the mechanism is two environment variables and a TCP connect. The knob carries
 the name because a dependency is named rather than hidden, not because the code
 knows about it — and `evals/lint.sh` **runs** that rule rather than quoting it,
-so a `command -v headroom` added to the payload later fails the build.
+so a `command -v headroom` added anywhere under `scripts/fleet/` later fails the
+build. It scans that directory and not the rest of the payload, which is where
+every line of this seam lives.
 
 The probe is strict about the URL on purpose: **no scheme or no host reads as
 unreachable**, so `AUTOFLEET_HEADROOM_URL=localhost:8787` (no `http://`) and an
@@ -642,9 +645,15 @@ own machine and then exported as a broken base URL.
 
 If the proxy dies between two calls in one process — the two self-review passes
 are minutes apart — the second call **puts back whatever was there before**
-rather than leaving the agent pointed at a dead endpoint. If you had your own
-`ANTHROPIC_BASE_URL` set (a company gateway, say) the knob borrows it while the
-proxy is up and returns it when the proxy goes away; it is not lost.
+rather than leaving the agent pointed at a dead endpoint.
+
+**If you already have your own `ANTHROPIC_BASE_URL`, the knob replaces it while
+the proxy is up.** It is recorded and restored, so it is not lost — but for as
+long as the proxy answers, the fleet's calls go to the proxy and then wherever
+*it* sends them upstream, **not through your gateway**. If that gateway is doing
+your authentication, your compliance logging or your egress control, that is the
+thing to know before setting `AUTOFLEET_HEADROOM=1`, and the reason to point
+`AUTOFLEET_HEADROOM_URL` at a proxy you have configured to forward through it.
 
 ### Per-worktree isolation
 
