@@ -49,10 +49,30 @@ case "${1:-}" in
   *) echo "usage: $0 [--watch]" >&2; exit 2 ;;
 esac
 
+# ABOVE everything about the runner, because a person who turned this watcher
+# off is not asking about drivers. It used to sit below, which was harmless
+# while the first `runner_*` was also below it -- moving the guard up to precede
+# that call put a fatal refusal in front of the documented opt-out, so
+# AUTOFLEET_AGENT_AUTOSTART=0 exited 1 on a misconfigured repo instead of 0.
+# Found by the local review.
+if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
+  echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
+  exit 0
+fi
+
 # The driver's deadline, for this process only, ASKED FOR through the contract
 # rather than set by a variable this script happens to know the driver reads. A
 # watcher polls, so it wants a shorter one than the dispatcher's: waiting 30s for
 # one read inside a 3-second poll loop is a watcher that has stopped watching.
+#
+# `fleet_require_runner` FIRST, because this is the first `runner_*` this script
+# calls -- 33 lines before the probe, which is where the guard used to sit. With
+# no driver it was `command not found` on stderr, landing between lib.sh's
+# four-line refusal and the one line that completes it: the split message this
+# change exists to remove, inside the change that removes it. Found by the local
+# review; `evals/lint.sh` check 4h now asserts the ordering rather than the
+# presence.
+fleet_require_runner
 CLI_SECONDS="${AGENT_AUTOSTART_CLI_SECONDS:-20}"
 runner_set_deadline "$CLI_SECONDS"
 POLL_SECONDS="${AGENT_AUTOSTART_POLL_SECONDS:-3}"
@@ -79,10 +99,10 @@ release() {
 trap 'release' EXIT
 trap 'release; exit 0' TERM INT
 
-if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" = "0" ]; then
-  echo "==> agent autostart disabled (AUTOFLEET_AGENT_AUTOSTART=0)"
-  exit 0
-fi
+# A driver that is not THERE is fatal and was dealt with above; a runtime that
+# is not answering is not. The difference is the remedy: one is a name in
+# `.autofleet/config` nobody has written a file for, the other is an app to
+# start.
 runner_available || { echo "==> no runner answers here; nothing to start"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "==> no python3; cannot read the agent's draft"; exit 0; }
 

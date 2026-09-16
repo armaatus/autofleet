@@ -483,7 +483,23 @@ and a port nothing can re-derive is a port nothing can release.
 
 ### The rest
 
-`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md).
+`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
+`scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
+the file it looked for and the drivers that do ship — and stops the four scripts
+that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
+caught before a worktree is opened rather than by an agent sitting on a prompt
+that never sends.
+`ORCA_CLI_COMMAND` (Orca driver only) — the CLI to try first, ahead of `orca`,
+`orca-dev`, `orca-ide` and the `/Applications` fallback. **Exactly one command**,
+so a path containing spaces is a single candidate and a value with arguments in
+it (`orca --debug`) is not a command at all: nothing on `PATH` has that name, the
+candidate is turned down, and the resolve falls through to plain `orca` — a
+different CLI from the one that was configured. It used to be expanded unquoted,
+where the same value was two candidates that both failed. The driver's refusal
+names this knob, so it is listed here rather than left in
+`scripts/fleet/runner/orca.sh`, and it has no default line in `config.sh` but is
+settable in `.autofleet/config`, which `config.sh` sources into the same shell
+before `lib.sh` sources the driver.
 `AUTOFLEET_SETUP_HOOK` / `AUTOFLEET_TEARDOWN_HOOK` — paths to the two hooks.
 `AUTOFLEET_TEST_COMMAND` — quoted into the agent's opening prompt, so it names
 the command your project actually runs rather than one autofleet guessed.

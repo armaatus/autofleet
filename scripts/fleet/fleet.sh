@@ -318,7 +318,10 @@ check_drain() {
 # green on the laptop where the runtime answers.
 #
 # Guarded on BASH_SOURCE so sourcing this file for tests still defines
-# everything below rather than exec-ing away mid-source.
+# everything below rather than exec-ing away mid-source. This is also why
+# `fleet_require_runner` is below rather than beside the `. lib.sh` at the top:
+# `cost` calls no `runner_*`, so a driver that is not there is not its problem,
+# and it has to be able to exec away before anything requires one.
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = cost ]; then
   # A separate script rather than a cmd_* in here: it knows nothing about
   # dispatching, and this file is 3.5k lines already. `exec` so its exit status
@@ -333,13 +336,29 @@ fi
 # run nothing. "It reads transcripts off disk and opens no worktree" is how the
 # dispatch above describes itself. Nothing between here and there reads these
 # directories at source time. Found by the independent review.
-mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
+
+# A driver that is not THERE, before anything else: without one the probe below
+# is `command not found`, and `|| die` turned rc 127 into "the runner is not
+# usable here" -- true of a missing file and the wrong sentence to act on.
+# lib.sh has already named the file it looked for.
+#
+# Above the `mkdir` for the reason the `mkdir` is below the `cost` dispatch: a
+# command about to be refused should not create state directories first. Found
+# by the local review.
+fleet_require_runner
 
 # At SOURCE time, not at first use: everything below assumes a runner that
 # answers, and a dispatcher that discovers otherwise three functions deep
 # reports the consequence instead of the cause. The driver has already said why
 # on stderr; this is the consequence.
 runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so there is nothing to dispatch with"
+
+# BELOW BOTH REFUSALS, which is the rationale the guard above was given and the
+# probe below it was not: a command about to be refused should not create state
+# directories first. `fleet.sh status` on a machine whose app is not running was
+# making three directories under ~/.autofleet and then declining to do
+# anything. Found by the self-review.
+mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
 
 # The runner's board is the status surface: `in-progress` while it builds,
 # `in-review` once the PR is up (the agent sets that itself), `completed` on

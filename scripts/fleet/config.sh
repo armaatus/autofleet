@@ -55,8 +55,15 @@
 
 # ---------------------------------------------------------------- the runner
 # Which driver creates worktrees and terminals. `orca` is the only one that
-# ships today; see fleet/runner/README.md for the contract a second one has to
-# meet.
+# ships today; the contract a second one has to meet is docs/RUNNERS.md, which
+# CLAUDE.md hard rule 4 names as the authority -- fleet/runner/README.md, which
+# this used to point at, is about the seam and lists no `runner_*` at all.
+#
+# A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
+# lib.sh sources it -- the file it looked for and the drivers that do ship --
+# and stops the four scripts that call `fleet_require_runner`: the dispatcher,
+# the setup hook, the board and the autostart watcher. `evals/lint.sh` check 4g
+# goes red on it before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=orca}"
 
 # ---------------------------------------------------------------- the review
