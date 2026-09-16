@@ -2,13 +2,13 @@
 """Which part of a shell line is CODE, and which is prose -- and which lines
 start a model call.
 
-Three checks in evals/lint.sh need the first question answered: 7b asks which
+Two checks in evals/lint.sh need the first question answered: 7b asks which
 scripts start a model call and whether they go through the compression seam, 7c
 asks whether any of them reaches for the vendor the seam is named after. Both are
 wrong in the same way without it -- a rule a COMMENT satisfies is a rule that has
-stopped guarding. check 4c learnt that for the runner seam and carries its own
-copy in awk; this is the Python one, written once because the third caller is the
-one that drifts.
+stopped guarding. check 4c already asks the same question a third time, in awk,
+for the runner seam; this is the Python one, written once here because two
+copies is where the third comes from.
 
 Shipped rather than inlined: `evals/` is vendored (CLAUDE.md, Layout), and a
 vendored lint that imports a file the installer did not deliver fails on every
@@ -27,18 +27,24 @@ import sys
 # still ends up running the agent in the environment of this process, or a shell
 # construct the call is nested in.
 _PREFIX = re.compile(
-    r"^(exec|command|nohup|time|timeout\s+[0-9smhd.]+|if|while|until|then|do|!"
-    r"|[A-Za-z_][A-Za-z0-9_]*=\S*)\s+|^[(]\s*|^\$[(]\s*"
+    # A wrapper that still runs the agent in the environment of this process...
+    r"^(exec|command|nohup|env|time|timeout(\s+(-[A-Za-z]\S*|[0-9smhd.]+))+"
+    # ...a shell keyword the call is nested behind...
+    r"|if|while|until|then|do|!"
+    # ...or a one-command variable assignment, whose VALUE may be quoted and
+    # therefore may contain spaces: `AUTOFLEET_X="a b" cmd` is one command.
+    r"|[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|'[^']*'|\S*))\s+"
+    r"|^[(]\s*|^\$[(]\s*"
 )
 
-# The expansion itself, in every spelling bash accepts: quoted or bare, braced
-# or not. The first version wanted the quotes and the bare brace-less form only,
-# which `"${AUTOFLEET_REVIEW_CMD}"` and `$AUTOFLEET_REVIEW_CMD` both walk past.
 # Where one command ends and the next begins. Crude on purpose -- an operator
 # inside quotes splits a line that was already going to be looked at whole, and
 # the worst that costs is one extra fragment that matches nothing.
 _SEPARATOR = re.compile(r"(?:;|&&|\|\||\|&|\|)")
 
+# The expansion itself, in every spelling bash accepts: quoted or bare, braced
+# or not. The first version wanted the quotes and the bare brace-less form only,
+# which `"${AUTOFLEET_REVIEW_CMD}"` and `$AUTOFLEET_REVIEW_CMD` both walk past.
 _CALL = re.compile(r'^"?\$\{?AUTOFLEET_[A-Z_]*_CMD\}?"?')
 
 
@@ -135,6 +141,9 @@ _CASES = [
     ('out="$($AUTOFLEET_REVIEW_CMD -p x)"', False),
     ('set -m; "$AUTOFLEET_REVIEW_CMD" -p x', True),
     ('mkdir -p "$d" && "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('env FOO=1 "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('timeout -k 5 600 "$AUTOFLEET_REVIEW_CMD" -p x', True),
+    ('FOO="a b" "$AUTOFLEET_REVIEW_CMD" -p x', True),
     # ...and the mentions, which are not call sites.
     ('  say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue', False),
     ('command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {', False),

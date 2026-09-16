@@ -4117,7 +4117,7 @@ cmd_status() {
   # unconfigured repository pays nothing for a row it still gets.
   if fleet_headroom_on; then
     if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
-      echo "headroom:    on -- ${AUTOFLEET_HEADROOM_URL:-}, answering"
+      echo "headroom:    on -- '${AUTOFLEET_HEADROOM_URL:-}', answering"
     else
       echo "headroom:    on -- '${AUTOFLEET_HEADROOM_URL:-}', NOT ANSWERING"
       echo "             (fleet-started agents run unwrapped, at full token price;"

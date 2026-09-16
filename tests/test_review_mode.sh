@@ -3175,15 +3175,15 @@ XX
   # -- from drifting apart.
   inner_body='. ./scripts/fleet/lib.sh
 fleet_headroom_env
-printf "one=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
+printf "one=%s\n" "${ANTHROPIC_BASE_URL+set:$ANTHROPIC_BASE_URL}"
 kill -9 "$1" 2>/dev/null
 i=0
 while fleet_headroom_up "$AUTOFLEET_HEADROOM_URL" && [ "$i" -lt 200 ]; do
   sleep 0.05; i=$((i + 1))
 done
 fleet_headroom_env
-printf "two=%s\n" "${ANTHROPIC_BASE_URL:-unset}"
-printf "search=%s\n" "${ENABLE_TOOL_SEARCH:-unset}"'
+printf "two=%s\n" "${ANTHROPIC_BASE_URL+set:$ANTHROPIC_BASE_URL}"
+printf "search=%s\n" "${ENABLE_TOOL_SEARCH+set:$ENABLE_TOOL_SEARCH}"'
   # CLEARED, for the reason the top of this phase clears them: the suite may be
   # running under an agent that followed docs/CONFIGURATION.md and wrapped its
   # own `claude`, and this half asks what the seam SETS from nothing.
@@ -3196,12 +3196,16 @@ $inner_body"
              AUTOFLEET_HEADROOM_URL="$PROXY_URL" \
              bash -c "$inner" _ "$PROXY_PID" 2>&1 )"
   PROXY_PID=""
-  grep -qxF "one=$PROXY_URL" <<<"$out" \
+  grep -qxF "one=set:$PROXY_URL" <<<"$out" \
     || fail "the first call did not point at the proxy: $out"
-  grep -qxF "two=unset" <<<"$out" \
-    || fail "a proxy that died between two calls left the first call's export behind: $out"
-  grep -qxF "search=unset" <<<"$out" \
-    || fail "ENABLE_TOOL_SEARCH survived the degrade: $out"
+  # `two=` and NOT `two=unset`: the recording is `${VAR+set:$VAR}`, so an empty
+  # line means genuinely unset and `two=set:` would mean exported-empty -- which
+  # is the breakage lib.sh says it avoids and which a `:-unset` reading would
+  # have called a pass. Found by the self-review.
+  grep -qxF "two=" <<<"$out" \
+    || fail "the degrade left ANTHROPIC_BASE_URL set, possibly to nothing: $out"
+  grep -qxF "search=" <<<"$out" \
+    || fail "the degrade left ENABLE_TOOL_SEARCH set, possibly to nothing: $out"
   ok "a proxy that dies between two calls takes both exports with it"
   grep -qF "AUTOFLEET_HEADROOM" <<<"$out" \
     || fail "the second call degraded silently: $out"
@@ -3220,9 +3224,9 @@ $inner_body"
              ANTHROPIC_BASE_URL="https://gateway.invalid" \
              bash -c "$inner_keep" _ "$PROXY_PID" 2>&1 )"
   PROXY_PID=""
-  grep -qxF "one=$PROXY_URL" <<<"$out" \
+  grep -qxF "one=set:$PROXY_URL" <<<"$out" \
     || fail "the first call did not take the proxy over the operator value: $out"
-  grep -qxF "two=https://gateway.invalid" <<<"$out" \
+  grep -qxF "two=set:https://gateway.invalid" <<<"$out" \
     || fail "the degrade threw away a base URL the operator set, rather than putting it back: $out"
   ok "...and a base URL the operator set themselves comes back, rather than vanishing"
 
@@ -3260,6 +3264,54 @@ $inner_body"
     && fail "a non-HTTP scheme was probed as a usable proxy, and would have been exported as one"
   kill_proxy
   ok "a live URL is reachable; no scheme, no host, and a scheme that is not HTTP are not"
+
+  # THE TOGGLE TAKES TWO VALUES AND REFUSES THE REST, LOUDLY. `fleet_headroom_on`
+  # tests the literal `1`, and the two knobs above this one in config.sh take
+  # `on`/`off` -- so `AUTOFLEET_HEADROOM=on` is the spelling somebody writes, and
+  # before the check it read as OFF: every review paid full token price, `status`
+  # said "off", and nothing named the typo. An empty value reaches the same place
+  # for the reason the section is written against -- config.sh's `:=` default
+  # runs BEFORE the host config is sourced, so `AUTOFLEET_HEADROOM=` survives.
+  #
+  # FATAL rather than a warning, and that is deliberate: this file is sourced by
+  # lib.sh, so the exit takes every fleet command with it, and the message names
+  # the knob, the value and the page. A knob whose wrong value is
+  # indistinguishable from its default cannot be fixed by a line in a log.
+  for bad in on true yes 2; do
+    out="$( cd "$WORK/repo" && AUTOFLEET_HEADROOM="$bad" \
+            bash -c '. ./scripts/fleet/config.sh' 2>&1 )"; rc=$?
+    [ "$rc" = 2 ] \
+      || fail "AUTOFLEET_HEADROOM='$bad' was accepted (exit $rc), so a typo reads as off"
+    grep -qF "AUTOFLEET_HEADROOM" <<<"$out" \
+      || fail "the refusal for '$bad' does not name the knob: $out"
+  done
+  ok "a compression knob that is neither 0 nor 1 stops the fleet and names itself"
+
+  # THE EMPTY VALUE, AND IT HAS TO COME THROUGH THE HOST CONFIG. From the
+  # ENVIRONMENT an empty value never reaches the check: `:=` substitutes on
+  # unset OR NULL, so `AUTOFLEET_HEADROOM= fleet.sh` is handed the default and is
+  # genuinely off. A half-edited `.autofleet/config` is the live case, and it is
+  # sourced AFTER the defaults, so the empty string survives all the way to
+  # `fleet_headroom_on` -- which reads it as off, with a line in the file saying
+  # otherwise. The same shape as the AUTOFLEET_REVIEW_MAX_ROUNDS check above it.
+  printf 'AUTOFLEET_REVIEW_MODE=local\nAUTOFLEET_HEADROOM=\n' \
+    >"$WORK/repo/.autofleet/config"
+  # REPO_ROOT, because that is what config.sh resolves `.autofleet/config`
+  # against -- without it the file is looked for at `/.autofleet/config`, the
+  # host config is never read, and the phase passes having tested nothing.
+  out="$( cd "$WORK/repo" && REPO_ROOT="$WORK/repo" \
+          bash -c '. ./scripts/fleet/config.sh' 2>&1 )"; rc=$?
+  [ "$rc" = 2 ] \
+    || fail "a half-edited '.autofleet/config' line was accepted (exit $rc): $out"
+  grep -qF "AUTOFLEET_HEADROOM" <<<"$out" \
+    || fail "the refusal does not name the knob: $out"
+  ok "...including an empty line in .autofleet/config, which the default cannot fill"
+  printf 'AUTOFLEET_REVIEW_MODE=local\n' >"$WORK/repo/.autofleet/config"
+  for good in 0 1; do
+    ( cd "$WORK/repo" && AUTOFLEET_HEADROOM="$good" bash -c '. ./scripts/fleet/config.sh' ) \
+      || fail "AUTOFLEET_HEADROOM=$good was refused"
+  done
+  ok "...and both legal values are taken"
   ;;
 
 # ---------------------------------------------------------- headroom_status
