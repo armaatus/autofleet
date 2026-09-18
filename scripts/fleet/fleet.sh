@@ -246,6 +246,11 @@ POLL_SECONDS="${AUTOFLEET_POLL:-60}"
 # passes; short enough that an overnight run does not spend the night on the one
 # task that was never going to work.
 TIMEBOX_SECONDS="${AUTOFLEET_TIMEBOX:-10800}"
+# The answering half, timed separately -- see `enforce_answer_timebox` for why
+# the build's box cannot just be left armed. Defaults to the build's, because
+# "the same box, starting when the answering starts" is the claim, and a second
+# number nobody set is a second number nobody tuned.
+ANSWER_TIMEBOX_SECONDS="${AUTOFLEET_ANSWER_TIMEBOX:-$TIMEBOX_SECONDS}"
 FOUNDATION_LABEL="${AUTOFLEET_FOUNDATION_LABEL:-foundation}"
 # The human's thumb on the queue -- see "What it picks" above. Read in exactly one
 # place that can change what STARTS (`ready_issues`, where it only sorts), plus
@@ -567,7 +572,12 @@ reset_context_for_answering() {
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
     # waited for both.
-    : >"$STATE_DIR/context-reset-$num"
+    #
+    # IT CARRIES THE TIME, not just the fact. `enforce_answer_timebox` needs a
+    # start for the answering session and this is the moment it begins -- an
+    # empty marker cannot be a clock, and a marker written by an older
+    # dispatcher still is one, which that function reads as "starting now".
+    date +%s >"$STATE_DIR/context-reset-$num"
     say_to_agent_in "$path" \
       "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr $num\` and follow everything it prints. You are the same worktree and a new session: what the build decided is in its handoff note, which that command prints, and nothing else from it survives." \
       || say "#$num: the conversation was dropped but the answering brief did not arrive -- send it by hand"
@@ -640,7 +650,8 @@ clear_issue_markers() {
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
         "$STATE_DIR/send-refused-$1" \
-        "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1"
+        "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1" \
+        "$STATE_DIR/answer-box-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -3968,6 +3979,61 @@ enforce_timebox() {
   done
 }
 
+# THE OTHER HALF OF THE SESSION. `enforce_timebox` above deletes its marker the
+# moment a pull request is open -- "a PR being up means it got where it was
+# going" -- and that sentence is true of the BUILD and of nothing after it. From
+# the PR onwards the agent answered findings, pushed, waited and answered again
+# with no clock on any of it.
+#
+# Measured on issue #71: the build hit its three-hour box and was stopped. The
+# answering session that followed ran 4 hours 49 minutes and 262 turns at
+# 165,000 cache-read tokens a turn -- 43M tokens, the second most expensive
+# session in an issue that cost 207M. Nothing was wrong with it. Nothing was
+# watching it either.
+#
+# A SEPARATE CLOCK RATHER THAN LEAVING THE BUILD'S ARMED, because the two are
+# different work of different lengths and the second starts hours after the
+# first. Its start is the moment `reset_context_for_answering` dropped the build
+# conversation, which is exactly when the answering session began.
+#
+# What it does at the deadline is what the build's box does, for the same
+# reason: a turn to write the handoff note, then the interrupt, then a line
+# where a person looks. What it does NOT do is release the worktree -- there is
+# an open pull request on it, and the findings on that PR are the thing a person
+# is about to read.
+enforce_answer_timebox() {
+  local f num path started now
+  now="$(date +%s)"
+  for f in "$STATE_DIR"/context-reset-*; do
+    [ -e "$f" ] || continue
+    num="${f##*/context-reset-}"
+    # Said once per answering session, not once per poll. An interrupt and an
+    # issue comment every minute for the life of a pull request is the failure
+    # every other once-per-event marker in this file exists to prevent.
+    [ -e "$STATE_DIR/answer-box-$num" ] && continue
+    path="$(owned_path "$num")"
+    [ -d "$path" ] || continue
+    started=""
+    read -r started 2>/dev/null <"$f" || true
+    # An empty or unreadable marker is one an older dispatcher wrote, or one
+    # this poll is racing. Stamp it and start the clock now rather than reading
+    # a missing number as "infinitely overdue" and stopping an agent that just
+    # started. Found while writing the phase for this.
+    case "${started:-}" in
+      ''|*[!0-9]*) printf '%s\n' "$now" >"$f" 2>/dev/null || true; continue ;;
+    esac
+    [ $((now - started)) -ge "$ANSWER_TIMEBOX_SECONDS" ] || continue
+    handoff_turn "$num" "$path" || continue
+    : >"$STATE_DIR/answer-box-$num"
+    say "#$num: $((ANSWER_TIMEBOX_SECONDS / 3600))h answering with no merge -- stopping it; the PR and its worktree stay"
+    interrupt_agent_in "$path"
+    : >"$POLL_CACHE/interrupted-$num"
+    card "$path" comment "#$num: answering timed out after $((ANSWER_TIMEBOX_SECONDS / 3600))h -- needs you"
+    GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $((ANSWER_TIMEBOX_SECONDS / 3600)) hours of answering review findings. The pull request is open and its worktree at \`$path\` is kept -- nothing is released, because the findings on that pull request are what needs reading. Its handoff note says where the answering got to." >/dev/null 2>&1 || true
+    notify "#$num answering gave up" "$((ANSWER_TIMEBOX_SECONDS / 3600))h since the PR opened. The PR is left for you."
+  done
+}
+
 # ------------------------------------------------------- the running code ---
 # `fleet.sh run` parses this file ONCE, at start, and never re-reads it. So a fix
 # merged to `main` is live in the worktree and not live in the dispatcher that is
@@ -4975,6 +5041,10 @@ while that one is up."
     # the one the reviewer's findings arrive into.
     reset_context_for_answering
     enforce_timebox
+    # Immediately after, and for the same reason it runs before notice_stalled:
+    # both interrupt an agent, and the one with a deadline behind it should get
+    # there first so the other does not card the same worktree twice.
+    enforce_answer_timebox
     notice_stalled
     reap_abandoned
     prune_gaveup

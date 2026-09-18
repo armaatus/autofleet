@@ -45,7 +45,8 @@ the default and make the documented way to turn the cost report off do nothing.
 |---|---|---|
 | `AUTOFLEET_MAX` | `3` | The ceiling is not machine capacity, it is how many streams one person can review properly. Raising it makes the review queue the bottleneck. |
 | `AUTOFLEET_POLL` | `60` | How often the dispatcher re-reads the world, in seconds. Lower burns API quota; higher delays every handoff. |
-| `AUTOFLEET_TIMEBOX` | `10800` | How long one issue may hold a worktree. Long enough for a full test run and both review rounds; short enough that an overnight run does not spend the night on the one task that was never going to work. |
+| `AUTOFLEET_TIMEBOX` | `10800` | How long one issue may hold a worktree **before its pull request is open**. Long enough for a full test run and both review rounds; short enough that an overnight run does not spend the night on the one task that was never going to work. The box is disarmed the moment a PR appears — the build got where it was going — which is why the row below exists. |
+| `AUTOFLEET_ANSWER_TIMEBOX` | `$AUTOFLEET_TIMEBOX` | The same box for the **answering** half, starting when `reset_context_for_answering` drops the build conversation. That half had no clock at all: measured on issue #71, the build hit its three-hour box and stopped, and the answering session that followed ran **4h49m and 262 turns** at 165,000 cache-read tokens a turn — 43M tokens, the second most expensive session in an issue that cost 207M. At the deadline the agent gets a turn to write its handoff note and is then interrupted, and the issue gets a comment saying so. **The worktree is not released**: there is an open pull request on it, and the findings on that PR are what a person is about to read. |
 | `AUTOFLEET_RM_DEADLINE` | `180` | How long a worktree removal may take before it is reported as refused. |
 
 ### The labels

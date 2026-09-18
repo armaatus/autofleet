@@ -3072,6 +3072,81 @@ print(json.dumps({"result": {"worktrees": [
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
+
+  answer_timebox)
+    # THE OTHER HALF OF THE SESSION, which had no clock at all.
+    #
+    # `enforce_timebox` deletes the started marker the moment a pull request is
+    # open -- "a PR being up means it got where it was going" -- so from that
+    # point nothing bounds the agent. Measured on issue #71: the build hit its
+    # three-hour box and stopped, and the answering session that followed ran
+    # 4h49m and 262 turns with nothing to stop it, at 165,000 cache-read tokens
+    # a turn. It is the second most expensive session in the whole issue.
+    #
+    # The build's box cannot simply be left armed: the two phases are different
+    # lengths of work and the answering one starts hours later. It gets its own,
+    # off the marker `reset_context_for_answering` already writes.
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+
+    # The answering session starts, and the marker that records it carries WHEN
+    # -- an empty marker cannot be a clock.
+    in_fleet reset_context_for_answering >/dev/null 2>&1
+    [ -s "$AUTOFLEET_DIR/context-reset-42" ] \
+      || fail "the context-reset marker is empty, so nothing can time the answering session"
+    echo "ok: the answering session's start is recorded, not just the fact of it"
+
+    # Inside the box, nothing happens.
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      && fail "an answering session well inside its box was stopped: $out"
+    echo "ok: an answering session inside its box is left alone"
+
+    # ...and past it, the same treatment the build gets: a turn to write the
+    # handoff note, an interrupt, and a comment saying so where a person looks.
+    echo 0 >"$AUTOFLEET_DIR/context-reset-42"
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      || fail "an answering session past its box was not stopped: $out"
+    grep -q "issue comment" "$GH_CALLS" \
+      || fail "it stopped the agent and left nothing on the issue saying why: $out"
+    echo "ok: an answering session past its box is stopped, and says so on the issue"
+
+    # ONCE. This runs every poll, and an interrupt plus a comment once a minute
+    # for the life of the pull request is the failure mode every other
+    # once-per-event marker in this file exists to prevent.
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      && fail "it stopped the same answering session a second time: $out"
+    echo "ok: ...and not again on the next poll"
+
+    # THE CALL SITE, not just the function. Every assertion above drives
+    # `enforce_answer_timebox` directly, so deleting the one line in the poll
+    # loop that runs it leaves all of them green while the answering session
+    # goes back to being unbounded -- which is hard rule 3's shape exactly, and
+    # is how `foundation_launch_held` two phases down came to exist.
+    grep -qE '^ +enforce_answer_timebox$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
+      || fail "nothing in the poll loop calls enforce_answer_timebox"
+    echo "ok: ...and the poll loop actually calls it"
+
+    # ...AND THE SAY-ONCE MARKER DOES NOT OUTLIVE THE WORKTREE. It is the whole
+    # of what stops a second interrupt, so left behind it silences the box for
+    # the NEXT worktree on this issue -- which is the bug `enforce_timebox`
+    # records against `unreachable-` in its own comments, arriving again through
+    # a marker added later than the list that clears them.
+    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
+      || fail "the fixture never armed answer-box-42, so this asserts nothing"
+    in_fleet clear_issue_markers 42 >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
+      && fail "answer-box-42 survives clear_issue_markers: the next worktree on this issue gets no box"
+    echo "ok: ...and its say-once marker is cleared with the rest"
+    ;;
   foundation_holds)
     # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
     # half of it -- a foundation issue would not JOIN running worktrees, and
