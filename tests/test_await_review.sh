@@ -263,6 +263,41 @@ case "${1:-}" in
   ok "...and the open thread itself is printed, so the fixture is load-bearing"
   ;;
 # ----------------------------------------------------------------------- knob
+  moved)
+  # WHAT THE AGENT IS TOLD WHEN ITS WORKTREE HAS MOVED PAST THE REVIEWED HEAD.
+  #
+  # This branch used to end "Push, and the reviewer runs again on what you
+  # sent", and that sentence was false in both venues: AUTOFLEET_REVIEW_MAX=1
+  # bounds reviews per pull request in `local` mode, and `claude-review.yml`
+  # deliberately excludes `synchronize` in `github` mode. REVIEW.md's "It runs
+  # once" is the truth in each.
+  #
+  # False in the expensive direction, too. It taught the loop merge_gate.py
+  # documents at its own condition 7 -- answer a finding with a push, the head
+  # moves, the review that asked is discarded, and the gate wants a review on
+  # the new head. 45% of every gate refusal measured on this repository is that
+  # one loop, and this was the payload telling an agent to enter it.
+  make_fixture "$NIT_ONLY"
+  # The PR is stuck on the sha the stub reports; the worktree moves past it.
+  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "a fix"
+  out="$( (cd "$WORK/repo" && ./scripts/fleet/await-review.sh 42) 2>&1 )"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "the wait did not end on the review (rc=$rc)"; }
+
+  grep -qF 'Not counted as one of' <<<"$out" \
+    || { echo "$out" >&2; fail "a review of a head the worktree has moved past was counted as a round"; }
+  ok "a review of an already-changed head does not spend a round"
+
+  grep -qE 'reviewer (runs|will run) again' <<<"$out" \
+    && { echo "$out" >&2; fail "it still tells the agent that pushing buys another review"; }
+  ok "it does not promise a second review that neither venue runs"
+
+  grep -qF 'does not buy another review' <<<"$out" \
+    || { echo "$out" >&2; fail "it does not say that pushing buys no further review"; }
+  grep -qiF 'validation' <<<"$out" \
+    || { echo "$out" >&2; fail "it does not name what DOES run on the head that gets pushed"; }
+  ok "...and says what runs on the pushed head instead"
+  ;;
+
   knob)
   # AWAIT_REVIEW_MAX_ROUNDS became a documented knob with the round cap and was
   # still read raw. `[ 4 -gt three ]` returns 2, which reads as false, so the

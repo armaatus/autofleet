@@ -3072,6 +3072,287 @@ print(json.dumps({"result": {"worktrees": [
       || fail "an ordinary overrun left nothing on the issue: $out"
     echo "ok: an ordinary overrun is still stopped"
     ;;
+
+  cost_knobs)
+    # THE THREE KNOBS THIS BRANCH ADDED, REFUSED WHEN THEY ARE NOT NUMBERS.
+    #
+    # config.sh validates every other numeric knob and says in its own comments
+    # why: a non-number makes `[ N -ge X ]` return 2, bash reads 2 as false, and
+    # the check the knob exists for never fires. Silently. These three are the
+    # ones where that failure is worst, because each one IS a cap:
+    #
+    #   SELF_REVIEW_MAX=three  -> `[ "$round" -gt "three" ]` is false forever,
+    #                             so the sixteen-round grind is back and nothing
+    #                             says so.
+    #   ANSWER_TIMEBOX=x       -> the answering session is unbounded again.
+    #   CONTEXT_RECYCLE=x      -> the recycle silently never runs.
+    #
+    # THROUGH THE CONFIG FILE as well as the environment, which is the route
+    # that matters: `.autofleet/config` is sourced LAST so it can override the
+    # defaults, and a check that only ever saw the defaults was decorative for
+    # every real user of it. That is the bug the REVIEW_MAX_TRIES phase in
+    # test_review_mode.sh records, and it is why both routes are driven here.
+    make_fixture ok
+    hostcfg="$WORK/hostcfg"
+    for knob in AUTOFLEET_SELF_REVIEW_MAX AUTOFLEET_ANSWER_TIMEBOX AUTOFLEET_CONTEXT_RECYCLE; do
+      for bad in three 2x -1; do
+        out="$( (cd "$WORK/repo" && env "$knob=$bad" \
+          bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
+        [ "$rc" = 2 ] \
+          || fail "$knob='$bad' was accepted (rc=$rc): $out"
+        grep -q "$knob must be" <<<"$out" \
+          || fail "$knob='$bad' failed without naming the knob: $out"
+      done
+      printf '%s=three\n' "$knob" >"$hostcfg"
+      out="$( (cd "$WORK/repo" && env -u "$knob" AUTOFLEET_CONFIG="$hostcfg" \
+        bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
+      [ "$rc" = 2 ] \
+        || fail "a config file setting $knob=three was accepted (rc=$rc): $out"
+    done
+    echo "ok: each new cap is refused when it is not a whole number, by both routes"
+
+    # ...and the legal values are accepted. A floor of 1 for the two that are
+    # counts of something that must happen at least once; 0 for the recycle,
+    # where 0 IS the documented off switch and refusing it would make the
+    # default unsettable.
+    for good in "AUTOFLEET_SELF_REVIEW_MAX=1" "AUTOFLEET_ANSWER_TIMEBOX=60" \
+                "AUTOFLEET_CONTEXT_RECYCLE=0" "AUTOFLEET_CONTEXT_RECYCLE=2700"; do
+      out="$( (cd "$WORK/repo" && env "$good" \
+        bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
+      [ "$rc" = 0 ] || fail "$good was refused (rc=$rc): $out"
+    done
+    echo "ok: ...while legal values pass, including the recycle's documented 0 for off"
+
+    # A ZERO SELF-REVIEW CAP IS NOT A LEGAL OFF SWITCH, for the reason the
+    # REVIEW_MAX_TRIES floor exists: it does not mean "no cap", it means the
+    # first round is already over it, so no self-review ever runs and the push
+    # gate opens on findings nothing produced.
+    out="$( (cd "$WORK/repo" && AUTOFLEET_SELF_REVIEW_MAX=0 \
+      bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
+    [ "$rc" = 2 ] || fail "AUTOFLEET_SELF_REVIEW_MAX=0 was accepted (rc=$rc): $out"
+    echo "ok: ...and a zero self-review cap is refused, not read as 'off'"
+    ;;
+
+  context_recycle)
+    # THE BUILD SESSION IS THE SINGLE BIGGEST LINE IN AN ISSUE'S BILL, and the
+    # reason is not the number of turns. Measured on issue #71: the build ran
+    # 285 turns at 229,052 cache-read tokens PER TURN -- 65M, 31.9% of the whole
+    # issue -- against issue #106's build at 61 turns and 96,061 a turn. Same
+    # kind of work; 2.4x the context on every single turn, because one session
+    # accumulates everything it has read and pays for all of it again each turn.
+    #
+    # `reset_context_for_answering` already proves the remedy works. It fires
+    # ONCE, at the pull request, and everything before that is one window that
+    # only grows.
+    #
+    # OFF BY DEFAULT, and this phase asserts that first. A recycle costs the
+    # agent everything not in a 300-word handoff note, so a badly chosen
+    # interval makes the work worse AND more expensive by making it redo things.
+    # It is a knob to measure with, not a default to inflict.
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[]' >"$GH_PRS"
+
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "the build context was recycled with the knob unset: $out"
+    echo "ok: off by default -- an unset knob recycles nothing"
+
+    # ...and on, but well inside the interval, still nothing.
+    export AUTOFLEET_CONTEXT_RECYCLE=3600
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "a build well inside the recycle interval was cleared: $out"
+    echo "ok: ...and inside the interval it leaves the session alone"
+
+    # Past it: the note is asked for, the conversation dropped, and the SAME
+    # brief re-sent. All three, in that order -- a clear with no brief after it
+    # strands the worktree with an agent that has nothing to do, which is the
+    # failure reset_context_for_answering's own comments warn about.
+    #
+    # THE AGENT ANSWERS, which is what makes this the happy path rather than the
+    # expiry one below: the recycle only drops a session whose handoff note
+    # actually MOVED, so a fixture that never writes one is testing the refusal.
+    NOTE="$WORK/wt/.autofleet/run/handoff-42.md"
+    mkdir -p "$(dirname "$NOTE")"
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    : >"$ORCA_CALLS"
+    # First pass asks for the note and declines to clear; the agent then writes
+    # it, and the second pass is the one that recycles.
+    in_fleet enforce_context_recycle >/dev/null 2>&1
+    printf 'what this session decided\n' >"$NOTE"
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      || fail "a build past the recycle interval was not cleared: $out"
+    grep -q -- "issue-command.sh 42" "$ORCA_CALLS" \
+      || fail "it cleared the context and sent no brief, stranding the worktree: $out"
+    echo "ok: past the interval the session is recycled and re-briefed"
+
+    # ...and the clock restarts, so the next poll does not clear it again.
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it recycled the session it had just recycled: $out"
+    echo "ok: ...and the interval restarts, so the next poll leaves it alone"
+
+    # AN OPEN PULL REQUEST ENDS THIS. Past the PR the answering session is the
+    # one running, `reset_context_for_answering` owns that boundary, and a
+    # recycle here would drop the answering context that function just built --
+    # the same worktree losing the findings it was sent to answer.
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it recycled a session that is answering a review, not building: $out"
+    echo "ok: an open PR ends the build recycle -- the answering half is not its business"
+
+    # AN ISSUE THE TIME-BOX GAVE UP ON IS FINISHED WITH. enforce_timebox
+    # interrupts the agent and comments "the fleet will not start this issue
+    # again on its own", but it leaves the worktree OWNED -- reap_abandoned
+    # keeps it while it holds commits. A recycle that did not ask would re-brief
+    # that agent every interval forever, restarting work the fleet announced it
+    # had stopped and that only `fleet.sh retry` may hand back.
+    echo '[]' >"$GH_PRS"
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    : >"$AUTOFLEET_DIR/gaveup-42"
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it re-briefed an issue the time-box had given up on: $out"
+    echo "ok: an issue the time-box gave up on is not recycled back to life"
+    rm -f "$AUTOFLEET_DIR/gaveup-42"
+
+    # THE NOTE HAS TO HAVE MOVED. handoff_turn returns 0 for three different
+    # things -- the note was written, the grace expired without one, and there
+    # was nobody to ask -- and only the first is a reason to drop a build that
+    # is still going. With the grace at zero it never even asks, and clearing
+    # then resumes from whatever stale note is on disk, redoing committed work.
+    # No note at all, and the grace at zero so handoff_turn never even asks --
+    # its "go ahead" here means "I did not try", which is not "the agent
+    # answered".
+    rm -f "$NOTE"
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    : >"$ORCA_CALLS"
+    out="$(AUTOFLEET_HANDOFF_GRACE_SECONDS=0 in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it cleared a live build with no fresh handoff note: $out"
+    grep -q "no fresh handoff note" <<<"$out" \
+      || fail "it declined to recycle without saying why: $out"
+    echo "ok: no fresh note means the build context is kept, not dropped"
+
+    # ...and an empty clear command says so ONCE, rather than turning the knob
+    # off in silence for the whole build.
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    out="$(AUTOFLEET_AGENT_CLEAR_CMD= in_fleet enforce_context_recycle 2>&1)"
+    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
+      || fail "an empty clear command turned the recycle off silently: $out"
+    out="$(AUTOFLEET_AGENT_CLEAR_CMD= in_fleet enforce_context_recycle 2>&1)"
+    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
+      && fail "it said so again on the next poll, once a minute for the run"
+    echo "ok: ...and an empty clear command is said once, not every poll"
+
+    # The call site, for the same hard rule 3 reason answer_timebox asserts it.
+    grep -qE '^ +enforce_context_recycle$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
+      || fail "nothing in the poll loop calls enforce_context_recycle"
+    echo "ok: ...and the poll loop actually calls it"
+    ;;
+
+  answer_timebox)
+    # THE OTHER HALF OF THE SESSION, which had no clock at all.
+    #
+    # `enforce_timebox` deletes the started marker the moment a pull request is
+    # open -- "a PR being up means it got where it was going" -- so from that
+    # point nothing bounds the agent. Measured on issue #71: the build hit its
+    # three-hour box and stopped, and the answering session that followed ran
+    # 4h49m and 262 turns with nothing to stop it, at 165,000 cache-read tokens
+    # a turn. It is the second most expensive session in the whole issue.
+    #
+    # The build's box cannot simply be left armed: the two phases are different
+    # lengths of work and the answering one starts hours later. It gets its own,
+    # off the marker `reset_context_for_answering` already writes.
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+
+    # ITS OWN CLOCK, NOT THE CONTEXT RESET'S. Keying this on `context-reset-*`
+    # meant a host that set AUTOFLEET_CONTEXT_RESET=off -- documented and
+    # supported -- got no answering clock either, and the 4h49m hole reopened
+    # with nothing saying so. Two unrelated features sharing one marker, the
+    # coupling invisible from both ends. So the reset is explicitly OFF here,
+    # and the box must still arm.
+    export AUTOFLEET_CONTEXT_RESET=off
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    [ -s "$AUTOFLEET_DIR/answer-since-42" ] \
+      || fail "no answering clock was started for an open PR: $out"
+    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
+      && fail "the phase is measuring the context reset's marker, not the box's own"
+    echo "ok: the clock starts at the PR, with the context reset turned off"
+
+    # Inside the box, nothing happens.
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      && fail "an answering session well inside its box was stopped: $out"
+    echo "ok: an answering session inside its box is left alone"
+
+    # ...and past it, the same treatment the build gets: a turn to write the
+    # handoff note, an interrupt, and a comment saying so where a person looks.
+    echo 0 >"$AUTOFLEET_DIR/answer-since-42"
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      || fail "an answering session past its box was not stopped: $out"
+    grep -q "issue comment" "$GH_CALLS" \
+      || fail "it stopped the agent and left nothing on the issue saying why: $out"
+    echo "ok: an answering session past its box is stopped, and says so on the issue"
+
+    # AND THE DURATION IS NOT "0h". The issue comment is the only durable record
+    # of why an agent was stopped, read by somebody who was not there, and
+    # `$((n / 3600))h` truncates: a documented, validated AUTOFLEET_ANSWER_TIMEBOX
+    # of 1800 announced "stopped work on this after 0 hours". A clumsy number
+    # there is survivable; a wrong one is not.
+    grep -q "after 0 hours\|after 0h" "$GH_CALLS" \
+      && fail "the issue comment says the agent was stopped after 0 hours"
+    echo "ok: ...and the duration in that comment is a real one"
+
+    # ONCE. This runs every poll, and an interrupt plus a comment once a minute
+    # for the life of the pull request is the failure mode every other
+    # once-per-event marker in this file exists to prevent.
+    : >"$ORCA_CALLS"; : >"$GH_CALLS"
+    out="$(in_fleet enforce_answer_timebox 2>&1)"
+    grep -q -- "--interrupt" "$ORCA_CALLS" \
+      && fail "it stopped the same answering session a second time: $out"
+    echo "ok: ...and not again on the next poll"
+
+    # THE CALL SITE, not just the function. Every assertion above drives
+    # `enforce_answer_timebox` directly, so deleting the one line in the poll
+    # loop that runs it leaves all of them green while the answering session
+    # goes back to being unbounded -- which is hard rule 3's shape exactly, and
+    # is how `foundation_launch_held` two phases down came to exist.
+    grep -qE '^ +enforce_answer_timebox$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
+      || fail "nothing in the poll loop calls enforce_answer_timebox"
+    echo "ok: ...and the poll loop actually calls it"
+
+    # ...AND THE SAY-ONCE MARKER DOES NOT OUTLIVE THE WORKTREE. It is the whole
+    # of what stops a second interrupt, so left behind it silences the box for
+    # the NEXT worktree on this issue -- which is the bug `enforce_timebox`
+    # records against `unreachable-` in its own comments, arriving again through
+    # a marker added later than the list that clears them.
+    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
+      || fail "the fixture never armed answer-box-42, so this asserts nothing"
+    in_fleet clear_issue_markers 42 >/dev/null 2>&1
+    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
+      && fail "answer-box-42 survives clear_issue_markers: the next worktree on this issue gets no box"
+    echo "ok: ...and its say-once marker is cleared with the rest"
+    ;;
   foundation_holds)
     # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
     # half of it -- a foundation issue would not JOIN running worktrees, and

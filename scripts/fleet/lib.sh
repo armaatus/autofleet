@@ -752,6 +752,27 @@ fleet_headroom_env() {
 # itself, and the suite was red on `main` for it. Ordering alone would fix
 # today's pair; validating the answer is what makes the next `stat` that prints
 # something unexpected a "could not tell" rather than a crash three frames up.
+# A count of seconds, said the way a person would say it: `3h`, `45m`, `30s`.
+#
+# `$((n / 3600))h` is what the callers used to do inline, and integer division
+# truncates: an `AUTOFLEET_ANSWER_TIMEBOX` of 1800 announced itself as "stopping
+# it after 0h", and the same shape at `/ 60` printed "0m" for any recycle under
+# a minute. Both numbers are documented tunables with a floor of 1 second, and
+# the line they appear in is the ISSUE COMMENT -- the only durable record of why
+# an agent was stopped, read by a person who was not there. A wrong number there
+# is worse than a clumsy one. Found by the local /code-review pass.
+#
+# Whole units only, largest that divides exactly, so `5400` is `90m` rather than
+# `1h` (wrong) or `1h30m` (a formatter nobody asked for).
+fleet_duration() {
+  local n="${1:-0}"
+  case "$n" in (''|*[!0-9]*) printf '%ss\n' "${1:-0}"; return 0 ;; esac
+  if [ "$n" -ge 3600 ] && [ $((n % 3600)) -eq 0 ]; then printf '%sh\n' "$((n / 3600))"
+  elif [ "$n" -ge 60 ] && [ $((n % 60)) -eq 0 ]; then printf '%sm\n' "$((n / 60))"
+  else printf '%ss\n' "$n"
+  fi
+}
+
 fleet_mtime() {
   [ -e "${1:-}" ] || return 1
   local m

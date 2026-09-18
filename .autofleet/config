@@ -12,6 +12,50 @@ AUTOFLEET_PROJECT_PREFIX=autofleet
 AUTOFLEET_TEST_COMMAND="./tests/run.sh"
 AUTOFLEET_NOTIFY_TITLE="autofleet"
 
+# TWO WORKTREES, NOT THREE, while what an issue costs is still being brought
+# down. Parallelism does not reduce what the backlog spends -- it spends it
+# faster, three issues at a time, which is how one day took a week's budget.
+# Measured here: issue #71 cost 207M tokens and #13 196M, against #106's 10.5M
+# for comparable work. Two halves the blast radius of one of those and leaves a
+# chance of noticing it before the others have finished too. Back to three once
+# the per-issue numbers hold under 20M.
+AUTOFLEET_MAX=2
+
+# The compression proxy, on. It is worth 8.8% of what it can reach (measured:
+# 133,864 of 1,529,329 tokens, docs/CONFIGURATION.md) and it costs nothing when
+# it is right -- a proxy that stops answering degrades to a warning and full
+# price, not to a failure.
+#
+# WHAT IT CANNOT REACH IS THE PART THAT MATTERS, and that is why this is a
+# footnote rather than a fix: `review.sh` deliberately does not export the base
+# URL into the worktree agent, and the worktree agent is where 63% of an issue's
+# tokens are spent. This wraps the self-review passes, the reviewer and the
+# validator. Do not read a green line here as the cost problem being addressed.
+AUTOFLEET_HEADROOM=1
+
+# RECYCLE THE BUILD CONTEXT EVERY 45 MINUTES.
+#
+# The payload default is 0, and stays 0: a host repo gets this only if it asks.
+# This repository asks, because it is where the measurement came from. Issue
+# #71's build ran 285 turns in ONE window at 229,052 cache-read tokens a turn --
+# 65M, 31.9% of a 207M issue -- against issue #106's build at 61 turns and
+# 96,061 a turn for comparable work. The cost is not the turn count. Every turn
+# re-sends everything the session has read, so a long build pays for its whole
+# history again on each turn of it.
+#
+# 45 minutes turns a three-hour build into roughly four sessions instead of one.
+# It is a first guess, not a tuned number -- that is the whole reason the
+# payload default is off -- so the thing to do after the next run is compare
+# `fleet.sh cost` against the 207M/10.5M figures above and move it.
+#
+# WHAT IT COSTS WHEN IT IS WRONG: everything the agent has not put in its
+# handoff note, which AUTOFLEET_HANDOFF_MAX_WORDS caps at 300. The two ways
+# that turned into lost work are both guarded now -- a worktree the time-box
+# gave up on is never recycled back to life, and a session whose note did not
+# actually move is kept rather than cleared -- so the remaining downside is
+# redoing a little, not losing it.
+AUTOFLEET_CONTEXT_RECYCLE=2700
+
 # No CLAUDE_CODE_OAUTH_TOKEN on this repository, so claude-review.yml no-ops and
 # the only account that could review a fleet PR is the one that opened it. The
 # dispatcher runs the reviewer here instead. See docs/CONFIGURATION.md for what
@@ -35,3 +79,29 @@ AUTOFLEET_NOTIFY_TITLE="autofleet"
 # program that never sources this file and its --selftest has to drive both
 # modes. Two answers to "who wins", for two different readers.
 AUTOFLEET_REVIEW_MODE=local
+
+# ROUND TWO ONWARDS READS WHAT CHANGED, not the whole branch again.
+#
+# Every reviewer run this machine has ever recorded is `scope: full` --
+# `~/.autofleet/reviews/cost.tsv`, ten rows -- including FOUR full reviews of
+# PR #132 at $5.75, $1.79, $2.13 and $1.87, which is $11.54 for one pull
+# request. Each one re-read a branch whose earlier rounds had already been
+# judged, because the head had moved. (An earlier draft of this comment, and
+# the commit message that carried it, said three and $9.67: the fourth row is a
+# second review on head 31670481, three minutes after the first. Found by the
+# local /mattpocock-skills:code-review pass, checking the claim against the
+# ledger.)
+#
+# The delta machinery has been built and tested since #65 and was left off for
+# one stated reason: `review.sh` inlines `.claude/agents/reviewer.md` as the
+# brief, that file is under `.claude/` and cannot be auto-merged, so flipping
+# the payload DEFAULT would outrun the brief. That argument is about the
+# default in scripts/fleet/config.sh. It is not about this file -- these are
+# one repository's own knobs, and the three clauses that make a delta review
+# safe are stated in review.sh's own "This run" block, which is what the
+# reviewer actually reads.
+#
+# Round one is always full, and AUTOFLEET_REVIEW_FULL_EVERY=4 makes every
+# fourth round full regardless, so no pull request is ever judged by an
+# unbroken chain of deltas.
+AUTOFLEET_REVIEW_SCOPE=delta

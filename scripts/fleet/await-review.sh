@@ -871,8 +871,18 @@ PY
       echo "Why each of those, in full: ./scripts/fleet/issue-command.sh --after-pr <issue>"
       # The round cap counts rounds of DISAGREEMENT. A review of a head this
       # worktree has already moved past is not one: the agent will push what it
-      # has, the reviewer will run again, and that answer is the round. Spending
-      # one here would leave two for the whole conversation.
+      # has, and what answers that push is a VALIDATION. Spending a round here
+      # would leave two for the whole conversation.
+      #
+      # THE MESSAGE BELOW USED TO SAY "the reviewer runs again on what you
+      # sent", and that was false in both venues and false in the expensive
+      # direction. `AUTOFLEET_REVIEW_MAX=1` bounds reviews per pull request in
+      # `local` mode, and `claude-review.yml` deliberately excludes
+      # `synchronize` in `github` mode -- REVIEW.md's "It runs once" is the
+      # truth in both. What the sentence taught instead was the loop that
+      # `merge_gate.py` documents at its own condition 7: answer a finding with
+      # a push, the head moves, the review that asked is discarded. It is 45% of
+      # every gate refusal measured on this repository.
       pr_head="$(sed -n 1p "$stamp")"
       if [ "$pr_head" = "$head" ]; then
         record_round
@@ -880,7 +890,13 @@ PY
         echo
         echo "Not counted as one of the $MAX_ROUNDS rounds: the PR is on ${pr_head:0:8} and"
         echo "this worktree is on ${head:0:8}, so the review above answers code you have"
-        echo "already changed. Push, and the reviewer runs again on what you sent."
+        echo "already changed. Push what you have."
+        echo
+        echo "Pushing does not buy another review. The review runs ONCE per pull"
+        echo "request; what runs on the head you push is a VALIDATION, which asks"
+        echo "only whether these findings were addressed. So the findings above are"
+        echo "the ones to answer -- there is no later round in which a reviewer"
+        echo "restates them."
       fi
       exit 0
     fi

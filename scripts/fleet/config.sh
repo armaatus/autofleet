@@ -25,6 +25,28 @@
 # seconds. Long enough for a real issue including a full test run and both
 # review rounds.
 : "${AUTOFLEET_TIMEBOX:=10800}"
+# The same box for the ANSWERING half, which had none. The box above is
+# disarmed the moment a pull request opens -- the build got where it was going
+# -- and everything after that ran unwatched: 4h49m and 262 turns on issue #71,
+# 43M tokens. Defaults to the build's, because "the same box, starting when the
+# answering starts" is the claim, and a second number nobody set is a second
+# number nobody tuned. `fleet.sh` reads it through ANSWER_TIMEBOX_SECONDS.
+#
+# THE FALLBACK IS RESOLVED AT THE BOTTOM OF THIS FILE, not here, for exactly the
+# reason AUTOFLEET_SELF_REVIEW_CMD's is: `.autofleet/config` is sourced further
+# down so it can override these defaults, so a `:=` here would capture the
+# DEFAULT 10800 before a host had said `AUTOFLEET_TIMEBOX=1800`. Measured on a
+# config file holding only that line: TIMEBOX=1800, ANSWER=10800 -- a host that
+# halves its build box gets a six-times-longer answering box, and the row in
+# docs/CONFIGURATION.md that says it defaults to the build's is wrong for the
+# one route it is for. Empty here; `:=` treats empty as unset, so the
+# resolution below fires for anything the environment and the host config did
+# not set. Found by the local /code-review pass.
+: "${AUTOFLEET_ANSWER_TIMEBOX:=}"
+# Seconds between context recycles INSIDE the build, before the PR exists.
+# 0 is off, and off is the default -- see docs/CONFIGURATION.md for why the
+# right interval is a measurement nobody has taken yet.
+: "${AUTOFLEET_CONTEXT_RECYCLE:=0}"
 # How long a worktree removal may take before it is reported as refused.
 : "${AUTOFLEET_RM_DEADLINE:=180}"
 
@@ -132,6 +154,27 @@
 # sub-agents of their own, so the visible budget is what keeps "report what you
 # have while you still have turns" meaningful.
 : "${AUTOFLEET_SELF_REVIEW_MAX_TURNS:=80}"
+# How many times ONE BRANCH may run the two passes before the loop is called
+# done and what it has found is handed on to the independent reviewer.
+#
+# THE NEIGHBOUR ABOVE BOUNDS ONE PASS. This bounds the number of them, and it
+# was the hole: `AUTOFLEET_REVIEW_MAX=1` and `AUTOFLEET_VALIDATE_MAX=2` bound
+# everything AFTER the pull request exists, and nothing bounded what came
+# before it. Measured on this machine, PR #126 ran SIXTEEN rounds of both
+# passes and PR #129 ran eight, each round two fresh full-budget agents
+# re-reading the whole branch diff -- 36% of issue #71's 207M tokens.
+#
+# It ground because the loop has nothing to converge on. A review pass can
+# always find one more Suggestion; the agent answers a finding with a commit;
+# the commit moves the head; `record-review.sh` keys its marker on the head, so
+# the marker is stale and another round is needed to push. Every turn of that
+# cycle is the same size as the last.
+#
+# TWO, for the same reason AUTOFLEET_VALIDATE_MAX is two: one round to find
+# what is there, one to check the answers to it. The findings that survive a
+# second round are the independent reviewer's job, which is the phase that
+# exists for exactly this and is bounded at one.
+: "${AUTOFLEET_SELF_REVIEW_MAX:=2}"
 
 # How many attempts one head may get that produce NO VERDICT.
 #
@@ -462,6 +505,10 @@ fi
 # The self-review's command, now that the host config has had its say. See the
 # note by the knob above for why this cannot be done where it is declared.
 : "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
+# ...and the answering box, derived from whatever AUTOFLEET_TIMEBOX ended up
+# being rather than from the default it had 460 lines ago. Same reason, written
+# by the knob above.
+: "${AUTOFLEET_ANSWER_TIMEBOX:=$AUTOFLEET_TIMEBOX}"
 
 # ----------------------------------------------------- knobs that must be sane
 #
@@ -583,6 +630,37 @@ config_whole_number AUTOFLEET_VALIDATE_MAX "$AUTOFLEET_VALIDATE_MAX" \
 #               `head` fail and the context file empty, which is a delta review
 #               with nothing carried forward and no sign that anything is
 #               missing. 0 is legal and means "carry nothing".
+# THE THREE CAPS THAT BOUND WHAT AN ISSUE SPENDS, refused for the reason every
+# other number in this section is: a non-number makes `[ N -ge X ]` return 2,
+# bash reads 2 as false, and the cap never fires. Silently, which is worse here
+# than for most of these, because each of these three IS the bound on a loop
+# that has already been measured running away.
+#
+#   SELF_REVIEW_MAX   `[ "$round" -gt "$AUTOFLEET_SELF_REVIEW_MAX" ]` in
+#                     self-review.sh. False forever means the pre-PR loop is
+#                     uncapped again -- sixteen rounds on PR #126, two fresh
+#                     full-budget agents each. The floor is 1 and 0 is NOT an
+#                     off switch: at 0 the first round is already over the cap,
+#                     so no self-review ever runs and the push gate opens on
+#                     findings nothing produced. That is the hole self-review.sh
+#                     exists to close, reached through a config typo.
+#   ANSWER_TIMEBOX    `[ $((now - started)) -ge "$ANSWER_TIMEBOX_SECONDS" ]` in
+#                     fleet.sh. False forever is the unbounded answering session
+#                     that ran 4h49m on issue #71.
+#   CONTEXT_RECYCLE   fleet.sh guards this one inline, because 0 is its
+#                     documented off switch and the guard has to run before the
+#                     knob is read. Checked here too so a typo is refused at the
+#                     same place as its neighbours rather than being read as
+#                     "off" -- a wrong value that is indistinguishable from the
+#                     default is what AUTOFLEET_HEADROOM's check below exists to
+#                     refuse.
+config_whole_number AUTOFLEET_SELF_REVIEW_MAX "$AUTOFLEET_SELF_REVIEW_MAX" \
+  1 "a positive whole number (0 would mean no self-review ever runs)"
+config_whole_number AUTOFLEET_ANSWER_TIMEBOX "$AUTOFLEET_ANSWER_TIMEBOX" \
+  1 "a positive whole number of seconds"
+config_whole_number AUTOFLEET_CONTEXT_RECYCLE "$AUTOFLEET_CONTEXT_RECYCLE" \
+  0 "a whole number of seconds (0 turns the build recycle off)"
+
 config_whole_number AUTOFLEET_REVIEW_FULL_EVERY "$AUTOFLEET_REVIEW_FULL_EVERY" \
   1 "a positive whole number (1 makes every round a full review)"
 config_whole_number AUTOFLEET_REVIEW_CONTEXT_MAX "$AUTOFLEET_REVIEW_CONTEXT_MAX" \

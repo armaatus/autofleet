@@ -376,6 +376,29 @@ the INDEPENDENT reviewer's and are not yours: you have no \`gh pr review\`, no
 verdict to pick, and no \`review-findings\` trailer to write. You print, and the
 author pastes what you printed into the pull request.
 
+ITS RANKING, HOWEVER, IS YOURS. Critical, Important and Suggestion mean here
+exactly what REVIEW.md says they mean, and the sentence in it that matters most
+at this phase is the one about the last tier: a Suggestion is answered, not
+fixed, because answering costs no commit and a commit moves the head.
+
+AND THE PULL REQUEST DOES NOT EXIST YET, which is what makes that sentence
+harder here than it is for the reviewer. There is no PR body for the author to
+answer a Suggestion in. The only way it can discharge one of yours is a commit
+-- and a commit moves the head, which stales the per-commit review marker, which
+costs another full round of both of these passes before anything can be pushed.
+Measured on this repository, that loop ran sixteen times on one pull request and
+eight on another, and a third of one issue's entire token spend went into it.
+
+SO REPORT CRITICAL AND IMPORTANT FINDINGS. Below that line, do not list
+individual Suggestions: count them, say in one sentence what kind they were, and
+stop. You are not the last reader of this diff -- the independent reviewer runs
+on the pull request after it opens, it has a body to answer in, and raising
+Suggestions there is its job and costs nothing. A nit you hold back is not a nit
+lost; it is a nit raised where answering it is free.
+
+This is a floor, not a quota. If the diff has ten Important findings, report ten.
+What it forbids is spending a round of two agents on wording.
+
 $issue_line
 THERE IS NO USER. You were started headless by a script, your stdin is closed,
 and a question you ask is a question nobody will answer -- a pass that stops to
@@ -431,6 +454,60 @@ empty final message is the only thing recorded as a failure."
 # the local /mattpocock-skills:code-review pass.
 FINDINGS=".autofleet/run/self-review.md"
 DRAFT="$FINDINGS.partial"
+
+# ---------------------------------------------------------------- THE CAP ---
+#
+# How many times this branch has already done the above, and whether that is
+# enough. Everything after the pull request exists was bounded --
+# AUTOFLEET_REVIEW_MAX=1, AUTOFLEET_VALIDATE_MAX=2 -- and this phase, which
+# runs BEFORE it and spends two full-budget agents a round, was not. Measured
+# on this machine: PR #126 ran sixteen rounds, PR #129 eight, and 36% of issue
+# #71's 207M tokens went here.
+#
+# WHY IT GRINDS rather than converging: a review pass can always find one more
+# Suggestion, the agent's remedy for a finding is a commit, a commit moves the
+# head, and `record-review.sh` keys the push marker on the head -- so the
+# marker is stale and the next push needs another round. Each turn of that
+# cycle costs exactly what the last one did.
+#
+# WRITTEN ONLY ON SUCCESS, at the bottom. A pass killed at its deadline or one
+# that said nothing has not spent a round -- the same refund convention
+# `review.sh` and `validate.sh` apply to a reviewer that submitted nothing, and
+# for the same reason: the cap bounds rounds that produced a verdict, not
+# attempts at one.
+ROUNDS_MARKER=".autofleet/run/self-review.rounds"
+round="$(fleet_round_next "$ROUNDS_MARKER")"
+if [ "$round" -gt "$AUTOFLEET_SELF_REVIEW_MAX" ]; then
+  # THE PUSH GATE STILL HAS TO OPEN, and this is the half of the cap that is
+  # easy to get wrong. Refusing outright writes no marker for the new head,
+  # `guard.py` then refuses the push, and the agent burns the rest of its
+  # AUTOFLEET_TIMEBOX unable to reach the independent reviewer -- which is the
+  # phase that exists to judge exactly the findings this cap stopped chasing.
+  # So the cap stops the READING, not the pull request.
+  #
+  # What is recorded is the last round's findings, re-stamped for this head.
+  # That is the rebase case `record-review.sh` already handles, and its
+  # stale-head NOTE is what says out loud that the findings were produced on an
+  # earlier commit. Nothing here claims a pass ran that did not.
+  echo "==> $AUTOFLEET_SELF_REVIEW_MAX self-review rounds on this branch, which is the cap." >&2
+  echo "    Not starting another pass. Two rounds find what is there and check the" >&2
+  echo "    answers to it; a third is the same two agents reading the same diff for" >&2
+  echo "    one more Suggestion, and Suggestions are the independent reviewer's to" >&2
+  echo "    raise. Raise AUTOFLEET_SELF_REVIEW_MAX if this branch really needs more." >&2
+  [ -f "$FINDINGS" ] || {
+    echo >&2
+    echo "...but there are no findings from an earlier round to record: $FINDINGS" >&2
+    echo "is missing. The count says $((round - 1)) rounds ran, so something removed it." >&2
+    echo "Run the passes by hand and record what they find:" >&2
+    echo "  ./scripts/fleet/record-review.sh findings.md" >&2
+    exit 2; }
+  ./scripts/fleet/record-review.sh "$FINDINGS" >&2 || {
+    echo "record-review.sh refused the earlier findings; the push gate is still closed." >&2
+    exit 2; }
+  cat "$FINDINGS"
+  exit 0
+fi
+
 : >"$DRAFT"
 # `failed` IS A STRING, NOT AN ARRAY. macOS ships bash 3.2, where `${#arr[@]}`
 # on an array that was never appended to is an unbound variable under `set -u`
@@ -527,6 +604,10 @@ now="$(git rev-parse HEAD)"
 # loud rather than refusing. Found by the independent review.
 printf '<!-- self-review-head: %s -->\n' "$sha" >>"$DRAFT"
 mv "$DRAFT" "$FINDINGS"
+# THIS ROUND IS SPENT -- here, past every failure path above, because a round
+# that produced no findings has not spent anything. See THE CAP for why the
+# refund convention rather than counting invocations.
+printf '%s\n' "$round" >"$ROUNDS_MARKER" 2>/dev/null || true
 echo "==> findings: $FINDINGS" >&2
 echo "    after a rebase, re-record them for the new head with" >&2
 echo "      ./scripts/fleet/record-review.sh $FINDINGS" >&2

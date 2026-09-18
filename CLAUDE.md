@@ -121,9 +121,9 @@ and say so in the PR body.
 
 ## Working in parallel
 
-At most **3 worktrees** at once, and an issue is startable only when it carries
-`ready` rather than `blocked`. Do not start a `blocked` issue, nor a
-**`needs-human-step`** one — its last step is the maintainer's.
+At most **`AUTOFLEET_MAX` worktrees** at once (2 here), and an issue is startable
+only when it carries `ready` rather than `blocked`. Do not start a `blocked`
+issue, nor a **`needs-human-step`** one — its last step is the maintainer's.
 
 One exception the labels cannot express: **a foundation issue lands alone.** When
 an issue defines an interface later issues include, it merges before anything
