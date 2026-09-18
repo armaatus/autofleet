@@ -572,12 +572,7 @@ reset_context_for_answering() {
     # answering brief that did not is recoverable by hand, and is much better
     # than clearing the same agent again on the next poll because the marker
     # waited for both.
-    #
-    # IT CARRIES THE TIME, not just the fact. `enforce_answer_timebox` needs a
-    # start for the answering session and this is the moment it begins -- an
-    # empty marker cannot be a clock, and a marker written by an older
-    # dispatcher still is one, which that function reads as "starting now".
-    date +%s >"$STATE_DIR/context-reset-$num"
+    : >"$STATE_DIR/context-reset-$num"
     say_to_agent_in "$path" \
       "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr $num\` and follow everything it prints. You are the same worktree and a new session: what the build decided is in its handoff note, which that command prints, and nothing else from it survives." \
       || say "#$num: the conversation was dropped but the answering brief did not arrive -- send it by hand"
@@ -602,19 +597,45 @@ reset_context_for_answering() {
 # interval is a measurement nobody has taken. Turn it on, run an issue, compare
 # `fleet.sh cost`, then argue for a default.
 enforce_context_recycle() {
-  local every f num path last now
+  local every f num path last now note_at
   every="${AUTOFLEET_CONTEXT_RECYCLE:-0}"
   case "$every" in (''|*[!0-9]*) return 0 ;; esac
   [ "$every" -gt 0 ] || return 0
   # The clear command is the same seam the answering reset uses, and an empty
-  # one is the same off switch. Said there, once, rather than twice.
-  [ -n "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ] || return 0
+  # one is the same off switch -- but it has to be SAID here rather than left to
+  # that function to say. It only speaks once a pull request is open, which is
+  # hours into a build or never: a build that times out without a PR never
+  # reaches it at all. So a host that turned this knob on, on a CLI with no
+  # clear command, got silence for the whole build and no saving, which is the
+  # exact failure `reset_context_for_answering`'s own comment says must not
+  # happen -- "the place to find that out is the log of the first issue it would
+  # have hit". Once per dispatcher, not once per poll. Found by the local
+  # /code-review pass.
+  if [ -z "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ]; then
+    [ -e "$STATE_DIR/recycle-noclear" ] && return 0
+    : >"$STATE_DIR/recycle-noclear"
+    say "AUTOFLEET_CONTEXT_RECYCLE is set, but AUTOFLEET_AGENT_CLEAR_CMD is empty, so no build context is recycled"
+    return 0
+  fi
   now="$(date +%s)"
   for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"
     path="$(owned_path "$num")"
     [ -d "$path" ] || continue
+    # AN ISSUE THE TIME-BOX GAVE UP ON IS NOT RECYCLED -- it is finished with.
+    #
+    # `enforce_timebox` interrupts the agent, writes `gaveup-`, and comments on
+    # the issue that "the fleet will not start this issue again on its own".
+    # What it does NOT do is drop `OWNED_DIR/$num`: `reap_abandoned` keeps the
+    # worktree owned for as long as it holds commits or uncommitted work. So a
+    # loop over owned worktrees that did not ask would, every interval forever,
+    # clear that agent and send it the opening brief again -- restarting work
+    # the fleet announced it had stopped, which only `fleet.sh retry` is
+    # supposed to hand back. With a 3h box and a 1h recycle the two fire on the
+    # same pass, and the re-brief lands directly behind the interrupt. Found by
+    # the local /code-review pass.
+    gave_up_on "$num" && continue
     # THE PULL REQUEST ENDS THIS. Past it the answering session is the one
     # running, `reset_context_for_answering` owns that boundary, and a recycle
     # here would drop the answering context that function just built -- the same
@@ -624,8 +645,10 @@ enforce_context_recycle() {
     # `$?`. That form does work -- the compound carries the failing status
     # through -- but it reads as though `$?` were the function's, and the next
     # person to add a line between the two gets a silent wrong answer on the
-    # branch that matters least often. Every other caller in this file spells it
-    # this way.
+    # branch that matters least often. It is the spelling `enforce_timebox`
+    # uses, which is the caller that has to tell all three statuses apart;
+    # `reset_context_for_answering` uses the two-way `|| continue` because it
+    # genuinely only needs "yes" from "anything else".
     has_open_pr "$num"; case $? in
       0) continue ;;
       2) continue ;;
@@ -644,13 +667,42 @@ enforce_context_recycle() {
     # `reset_context_for_answering` uses and for its reasons: what is not in the
     # note does not survive, and a clear with no brief after it strands the
     # worktree with an agent that has nothing to do.
+    # THE NOTE HAS TO ACTUALLY EXIST, and `handoff_turn` returning 0 does not
+    # say that it does. It says "stop waiting", and it says that in three
+    # cases: the note was written, the grace expired without one, and there was
+    # nobody to ask. The last two are fine for
+    # `reset_context_for_answering` -- the build is over there, and what is lost
+    # is context nothing needs again -- and they are not fine here, where the
+    # build CONTINUES from whatever the note says.
+    #
+    # The expiry case is not hypothetical. The agent spends much of its build
+    # inside `self-review.sh`, which blocks for up to two 1200s passes; the
+    # request queues behind that turn, the grace runs out, the clear lands, and
+    # the new session resumes from an hour-old note and redoes work that is
+    # already committed. So: compare the mtime ourselves, and on anything but a
+    # note that MOVED, restart the clock and try again next interval. Losing an
+    # interval costs tokens; clearing a session whose note is stale costs the
+    # work. Found by the local /code-review pass.
+    # AGAINST THE START OF THIS INTERVAL, not across the `handoff_turn` call.
+    # That call only WAITS -- the agent writes the note between polls, never
+    # during it -- so an mtime compared either side of it is always equal, and
+    # the first draft of this check refused every recycle including the ones it
+    # was meant to allow. What makes a note this interval's is that it is newer
+    # than the moment the interval began.
     handoff_turn "$num" "$path" || continue
+    note_at="$(fleet_mtime "$(fleet_handoff_path "$path" "$num")")"
+    case "${note_at:-}" in (''|*[!0-9]*) note_at=0 ;; esac
+    if [ "$note_at" -le "$last" ]; then
+      printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
+      say "#$num: no fresh handoff note, so the build context is kept -- recycling again in $(fleet_duration "$every")"
+      continue
+    fi
     say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
     # The clock restarts on the clear that LANDED, not on the attempt: a driver
     # refusing the send is retried next poll, and a marker written ahead of it
     # would skip a whole interval each time.
     printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
-    say "#$num: recycling the build context after $((every / 60))m -- the handoff note is what carries over"
+    say "#$num: recycling the build context after $(fleet_duration "$every") -- the handoff note is what carries over"
     say_to_agent_in "$path" \
       "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $num\` and follow everything it prints. You are the same worktree and a new session, part-way through this issue: your handoff note is what the last session decided and how far it got, and nothing else from it survives. Read the note before you start work again." \
       || say "#$num: the conversation was dropped but the brief did not arrive -- send it by hand"
@@ -724,7 +776,8 @@ clear_issue_markers() {
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
         "$STATE_DIR/send-refused-$1" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1" \
-        "$STATE_DIR/answer-box-$1" "$STATE_DIR/recycled-$1"
+        "$STATE_DIR/answer-box-$1" "$STATE_DIR/recycled-$1" \
+        "$STATE_DIR/answer-since-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -4075,35 +4128,51 @@ enforce_timebox() {
 # an open pull request on it, and the findings on that PR are the thing a person
 # is about to read.
 enforce_answer_timebox() {
-  local f num path started now
+  local f num path started now marker
   now="$(date +%s)"
-  for f in "$STATE_DIR"/context-reset-*; do
+  # OWNED WORKTREES, AND ITS OWN MARKER -- not `context-reset-*`.
+  #
+  # Keying this on the reset marker was wrong in a way nothing would have said
+  # out loud: that marker is only ever written by `reset_context_for_answering`,
+  # which returns at the top when `AUTOFLEET_CONTEXT_RESET` is not `on`. So a
+  # host that turned the context reset off -- a documented, supported choice --
+  # got no answering clock either, and the 4h49m hole reopened silently with the
+  # knob's own row saying nothing about it. Two unrelated features, one marker,
+  # and the coupling invisible from either end. Found by the local
+  # `/code-review` pass.
+  for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
-    num="${f##*/context-reset-}"
+    num="$(basename "$f")"
     # Said once per answering session, not once per poll. An interrupt and an
     # issue comment every minute for the life of a pull request is the failure
     # every other once-per-event marker in this file exists to prevent.
     [ -e "$STATE_DIR/answer-box-$num" ] && continue
     path="$(owned_path "$num")"
     [ -d "$path" ] || continue
+    # The clock starts at the pull request, which is the boundary the answering
+    # work begins at whether or not the context was reset there. "Could not
+    # tell" is not "yes", the same reading every other branch here gives it.
+    has_open_pr "$num"; case $? in
+      1|2) continue ;;
+    esac
+    marker="$STATE_DIR/answer-since-$num"
     started=""
-    read -r started 2>/dev/null <"$f" || true
-    # An empty or unreadable marker is one an older dispatcher wrote, or one
-    # this poll is racing. Stamp it and start the clock now rather than reading
-    # a missing number as "infinitely overdue" and stopping an agent that just
-    # started. Found while writing the phase for this.
+    read -r started 2>/dev/null <"$marker" || true
+    # No marker yet, or one this poll is racing: this is the first pass that has
+    # seen the PR, so start the clock rather than reading a missing number as
+    # "infinitely overdue" and stopping an agent that has only just got here.
     case "${started:-}" in
-      ''|*[!0-9]*) printf '%s\n' "$now" >"$f" 2>/dev/null || true; continue ;;
+      ''|*[!0-9]*) printf '%s\n' "$now" >"$marker" 2>/dev/null || true; continue ;;
     esac
     [ $((now - started)) -ge "$ANSWER_TIMEBOX_SECONDS" ] || continue
     handoff_turn "$num" "$path" || continue
     : >"$STATE_DIR/answer-box-$num"
-    say "#$num: $((ANSWER_TIMEBOX_SECONDS / 3600))h answering with no merge -- stopping it; the PR and its worktree stay"
+    say "#$num: $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") answering with no merge -- stopping it; the PR and its worktree stay"
     interrupt_agent_in "$path"
     : >"$POLL_CACHE/interrupted-$num"
-    card "$path" comment "#$num: answering timed out after $((ANSWER_TIMEBOX_SECONDS / 3600))h -- needs you"
-    GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $((ANSWER_TIMEBOX_SECONDS / 3600)) hours of answering review findings. The pull request is open and its worktree at \`$path\` is kept -- nothing is released, because the findings on that pull request are what needs reading. Its handoff note says where the answering got to." >/dev/null 2>&1 || true
-    notify "#$num answering gave up" "$((ANSWER_TIMEBOX_SECONDS / 3600))h since the PR opened. The PR is left for you."
+    card "$path" comment "#$num: answering timed out after $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") -- needs you"
+    GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") of answering review findings. The pull request is open and its worktree at \`$path\` is kept -- nothing is released, because the findings on that pull request are what needs reading. Its handoff note says where the answering got to." >/dev/null 2>&1 || true
+    notify "#$num answering gave up" "$(fleet_duration "$ANSWER_TIMEBOX_SECONDS") since the PR opened. The PR is left for you."
   done
 }
 
@@ -4241,8 +4310,10 @@ restart_advice() {
   else
     echo "    ./scripts/fleet/fleet.sh run --auto   # from the MAIN worktree"
   fi
-  echo "  AUTOFLEET_MAX, _POLL and _TIMEBOX are read at start too, so they"
-  echo "  change only across a restart. docs/WORKFLOW.md, 'Restart it'."
+  echo "  AUTOFLEET_MAX, _POLL, _TIMEBOX and _ANSWER_TIMEBOX are read at start"
+  echo "  too, so they change only across a restart. docs/WORKFLOW.md,"
+  echo "  'Restart it'. AUTOFLEET_CONTEXT_RECYCLE is not: it is re-read every"
+  echo "  poll, so turning it on takes effect without one."
 }
 
 # The refusal `fleet.sh run` prints when a dispatcher is already up, and how to

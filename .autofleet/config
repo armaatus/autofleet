@@ -60,9 +60,14 @@ AUTOFLEET_REVIEW_MODE=local
 # ROUND TWO ONWARDS READS WHAT CHANGED, not the whole branch again.
 #
 # Every reviewer run this machine has ever recorded is `scope: full` --
-# `~/.autofleet/reviews/cost.tsv`, ten rows -- including THREE separate full
-# reviews of PR #132 at $5.75, $1.79 and $2.13. Each one re-read a branch whose
-# earlier rounds had already been judged, because the head had moved.
+# `~/.autofleet/reviews/cost.tsv`, ten rows -- including FOUR full reviews of
+# PR #132 at $5.75, $1.79, $2.13 and $1.87, which is $11.54 for one pull
+# request. Each one re-read a branch whose earlier rounds had already been
+# judged, because the head had moved. (An earlier draft of this comment, and
+# the commit message that carried it, said three and $9.67: the fourth row is a
+# second review on head 31670481, three minutes after the first. Found by the
+# local /mattpocock-skills:code-review pass, checking the claim against the
+# ledger.)
 #
 # The delta machinery has been built and tested since #65 and was left off for
 # one stated reason: `review.sh` inlines `.claude/agents/reviewer.md` as the
