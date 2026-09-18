@@ -14,6 +14,17 @@
 #                                the findings come back labelled with the two
 #                                words `merge_gate.py` greps the body for, and
 #                                the push marker is written for THIS commit.
+#   test_self_review.sh roundcap the passes stop after AUTOFLEET_SELF_REVIEW_MAX
+#                                rounds on one branch, and the push gate still
+#                                opens on the last round's findings. Uncapped,
+#                                this loop ran SIXTEEN times on PR #126 and
+#                                eight on #129 -- every round two fresh agents
+#                                re-reading the whole diff, because a review
+#                                pass with no severity floor can always find
+#                                one more nit and the remedy for a nit is a
+#                                commit, which moves the head and invalidates
+#                                the marker. 36% of issue #71's whole token
+#                                spend was this loop.
 #   test_self_review.sh uncounted
 #                                a pass that reports findings but no count is
 #                                RECORDED -- `/code-review` emitted the trailer
@@ -261,6 +272,62 @@ case "${1:-}" in
   grep -qF -- 'did not report a finding count' "$out" \
     && fail "a pass that DID report a count was annotated as if it had not"
   ok "a pass that reported its count is not annotated"
+  ;;
+
+# ----------------------------------------------------------------- roundcap
+  roundcap)
+  make_fixture
+  export SELF_MODE=findings
+  # Two rounds, which is the default. Set explicitly so the phase says what it
+  # is testing rather than inheriting a number that may move.
+  export AUTOFLEET_SELF_REVIEW_MAX=2
+
+  # Round one. The passes run, and the marker opens the push gate for this head.
+  run_it >"$WORK/out1" 2>"$WORK/err1" \
+    || { cat "$WORK/err1" >&2; fail "round one did not succeed"; }
+  [ "$(n_calls)" = 2 ] || fail "round one ran $(n_calls) passes, not 2"
+
+  # ...and the agent answers a finding the only way it can: a commit. Which
+  # moves the head, which is what makes the marker stale and the next round
+  # necessary. That is the loop -- 16 rounds of it on PR #126.
+  bump() {
+    printf 'round %s\n' "$1" >>"$WORK/repo/thing.txt"
+    git -C "$WORK/repo" add thing.txt
+    git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q -m "fix $1"
+    SHA="$(git -C "$WORK/repo" rev-parse HEAD)"
+    MARKER="$WORK/repo/.autofleet/run/reviewed-$SHA"
+  }
+  bump two
+
+  run_it >"$WORK/out2" 2>"$WORK/err2" \
+    || { cat "$WORK/err2" >&2; fail "round two did not succeed"; }
+  [ "$(n_calls)" = 4 ] || fail "round two ran $(( $(n_calls) - 2 )) passes, not 2"
+  ok "rounds up to AUTOFLEET_SELF_REVIEW_MAX run both passes"
+
+  # Round THREE is over the cap. This is the assertion the whole phase is for.
+  bump three
+  run_it >"$WORK/out3" 2>"$WORK/err3"; rc=$?
+
+  [ "$(n_calls)" = 4 ] \
+    || { cat "$WORK/err3" >&2; fail "a pass was started past the cap: $(n_calls) calls, expected 4"; }
+  ok "past the cap no pass is started -- the grind stops"
+
+  # ...AND THE PUSH GATE STILL OPENS. A cap that refuses to record is a cap that
+  # strands the agent: no marker for the new head means guard.py refuses the
+  # push, the agent cannot reach the independent reviewer, and it burns its
+  # time-box discovering that. What the cap stops is reading the diff again, not
+  # the pull request. The findings recorded are the ones round two produced, and
+  # record-review.sh's stale-head NOTE is what says so out loud.
+  [ "$rc" = 0 ] || { cat "$WORK/err3" >&2; fail "past the cap it exited $rc; the agent is stranded"; }
+  [ -f "$MARKER" ] \
+    || { cat "$WORK/err3" >&2; fail "no marker past the cap: guard.py refuses the push and the agent is stuck"; }
+  grep -qF -- 'mattpocock-skills:code-review' "$MARKER" \
+    || fail "the marker past the cap does not hold what the last round found"
+  ok "the push gate still opens, carrying the last round's findings"
+
+  grep -qiF -- 'cap' "$WORK/err3" \
+    || { cat "$WORK/err3" >&2; fail "nothing said the cap was what stopped the passes"; }
+  ok "the cap names itself, so a reader knows why the passes did not run"
   ;;
 
 # ----------------------------------------------------------------- uncounted
@@ -565,5 +632,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|stale|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|roundcap|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|stale|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac
