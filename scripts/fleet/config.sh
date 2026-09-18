@@ -132,6 +132,27 @@
 # sub-agents of their own, so the visible budget is what keeps "report what you
 # have while you still have turns" meaningful.
 : "${AUTOFLEET_SELF_REVIEW_MAX_TURNS:=80}"
+# How many times ONE BRANCH may run the two passes before the loop is called
+# done and what it has found is handed on to the independent reviewer.
+#
+# THE NEIGHBOUR ABOVE BOUNDS ONE PASS. This bounds the number of them, and it
+# was the hole: `AUTOFLEET_REVIEW_MAX=1` and `AUTOFLEET_VALIDATE_MAX=2` bound
+# everything AFTER the pull request exists, and nothing bounded what came
+# before it. Measured on this machine, PR #126 ran SIXTEEN rounds of both
+# passes and PR #129 ran eight, each round two fresh full-budget agents
+# re-reading the whole branch diff -- 36% of issue #71's 207M tokens.
+#
+# It ground because the loop has nothing to converge on. A review pass can
+# always find one more Suggestion; the agent answers a finding with a commit;
+# the commit moves the head; `record-review.sh` keys its marker on the head, so
+# the marker is stale and another round is needed to push. Every turn of that
+# cycle is the same size as the last.
+#
+# TWO, for the same reason AUTOFLEET_VALIDATE_MAX is two: one round to find
+# what is there, one to check the answers to it. The findings that survive a
+# second round are the independent reviewer's job, which is the phase that
+# exists for exactly this and is bounded at one.
+: "${AUTOFLEET_SELF_REVIEW_MAX:=2}"
 
 # How many attempts one head may get that produce NO VERDICT.
 #

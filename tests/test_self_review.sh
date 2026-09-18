@@ -14,6 +14,16 @@
 #                                the findings come back labelled with the two
 #                                words `merge_gate.py` greps the body for, and
 #                                the push marker is written for THIS commit.
+#   test_self_review.sh floor    both passes are told that REVIEW.md's RANKING is
+#                                theirs even though its submission rules are not,
+#                                and that at this phase the Suggestion tier is
+#                                not reported at all. Before the pull request
+#                                exists there is no body to answer a Suggestion
+#                                in, so the only way the author can discharge one
+#                                is a commit -- which moves the head, stales the
+#                                marker, and buys another round of both passes.
+#                                The floor is what makes the cap below reachable
+#                                rather than something a branch always hits.
 #   test_self_review.sh roundcap the passes stop after AUTOFLEET_SELF_REVIEW_MAX
 #                                rounds on one branch, and the push gate still
 #                                opens on the last round's findings. Uncapped,
@@ -142,6 +152,7 @@ make_fixture() {
   SELF_TOOLS="$WORK/tools";   : >"$SELF_TOOLS";  export SELF_TOOLS
   SELF_DENIED="$WORK/denied"; : >"$SELF_DENIED"; export SELF_DENIED
   SELF_CHILD="$WORK/child"; : >"$SELF_CHILD"; export SELF_CHILD
+  SELF_SYSTEM="$WORK/system"; : >"$SELF_SYSTEM"; export SELF_SYSTEM
   cat >"$WORK/bin/fake-pass" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SELF_ARGV"
@@ -156,7 +167,12 @@ while [ $# -gt 0 ]; do
     # /mattpocock-skills:code-review pass.
     --allowed-tools) printf '%s\n' "${2:-}" >>"$SELF_TOOLS"; shift 2 ;;
     --disallowed-tools) printf '%s\n' "${2:-}" >>"$SELF_DENIED"; shift 2 ;;
-    --max-turns|--append-system-prompt) shift 2 ;;
+    # Captured on its own, like the allowlist above and for the same reason:
+    # what the pass is TOLD is a thing the tests have to be able to assert, and
+    # scanning the argv blob for a phrase that could equally have come from the
+    # prompt proves nothing about which.
+    --append-system-prompt) printf '%s\n' "${2:-}" >>"$SELF_SYSTEM"; shift 2 ;;
+    --max-turns) shift 2 ;;
     *) shift ;;
   esac
 done
@@ -272,6 +288,41 @@ case "${1:-}" in
   grep -qF -- 'did not report a finding count' "$out" \
     && fail "a pass that DID report a count was annotated as if it had not"
   ok "a pass that reported its count is not annotated"
+  ;;
+
+# -------------------------------------------------------------------- floor
+  floor)
+  make_fixture
+  export SELF_MODE=findings
+  run_it >/dev/null 2>"$WORK/err" || { cat "$WORK/err" >&2; fail "the run did not succeed"; }
+
+  [ -s "$SELF_SYSTEM" ] || fail "no pass was handed a system prompt at all"
+  # BOTH passes, not just whichever ran first. A floor one pass has and the
+  # other does not is a floor that does not hold: the branch still gets a round
+  # of nit-chasing, just from one agent instead of two.
+  [ "$(grep -c . "$SELF_SYSTEM")" -ge 2 ] \
+    || fail "only one pass was handed a system prompt"
+
+  # THE TIERS ARE THIS PASS'S TOO. The prompt already says the independent
+  # reviewer's SUBMISSION rules are not the pass's -- no `gh pr review`, no
+  # verdict -- and a pass reading that as "REVIEW.md's ranking is not mine
+  # either" is how a pre-PR pass with no floor happens. It has to be told which
+  # half it inherits.
+  grep -qF -- 'Suggestion' "$SELF_SYSTEM" \
+    || fail "the passes are never told about the Suggestion tier, so nothing ranks below Important"
+  ok "both passes are told the severity tiers are theirs"
+
+  # ...AND THE FLOOR IS HARDER BEFORE THE PULL REQUEST EXISTS. REVIEW.md lets a
+  # Suggestion be "answered, not fixed" because answering costs no commit -- but
+  # that answer goes in the PR body, and at this phase there is no PR body to
+  # put it in. The only way an agent can discharge a Suggestion here is a
+  # commit, which moves the head, which stales the marker, which costs another
+  # round of both passes. That is the loop that ran sixteen times on PR #126.
+  grep -qiE 'does not (yet )?exist|no pull request|before the pull request' "$SELF_SYSTEM" \
+    || fail "the passes are not told the pull request does not exist yet, which is why the floor is harder here"
+  grep -qiE 'Critical and Important|Critical or Important' "$SELF_SYSTEM" \
+    || fail "the passes are not told which tiers to actually report at this phase"
+  ok "the passes are told a Suggestion costs a round here, and to report the two tiers above it"
   ;;
 
 # ----------------------------------------------------------------- roundcap
@@ -632,5 +683,5 @@ case "${1:-}" in
   ok "a stop is a stop: exit 3, no pass started, nothing recorded"
   ;;
 
-  *) echo "usage: $0 {runs|roundcap|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|stale|empty|timeout|missing|stopped}" >&2; exit 2 ;;
+  *) echo "usage: $0 {runs|floor|roundcap|uncounted|silent|noise|noisy|dirty|norange|keeps|midstop|first|stale|empty|timeout|missing|stopped}" >&2; exit 2 ;;
 esac
