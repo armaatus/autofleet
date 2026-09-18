@@ -98,15 +98,18 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 ## The tracker is the spec
 
 Every issue carries **Goal / Scope / Design notes / Acceptance**. Read yours in
-full before starting; it is meant to be sufficient. **It is also the plan** —
-there is no planning phase before you edit, and `/implement` is the opening
-prompt precisely because the deciding was done on the tracker.
+full before you start; it is meant to be sufficient, and **it is the plan too** —
+`/implement` opens with no planning phase because the tracker did the deciding.
 
 It stays sufficient only if you maintain it. When the work turns up something the
 issue did not know — a seam that is wider than it looked, scope another issue
 already shipped, a constraint the code imposes — **edit the affected issue as you
 find it**, including issues other than your own. Agents in parallel worktrees
 cannot see each other's findings; these bodies are the only channel between them.
+
+**Creating** one is narrower: only for a defect you can reproduce — a cited line
+that contradicts a stated rule, or inputs that produce a wrong result. Without
+that, comment on the nearest issue. One you file with no blockers gets a worktree.
 
 Never hand-edit the `blocked`/`ready` labels — `.github/workflows/unblock.yml`
 derives them from the `Blocked by #N` lines below the *first* `<!-- blockers -->`
@@ -134,13 +137,10 @@ issue to the front of the dispatcher's queue and grants nothing else. Do not add
 or remove it on your own judgement: the queue's own ordering is derived from the
 `Blocked by #N` lines and that is the one you maintain.
 
-The exception is the same one the blockers rule gets, and for the same reason —
-**when the maintainer asks for it, say so where it is visible.** An agent
-labelling its own work `priority` is self-dealing; an agent relaying a decision
-the maintainer made is the tracker doing its job. Name who asked, in the PR body
-or an issue comment, so the next reader can tell the two apart. The label is
-cheap to add and expensive to audit, which is why the trail matters more here
-than the permission does.
+The exception is the blockers' exception, for the same reason — **when the
+maintainer asks for it, say so where it is visible.** Labelling your own work
+`priority` is self-dealing; relaying the maintainer's decision is the tracker
+doing its job. Name who asked, in the PR body or an issue comment.
 
 ## Finishing a task
 
