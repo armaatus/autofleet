@@ -56,3 +56,24 @@ AUTOFLEET_HEADROOM=1
 # program that never sources this file and its --selftest has to drive both
 # modes. Two answers to "who wins", for two different readers.
 AUTOFLEET_REVIEW_MODE=local
+
+# ROUND TWO ONWARDS READS WHAT CHANGED, not the whole branch again.
+#
+# Every reviewer run this machine has ever recorded is `scope: full` --
+# `~/.autofleet/reviews/cost.tsv`, ten rows -- including THREE separate full
+# reviews of PR #132 at $5.75, $1.79 and $2.13. Each one re-read a branch whose
+# earlier rounds had already been judged, because the head had moved.
+#
+# The delta machinery has been built and tested since #65 and was left off for
+# one stated reason: `review.sh` inlines `.claude/agents/reviewer.md` as the
+# brief, that file is under `.claude/` and cannot be auto-merged, so flipping
+# the payload DEFAULT would outrun the brief. That argument is about the
+# default in scripts/fleet/config.sh. It is not about this file -- these are
+# one repository's own knobs, and the three clauses that make a delta review
+# safe are stated in review.sh's own "This run" block, which is what the
+# reviewer actually reads.
+#
+# Round one is always full, and AUTOFLEET_REVIEW_FULL_EVERY=4 makes every
+# fourth round full regardless, so no pull request is ever judged by an
+# unbroken chain of deltas.
+AUTOFLEET_REVIEW_SCOPE=delta
