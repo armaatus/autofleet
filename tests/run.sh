@@ -39,7 +39,7 @@ SUITES=(
 "runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"
 "answer_review:posts abandoned thin unpushed behind no_review flight stopped gate"
-"await_review:nitonly threads tworeviewers knob important untrailered quiet validated"
+"await_review:nitonly moved threads tworeviewers knob important untrailered quiet validated"
 "cost:sums json empty attempts long_path filtered reaped subcommand"
 "install:ignores idempotent dry"
 "self_review:runs floor roundcap uncounted silent noise noisy dirty norange keeps midstop first stale empty timeout missing stopped"

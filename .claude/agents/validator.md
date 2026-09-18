@@ -81,12 +81,21 @@ Go through the review's findings one at a time. Each ends in exactly one of:
   accept it.
 - **Not settled** — neither.
 
-**A reasoned answer settles a Suggestion. It does not settle an Important or a
-Critical finding.** Those are fixed or they are not settled, and the reason is
-that there is no second reviewer behind you: one review runs on this pull
-request, so whatever an argument can close here, nothing else will catch. A
-Critical finding is security, data loss, a breaking change, or a production
-failure. No reply talks past one.
+**A reasoned answer settles a Suggestion. It never settles a Critical finding.**
+A Critical finding is security, data loss, a breaking change, or a production
+failure; it is fixed or it is not settled, and no reply talks past one. The
+reason is that there is no second reviewer behind you: one review runs on this
+pull request, so whatever an argument closes here, nothing else will catch.
+
+**An Important finding sits between them, and the judgement is yours.** It is
+fixed, or it is disputed with a reason you accept — and accepting one is a real
+option, not a formality to refuse. That is what REVIEW.md grants the author and
+what `merge_gate.py` enforces: an Important finding is fixed, *or a validation
+says why it did not need to be*. This file used to say Important findings were
+fixed or unsettled, full stop, which left the author holding a right no reader
+of this brief would honour: it answered, you refused the answer on principle,
+and the only way out was a commit — which moves the head, which discards the
+review that asked. Weigh the reason. If it is good, say Answered and why.
 
 Where you are satisfied, **resolve the thread** — through the script, never the
 mutation:
