@@ -12,6 +12,27 @@ AUTOFLEET_PROJECT_PREFIX=autofleet
 AUTOFLEET_TEST_COMMAND="./tests/run.sh"
 AUTOFLEET_NOTIFY_TITLE="autofleet"
 
+# TWO WORKTREES, NOT THREE, while what an issue costs is still being brought
+# down. Parallelism does not reduce what the backlog spends -- it spends it
+# faster, three issues at a time, which is how one day took a week's budget.
+# Measured here: issue #71 cost 207M tokens and #13 196M, against #106's 10.5M
+# for comparable work. Two halves the blast radius of one of those and leaves a
+# chance of noticing it before the others have finished too. Back to three once
+# the per-issue numbers hold under 20M.
+AUTOFLEET_MAX=2
+
+# The compression proxy, on. It is worth 8.8% of what it can reach (measured:
+# 133,864 of 1,529,329 tokens, docs/CONFIGURATION.md) and it costs nothing when
+# it is right -- a proxy that stops answering degrades to a warning and full
+# price, not to a failure.
+#
+# WHAT IT CANNOT REACH IS THE PART THAT MATTERS, and that is why this is a
+# footnote rather than a fix: `review.sh` deliberately does not export the base
+# URL into the worktree agent, and the worktree agent is where 63% of an issue's
+# tokens are spent. This wraps the self-review passes, the reviewer and the
+# validator. Do not read a green line here as the cost problem being addressed.
+AUTOFLEET_HEADROOM=1
+
 # No CLAUDE_CODE_OAUTH_TOKEN on this repository, so claude-review.yml no-ops and
 # the only account that could review a fleet PR is the one that opened it. The
 # dispatcher runs the reviewer here instead. See docs/CONFIGURATION.md for what
