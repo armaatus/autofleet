@@ -109,7 +109,7 @@ cannot see each other's findings; these bodies are the only channel between them
 
 **Creating** one is narrower: only for a defect you can reproduce — a cited line
 that contradicts a stated rule, or inputs that produce a wrong result. Without
-that, comment on the nearest issue. A new issue is `ready`, and gets a worktree.
+that, comment on the nearest issue. One you file with no blockers gets a worktree.
 
 Never hand-edit the `blocked`/`ready` labels — `.github/workflows/unblock.yml`
 derives them from the `Blocked by #N` lines below the *first* `<!-- blockers -->`
