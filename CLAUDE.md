@@ -98,8 +98,8 @@ CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 ## The tracker is the spec
 
 Every issue carries **Goal / Scope / Design notes / Acceptance**. Read yours in
-full; it is meant to be sufficient, and **it is also the plan** — there is no
-planning phase, and `/implement` opens because the deciding was done here.
+full before you start; it is meant to be sufficient, and **it is the plan too** —
+`/implement` opens with no planning phase because the tracker did the deciding.
 
 It stays sufficient only if you maintain it. When the work turns up something the
 issue did not know — a seam that is wider than it looked, scope another issue
@@ -108,8 +108,8 @@ find it**, including issues other than your own. Agents in parallel worktrees
 cannot see each other's findings; these bodies are the only channel between them.
 
 **Creating** one is narrower: only for a defect you can reproduce — a cited line
-that contradicts a stated rule, or inputs that produce a wrong result. Anything
-less is a Suggestion, which REVIEW.md forbids becoming an issue: comment instead.
+that contradicts a stated rule, or inputs that produce a wrong result. Without
+that, comment on the nearest issue. A new issue is `ready`, and gets a worktree.
 
 Never hand-edit the `blocked`/`ready` labels — `.github/workflows/unblock.yml`
 derives them from the `Blocked by #N` lines below the *first* `<!-- blockers -->`
