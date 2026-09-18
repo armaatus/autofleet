@@ -585,6 +585,79 @@ reset_context_for_answering() {
   done
 }
 
+# ...AND THE SAME MOVE, ON A TIMER, BEFORE THE PULL REQUEST EXISTS.
+#
+# The function above fires once, at the PR. Everything before it is one window
+# that only grows, and that window is the single biggest line in an issue's
+# bill. Measured: issue #71's build ran 285 turns at 229,052 cache-read tokens
+# PER TURN -- 65M, 31.9% of a 207M issue -- against issue #106's build at 61
+# turns and 96,061 a turn. Comparable work. The difference is not how many
+# turns; it is that every turn re-sends everything the session has read, so a
+# long build pays for its whole history on every turn of it.
+#
+# OFF BY DEFAULT, and that is a considered position rather than timidity. A
+# recycle costs the agent everything not in a 300-word handoff note, so an
+# interval chosen badly makes the work worse AND dearer by making it redo what
+# it forgot. The mechanism is proven -- it is the one above -- but the right
+# interval is a measurement nobody has taken. Turn it on, run an issue, compare
+# `fleet.sh cost`, then argue for a default.
+enforce_context_recycle() {
+  local every f num path last now
+  every="${AUTOFLEET_CONTEXT_RECYCLE:-0}"
+  case "$every" in (''|*[!0-9]*) return 0 ;; esac
+  [ "$every" -gt 0 ] || return 0
+  # The clear command is the same seam the answering reset uses, and an empty
+  # one is the same off switch. Said there, once, rather than twice.
+  [ -n "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ] || return 0
+  now="$(date +%s)"
+  for f in "$OWNED_DIR"/*; do
+    [ -e "$f" ] || continue
+    num="$(basename "$f")"
+    path="$(owned_path "$num")"
+    [ -d "$path" ] || continue
+    # THE PULL REQUEST ENDS THIS. Past it the answering session is the one
+    # running, `reset_context_for_answering` owns that boundary, and a recycle
+    # here would drop the answering context that function just built -- the same
+    # worktree losing the findings it was sent to answer. "Could not tell" is
+    # not "no PR", the same reading every other branch in this file gives it.
+    # A `case` on the status, not `has_open_pr && continue` followed by a test of
+    # `$?`. That form does work -- the compound carries the failing status
+    # through -- but it reads as though `$?` were the function's, and the next
+    # person to add a line between the two gets a silent wrong answer on the
+    # branch that matters least often. Every other caller in this file spells it
+    # this way.
+    has_open_pr "$num"; case $? in
+      0) continue ;;
+      2) continue ;;
+    esac
+    last=""
+    read -r last 2>/dev/null <"$STATE_DIR/recycled-$num" || true
+    case "${last:-}" in
+      # No marker, or one this poll is racing: start the clock rather than
+      # reading a missing number as infinitely overdue and clearing a session
+      # that has just begun.
+      ''|*[!0-9]*) printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
+                   continue ;;
+    esac
+    [ $((now - last)) -ge "$every" ] || continue
+    # The note first, then the clear, then the brief -- the order
+    # `reset_context_for_answering` uses and for its reasons: what is not in the
+    # note does not survive, and a clear with no brief after it strands the
+    # worktree with an agent that has nothing to do.
+    handoff_turn "$num" "$path" || continue
+    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
+    # The clock restarts on the clear that LANDED, not on the attempt: a driver
+    # refusing the send is retried next poll, and a marker written ahead of it
+    # would skip a whole interval each time.
+    printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
+    say "#$num: recycling the build context after $((every / 60))m -- the handoff note is what carries over"
+    say_to_agent_in "$path" \
+      "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $num\` and follow everything it prints. You are the same worktree and a new session, part-way through this issue: your handoff note is what the last session decided and how far it got, and nothing else from it survives. Read the note before you start work again." \
+      || say "#$num: the conversation was dropped but the brief did not arrive -- send it by hand"
+    card "$path" comment "#$num: build context recycled; carrying on from the handoff note"
+  done
+}
+
 # Interrupt the agent in one worktree, if it has one. Both callers are about to
 # take something away from it -- the time-box the rest of its hours, the release
 # its whole directory -- and an agent that is not told keeps working against a rig
@@ -651,7 +724,7 @@ clear_issue_markers() {
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
         "$STATE_DIR/send-refused-$1" \
         "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1" \
-        "$STATE_DIR/answer-box-$1"
+        "$STATE_DIR/answer-box-$1" "$STATE_DIR/recycled-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -5045,6 +5118,7 @@ while that one is up."
     # both interrupt an agent, and the one with a deadline behind it should get
     # there first so the other does not card the same worktree twice.
     enforce_answer_timebox
+    enforce_context_recycle
     notice_stalled
     reap_abandoned
     prune_gaveup

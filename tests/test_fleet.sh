@@ -3073,6 +3073,79 @@ print(json.dumps({"result": {"worktrees": [
     echo "ok: an ordinary overrun is still stopped"
     ;;
 
+  context_recycle)
+    # THE BUILD SESSION IS THE SINGLE BIGGEST LINE IN AN ISSUE'S BILL, and the
+    # reason is not the number of turns. Measured on issue #71: the build ran
+    # 285 turns at 229,052 cache-read tokens PER TURN -- 65M, 31.9% of the whole
+    # issue -- against issue #106's build at 61 turns and 96,061 a turn. Same
+    # kind of work; 2.4x the context on every single turn, because one session
+    # accumulates everything it has read and pays for all of it again each turn.
+    #
+    # `reset_context_for_answering` already proves the remedy works. It fires
+    # ONCE, at the pull request, and everything before that is one window that
+    # only grows.
+    #
+    # OFF BY DEFAULT, and this phase asserts that first. A recycle costs the
+    # agent everything not in a 300-word handoff note, so a badly chosen
+    # interval makes the work worse AND more expensive by making it redo things.
+    # It is a knob to measure with, not a default to inflict.
+    make_fixture ok
+    make_worktree
+    agent_state working
+    issue_labels "ready"
+    echo '[]' >"$GH_PRS"
+
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "the build context was recycled with the knob unset: $out"
+    echo "ok: off by default -- an unset knob recycles nothing"
+
+    # ...and on, but well inside the interval, still nothing.
+    export AUTOFLEET_CONTEXT_RECYCLE=3600
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "a build well inside the recycle interval was cleared: $out"
+    echo "ok: ...and inside the interval it leaves the session alone"
+
+    # Past it: the note is asked for, the conversation dropped, and the SAME
+    # brief re-sent. All three, in that order -- a clear with no brief after it
+    # strands the worktree with an agent that has nothing to do, which is the
+    # failure reset_context_for_answering's own comments warn about.
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      || fail "a build past the recycle interval was not cleared: $out"
+    grep -q -- "issue-command.sh 42" "$ORCA_CALLS" \
+      || fail "it cleared the context and sent no brief, stranding the worktree: $out"
+    echo "ok: past the interval the session is recycled and re-briefed"
+
+    # ...and the clock restarts, so the next poll does not clear it again.
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it recycled the session it had just recycled: $out"
+    echo "ok: ...and the interval restarts, so the next poll leaves it alone"
+
+    # AN OPEN PULL REQUEST ENDS THIS. Past the PR the answering session is the
+    # one running, `reset_context_for_answering` owns that boundary, and a
+    # recycle here would drop the answering context that function just built --
+    # the same worktree losing the findings it was sent to answer.
+    echo 0 >"$AUTOFLEET_DIR/recycled-42"
+    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
+    : >"$ORCA_CALLS"
+    out="$(in_fleet enforce_context_recycle 2>&1)"
+    grep -q -- "/clear" "$ORCA_CALLS" \
+      && fail "it recycled a session that is answering a review, not building: $out"
+    echo "ok: an open PR ends the build recycle -- the answering half is not its business"
+
+    # The call site, for the same hard rule 3 reason answer_timebox asserts it.
+    grep -qE '^ +enforce_context_recycle$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
+      || fail "nothing in the poll loop calls enforce_context_recycle"
+    echo "ok: ...and the poll loop actually calls it"
+    ;;
+
   answer_timebox)
     # THE OTHER HALF OF THE SESSION, which had no clock at all.
     #
