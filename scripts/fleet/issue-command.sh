@@ -9,7 +9,7 @@
 # will want.
 #
 # It prints the spec AND the marching orders, so this file is the single place
-# the opening brief is written. orca.yaml and agent-autostart.sh both only point
+# the opening brief is written. orca.yaml and the dispatcher both only point
 # at it -- neither restates the workflow, so neither can drift from it.
 #
 # THE BRIEF ARRIVES IN TWO STAGES, and both are in this file:

@@ -64,8 +64,8 @@
 #
 # A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
 # lib.sh sources it -- the file it looked for and the drivers that do ship --
-# and stops the four scripts that call `fleet_require_runner`: the dispatcher,
-# the setup hook, the board and the autostart watcher. `evals/lint.sh` check 4g
+# and stops the three scripts that call `fleet_require_runner`: the dispatcher,
+# the setup hook and the board. `evals/lint.sh` check 4g
 # goes red on it before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=headless}"
 
@@ -84,6 +84,16 @@
 # measurements -- a median issue here has cost about $20 -- and a host project
 # is expected to move them, which is what docs/CONFIGURATION.md says.
 : "${AUTOFLEET_BUILD_CMD:=claude}"
+# WHAT THE BUILD MAY DO WITHOUT ASKING, and this default is NOT the one
+# armaatus/autofleet#151 asked for. The issue says `acceptEdits`; that mode
+# auto-accepts FILE EDITS ONLY, so every Bash call not on the settings
+# allow-list still asks -- and under `-p` there is nobody to ask, so it is
+# denied. A build that edits files and cannot run `git commit`, `git push` or
+# the test command is not a build. `auto` is Claude Code's own per-call
+# decision and is what `.claude/settings.json` already sets for this
+# repository's sessions. Set it to `acceptEdits` to get the issue's literal
+# flag. Found by the local `/code-review` pass.
+: "${AUTOFLEET_BUILD_PERMISSION_MODE:=auto}"
 : "${AUTOFLEET_BUILD_MAX_TURNS:=400}"
 : "${AUTOFLEET_BUILD_MAX_BUDGET_USD:=25}"
 
@@ -533,6 +543,25 @@ config_whole_number AUTOFLEET_BUILD_MAX_TURNS "$AUTOFLEET_BUILD_MAX_TURNS" \
 
 config_whole_number AUTOFLEET_BUILD_MAX_RUNS "$AUTOFLEET_BUILD_MAX_RUNS" \
   1 "a positive whole number (1 means a build is never resumed)"
+
+# ...and the budget, which is the one of the three that is NOT a whole number.
+# It went through no check at all while the comment beside its sibling argued
+# exactly why it needed one -- a non-number reaches `--max-budget-usd` as an
+# argument the build refuses, so every run dies the instant it starts and is
+# resumed up to AUTOFLEET_BUILD_MAX_RUNS before the fleet gives up on the issue.
+# Found by both local review passes.
+case "$AUTOFLEET_BUILD_MAX_BUDGET_USD" in
+  ''|*[!0-9.]*|*.*.*|.) 
+    echo "AUTOFLEET_BUILD_MAX_BUDGET_USD must be a positive amount in dollars;" \
+         "got '$AUTOFLEET_BUILD_MAX_BUDGET_USD'" >&2
+    exit 2 ;;
+esac
+case "$AUTOFLEET_BUILD_MAX_BUDGET_USD" in
+  0|0.|0.0|0.00|.0|.00)
+    echo "AUTOFLEET_BUILD_MAX_BUDGET_USD is 0, which is a build that may spend" \
+         "nothing and therefore do nothing" >&2
+    exit 2 ;;
+esac
 
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error

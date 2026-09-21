@@ -124,16 +124,6 @@ OWNED_DIR="$FLEET_OWNED"
 # wall-clock time-box that used to read it is gone -- turns and dollars bound a
 # run now -- so nothing ACTS on this number.
 STARTED_DIR="$STATE_DIR/started"
-# What the fleet HAS run, as opposed to what it is running. From lib.sh, because
-# cost.sh reads the same path and two spellings of it is one chance for the
-# reader to look where the writer never wrote.
-#
-# It gets the same exception `gaveup-` gets, and for the same reason: a record of
-# what happened is not state about what is happening, and a restart is not a
-# decision about an issue. It grows by one short file per issue the fleet ever
-# starts -- bounded by the backlog rather than by the clock, unlike the two
-# stores #72 capped, which grew per review and per log line. Nothing evicts it.
-RAN_DIR="$FLEET_RAN"
 # The `Closes #N` and `Blocked by #N` patterns, shared with merge_gate.py so the
 # dispatcher, the gate and GitHub cannot read the same body three ways. It sits
 # under .github/scripts/ because merge-gate.yml sparse-checks out that directory
@@ -391,7 +381,7 @@ runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so the
 # directories first. `fleet.sh status` on a machine whose app is not running was
 # making three directories under ~/.autofleet and then declining to do
 # anything. Found by the self-review.
-mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
+mkdir -p "$OWNED_DIR" "$STARTED_DIR"
 
 # The runner's board is the status surface: `in-progress` while it builds,
 # `in-review` once the PR is up (the agent sets that itself), `completed` on
@@ -455,14 +445,13 @@ stop_build_in() {
 # --------------------------------------------------------------- the state ---
 own() {
   printf '%s\n' "$2" >"$OWNED_DIR/$1"; date +%s >"$STARTED_DIR/$1"
-  # ...and the copy that OUTLIVES the worktree, for `cost.sh`. See RAN_DIR.
-  #
-  # APPENDED, not replaced, and only if new. `fleet.sh retry 44` opens a SECOND
-  # worktree for the same issue at a different path, and truncating here threw
-  # the first attempt away -- which is "did the abandoned attempt cost more than
-  # the one that landed", the question the report exists to answer. Found by
-  # `/code-review`.
-  grep -qxF "$2" "$RAN_DIR/$1" 2>/dev/null || printf '%s\n' "$2" >>"$RAN_DIR/$1"
+  # THERE IS NO SECOND REGISTRY any more. `$FLEET_DIR/ran` held every path an
+  # issue had ever run in, because `cost.sh` found what an issue spent by
+  # slugging those paths into the agent CLI's transcript root and the record had
+  # to outlive the worktree. The report reads `$FLEET_DIR/builds/<issue>/` now,
+  # which is keyed on the issue and outlives everything, so the registry became
+  # a store nothing read -- with three comments across two files still claiming
+  # the report was built on it. Found by `/mattpocock-skills:code-review`.
   clear_issue_markers "$1"
 }
 owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
@@ -3232,11 +3221,6 @@ for p in prs:
 # database of an orphan somebody is still looking at; `--only` narrows reap.sh's
 # stale set and can never widen it.
 #
-# The autostart watcher is the hook's other half, and it does not survive
-# dropping --run-hooks by itself: its pidfile lives INSIDE the worktree, so it is
-# read before the removal and signalled after one that worked. A watcher left
-# behind polls the runtime for a directory that is gone, forever.
-#
 # Returns 0 when the worktree is gone, 2 when the runner never answered, and 1
 # when it answered and refused. The caller acts on the difference: a refusal is a
 # decision about THIS worktree and is not worth retrying, while a deadline is the
@@ -3258,7 +3242,12 @@ remove_worktree() {
   # take the removal with it. `finish_removal` sweeps the stack by name
   # afterwards for whatever this did not reach.
   if [ -x "$path/scripts/fleet/archive.sh" ]; then
-    ( cd "$path" && ./scripts/fleet/archive.sh ) >/dev/null 2>&1 || true
+    # BOUNDED, as the paragraph above claims. Run inline it was not: a project
+    # teardown hook that never returns held the whole poll loop, and the sweep
+    # in `finish_removal` two screens down already goes through the watchdog for
+    # exactly that reason. Found by the local `/code-review` pass.
+    fleet_run_with_deadline "$deadline" /dev/null \
+      env -C "$path" ./scripts/fleet/archive.sh || true
   fi
   # Pure reads, before anything can be destroyed. Both live INSIDE the worktree
   # and the sweep below needs them after it is gone.
@@ -3862,11 +3851,26 @@ build_exited() {
   if [ "$pr_open" = 0 ]; then
     runs="$(cat "$dir/run-count" 2>/dev/null || echo 1)"
     if [ "$runs" -ge "$AUTOFLEET_BUILD_MAX_RUNS" ]; then
+      # SAID ONCE. `notice_build_exit` re-enters this function on every poll for
+      # every owned worktree whose state is `exited`, and that state never
+      # changes by itself -- so an unguarded branch here posts the same issue
+      # comment and the same notification once a minute for as long as the
+      # dispatcher runs. Both terminal branches had the guard their two
+      # neighbours already had; neither had its own. Found by both local review
+      # passes, which rated the one below Critical because `reap_abandoned`
+      # never disowns a worktree that holds anything -- so there it is unbounded
+      # rather than merely repeated.
+      gave_up_on "$num" && return 0
+      : >"$STATE_DIR/gaveup-$num"
       say "#$num: its build stopped again -- $(build_summary "$num") -- after $runs runs, which is AUTOFLEET_BUILD_MAX_RUNS"
       card "$path" comment "#$num: out of runs with its pull request open -- needs you"
-      GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $runs runs of its build agent. The pull request is open and its worktree at \`$path\` is kept -- nothing is released, because the findings on that pull request are what needs reading." >/dev/null 2>&1 || true
+      # WHAT THE WORKTREE ACTUALLY GETS, rather than a promise this line cannot
+      # keep: `gaveup-` above makes `reap_abandoned` release the worktree once
+      # it holds nothing, and a pushed branch usually holds nothing. The
+      # previous wording said "nothing is released", which was false on exactly
+      # this path. Found by `/mattpocock-skills:code-review`.
+      GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $runs runs of its build agent. The pull request is open and is what needs reading; its worktree at \`$path\` is kept while it holds anything uncommitted, and released once it does not." >/dev/null 2>&1 || true
       notify "#$num is out of runs" "Its PR is open and left for you."
-      : >"$STATE_DIR/gaveup-$num"
       return 0
     fi
     say "#$num: its build stopped at a limit -- $(build_summary "$num") -- resuming in the same worktree (run $((runs + 1)))"
@@ -3874,11 +3878,12 @@ build_exited() {
     return 0
   fi
 
+  gave_up_on "$num" && return 0
+  : >"$STATE_DIR/gaveup-$num"
   say "#$num: its build ran out -- $(build_summary "$num") -- and opened no pull request"
   card "$path" comment "#$num: ran out before opening a pull request -- needs you"
   GH_PAGER=cat gh issue comment "$num" --body "The fleet's build agent stopped on this without opening a pull request: $(build_summary "$num"). Its worktree at \`$path\` is kept, so whatever it did get to is still there. \`./scripts/fleet/fleet.sh retry $num\` starts it again." >/dev/null 2>&1 || true
   notify "#$num ran out" "No pull request. Its worktree is kept."
-  : >"$STATE_DIR/gaveup-$num"
   return 0
 }
 
@@ -3969,7 +3974,7 @@ release_dispatcher_files() {
 # behind, the OS wraps round and hands that number to somebody else, and a check
 # that asked `kill -0` alone would from then on refuse to start the fleet at all
 # -- forever, on the strength of a stranger's process. lib.sh's
-# fleet_stop_autostart_watcher takes the same precaution for the same reason,
+# The watcher stop this replaced took the same precaution for the same reason,
 # before it SIGNALS a pid it did not watch die.
 #
 # `run` as well as the file name, because only `fleet.sh run` is a dispatcher.
@@ -4016,10 +4021,10 @@ restart_advice() {
   else
     echo "    ./scripts/fleet/fleet.sh run --auto   # from the MAIN worktree"
   fi
-  echo "  AUTOFLEET_MAX, _POLL, _TIMEBOX and _ANSWER_TIMEBOX are read at start"
-  echo "  too, so they change only across a restart. docs/WORKFLOW.md,"
-  echo "  'Restart it'. AUTOFLEET_CONTEXT_RECYCLE is not: it is re-read every"
-  echo "  poll, so turning it on takes effect without one."
+  echo "  AUTOFLEET_MAX and _POLL are read at start too, so they change only"
+  echo "  across a restart. docs/WORKFLOW.md, 'Restart it'. The three build"
+  echo "  knobs -- AUTOFLEET_BUILD_MAX_TURNS, _MAX_BUDGET_USD and _MAX_RUNS --"
+  echo "  are read per launch, so moving one takes effect on the next build."
 }
 
 # The refusal `fleet.sh run` prints when a dispatcher is already up, and how to
@@ -4491,7 +4496,7 @@ cmd_stop() {
       # worktree once its PR merges, and killing it strands them.
       #
       # dispatcher_alive before the signal, which is the whole of lib.sh's
-      # fleet_stop_autostart_watcher in one line: this is the only place the
+      # The watcher stop this replaced, in one line: this is the only place the
       # fleet SIGNALS a pid it read out of a file, and a pidfile a `kill -9`
       # left behind names whoever the OS has since given that number to.
       local held; held="$(cat "$PIDFILE" 2>/dev/null)"

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The Orca driver: how autofleet creates worktrees, opens terminals, and reads
-# the runtime. Sourced by lib.sh when AUTOFLEET_RUNNER=orca, which is the
-# default and today the only driver that ships.
+# The Orca driver: how autofleet creates a worktree and hosts a build in a
+# terminal a person can watch. Sourced by lib.sh when AUTOFLEET_RUNNER=orca,
+# which is NO LONGER THE DEFAULT -- `headless` is, and it needs no app at all.
+# This one exists for the desk: it runs the identical command line in a tab.
+# armaatus/autofleet#151.
 #
 # THE CONTRACT A SECOND DRIVER HAS TO MEET is in docs/RUNNERS.md, and this file
 # is now the whole of it: no code outside this directory CALLS the CLI, reads
@@ -30,7 +32,7 @@ ORCA_CREATE_DEADLINE=240
 
 # `runner_set_deadline <seconds>` -- part of the contract, because a caller that
 # needs a shorter one has to be able to ask WITHOUT knowing which driver it has.
-# agent-autostart.sh is that caller: it polls every three seconds, and a watcher
+# The watcher that polled every three seconds was that caller, and one
 # that can block for thirty of them inside one poll has stopped watching. It
 # used to say so by exporting a variable only this file reads, which is a caller
 # outside runner/ assuming how the driver works -- the exact thing the seam
@@ -51,7 +53,7 @@ runner_set_deadline() {
 # fails for the user Orca runs these hooks as and every call dies with "Unable to
 # determine Orca.app path from symlink". Nothing here notices a broken CLI as
 # such -- the JSON never parses -- so it surfaces one layer up as an answer:
-# `agent-autostart.sh` reports "this worktree has no linked issue", stops
+# a hook reports "this worktree has no linked issue", stops
 # watching, and leaves a fully provisioned worktree whose agent sits on an unsent
 # prompt forever. That is how three worktrees went idle on 2026-09-05.
 #
@@ -610,17 +612,27 @@ runner_worktree_remove() {
 orca_terminal_for_path() {
   local out; out="$(mktemp)"
   orca_json "$out" terminal list || { rm -f "$out"; return 1; }
-  ORCA_TERMINAL_PATH="$1" python3 -c '
+    # MATCHED ON THE TITLE AS WELL AS THE PATH. `runner_build_start` names the tab
+  # `#<issue>`, and a worktree can hold several tabs -- a shell, a log, an agent
+  # a person opened. On the path alone a stop interrupted and CLOSED whichever
+  # came back first, which is somebody else's tab and leaves the build writing
+  # into a worktree that is being removed. Found by the local `/code-review`
+  # pass.
+  ORCA_TERMINAL_PATH="$1" ORCA_TERMINAL_TITLE="${2:-}" python3 -c '
 import json, os, sys
 try:
     terminals = json.load(open(sys.argv[1]))["result"]["terminals"]
 except Exception:
     raise SystemExit(1)
 want = os.environ["ORCA_TERMINAL_PATH"]
+title = os.environ.get("ORCA_TERMINAL_TITLE") or ""
 for t in terminals:
-    if t.get("worktreePath") == want and not t.get("orphaned"):
-        print(t["handle"])
-        break
+    if t.get("worktreePath") != want or t.get("orphaned"):
+        continue
+    if title and (t.get("title") or "") != title:
+        continue
+    print(t["handle"])
+    break
 ' "$out"
   local rc=$?
   rm -f "$out"
@@ -672,9 +684,13 @@ runner_build_state() { fleet_build_state_of "$1"; }
 # the `printf` that records its exit status. Silent and always 0 -- every caller
 # reaches here on a path where the worktree is going away regardless.
 runner_build_stop() {
-  local handle
+  local handle issue
   orca_cli_resolve || return 0
-  handle="$(orca_terminal_for_path "$1")" || return 0
+  # The tab this driver named, by the title it gave it. An issue it cannot
+  # resolve falls back to the worktree, which is the pre-title behaviour and
+  # still better than nothing.
+  issue="$(fleet_build_dir_for_path "$1" 2>/dev/null)" && issue="#${issue##*/}" || issue=""
+  handle="$(orca_terminal_for_path "$1" "$issue")" || return 0
   [ -n "$handle" ] || return 0
   orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
     terminal send --terminal "$handle" --interrupt --json >/dev/null 2>&1

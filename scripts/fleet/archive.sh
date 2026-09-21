@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Worktree archive hook -- runs when a worktree is removed.
 #
-# The reverse of setup.sh, for the things setup.sh creates that do NOT go away
-# with the worktree directory: the docker stack and the autostart watcher.
+# The reverse of setup.sh, for the one thing setup.sh creates that does NOT go
+# away with the worktree directory: the docker stack.
 # Everything else setup.sh writes -- .env, build output, fixtures -- lives
 # inside the worktree and is deleted along with it. Caches a project shares
 # between worktrees are deliberately left alone.

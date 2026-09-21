@@ -1773,6 +1773,95 @@ DRIVER
 
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
+  build_command)
+    # THE SPEC'S CENTRAL ARTEFACT, and nothing asserted it. The issue names the
+    # flags exactly and its design notes say `--bare` must not be passed --
+    # which is the line that keeps `.claude/hooks/guard.py` running under a
+    # headless agent, so a build that lost it could merge its own pull request
+    # and push before its review was recorded, with every phase still green.
+    # Found by `/mattpocock-skills:code-review`.
+    make_fixture ok
+    line="$(in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42")"
+    for flag in --permission-mode --max-turns --max-budget-usd "--output-format json" \
+                --append-system-prompt-file; do
+      grep -qF -- "$flag" <<<"$line" \
+        || fail "the build command line no longer passes $flag: $line"
+    done
+    grep -qF -- "--bare" <<<"$line" \
+      && fail "the build command line passes --bare, which turns off every rule in guard.py: $line"
+    # The two long inputs are READ FROM FILES rather than carried inline, which
+    # is what makes the line safe to hand to a terminal: the prompt and the
+    # brief are multi-line text from a tracker, and a command line quoting them
+    # is one apostrophe away from running something else.
+    grep -qF -- "\$(cat '$AUTOFLEET_DIR/builds/42/prompt')" <<<"$line" \
+      || fail "the prompt is not read from its file: $line"
+    grep -qF -- "'$AUTOFLEET_DIR/builds/42/system.md'" <<<"$line" \
+      || fail "the brief is not read from its file: $line"
+    # ...and the knobs reach it, so moving one moves the build.
+    line="$( AUTOFLEET_BUILD_MAX_TURNS=7 AUTOFLEET_BUILD_MAX_BUDGET_USD=3.5 \
+             AUTOFLEET_BUILD_PERMISSION_MODE=plan \
+             in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    grep -qF -- "--max-turns 7" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_MAX_TURNS does not reach the command line: $line"
+    grep -qF -- "--max-budget-usd 3.5" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_MAX_BUDGET_USD does not reach the command line: $line"
+    grep -qF -- "--permission-mode plan" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_PERMISSION_MODE does not reach the command line: $line"
+    # ...and it writes its own exit status last, which is what lets ONE state
+    # reader serve a background child and a command hosted in somebody else's
+    # terminal.
+    grep -qF -- "/rc'" <<<"$line" \
+      || fail "the command line no longer records its own exit status: $line"
+    echo "ok: the one build command line carries every flag the issue names, and not --bare"
+
+    # BOTH DRIVERS RUN IT, byte for byte. The claim "only where it runs differs"
+    # is only checkable by comparing what each hands to the shell.
+    headless="$( AUTOFLEET_RUNNER=headless in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    orca="$( AUTOFLEET_RUNNER=orca in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    [ "$headless" = "$orca" ] \
+      || fail "the two drivers would run different commands:\n  $headless\n  $orca"
+    echo "ok: ...and both drivers compose the identical line"
+    ;;
+
+  resume_brief)
+    # A RESUME IS THE AFTER-PR BRIEF. The issue: "Resume is a second `claude -p`
+    # in the same worktree whose prompt says which branch, which PR, and what is
+    # open." Nothing asserted that the second run is handed anything different
+    # from the first, so a resume that re-ran the opening brief -- starting the
+    # build again on a branch that already has a pull request -- would have been
+    # green. Found by `/mattpocock-skills:code-review`.
+    make_fixture ok
+    make_worktree
+    add_origin
+    cat >"$WORK/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+case "$*" in
+  *"issue view 42"*) echo "the issue body" ;;
+  *) echo '[]' ;;
+esac
+GHSTUB
+    chmod +x "$WORK/bin/gh"
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
+      || fail "the opening build would not start"
+    grep -qF -- "issue-command.sh 42" "$GH_CALLS" 2>/dev/null \
+      || grep -q "issue-command.sh" "$AUTOFLEET_DIR/builds/42/prompt" \
+      || grep -q "Your brief is in the system prompt" "$AUTOFLEET_DIR/builds/42/prompt" \
+      || fail "the opening run was handed no brief at all: $(cat "$AUTOFLEET_DIR/builds/42/prompt")"
+    opening="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    in_fleet start_build 42 "$WORK/wt" after-pr >/dev/null 2>&1 \
+      || fail "the resume would not start"
+    resumed="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    [ "$opening" = "$resumed" ] \
+      && fail "a resume was handed the same brief as the opening run, so it starts the build again on a branch that already has a pull request"
+    grep -q "after-pr\|--after-pr\|pull request" <<<"$resumed" \
+      || fail "the resumed run's brief says nothing about the pull request it is answering: $resumed"
+    # ...and the run count moved, which is what AUTOFLEET_BUILD_MAX_RUNS reads.
+    [ "$(cat "$AUTOFLEET_DIR/builds/42/run-count")" = 2 ] \
+      || fail "the resume did not count as a run, so the bound on resumes never fires"
+    echo "ok: a resume is handed the after-PR brief and counts as a run"
+    ;;
+
   runner_stub)
     # THE acceptance for armaatus/autofleet#1, and the only assertion that keeps
     # holding once the move has been made: with a driver that is neither of the
@@ -3697,30 +3786,41 @@ JSON
     done
     echo "ok: a fresh worktree starts with nothing already said on its behalf"
     ;;
-  own_records_run)
+  own_outlives_release)
     make_fixture ok
-    # The half of the ownership record that has to OUTLIVE the worktree. The
-    # owned registry is what is running, and `disown_issue` empties it the moment
-    # a worktree is released -- so a cost report built on it alone goes blank
-    # exactly when a run finishes, which is when somebody asks what it cost.
+    # WHAT AN ISSUE COST HAS TO OUTLIVE ITS WORKTREE. The owned registry is what
+    # is RUNNING, and `disown_issue` empties it the moment a worktree is
+    # released -- so a cost report built on it alone goes blank exactly when a
+    # run finishes, which is when somebody asks what it cost.
+    #
+    # A second registry under `$AUTOFLEET_DIR/ran/` used to carry that, because
+    # the report found an issue's cost by slugging every path it had run in into
+    # the agent CLI's transcript root. The build directory is keyed on the ISSUE
+    # and outlives everything, so the registry became a store nothing read and
+    # went with the slug (armaatus/autofleet#151). This is the claim that
+    # survived it.
     in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
-    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
-      || fail "own did not record #42's worktree path under ran/"
+    mkdir -p "$AUTOFLEET_DIR/builds/42"
+    printf '{"num_turns":9,"total_cost_usd":1.25}\n' >"$AUTOFLEET_DIR/builds/42/result.json"
     in_fleet disown_issue 42 >/dev/null 2>&1
     [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
       && fail "disown_issue left the OWNED entry behind; the fixture proves nothing"
-    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
-      || fail "releasing the worktree also erased the record that #42 ever ran"
-    # ...and a SECOND attempt, as `fleet.sh retry 42` opens: appended, not
-    # replaced. Truncating throws away the abandoned attempt, which is exactly
-    # the "did it cost more than the one that landed" comparison the report is
-    # for. Re-owning the SAME path must not duplicate the line.
-    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
-    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
-    [ "$(cat "$AUTOFLEET_DIR/ran/42")" = "$(printf '%s\n%s' "$WORK/wt" "$WORK/wt2")" ] \
-      || fail "a second worktree for #42 did not append cleanly; ran/42 holds:
-$(cat "$AUTOFLEET_DIR/ran/42")"
-    echo "ok: every worktree an issue has had survives its release, once each"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/cost.sh 42 2>&1 )"
+    grep -q "1.25" <<<"$out" \
+      || fail "releasing the worktree erased what #42 cost: $out"
+    echo "ok: what an issue spent survives the release of the worktree it spent it in"
+
+    # ...and `own` still clears the per-issue markers, which is the other half of
+    # what it is for: a fresh worktree must start with nothing already said on
+    # its behalf, or it inherits the previous attempt's silence.
+    : >"$AUTOFLEET_DIR/held-42"
+    : >"$AUTOFLEET_DIR/build-done-42"
+    in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
+    for m in held build-done; do
+      [ -e "$AUTOFLEET_DIR/$m-42" ] \
+        && fail "$m-42 survived into a fresh worktree, which is silenced by it"
+    done
+    echo "ok: ...and a fresh worktree starts with nothing already said on its behalf"
     ;;
   abandon_blocked)
     make_fixture ok

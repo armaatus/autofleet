@@ -69,7 +69,12 @@ headless_link_file() {
 # mode docs/RUNNERS.md's `orca_unavailable_says` exists to prevent.
 runner_available() {
   local missing=""
-  local build; build="$(fleet_build_cmd)"
+  # The PROGRAM, not the whole command line: AUTOFLEET_BUILD_CMD is advertised
+  # as a wrapper seam and docs/CONFIGURATION.md offers `ssh box claude` as a
+  # value, so `command -v` on the whole thing always said no and this driver
+  # reported itself unusable on every host that used the seam. Found by
+  # `/mattpocock-skills:code-review`.
+  local build; build="$(fleet_build_program)"
   for tool in git gh "$build"; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing:+$missing, }$tool"
   done
@@ -94,13 +99,35 @@ runner_worktree_create() {
   path="$root/$name"
   mkdir -p "$root" "$(headless_link_dir)" || { echo "could not create $root"; return 1; }
   [ -e "$path" ] && { echo "$path already exists"; return 1; }
+  # A BRANCH NAME NOTHING ELSE HAS. `launch` derives it from the issue number
+  # and title, so it is the same name every time that issue is started -- and
+  # `git worktree remove` does not delete the branch it made. So
+  # `fleet.sh retry 42`, and any relaunch after a release, died on `a branch
+  # named '42-foo' already exists`, every poll, forever. Suffixed rather than
+  # forced: `-B` would reset a branch that may hold the previous attempt's
+  # commits, which is the one thing the reap is careful not to throw away.
+  # Found by the local `/code-review` pass.
+  local base="$name" n=2
+  while git -C "$repo" show-ref --verify --quiet "refs/heads/$name"; do
+    name="$base-$n"; n=$((n + 1))
+    [ "$n" -gt 99 ] && { echo "a hundred branches are already named $base-*"; return 1; }
+  done
+
   out="$(mktemp)"
-  # `git worktree add -b` from the repo's default branch's remote tip rather
-  # than from whatever HEAD happens to be: the dispatcher runs for hours and a
-  # build that branched off a stale local main re-does merged work. The fetch is
-  # inside the deadline with everything else.
+  # FROM THE REMOTE TIP WHEN THERE IS ONE, and from HEAD when there is not. The
+  # dispatcher runs for hours and a build that branched off a stale local main
+  # re-does merged work -- but a repository with no `origin`, which is what
+  # every fixture and every offline host is, must still get a worktree. The
+  # fetch is inside the deadline with everything else. The comment here promised
+  # the fetch while the code passed `HEAD`; found by both local review passes.
+  local from=HEAD upstream
+  if upstream="$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" \
+     && [ -n "$upstream" ]; then
+    fleet_run_with_deadline "$HEADLESS_DEADLINE" /dev/null \
+      git -C "$repo" fetch --quiet origin && from="$upstream"
+  fi
   FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "$HEADLESS_DEADLINE" "$out" \
-    git -C "$repo" worktree add -b "$name" "$path" HEAD
+    git -C "$repo" worktree add -b "$name" "$path" "$from"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     # AT MOST THREE LINES of the runtime's own words -- the driver's bound, not
@@ -130,7 +157,16 @@ runner_worktree_list() {
   fi
   # The main worktree is skipped: the fleet owns the ones it opened, and the
   # checkout the dispatcher itself runs in is not one of them.
+  # THE MAIN WORKTREE, and `--path-format` is GUARDED. git before 2.31 does not
+  # know the option, echoes it back and still exits 0 -- so `main` came back as
+  # the flag itself, the comparison below never matched, and the dispatcher's
+  # own checkout was emitted as a fleet-owned worktree with no issue. The other
+  # driver carries the same guard and the reason (armaatus/autofleet#71); found
+  # here by `/mattpocock-skills:code-review`.
   local main; main="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  case "$main" in
+    --*|'') main="$(cd "$REPO_ROOT" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" && pwd -P)" ;;
+  esac
   main="${main%/.git}"
   local path="" branch=""
   while IFS= read -r line; do
@@ -181,7 +217,18 @@ runner_worktree_remove() {
   # A worktree that is ALREADY gone is gone, and saying so needs nothing else
   # to work: `reap_merged` could otherwise fail to release a slot with nothing
   # left in it, which is the same held slot this three-way answer avoids.
-  [ -d "$path" ] || { fleet_build_forget_path "$path"; return 0; }
+  # ...and the registry goes WITH it. Returning 0 here without pruning left
+  # `git worktree list --porcelain` still emitting the stale entry and the link
+  # file still naming its issue, so the row came back with an issue number on
+  # it: a phantom slot, counted against AUTOFLEET_MAX forever, and `in_flight`
+  # answering yes for an issue nobody is working on. Found by
+  # `/mattpocock-skills:code-review`.
+  if [ ! -d "$path" ]; then
+    rm -f "$(headless_link_file "$path")"
+    fleet_build_forget_path "$path"
+    git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1
+    return 0
+  fi
   # The build first: `git worktree remove` on a tree a `claude -p` is still
   # writing to races the agent, and the loser is the worktree.
   runner_build_stop "$path"

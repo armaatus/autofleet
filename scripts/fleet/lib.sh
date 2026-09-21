@@ -90,7 +90,7 @@ fleet_ports() {
 # optimisation: a child that has already exited is a zombie until bash reaps it,
 # and `kill -0` succeeds on a zombie. With a one-second sleep every call
 # therefore cost a full second even when the command answered instantly.
-# setup.sh makes dozens of these, and `agent-autostart.sh --watch` alone makes
+# setup.sh makes dozens of these, and one worktree provisioning alone makes
 # two per poll -- which is what turned a test of it into a 21-second one, close
 # enough to its 60s ctest timeout to go red on a loaded machine.
 #
@@ -239,6 +239,13 @@ fleet_build_dir_for_path() {
 # A seam, like AUTOFLEET_REVIEW_CMD: point it at a wrapper, a different account,
 # or an `ssh` to the machine that holds the subscription.
 fleet_build_cmd() { printf '%s\n' "${AUTOFLEET_BUILD_CMD:-claude}"; }
+# ...and the PROGRAM in it, which is what `command -v` can answer about.
+# AUTOFLEET_BUILD_CMD is advertised as a wrapper seam and
+# docs/CONFIGURATION.md offers "an `ssh` to the machine that holds the
+# subscription" as a value -- so the availability probe asked `command -v` about
+# a whole command line and always said no. Found by
+# `/mattpocock-skills:code-review`.
+fleet_build_program() { set -- $(fleet_build_cmd); printf '%s\n' "${1:-claude}"; }
 
 # `'` inside a single-quoted shell word, the only way there is: close, escape,
 # reopen. Not `printf %q`, whose output is bash's own dialect and is read by a
@@ -253,10 +260,24 @@ fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # worktree STAYS, and the dispatcher reports what it ran out of -- so a build
 # that was nearly done is resumed rather than redone (armaatus/autofleet#41).
 #
-# `--permission-mode acceptEdits` and NOT `--bare`: the guard hook still runs,
-# which is what keeps a headless agent from merging its own PR or pushing before
-# its review is recorded. A driver that passed `--bare` would disable every rule
-# in .claude/hooks/guard.py and nothing else would notice.
+# THE PERMISSION MODE IS A KNOB, and its default is not the one
+# armaatus/autofleet#151 asked for. The issue says `--permission-mode
+# acceptEdits`, and `acceptEdits` auto-accepts FILE EDITS ONLY: every Bash
+# command that is not on the settings allow-list still asks, and in `-p` there
+# is nobody to ask, so it is denied. A build that can edit files and cannot run
+# `git commit`, `git push` or the test command is not a build. Found by the
+# local `/code-review` pass, which read the flag against
+# `.claude/settings.json`'s own `defaultMode`.
+#
+# `auto` is that default -- Claude Code deciding per call -- and it is what this
+# repository already sets for its own sessions. A host that wants the issue's
+# literal flag sets AUTOFLEET_BUILD_PERMISSION_MODE=acceptEdits and gets a build
+# that edits and never commits, which is its choice to make.
+#
+# NOT `--bare`, in any mode: the guard hook still runs, which is what keeps a
+# headless agent from merging its own PR or pushing before its review is
+# recorded. A driver that passed `--bare` would disable every rule in
+# .claude/hooks/guard.py and nothing else would notice.
 #
 # `set -o pipefail` and the `tee` are load-bearing together: stdout is the result
 # JSON AND the thing a watching maintainer reads, and without pipefail the exit
@@ -269,9 +290,10 @@ fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # one question the dispatcher asks every poll.
 fleet_build_command_line() {
   local dir="$1"
-  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode acceptEdits --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s; printf "%%s\\n" "$?" >%s\n' \
+  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode %s --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s; printf "%%s\\n" "$?" >%s\n' \
     "$(fleet_build_cmd)" \
     "$(fleet_sq "$dir/prompt")" \
+    "${AUTOFLEET_BUILD_PERMISSION_MODE}" \
     "${AUTOFLEET_BUILD_MAX_TURNS}" \
     "${AUTOFLEET_BUILD_MAX_BUDGET_USD}" \
     "$(fleet_sq "$dir/system.md")" \
@@ -295,8 +317,7 @@ fleet_build_started() {
   # how `cost.sh` can report what an issue cost rather than what its last run
   # cost. An issue gets up to AUTOFLEET_BUILD_MAX_RUNS of these, and "did the
   # resume cost more than the build" is exactly the question the report exists
-  # to answer -- the same reason $FLEET_RAN appends a path instead of replacing
-  # it.
+  # to answer.
   #
   # MOVED rather than parsed here. A finished result is one JSON object and the
   # reader knows its shape; summarising it at write time would put a second
@@ -324,12 +345,18 @@ fleet_build_forget_path() {
 # how a dispatcher waits out its whole budget and then reports that nothing
 # arrived.
 #
-# The pid is consulted FIRST when there is one, and only the headless driver
-# writes one. A build the dispatcher killed never reaches the line that writes
-# `rc`, so on files alone it would read as running forever; the pid is what
-# makes a killed build honest. A terminal-hosted build has no pid to give and
-# falls through to the file, which is correct for it: nothing outside that
-# terminal can kill the command without the terminal noticing.
+# THE EXIT STATUS FIRST, then the pid. `rc` is written by the command line
+# itself, so it is the one answer that is true whoever is hosting the build; a
+# pid is consulted only when no `rc` has been written yet, and only the headless
+# driver writes one. That order matters in the killed case: a build the
+# dispatcher killed never reaches the line that writes `rc`, so on files alone
+# it would read as running forever, and the pid is what makes it honest. A
+# terminal-hosted build has no pid to give and falls through to the last branch,
+# which is correct for it -- nothing outside that terminal can kill the command
+# without the terminal noticing.
+#
+# (The header said "the pid is consulted FIRST", which is the opposite of the
+# code beneath it. Found by `/mattpocock-skills:code-review`.)
 fleet_build_state_of() {
   local dir pid rc
   dir="$(fleet_build_dir_for_path "$1")" || return 1
@@ -534,9 +561,9 @@ else
   #   exempting it by name was the tell that the line was drawn in the wrong
   #   place. Found by the local review.
   #
-  # So: say it once at source time, finish sourcing, and let the four scripts
+  # So: say it once at source time, finish sourcing, and let the three scripts
   # that call `fleet_require_runner` stop on it -- the dispatcher, the setup
-  # hook, the board and the autostart watcher. A fifth NAMES a `runner_*` and is
+  # hook and the board. A fourth NAMES a `runner_*` and is
   # deliberately unguarded: `issue-command.sh` prints an agent's brief, which
   # needs no runtime, and asks `runner_available` only behind an `&&` that rc
   # 127 makes false. docs/RUNNERS.md carries the reason. `evals/lint.sh` check 4h
@@ -611,16 +638,13 @@ FLEET_OWNED="$FLEET_DIR/worktrees"
 # nobody holds. `fleet.sh`'s REVIEWING_DIR is this, and the comment naming what
 # is in it is there, next to the four consumers that walk it.
 FLEET_REVIEWING="$FLEET_DIR/reviewing"
-# ...and what it HAS run, which is a different question. `own()` writes an
-# issue's worktree path here and `disown_issue` does NOT take it away, so the
-# record outlives the worktree -- `cost.sh` is built on it, and on $FLEET_OWNED
-# alone that report emptied itself exactly when a run finished.
-#
-# HERE, beside the others, for the reason stated above them: the writer is
-# fleet.sh and the reader is cost.sh, and two spellings of one path is one
-# chance for the reader to look somewhere the writer never wrote. Found by the
-# standards review, which pointed at this very paragraph as the rule it broke.
-FLEET_RAN="$FLEET_DIR/ran"
+# ...and what it HAS run, which is a different question and is answered
+# somewhere else now. `$FLEET_DIR/ran` held every path an issue had run in,
+# because `cost.sh` found what an issue spent by slugging those paths into the
+# agent CLI's transcript root. The report reads `$FLEET_BUILDS/<issue>/`
+# instead -- keyed on the issue, outliving every worktree -- so the registry and
+# the three comments that claimed the report was built on it are gone with the
+# slug. armaatus/autofleet#151.
 
 # Which reviewer this repository runs, normalised -- `local` or `github`.
 #

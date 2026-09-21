@@ -4,8 +4,11 @@ A **runner** is whatever creates a worktree, opens a terminal in it, and can be
 asked what it is doing. `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` is the
 driver, sourced by `lib.sh`.
 
-Today there is exactly one that ships: `orca`. No code outside
-`scripts/fleet/runner/` calls its CLI, and
+Two ship. **`headless` is the default**: a plain `git worktree` and one
+`claude -p`, needing `git`, `gh` and the build command and nothing else, and it
+is what CI runs. `orca` is the desk path — it creates the worktree through the
+app and runs the *identical* build command in a terminal tab, so a maintainer
+can watch it. No code outside `scripts/fleet/runner/` calls the app's CLI, and
 
 ```sh
 grep -rni 'orca' scripts/fleet --include='*.sh' \
@@ -141,7 +144,7 @@ before their first `runner_*`, which adds the consequence and stops; without it
 that first call is `command not found`, and rc 127 through a `|| die` reports
 the consequence as the cause.
 
-`issue-command.sh` is the fifth script that names a `runner_*` and is
+`issue-command.sh` is the fourth script that names a `runner_*` and is
 deliberately **not** guarded: it prints an agent's brief, which needs no
 runtime, and asks `runner_available` only behind
 `if [ -z "$ref" ] && runner_available 2>/dev/null` to decide whether it can

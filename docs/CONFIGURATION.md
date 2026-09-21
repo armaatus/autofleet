@@ -684,7 +684,7 @@ and a port nothing can re-derive is a port nothing can release.
 
 `AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
 `scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
-the file it looked for and the drivers that do ship — and stops the four scripts
+the file it looked for and the drivers that do ship — and stops the three scripts
 that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
 caught before a worktree is opened rather than by an agent sitting on a prompt
 that never sends.
