@@ -3,31 +3,28 @@
 What the independent review looks for, which findings **block a merge** and
 which do not, and what it should not report at all.
 
-The pull request arrives already reviewed: step 3 of the brief runs both
-self-review passes and their findings are in the body. This review is the one
-from a context that has not seen the conversation which produced the diff,
-because an author reviewing its own work shares its blind spots.
+**It runs once.** One review per pull request, from a context that has not seen
+the conversation which produced the diff, because an author reviewing its own
+work shares its blind spots. If it asks for changes, the author gets exactly one
+fix session and that fix is re-reviewed once. That second verdict is final: a
+second request for changes parks the pull request for a person. **Two reviews
+maximum, ever.**
 
-**It runs once.** One review per pull request, at PR-open, on the head the PR
-opened with. What follows is a **validation** — a different job, with a different
-brief ([`.claude/agents/validator.md`](.claude/agents/validator.md)), asking only
-whether these findings were addressed and whether the commits answering them
-broke anything.
+Nothing else reads the branch. There is no validation pass behind this asking
+whether the findings were addressed — a re-review of the fixed head answers that
+in one pass with no protocol, which is what the two validations were
+approximating. They never once ended the loop on their own: every validation of
+#132 and #133 came back `fail` for reasons unrelated to the code, so every pull
+request landed on the maintainer at the cap having spent five model passes to
+get there. armaatus/autofleet#152.
 
-How many validations a pull request may have is **not this file's to say** — the
-brief states it, and `AUTOFLEET_VALIDATE_MAX` enforces it, in `local` mode where
-the dispatcher starts them. In the default `github` mode
-`.github/workflows/validate.yml` fires on every push and nothing bounds it. This
-file carried the cap unqualified, which asserted a termination argument the
-venue most hosts run does not have.
-
-That is the shape, and it replaced a loop bounded at four reviews per pull
-request that routinely spent all four. Every answer to a finding was a commit,
-every commit moved the head, and a head move invalidates the review that asked
-for it — so the reviewer read the whole diff again and found one more thing a
-level down. #86 burned four reviews without one ever judging the commit that
-merged. Reviewing a branch four times is not four times the assurance; it is the
-same review of four different commits.
+That shape replaced a loop bounded at four reviews per pull request that
+routinely spent all four. Every answer to a finding was a commit, every commit
+moved the head, and a head move invalidates the review that asked for it — so
+the reviewer read the whole diff again and found one more thing a level down.
+#86 burned four reviews without one ever judging the commit that merged.
+Reviewing a branch four times is not four times the assurance; it is the same
+review of four different commits.
 
 So this review is the only one. Read this file before reviewing. If you are the
 author, read it before you finish — a finding you can predict is one you can
@@ -85,22 +82,24 @@ save format. Nothing in the payload may know about one project; that is hard rul
 
 **Critical** — security, data loss or corruption, a breaking change with no
 migration, or a production failure. **A Critical finding is fixed, never argued
-away.** The validator will not accept a reasoned reply in its place, because
-there is no second reviewer behind it.
+away.** There is no second reviewer behind this one to take the argument to.
 
 **Important** — a real defect or a breach of a hard rule: wrong behaviour on a
 path that matters, a missing test that would have caught the bug, a broken build
 on either target, or the tracker left saying something untrue. Fixed, or
-disputed with a reason the validator accepts.
+disputed in the commit message with a reason the re-review accepts.
 
 **Suggestion** — naming, comment wording, ordering, a clearer formulation of
-something already correct. **A Suggestion is answered, not fixed**: say which you
-took and which you did not. Answering costs no commit, and a commit moves the
-head.
+something already correct. **A Suggestion is posted, and that is all.** It goes
+in an ordinary pull request comment that blocks nothing and that nobody has to
+answer; `review.sh` separates them from the blocking half by severity, so
+labelling one thing as another is the single mistake here that moves a merge.
+The asymmetry is deliberate: a nit that held a branch cost a whole loop to
+change a comment.
 
 **A Suggestion never becomes its own issue.** One that does costs a whole loop —
-brief, implementation, review, validation — to change a comment, and a review
-that mints work every round is the most expensive thing in this system. Anything
+brief, implementation, review, fix — to change a comment, and a review that
+mints work every round is the most expensive thing in this system. Anything
 worth keeping goes on the repository's standing nit issue, if it keeps one.
 
 Report at most **five Suggestions**, and summarise the rest as a count. A review
@@ -115,54 +114,31 @@ whose signal is buried in twenty preferences costs more attention than it saves.
   against the cap of five.
 - **Anything you cannot cite.** A behaviour claim needs a `file:line` in the
   actual source, not an inference from a name. If you are unsure a finding is
-  real, drop it or say you are unsure — a wrong finding costs the author a round
-  trip, and there is no later round to take it back in.
-- **What the author already found.** The `/mattpocock-skills:code-review`
-  findings are in the PR body. Repeat one only if you think the fix was wrong.
-- **A verdict GitHub will refuse.** Under `AUTOFLEET_REVIEW_MODE=local` the
-  reviewer signs in as the pull request's own author, and GitHub declines
-  `CHANGES_REQUESTED` on a self-authored PR — *"Review Can not request changes on
-  your own pull request"*. Trying it returns a non-zero exit on the reviewer's
-  last action, which is how a run ends having submitted nothing at all. Use
-  `--comment` whatever you found; the counts below are what hold the branch.
+  real, drop it or say you are unsure — there is one fix session behind this
+  review, and a wrong Important finding spends it with no later round to take it
+  back in.
 
-## Say how many findings you left
+## The verdict is a field, not a sentence
 
-Every review ends its body with these lines, **in this order** — the block
-`review.sh` and `claude-review.yml` dictate verbatim, because a policy that
-disagrees with the prompt gets a real review discarded:
+The reviewer answers with a JSON object — `verdict`, and `findings` each
+carrying a severity, a file, a line and its text. `scripts/fleet/review.sh`
+posts it: the Critical and Important findings as the review body, the
+Suggestions as an ordinary comment, and a marker naming the head it judged.
 
-```
-<!-- review-important: M -->
-<!-- review-findings: N -->
-```
+**`verdict` is `request-changes` if and only if something is Critical or
+Important.** Nothing reads prose to decide. That marker is the only thing
+`.github/scripts/merge_gate.py` looks for, and it is written by the script from
+the `verdict` field — never spelled by the model, and never reachable from the
+worktree under review (`.claude/hooks/guard.py` refuses `gh pr review` there).
 
-and, under `AUTOFLEET_REVIEW_MODE=local` only, one more naming the commit the
-review judged:
+It has to be a marker and not GitHub's own APPROVED state because GitHub
+refuses `--approve` and `--request-changes` on your own pull request, and the
+reviewer signs in as whoever `gh` is — normally the account that opened the PR.
+`review.sh` tries the real state first and falls back, so a repository with a
+separate reviewer identity gets the badge for free.
 
-```
-<!-- independent-review: local <head-sha> -->
-```
-
-Nothing else follows them.
-
-That marker is what makes a review count at all in that mode; `github` mode has
-none ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#the-review)).
-
-**This file names every trailer a review may carry, and never says how many there
-are anywhere else.** A count stated twice goes stale in one of them. The
-validator's own trailer is named in its brief, for the same reason.
-
-**`M` is Critical plus Important.** **`N` is `M` plus Suggestions** — every
-finding across all seven dimensions, inline comments included. `0` means nothing
-found.
-
-`N` above zero holds the branch until the author has answered. `M` decides
-nothing about merging; what it changes is what the author is *told*, because
-`M == 0` means answering in words is a complete answer and costs no commit.
-Omitting `M` reads as "did not say", never as zero, so write it even when `M`
-equals `N`.
-
-They are HTML comments, invisible in the rendered review. They exist because
-`merge-gate` cannot otherwise tell five Suggestions from nothing at all: both are
-a COMMENTED verdict, and both satisfy every other condition it has.
+**A count of findings is not a trailer any more.** Three HTML comments used to
+end every review body — `review-important`, `review-findings`,
+`independent-review` — because the gate could not otherwise tell five
+Suggestions from nothing at all, both being a COMMENTED verdict. The severity
+field tells it now, in the one place the reviewer states it.
