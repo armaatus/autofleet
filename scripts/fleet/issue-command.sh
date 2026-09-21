@@ -163,9 +163,9 @@ sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk "$brief_filter"
 ---
 
 Implement the issue above, end to end. CLAUDE.md and this brief carry your
-instructions, and name anything else. Work autonomously: do not stop to ask for confirmation on
-anything CLAUDE.md already decides. If a question is genuinely open, write it in
-the PR body and carry on with the rest of the scope.
+instructions and name anything else. Work autonomously; do not stop for
+confirmation on anything CLAUDE.md decides. A genuinely open question goes in
+the PR body, and you carry on with the rest of the scope.
 
 **1. Build it.** The issue above IS the plan -- Goal, Scope, Design notes and
 Acceptance are meant to be sufficient, and there is no planning phase before you
@@ -173,31 +173,25 @@ edit. Type this and nothing else, naming the issue above as the input:
 
     /implement
 
-It drives `/mattpocock-skills:tdd` at the seams, typechecks as it goes, runs
-__TEST_COMMAND__ once at the end, and commits. For a bug, the failing test is
-committed before the fix. Read the suite output: a phase reporting `skip` judged
-nothing.
+It drives `/mattpocock-skills:tdd` at the seams, runs __TEST_COMMAND__ once at
+the end, and commits. For a bug the failing test is committed before the fix.
+Read the suite output: a phase reporting `skip` judged nothing.
 
-**2. Push, and open the pull request. THAT IS WHERE YOUR JOB ENDS.** The body
-must carry `## Plan` -- what the issue asked for, and where the implementation
-departed from it and why -- any issue you edited and why, and `Closes #__ISSUE__`
-on a line of its own. Departing from the issue is normal; departing silently is
-not, and the review checks that section against the diff. The closing line is
-the one the PR template leaves as a placeholder: fill it in, because the
-merge-gate check refuses a body without it.
+**2. Push, open the pull request, and STOP THERE.** The body carries `## Plan`
+-- what the issue asked for, and where you departed from it and why -- any issue
+you edited, and `Closes #__ISSUE__` on a line of its own. Departing is normal;
+departing silently is not, and the review checks that section against the diff.
+The merge-gate check refuses a body with no closing line.
 
-**Do not queue the merge, do not wait for the review, and do not answer one.**
-The dispatcher arms auto-merge, runs one review, buys exactly one fix session if
-that review asks for changes, re-reviews the fix once, and then either GitHub
-merges on its own rules or a person is told why not. The guard hook refuses all
-three from here. Say the PR is open and stop.
+Do not queue the merge, wait for a review, or answer one. The dispatcher arms
+auto-merge, runs one review, buys one fix session if it asks for changes,
+re-reviews that once, and then GitHub merges or a person is told why not. The
+guard hook refuses all of it from here. Say the PR is open and stop.
 
-**If your issue's scope is `.github/workflows/`, `.github/scripts/`, `.claude/`,
-or the files in `.autofleet/` that set the rules -- `guard.json`, `config` and
-the host's review policy beside them, though not `setup.sh` or `teardown.sh` --
-this PR will never merge itself, and that is not a failure.** A PR that could
-rewrite the rules judging PRs is not merged by the machinery those rules govern.
-Take it to a green, reviewed PR and stop there.
+A PR touching `.github/workflows/`, `.github/scripts/`, `.claude/`, or
+the files in `.autofleet/` that set the rules, never merges itself -- and
+that is not a failure: a change that could rewrite the rules is not merged
+by them.
 
 **The `researcher` subagent** (`.claude/agents/`) answers "where is this
 handled" with the answer rather than the files it read.
@@ -206,8 +200,8 @@ handled" with the answer rather than the files it read.
 `gh pr diff`, `sed -n '120,180p'` not a whole file, `researcher` before a wide
 search.
 
-**Commit as you go.** If this run stops at its limit, a second one starts in the
-same worktree from the branch and the pull request -- nothing else crosses, so
+**Commit as you go.** If this run stops at its limit a second one starts in the
+same worktree, from the branch and the pull request -- nothing else crosses, so
 uncommitted work is work nobody sees again.
 
 If `~/.autofleet/STOP` exists, stop: say where you got to and do nothing
