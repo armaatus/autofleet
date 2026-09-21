@@ -29,8 +29,8 @@ AUTOFLEET_MAX=2
 # WHAT IT CANNOT REACH IS THE PART THAT MATTERS, and that is why this is a
 # footnote rather than a fix: `review.sh` deliberately does not export the base
 # URL into the worktree agent, and the worktree agent is where 63% of an issue's
-# tokens are spent. This wraps the self-review passes, the reviewer and the
-# validator. Do not read a green line here as the cost problem being addressed.
+# tokens are spent. This wraps the reviewer and the fix session. Do not read a
+# green line here as the cost problem being addressed.
 AUTOFLEET_HEADROOM=1
 
 # WHAT ONE BUILD MAY SPEND, left at the payload defaults for now.
@@ -53,52 +53,17 @@ AUTOFLEET_HEADROOM=1
 # compare `fleet.sh cost` against the 207M/10.5M figures above and move them.
 # They are the payload defaults (400 turns, $25) until then.
 
-# No CLAUDE_CODE_OAUTH_TOKEN on this repository, so claude-review.yml no-ops and
-# the only account that could review a fleet PR is the one that opened it. The
-# dispatcher runs the reviewer here instead. See docs/CONFIGURATION.md for what
-# that gives up -- and note that autofleet being its own reference installation
-# (hard rule 1) is exactly why this is the mode it runs itself on: the weaker
-# path is the one that has to be exercised daily, not the one nobody drives.
+# ONE REVIEW, ONE FIX, AND THE KNOBS ARE THE PAYLOAD DEFAULTS.
 #
-# A PLAIN assignment, like every other line in this file, and not the
-# `: "${X:=...}"` shape config.sh writes its own defaults in. Those defaults run
-# BEFORE this file is sourced, so by the time a `:=` here is reached the variable
-# already holds `github` and the assignment does nothing at all. The only form a
-# host config can override a default with is this one -- see #23, which is about
-# config.sh documenting a precedence it does not have.
+# Five knobs used to live here -- a review mode, a delta scope, and the numbers
+# bounding a loop of one review and up to two validations. armaatus/autofleet#152
+# removed the loop: the reviewer answers with a JSON verdict, a `request-changes`
+# buys exactly one fix session, and the re-review of that fix is final. There is
+# no mode to choose, because `.github/workflows/claude-review.yml` is gone and
+# the dispatcher is the only venue; there is no round two to take a delta of.
 #
-# The consequence, which is worth knowing before you try it: the environment
-# cannot override this for a single command either, because a plain assignment
-# beats an exported value. `AUTOFLEET_CONFIG=<other-file>` is the seam for that.
-#
-# merge_gate.py is the exception and deliberately so: it reads
-# AUTOFLEET_REVIEW_MODE from the environment FIRST, because it is a Python
-# program that never sources this file and its --selftest has to drive both
-# modes. Two answers to "who wins", for two different readers.
-AUTOFLEET_REVIEW_MODE=local
-
-# ROUND TWO ONWARDS READS WHAT CHANGED, not the whole branch again.
-#
-# Every reviewer run this machine has ever recorded is `scope: full` --
-# `~/.autofleet/reviews/cost.tsv`, ten rows -- including FOUR full reviews of
-# PR #132 at $5.75, $1.79, $2.13 and $1.87, which is $11.54 for one pull
-# request. Each one re-read a branch whose earlier rounds had already been
-# judged, because the head had moved. (An earlier draft of this comment, and
-# the commit message that carried it, said three and $9.67: the fourth row is a
-# second review on head 31670481, three minutes after the first. Found by the
-# local /mattpocock-skills:code-review pass, checking the claim against the
-# ledger.)
-#
-# The delta machinery has been built and tested since #65 and was left off for
-# one stated reason: `review.sh` inlines `.claude/agents/reviewer.md` as the
-# brief, that file is under `.claude/` and cannot be auto-merged, so flipping
-# the payload DEFAULT would outrun the brief. That argument is about the
-# default in scripts/fleet/config.sh. It is not about this file -- these are
-# one repository's own knobs, and the three clauses that make a delta review
-# safe are stated in review.sh's own "This run" block, which is what the
-# reviewer actually reads.
-#
-# Round one is always full, and AUTOFLEET_REVIEW_FULL_EVERY=4 makes every
-# fourth round full regardless, so no pull request is ever judged by an
-# unbroken chain of deltas.
-AUTOFLEET_REVIEW_SCOPE=delta
+# What this repository still gives up by reviewing itself is unchanged and is
+# worth knowing: there is no CLAUDE_CODE_OAUTH_TOKEN here, so the reviewer signs
+# in as the account that opened the pull request. GitHub refuses `--approve` on
+# your own PR, so the verdict arrives as a COMMENTED review carrying the marker
+# `merge_gate.py` reads. docs/CONFIGURATION.md has the row.
