@@ -1775,14 +1775,16 @@ slug() {
 # the moment a worktree opens. A build that started with an EMPTY brief would
 # look like a build and produce nothing, so the fallback is the old prompt: go
 # and run the command yourself. One turn, and it works.
+#
+# ONE BRIEF, AND A RESUME GETS THE SAME ONE. It used to take a second argument
+# and fetch `--after-pr` for a resume, because the post-PR contract was a
+# separate half of the text. armaatus/autofleet#152 deleted that half -- the
+# agent's job ends at an open pull request -- so a resumed run reads the branch,
+# the pull request and the same instructions the first run had.
 build_brief() {
-  local num="$1" after="${2:-}" out
+  local num="$1" out
   out="$(mktemp)"
-  if [ -n "$after" ]; then
-    GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr "$num" >"$out" 2>/dev/null
-  else
-    GH_PAGER=cat ./scripts/fleet/issue-command.sh "$num" >"$out" 2>/dev/null
-  fi
+  GH_PAGER=cat ./scripts/fleet/issue-command.sh "$num" >"$out" 2>/dev/null
   if [ -s "$out" ]; then
     cat "$out"; rm -f "$out"; return 0
   fi
@@ -1817,13 +1819,14 @@ PREAMBLE
 
 # Write the two files the build command reads, and start it.
 #
-# `$1` issue, `$2` worktree, `$3` empty for the opening run or `after-pr` for a
-# resume. Both go through here, and that is the point: a resume differs from a
-# first run in ONE input, the brief, and in nothing else. The old resume was a
-# `/clear` plus a re-send plus a handoff note plus a grace period plus four
-# markers, because it had to put a live session back the way it found it.
+# `$1` issue, `$2` worktree. A resume and a first run go through here and differ
+# in NOTHING: the brief is the same text, and what a resumed run starts from is
+# the branch and the pull request. The old resume was a `/clear` plus a re-send
+# plus a handoff note plus a grace period plus four markers, because it had to
+# put a live session back the way it found it; the one before that at least
+# differed in its brief.
 start_build() {
-  local num="$1" path="$2" after="${3:-}" dir runs
+  local num="$1" path="$2" dir runs
   # THE BUILD COMMAND IS CHECKED HERE, and this is the only place that knows a
   # build is about to happen. The driver's `runner_available` asked for it once
   # and stopped every fleet command on a machine with no agent CLI -- the
@@ -1838,17 +1841,13 @@ start_build() {
   dir="$(fleet_build_dir "$num")"
   mkdir -p "$dir" || { say "  could not make the build directory $dir"; return 1; }
 
-  if build_brief "$num" "$after" >"$dir/system.md.new" && [ -s "$dir/system.md.new" ]; then
+  if build_brief "$num" >"$dir/system.md.new" && [ -s "$dir/system.md.new" ]; then
     { build_preamble; printf '\n'; cat "$dir/system.md.new"; } >"$dir/system.md"
     printf 'Your brief is in the system prompt: the issue, and the instructions that follow it. Implement it end to end.\n' >"$dir/prompt"
   else
     say "  could not read the brief for #$num -- the build will fetch it itself"
     build_preamble >"$dir/system.md"
-    if [ -n "$after" ]; then
-      printf 'Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr %s` first and follow everything it prints.\n' "$num" >"$dir/prompt"
-    else
-      printf 'Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh %s` first and follow everything it prints.\n' "$num" >"$dir/prompt"
-    fi
+    printf 'Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh %s` first and follow everything it prints.\n' "$num" >"$dir/prompt"
   fi
   rm -f "$dir/system.md.new"
 
@@ -3401,7 +3400,7 @@ build_exited() {
       return 0
     fi
     say "#$num: its build stopped at a limit -- $(build_summary "$num") -- resuming in the same worktree (run $((runs + 1)))"
-    start_build "$num" "$path" after-pr || say "#$num: could not start the resume"
+    start_build "$num" "$path" || say "#$num: could not start the resume"
     return 0
   fi
 
