@@ -178,6 +178,10 @@ runner_worktree_set() { return 0; }
 # so 2 is unreachable and that is stated rather than left to be inferred.
 runner_worktree_remove() {
   local path="$1" deadline="${2:-$HEADLESS_DEADLINE}" out rc
+  # A worktree that is ALREADY gone is gone, and saying so needs nothing else
+  # to work: `reap_merged` could otherwise fail to release a slot with nothing
+  # left in it, which is the same held slot this three-way answer avoids.
+  [ -d "$path" ] || { fleet_build_forget_path "$path"; return 0; }
   # The build first: `git worktree remove` on a tree a `claude -p` is still
   # writing to races the agent, and the loser is the worktree.
   runner_build_stop "$path"
@@ -189,6 +193,7 @@ runner_worktree_remove() {
     head -3 "$out" >&2; rm -f "$out"; return 1
   fi
   rm -f "$out" "$(headless_link_file "$path")"
+  fleet_build_forget_path "$path"
   git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1
   return 0
 }
@@ -206,60 +211,43 @@ runner_worktree_remove() {
 runner_build_start() {
   local path="$1" issue="$2" dir
   dir="$(fleet_build_dir "$issue")"
-  mkdir -p "$dir" || return 1
   [ -r "$dir/prompt" ] && [ -r "$dir/system.md" ] || {
     echo "headless: no prompt for #$issue in $dir" >&2; return 1; }
 
   # Already running is SUCCESS, not an error: the dispatcher calls this to make
   # sure a build is up, and a second `claude -p` in one worktree is two agents
   # editing one tree.
-  runner_build_state "$path" | grep -qx running && return 0
+  [ "$(runner_build_state "$path" 2>/dev/null)" = running ] && return 0
 
-  # The result is written fresh on every start, so `runner_build_state` can
-  # never report the PREVIOUS run's exit as this one's.
-  rm -f "$dir/result.json" "$dir/rc"
-
+  fleet_build_started "$dir" "$path" "$issue" || return 1
   local line; line="$(fleet_build_command_line "$dir")"
   set -m
   (
     cd "$path" || exit 127
-    # The line itself writes result.json and build.log -- see
+    # The line itself writes result.json, build.log and rc -- see
     # `fleet_build_command_line`. Stdout is discarded HERE and nowhere else:
     # the app-backed driver runs the same line in a terminal, where that same
     # stdout is what the maintainer watches.
-    bash -c "$line" >/dev/null
-    printf '%s\n' "$?" >"$dir/rc"
+    bash -c "$line" >/dev/null 2>&1
   ) &
   local pid=$!
   set +m
   printf '%s\n' "$pid" >"$dir/pid"
-  printf '%s\n' "$path" >"$dir/worktree"
   return 0
 }
 
-# `running`, or `exited <rc>`, on stdout. Non-zero when it could not be told
-# apart from a build that was never started -- which is a different answer from
-# "not running", and conflating them is how a dispatcher waits out its whole
-# time-box and then reports that nothing arrived.
-runner_build_state() {
-  local path="$1" dir issue pid
-  issue="$(cat "$(headless_link_file "$path")" 2>/dev/null)" || return 1
-  [ -n "$issue" ] || return 1
-  dir="$(fleet_build_dir "$issue")"
-  pid="$(cat "$dir/pid" 2>/dev/null)" || return 1
-  [ -n "$pid" ] || return 1
-  if kill -0 "$pid" 2>/dev/null; then printf 'running\n'; return 0; fi
-  printf 'exited %s\n' "$(cat "$dir/rc" 2>/dev/null || echo '?')"
-}
+# `running`, or `exited <rc>`, from lib.sh's one reader. The driver adds
+# nothing: a background child and a terminal-hosted command are described by
+# the same two files, and the pid this driver writes is what makes a KILLED
+# build report as exited rather than as running forever.
+runner_build_state() { fleet_build_state_of "$1"; }
 
 # Stop the build in $1, if there is one. Idempotent, and silent about a build
 # that is already gone: every caller reaches here on a path where the worktree
 # is going away regardless.
 runner_build_stop() {
-  local path="$1" dir issue pid
-  issue="$(cat "$(headless_link_file "$path")" 2>/dev/null)" || return 0
-  [ -n "$issue" ] || return 0
-  dir="$(fleet_build_dir "$issue")"
+  local dir pid
+  dir="$(fleet_build_dir_for_path "$1")" || return 0
   pid="$(cat "$dir/pid" 2>/dev/null)" || return 0
   [ -n "$pid" ] || return 0
   kill -0 "$pid" 2>/dev/null || return 0

@@ -284,8 +284,16 @@ runner_dispatcher_hint() {
 # time-box, and neither reap iterates it, because both walk OWNED_DIR. A slot
 # held forever by a worktree the fleet cannot see. Found by the independent
 # review; lib.sh states the rule this broke, in this change's own words.
+# NO --agent AND NO --prompt any more, which is the shape armaatus/autofleet#151
+# changed here. Orca used to start the agent itself, from a worktree-creation
+# hook, with the brief DRAFTED in its composer and a watcher of ours pressing
+# Return -- so the dispatcher never saw the agent start, and a hook that failed
+# left a fully provisioned worktree sitting on an unsent prompt until a person
+# noticed. This call now creates a worktree and nothing else; `runner_build_start`
+# is what puts a build in it, and it runs the same command the headless driver
+# runs.
 runner_worktree_create() {
-  local repo="$1" name="$2" issue="$3" agent="$4" prompt="$5" comment="$6"
+  local repo="$1" name="$2" issue="$3"
   # Resolved explicitly, and SAID, because `orca_cli` answers a failed resolve
   # with `orca_cli_resolve || return 1` BEFORE anything is written to $err or
   # $out -- so the relay below had nothing to relay and `launch` printed
@@ -313,9 +321,7 @@ runner_worktree_create() {
     --name "$name" \
     --issue "$issue" \
     --no-parent \
-    --agent "$agent" \
-    --prompt "$prompt" \
-    --comment "$comment" \
+    --comment "starting #$issue" \
     --json
   rc=$?
   if [ "$rc" != 0 ]; then
@@ -587,105 +593,92 @@ runner_worktree_remove() {
   return 1
 }
 
-# What each worktree's agent is doing, as `path<TAB>state` lines.
+# ------------------------------------------------------------------ the build
 #
-# ONE listing, not one call per worktree: the dispatcher matches it against
-# every owned worktree each poll, and three 30-second-deadline calls a minute
-# for an answer that arrives in a single response is the shape this replaced.
+# THE SAME COMMAND, IN A TAB. `fleet_build_command_line` composes it once in
+# lib.sh and neither driver gets to assemble its own -- that is what makes
+# "headless is the CI path, Orca is the desk path" a statement about WHERE a
+# build runs rather than about what it does.
 #
-# Non-zero when the listing could not be read. A worktree with no agent is
-# simply absent, which is a real answer.
-runner_agent_states() {
-  local out rc; out="$(mktemp)"
-  orca_json "$out" worktree ps || { rm -f "$out"; return 1; }
-  python3 -c '
-import json, sys
-try:
-    worktrees = json.load(open(sys.argv[1]))["result"]["worktrees"]
-except Exception:
-    raise SystemExit(1)
-for w in worktrees:
-    state = ((w.get("agents") or [{}])[0]).get("state") or ""
-    if w.get("path") and state:
-        print(w["path"], state, sep="\t")
-' "$out"
-  rc=$?
-  rm -f "$out"
-  return $rc
-}
+# What this driver no longer does is drive a session. It does not type, does not
+# press Return, does not read a composer draft and does not classify a tab as
+# working or waiting. Those six contract functions are gone with the five
+# subsystems that used them.
 
-# Every live agent terminal on the machine, as `handle<TAB>worktree-path` lines.
-#
-# `orca terminal list` reports every terminal there is, so the worktree path is
-# what keeps three parallel worktrees from sending into each other's agents;
-# `agentIdentity` is what separates the agent tab from the shell and log tabs
-# beside it, and `orphaned` is a handle whose terminal is already gone.
-#
-# Non-zero when the listing could not be read; an empty list means there are
-# none, which the caller has to be able to tell apart.
-runner_agent_terminals() {
-  local out rc; out="$(mktemp)"
+# The live terminal in one worktree, if there is one. PRIVATE to this driver --
+# it is not a contract function, and nothing outside this file may call it.
+orca_terminal_for_path() {
+  local out; out="$(mktemp)"
   orca_json "$out" terminal list || { rm -f "$out"; return 1; }
-  python3 -c '
-import json, sys
+  ORCA_TERMINAL_PATH="$1" python3 -c '
+import json, os, sys
 try:
     terminals = json.load(open(sys.argv[1]))["result"]["terminals"]
 except Exception:
     raise SystemExit(1)
+want = os.environ["ORCA_TERMINAL_PATH"]
 for t in terminals:
-    if t.get("agentIdentity") and not t.get("orphaned"):
-        print(t["handle"], t.get("worktreePath") or "-", sep="\t")
+    if t.get("worktreePath") == want and not t.get("orphaned"):
+        print(t["handle"])
+        break
 ' "$out"
-  rc=$?
+  local rc=$?
   rm -f "$out"
   return $rc
 }
 
-# The composer text an agent has NOT sent, as a single comparable line: its
-# length, a space, then the text with newlines flattened.
+# Start the build in $1 for issue $2, in a terminal tab.
 #
-# Prints nothing when there is no draft, which is a normal answer rather than a
-# failure -- non-zero means the read itself failed.
-#
-# Whole, not truncated: the caller reads the text back to decide whether the
-# runtime drafted a real prompt or only the issue URL, and a 60-character prefix
-# cannot tell a bare URL apart from one with instructions after it. The length
-# prefix is what makes a paste caught half way through comparable to the same
-# paste once it has landed.
-runner_terminal_draft() {
+# `--command` is what makes the tab the build rather than a shell beside it: the
+# terminal starts, runs the line, and the maintainer watches the same stdout the
+# headless driver sends to /dev/null. The line writes its own exit status, so
+# `runner_build_state` needs nothing from the app -- which matters, because a
+# terminal is not a process this driver can wait on.
+runner_build_start() {
+  local path="$1" issue="$2" dir
+  dir="$(fleet_build_dir "$issue")"
+  [ -r "$dir/prompt" ] && [ -r "$dir/system.md" ] || {
+    echo "orca: no prompt for #$issue in $dir" >&2; return 1; }
+  [ "$(runner_build_state "$path" 2>/dev/null)" = running ] && return 0
+  orca_cli_resolve || { orca_unavailable_says >&2; return 1; }
+  fleet_build_started "$dir" "$path" "$issue" || return 1
   local out rc; out="$(mktemp)"
-  orca_json "$out" terminal read --terminal "$1" --screen --limit 1 \
-    || { rm -f "$out"; return 1; }
-  python3 -c '
-import json, sys
-try:
-    draft = json.load(open(sys.argv[1]))["result"]["terminal"].get("draft")
-except Exception:
-    raise SystemExit(1)
-if draft and str(draft).strip():
-    print(len(str(draft)), str(draft).strip().replace("\n", " "))
-' "$out"
+  FLEET_RUN_CAPTURE_STDERR=1 orca_cli "$ORCA_DEADLINE" "$out" terminal create \
+    --worktree "path:$path" \
+    --title "#$issue" \
+    --command "$(fleet_build_command_line "$dir")" \
+    --json
   rc=$?
+  if [ "$rc" != 0 ]; then
+    # AT MOST THREE LINES of the runtime's own words, the driver's bound.
+    sed -n '1,3p' "$out" >&2
+    rm -f "$out"
+    # ...and the index goes with it, or `runner_build_state` would answer
+    # "running" for a build that was never started -- the file-only reading
+    # `fleet_build_state_of` falls back to when there is no pid.
+    fleet_build_forget_path "$path"
+    return 1
+  fi
   rm -f "$out"
-  return $rc
+  return 0
 }
 
-# Type text into a terminal without submitting it.
-runner_terminal_send() {
-  orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
-    terminal send --terminal "$1" --text "$2" --json
-}
+runner_build_state() { fleet_build_state_of "$1"; }
 
-# Submit whatever is in the composer.
-runner_terminal_enter() {
+# Stop the build by interrupting the terminal hosting it, then closing the tab.
+#
+# The interrupt FIRST and the close after: closing a tab mid-write leaves the
+# build's own files half-written, and the interrupt is what lets the line reach
+# the `printf` that records its exit status. Silent and always 0 -- every caller
+# reaches here on a path where the worktree is going away regardless.
+runner_build_stop() {
+  local handle
+  orca_cli_resolve || return 0
+  handle="$(orca_terminal_for_path "$1")" || return 0
+  [ -n "$handle" ] || return 0
   orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
-    terminal send --terminal "$1" --enter --json
-}
-
-# Interrupt the agent in a terminal. Both callers are about to take something
-# away from it, and an agent that is not told keeps working against a rig that
-# is going or already gone.
-runner_terminal_interrupt() {
+    terminal send --terminal "$handle" --interrupt --json >/dev/null 2>&1
   orca_cli "$ORCA_SEND_DEADLINE" /dev/null \
-    terminal send --terminal "$1" --interrupt --json >/dev/null 2>&1
+    terminal close --terminal "$handle" --json >/dev/null 2>&1
+  return 0
 }

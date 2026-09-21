@@ -218,6 +218,23 @@ fleet_issue_number() {
 FLEET_BUILDS="${AUTOFLEET_DIR:-$HOME/.autofleet}/builds"
 fleet_build_dir() { printf '%s/%s\n' "$FLEET_BUILDS" "$1"; }
 
+# ...and the same directory found from the WORKTREE instead of from the issue.
+#
+# A reverse index rather than a scan, and one that both drivers write through
+# `fleet_build_started`: `runner_build_state` is asked per owned worktree on
+# every poll, and a driver that had to walk every build directory to answer it
+# would be the per-worktree call the contract's one-listing rule exists to
+# prevent. `/` folds to `%` because `%` cannot appear in a path component git
+# would accept as a branch name, and unlike a hash the directory is readable
+# when something has gone wrong.
+fleet_build_key() { printf '%s' "$1" | tr '/' '%'; }
+fleet_build_dir_for_path() {
+  local issue
+  issue="$(cat "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")" 2>/dev/null)" || return 1
+  [ -n "$issue" ] || return 1
+  fleet_build_dir "$issue"
+}
+
 # The build command itself, so `runner_available` can look for the right thing.
 # A seam, like AUTOFLEET_REVIEW_CMD: point it at a wrapper, a different account,
 # or an `ssh` to the machine that holds the subscription.
@@ -244,16 +261,92 @@ fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # `set -o pipefail` and the `tee` are load-bearing together: stdout is the result
 # JSON AND the thing a watching maintainer reads, and without pipefail the exit
 # status would be tee's, so every build would look like it succeeded.
+#
+# THE LINE WRITES ITS OWN EXIT STATUS, last, and that is what makes one state
+# reader serve both drivers. A background child has a pid the dispatcher can
+# signal; a command hosted in somebody else's terminal does not, and a state
+# answer that depended on one would be a second implementation per driver of the
+# one question the dispatcher asks every poll.
 fleet_build_command_line() {
   local dir="$1"
-  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode acceptEdits --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s\n' \
+  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode acceptEdits --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s; printf "%%s\\n" "$?" >%s\n' \
     "$(fleet_build_cmd)" \
     "$(fleet_sq "$dir/prompt")" \
     "${AUTOFLEET_BUILD_MAX_TURNS}" \
     "${AUTOFLEET_BUILD_MAX_BUDGET_USD}" \
     "$(fleet_sq "$dir/system.md")" \
     "$(fleet_sq "$dir/build.log")" \
-    "$(fleet_sq "$dir/result.json")"
+    "$(fleet_sq "$dir/result.json")" \
+    "$(fleet_sq "$dir/rc")"
+}
+
+# Everything a driver has to do BEFORE it starts the line, in one place so the
+# two cannot drift: clear the previous run's verdict, and write the index that
+# makes this worktree findable from a path.
+#
+# The removals are not tidiness. `runner_build_state` reads `rc`, so an `rc`
+# left over from the previous run makes a build that has only just started
+# report as already finished -- and `build_exited` would then resume it, once a
+# poll, forever.
+fleet_build_started() {
+  local dir="$1" path="$2" issue="$3" n
+  mkdir -p "$dir/runs" "$FLEET_BUILDS/by-path" || return 1
+  # THE PREVIOUS RUN'S RESULT IS KEPT, not overwritten, and that is the whole of
+  # how `cost.sh` can report what an issue cost rather than what its last run
+  # cost. An issue gets up to AUTOFLEET_BUILD_MAX_RUNS of these, and "did the
+  # resume cost more than the build" is exactly the question the report exists
+  # to answer -- the same reason $FLEET_RAN appends a path instead of replacing
+  # it.
+  #
+  # MOVED rather than parsed here. A finished result is one JSON object and the
+  # reader knows its shape; summarising it at write time would put a second
+  # parser in a second file, which is the drift `cost.sh`'s header is about.
+  if [ -s "$dir/result.json" ]; then
+    n=0
+    while [ -e "$dir/runs/$n.json" ]; do n=$((n + 1)); done
+    mv "$dir/result.json" "$dir/runs/$n.json" 2>/dev/null || true
+  fi
+  rm -f "$dir/rc" "$dir/result.json" "$dir/pid"
+  printf '%s\n' "$path" >"$dir/worktree"
+  printf '%s\n' "$issue" >"$FLEET_BUILDS/by-path/$(fleet_build_key "$path")"
+}
+
+# ...and the index entry, dropped when the worktree goes. A path is reusable --
+# `fleet.sh retry` opens a worktree at a name a previous attempt used -- and a
+# stale entry would answer the NEXT worktree's state question with the previous
+# issue's build.
+fleet_build_forget_path() {
+  rm -f "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")"
+}
+
+# `running`, or `exited <rc>`. Non-zero when there is no build here to describe
+# -- which is a different answer from "not running", and conflating the two is
+# how a dispatcher waits out its whole budget and then reports that nothing
+# arrived.
+#
+# The pid is consulted FIRST when there is one, and only the headless driver
+# writes one. A build the dispatcher killed never reaches the line that writes
+# `rc`, so on files alone it would read as running forever; the pid is what
+# makes a killed build honest. A terminal-hosted build has no pid to give and
+# falls through to the file, which is correct for it: nothing outside that
+# terminal can kill the command without the terminal noticing.
+fleet_build_state_of() {
+  local dir pid rc
+  dir="$(fleet_build_dir_for_path "$1")" || return 1
+  [ -d "$dir" ] || return 1
+  rc="$(cat "$dir/rc" 2>/dev/null)"
+  if [ -n "$rc" ]; then printf 'exited %s\n' "$rc"; return 0; fi
+  pid="$(cat "$dir/pid" 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null && { printf 'running\n'; return 0; }
+    printf 'exited ?\n'; return 0
+  fi
+  # No rc and no pid: the line has been handed to a terminal and has not
+  # finished. There is nothing here that can be checked, and saying "running" is
+  # the honest reading -- `build_exited` acts only on an exit, so the cost of
+  # being wrong is a worktree that is noticed one poll later by the reaper.
+  [ -f "$dir/worktree" ] || return 1
+  printf 'running\n'
 }
 
 # The runner driver: everything about creating a worktree, opening a terminal
