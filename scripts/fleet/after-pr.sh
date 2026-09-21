@@ -85,7 +85,7 @@ bought() {
   printf '%s\n' "$n"
 }
 review_once() {
-  local n; n="$(bought)"
+  local n rc; n="$(bought)"
   if [ "$n" -ge 2 ]; then
     echo "after-pr.sh: PR #$pr has had its two reviews; not buying a third." >&2
     return 9
@@ -95,7 +95,22 @@ review_once() {
   # every poll at full budget, which is the failure this ceiling exists for.
   printf '%s\n' "$((n + 1))" >"$REVIEWS" \
     || echo "after-pr.sh: could not write $REVIEWS; the review cap is not counting" >&2
-  ./scripts/fleet/review.sh "$pr"
+  ./scripts/fleet/review.sh "$pr"; rc=$?
+  # ...AND REFUNDED WHEN NO MODEL RAN. `review.sh` has four exits that spend
+  # nothing: 2 (it could not tell what to review), 3 (the fleet is stopped), 6
+  # (its command is not on PATH) and 8 (a verdict for this head is already
+  # posted). Counted, they exhaust the ceiling of two without a single model
+  # call -- and 8 is the ORDINARY one: a dispatcher that lost its `<pr>.done`
+  # record, a second machine, or a pull request a person reviewed by hand all
+  # reach it, twice, and then the next real review is refused with "it has had
+  # its two". What is NOT refunded is 5 and 7, where a reviewer ran and produced
+  # nothing or was killed at the deadline: those cost what a review costs, and
+  # the whole point of the ceiling is that they cannot be retried forever.
+  case "$rc" in
+    2|3|6|8) printf '%s\n' "$n" >"$REVIEWS" \
+               || echo "after-pr.sh: could not refund $REVIEWS" >&2 ;;
+  esac
+  return "$rc"
 }
 
 park() {

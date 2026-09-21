@@ -32,6 +32,11 @@
 #   ceiling      after-pr.sh refuses a third review on a pull request, whatever
 #                it is asked.
 #   parks        a second request-changes parks the PR with a comment and stops.
+#   refund       ...and a review that never started a model does NOT spend one
+#                of the two. Exit 8 is the ordinary case -- a dispatcher that
+#                lost its `.done` record, a second machine, a PR a person
+#                reviewed by hand -- and counted, two of those exhaust the
+#                ceiling before a single model call.
 #
 # `gh` and the reviewer command are stubbed on PATH; the fleet state dir is a
 # temp dir. Nothing here touches a pull request or the machine's fleet.
@@ -307,6 +312,28 @@ STUB
     || fail "the review count moved past the ceiling"
   ok "a third review is never bought, whatever it is asked"
   ;;
+# --------------------------------------------------------------------- refund
+  refund)
+  make_fixture approve "$APPROVE"
+  # `review.sh` replaced by one that exits 8 -- "a verdict for this head is
+  # already posted" -- which is the exit a polling dispatcher hits most often.
+  printf '#!/usr/bin/env bash\nexit 8\n' >"$WORK/repo/scripts/fleet/review.sh"
+  chmod +x "$WORK/repo/scripts/fleet/review.sh"
+  for _ in 1 2 3; do
+    (cd "$WORK/repo" && ./scripts/fleet/after-pr.sh 42 >/dev/null 2>&1)
+  done
+  spent="$(cat "$AUTOFLEET_DIR/reviewing/42.reviews" 2>/dev/null || echo 0)"
+  [ "$spent" = 0 ] \
+    || fail "three polls that started no model spent $spent of the two reviews"
+  # ...and a reviewer that RAN and produced nothing is not refunded: that costs
+  # what a review costs, and retrying it forever is what the ceiling is for.
+  printf '#!/usr/bin/env bash\nexit 5\n' >"$WORK/repo/scripts/fleet/review.sh"
+  chmod +x "$WORK/repo/scripts/fleet/review.sh"
+  (cd "$WORK/repo" && ./scripts/fleet/after-pr.sh 42 >/dev/null 2>&1)
+  [ "$(cat "$AUTOFLEET_DIR/reviewing/42.reviews")" = 1 ] \
+    || fail "a reviewer that ran and produced no verdict was refunded; it cost what a review costs"
+  ok "a review that started no model is refunded, and one that ran is not"
+  ;;
 # ---------------------------------------------------------------------- parks
   parks)
   make_fixture "" "$APPROVE"
@@ -324,6 +351,6 @@ STUB
   ok "one review, one fix, one re-review, then a person"
   ;;
   *)
-  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|parks}" >&2
+  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|parks}" >&2
   exit 2 ;;
 esac
