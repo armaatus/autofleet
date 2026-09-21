@@ -1932,12 +1932,20 @@ DRIVER
     ;;
 
   resume_brief)
-    # A RESUME IS THE AFTER-PR BRIEF. The issue: "Resume is a second `claude -p`
-    # in the same worktree whose prompt says which branch, which PR, and what is
-    # open." Nothing asserted that the second run is handed anything different
-    # from the first, so a resume that re-ran the opening brief -- starting the
-    # build again on a branch that already has a pull request -- would have been
-    # green. Found by `/mattpocock-skills:code-review`.
+    # A RESUME IS THE SAME BRIEF, AND IT COUNTS AS A RUN.
+    #
+    # It was the AFTER-PR brief, because the loop had a second half: a resumed
+    # run picked up at "wait for the review, answer it, resolve the threads".
+    # armaatus/autofleet#152 deleted that half -- the agent's job ends at an
+    # open pull request and everything after it is the dispatcher's -- so a
+    # resume differs from a first run in nothing at all. What it starts from is
+    # the branch and the pull request, which is state no brief carries.
+    #
+    # THE ASSERTION MOVED WITH THE SHAPE rather than being deleted with it. What
+    # it has to catch now is a `start_build` that stopped fetching the brief on
+    # the second call: a resumed build handed an empty system prompt looks like
+    # a build and produces nothing. So the two are compared for being the SAME
+    # rather than for differing, and the run count is what bounds them.
     make_fixture ok
     make_worktree
     add_origin
@@ -1957,17 +1965,22 @@ GHSTUB
       || grep -q "Your brief is in the system prompt" "$AUTOFLEET_DIR/builds/42/prompt" \
       || fail "the opening run was handed no brief at all: $(cat "$AUTOFLEET_DIR/builds/42/prompt")"
     opening="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
-    in_fleet start_build 42 "$WORK/wt" after-pr >/dev/null 2>&1 \
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
       || fail "the resume would not start"
     resumed="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    [ -s "$AUTOFLEET_DIR/builds/42/system.md" ] \
+      || fail "the resumed run was handed an empty system prompt"
     [ "$opening" = "$resumed" ] \
-      && fail "a resume was handed the same brief as the opening run, so it starts the build again on a branch that already has a pull request"
-    grep -q "after-pr\|--after-pr\|pull request" <<<"$resumed" \
-      || fail "the resumed run's brief says nothing about the pull request it is answering: $resumed"
+      || fail "the resume was handed a different brief from the opening run; there is only one"
+    # ...and the resume may not send the agent at a brief that refuses it.
+    # `--after-pr` is an ERROR now, so a resumed run told to fetch it would get
+    # a refusal where its instructions should be.
+    grep -qF -- "--after-pr" <<<"$resumed" \
+      && fail "the resumed run's brief still points at --after-pr, which now refuses"
     # ...and the run count moved, which is what AUTOFLEET_BUILD_MAX_RUNS reads.
     [ "$(cat "$AUTOFLEET_DIR/builds/42/run-count")" = 2 ] \
       || fail "the resume did not count as a run, so the bound on resumes never fires"
-    echo "ok: a resume is handed the after-PR brief and counts as a run"
+    echo "ok: a resume is handed the same brief and counts as a run"
     ;;
 
   runner_stub)
@@ -2093,24 +2106,14 @@ GHSTUB
         && fail "$legacy outlived the worktree that wrote it, and nothing will ever clear it"
     done
 
-    # board.sh is the line issue-command.sh hands EVERY agent, so it is where the
-    # seam is asserted by the brief rather than by the dispatcher.
-    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
-      || fail "board.sh could not set this worktree's card through the driver: $out"
-    grep -q "worktree set $WORK/repo workspace-status in-review comment #42: PR #7" "$STUB_CALLS" \
-      || fail "board.sh did not send the status and the comment in ONE call: $(cat "$STUB_CALLS")"
-
-    # ...and the REFUSAL, which is the whole of what makes board.sh's written-down
-    # $REPO_ROOT assumption acceptable rather than quiet: if the path the agent's
-    # shell has does not match the one the runtime recorded, every update from
-    # inside that worktree fails, and the answer to that is a card named as stale
-    # rather than a board update reported and not made.
-    : >"$STUB_DIR/set-fails"
-    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
-      && fail "a board update the runner REFUSED was reported as done, so the card is stale and nobody knows: $out"
-    rm -f "$STUB_DIR/set-fails"
-    grep -q "the card was NOT updated" <<<"$out" \
-      || fail "board.sh did not name the card as stale, which is the only thing bounding the cost of its path assumption: $out"
+    # `runner_worktree_set` IS STILL IN THE CONTRACT, and two assertions used to
+    # drive it here through `board.sh` -- the card update the brief handed every
+    # agent, and the REFUSAL that made its written-down $REPO_ROOT assumption
+    # acceptable rather than quiet. `board.sh` went with the post-PR protocol it
+    # reported into (armaatus/autofleet#152); the dispatcher's own `card` calls
+    # are what exercise the seam now, and `card_says` and `card_quiet` assert
+    # them. Nothing is re-asserted here, and this note is what stops a reader
+    # concluding the coverage was merely dropped.
 
     # ...and the contract's STREAM, against a driver that is neither shipped
     # one. `launch` captures stdout only, so a driver obeying docs/RUNNERS.md
