@@ -98,10 +98,9 @@ qgrep() { grep "$@" >/dev/null; }
 # only the first left the second deletable with the table still green.
 CEILINGS="$(cat <<'CEILINGS'
 claude-md|200|armaatus/autofleet#56|lines of CLAUDE.md, which every session reads in full|evals/lint.sh
-brief|400|armaatus/autofleet#49|words of the opening brief's stage 1, the issue spec and any handoff note excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
-reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, every "count" row of the reading table below, and the two texts autofleet does not write but the agent still reads -- the issue spec at the `spec` allowance and a handoff note at the `handoff` ceiling|evals/lint.sh; tests/test_brief.sh reading
+brief|400|armaatus/autofleet#49|words of the opening brief's stage 1, the issue spec excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
+reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, every "count" row of the reading table below, and the one text autofleet does not write but the agent still reads -- the issue spec at the `spec` allowance|evals/lint.sh; tests/test_brief.sh reading
 spec|500|armaatus/autofleet#98|words of an issue body the reading ceiling budgets for. NOT a limit on a tracker a maintainer writes -- it is the allowance the payload leaves for one, because the spec is injected into stage 1 and read before the first edit like everything else|evals/lint.sh
-handoff|350|armaatus/autofleet#55|words of the handoff note stage 1 prints ahead of the brief: the framing, plus a note at the AUTOFLEET_HANDOFF_MAX_WORDS default autofleet ships|tests/test_handoff.sh ceiling
 testrun|5|armaatus/autofleet#52|lines a fully green ./tests/run.sh prints|tests/test_runner_bound.sh quiet
 round|45|armaatus/autofleet#53|lines of one WHOLE clean round of ./scripts/fleet/await-review.sh, the review it hands back included, not the trailing prose alone|tests/test_await_review.sh quiet
 CEILINGS
@@ -1316,78 +1315,19 @@ else
   fail "hard rule 4's own paragraph carries the command again (above)"
 fi
 
-# 4f. THE SLUG RULE THE COST REPORT IMPLEMENTS IS THE ONE ITS PROSE PUBLISHES.
+# 4f. DELETED WITH THE RULE IT GUARDED.
 #
-#    Same shape as 4d, and added because it already happened once inside the
-#    change that introduced it: `scripts/fleet/cost.sh` widened the rule to every
-#    non-alphanumeric character, `docs/CONFIGURATION.md` was reworded, and
-#    `scripts/fleet/config.sh` -- the file a host project actually has open at
-#    the moment it sets AUTOFLEET_TRANSCRIPT_DIR -- kept saying "`/` and `.`".
-#    config.sh is in install.sh PAYLOAD, so a stale rule there is a stale
-#    instruction in every host repo.
+#    It asserted that the transcript slug `cost.sh` derives -- worktree path,
+#    every non-alphanumeric character to `-`, capped at SLUG_MAX -- was the rule
+#    `config.sh` and `docs/CONFIGURATION.md` published to a host project, because
+#    a wrong slug produced a confident table of zeros with a wrong explanation
+#    under it. There is no slug: `--output-format json` makes the build print
+#    what it spent and `cost.sh` reads that file (armaatus/autofleet#151).
 #
-#    Worth a check rather than a comment because of HOW it fails: a wrong slug
-#    rule produces a confident table of zeros over the words "reaped, or run
-#    before the fleet recorded its worktree path". Nothing is red, nothing is
-#    empty, and the explanation on screen is wrong. Hard rule 3 -- a rule with
-#    no assertion is not shipped. Found by the independent review.
-if python3 - <<'PYEOF'
-import re, sys
-
-code = open("scripts/fleet/cost.sh").read()
-# The rule as the code states it. Read out rather than hardcoded, so widening it
-# again to something this check has never heard of fails here rather than
-# passing quietly.
-rule = re.search(r're\.sub\(r"\[\^([^"]*)\]", "-", path\)', code)
-if not rule:
-    sys.exit("cost.sh no longer derives the transcript slug with a re.sub over a "
-             "character class; this check now asserts nothing")
-if rule.group(1) != "A-Za-z0-9":
-    sys.exit("cost.sh now keeps [%s] in a slug, which no page here describes; "
-             "reword config.sh and docs/CONFIGURATION.md, then widen this check"
-             % rule.group(1))
-
-cap = re.search(r"^SLUG_MAX = (\d+)$", code, re.M)
-if not cap:
-    sys.exit("cost.sh no longer names a SLUG_MAX; this check now asserts nothing")
-
-# The two pages that ship the rule to a host project. `config.sh` is the one
-# somebody has open while setting the knob; the doc is the one they are sent to.
-pages = ("scripts/fleet/config.sh", "docs/CONFIGURATION.md")
-bad = []
-for path in pages:
-    # LOWER-CASED. The check read the raw text, and `config.sh` states the rule
-    # in capitals -- so it was satisfied only by an incidental second mention
-    # further down the same comment. Reword the sentence that actually publishes
-    # the rule and this passed; delete the aside and it failed with the rule
-    # still correct. Found by the independent review.
-    prose = open(path).read().lower()
-    if "non-alphanumeric" not in prose:
-        bad.append("%s does not say the slug replaces every non-alphanumeric "
-                   "character" % path)
-    # The rule it USED to state, which is the one that went stale. Matched on the
-    # phrasing both pages carried, not on the characters alone -- "/" and "." are
-    # in every one of these files for other reasons.
-    for stale in ("every `/` and `.` turned into", "`/`-and-`.`-to-`-`"):
-        if stale in prose:
-            bad.append("%s still describes the old `/`-and-`.` slug rule" % path)
-# BOTH pages, not just config.sh. The doc is the one a host project is SENT to,
-# and it published the rule without the cap -- so of the two pages this check
-# exists to keep honest, the less complete one was the less checked. Found by the
-# independent review.
-for path in pages:
-    if cap.group(1) not in open(path).read():
-        bad.append("%s does not name the %s-character slug cap cost.sh applies"
-                   % (path, cap.group(1)))
-if bad:
-    sys.exit("the published slug rule has drifted from the one that runs:\n  "
-             + "\n  ".join(bad))
-PYEOF
-then
-  ok "the cost report's slug rule is the one config.sh and CONFIGURATION.md publish"
-else
-  fail "the slug rule in the docs is not the slug rule in cost.sh (above); config.sh ships to every host repo, and a wrong rule reports zeros rather than an error"
-fi
+#    Named rather than silently removed, because hard rule 3 is about the
+#    opposite move -- a guard that stops guarding while the rule stands. This
+#    one outlived its rule, and a check with nothing to assert is a green line
+#    that means nothing.
 
 # 4g. THE DRIVER THIS REPO IS CONFIGURED TO USE IS ONE THAT EXISTS.
 #
@@ -1869,8 +1809,8 @@ echo "== the flow's own scripts"
 # The brief names these by path. A rename that misses the brief turns into an
 # agent halfway through a task running a command that does not exist.
 for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
-              resolve-thread.sh answer-review.sh issue-command.sh agent-autostart.sh \
-              review.sh self-review.sh handoff.sh; do
+              resolve-thread.sh answer-review.sh issue-command.sh \
+              review.sh self-review.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -2007,7 +1947,7 @@ else
   # `verifier` left this list with the subagent: one review and two validations
   # replaced it, and the brief names those two by their own scripts.
   for named in self-review.sh "/code-review" "mattpocock-skills:code-review" \
-                --after-pr researcher "gh pr diff --stat" handoff.sh; do
+                --after-pr researcher "gh pr diff --stat" "Commit as you go"; do
     grep -qF -- "$named" <<<"$stage1" \
       || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
   done
@@ -2032,18 +1972,16 @@ else
 
   # Stage 2: every script of the loop, the closing line merge-gate demands, and
   # the three paths no agent can merge itself.
-  # `handoff.sh` is in BOTH stages, and that is the one instruction here which
-  # deliberately is. Stage 1 asks for the note when the work is put down --
-  # armaatus/autofleet#55's other half, the attempt the time-box interrupts --
-  # and stage 2 asks for it at the push and after every round. An instruction
-  # that arrives only after the PR exists cannot serve a case that happens
-  # before one does; the independent review of #55 is where that was measured.
+  # `handoff.sh` WAS IN BOTH STAGES and is in neither. The note existed so an
+  # interrupted session left something behind; a `claude -p` run is not
+  # interrupted and leaves its branch, so stage 1 says "commit as you go"
+  # instead -- which is asserted above, in stage 1's own list.
   # `resolve-thread.sh` is NOT in this list any more, and its absence is the
   # assertion. The validator resolves what it is satisfied by; an author that
   # closed its own threads would be holding the per-finding ledger it is judged
   # against. The negative is checked below, where the rest of the negatives are.
   for named in record-review.sh await-review.sh review-status.sh \
-                answer-review.sh handoff.sh "--auto --squash" "Closes #" \
+                answer-review.sh "--auto --squash" "Closes #" \
                 "THERE IS ONLY ONE" "VALIDATOR" "At most TWO validations" \
                 ".github/workflows/" ".github/scripts/" ".claude/"; do
     grep -qF -- "$named" <<<"$stage2" \
@@ -2127,19 +2065,22 @@ echo "== the rule of one home"
 if [ -n "$stage1" ] && [ -n "$stage2" ]; then
   reading_ceiling="$(ceiling reading)" || exit 2
   # WHAT AUTOFLEET DOES NOT WRITE, AND THE AGENT STILL READS. Stage 1 injects
-  # the issue body and, on a restart, a handoff note; both are in the context
-  # before the first edit and neither was in this sum. The number said 3,402
-  # while a real run on a 468-word issue read 3,870, which is a ceiling
-  # measuring the part of the load that happens to be ours. Charged as
-  # allowances rather than as measurements because their text is not in the
-  # tree: what the payload gets is whatever is left.
+  # the issue body, which is in the context before the first edit and was not in
+  # this sum. The number said 3,402 while a real run on a 468-word issue read
+  # 3,870, which is a ceiling measuring the part of the load that happens to be
+  # ours. Charged as an allowance rather than as a measurement because its text
+  # is not in the tree: what the payload gets is whatever is left.
+  #
+  # A SECOND ALLOWANCE LIVED HERE, for the handoff note stage 1 used to print
+  # ahead of the brief. It went with the note (armaatus/autofleet#151): a second
+  # `claude -p` reads the branch and the pull request, not a note, so there is
+  # no longer a text of ours injected before the first edit.
   spec_allowance="$(ceiling spec)" || exit 2
-  handoff_allowance="$(ceiling handoff)" || exit 2
   reading_what="$(ceiling_what reading)" || exit 2
   reading_issue="$(ceiling_issue reading)" || exit 2
   if stage1="$stage1" stage2="$stage2" rendered="$rendered" \
      reading_ceiling="$reading_ceiling" reading_what="$reading_what" \
-     spec_allowance="$spec_allowance" handoff_allowance="$handoff_allowance" \
+     spec_allowance="$spec_allowance" \
      reading_issue="$reading_issue" python3 - <<'PYEOF'; then
 import os, re, sys
 
@@ -2384,11 +2325,10 @@ if not IN_AUTOFLEET:
     required.discard("CLAUDE.md")
 parts = [(p, len(read(p).split())) for p in sorted(required)]
 parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
-# The two the tree does not hold. An allowance, not a measurement: a host
-# project's issues are not autofleet's to bound, and a handoff note is bounded
-# where it is written. What this does is stop the payload spending their room.
+# The one the tree does not hold. An allowance, not a measurement: a host
+# project's issues are not autofleet's to bound. What this does is stop the
+# payload spending its room.
 parts.append(("the issue spec (allowance)", int(os.environ["spec_allowance"])))
-parts.append(("a handoff note (allowance)", int(os.environ["handoff_allowance"])))
 total = sum(n for _, n in parts)
 if total > CEILING:
     # The four things armaatus/autofleet#56 asks every ceiling failure to name:
