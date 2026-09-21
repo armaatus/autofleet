@@ -60,6 +60,19 @@ printf '%s\n' "$*" >>"$CLAUDE_CALLS"
 exit 0
 STUB
   chmod +x "$WORK/bin/claude"
+  # `gh` STUBBED for the same reason, and with a sharper one: install.sh sets
+  # BRANCH PROTECTION through `gh api -X PUT`, and the host fixture is a real
+  # git repo. A stub that answers nothing to `repo view` keeps the installer on
+  # the "could not say which repository this is" path; the real `gh` in a
+  # checkout that happened to have a remote would reach for somebody's
+  # repository settings from inside a test.
+  cat >"$WORK/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+exit 1
+GHSTUB
+  chmod +x "$WORK/bin/gh"
+  GH_CALLS="$WORK/gh-calls"; : >"$GH_CALLS"; export GH_CALLS
   CLAUDE_CALLS="$WORK/claude-calls"; : >"$CLAUDE_CALLS"; export CLAUDE_CALLS
   PATH="$WORK/bin:$PATH"; export PATH
 }
@@ -68,13 +81,16 @@ install_it() { (cd "$WORK/host" && "$REPO_ROOT/install.sh" "$@" . 2>&1); }
 
 has_line() { grep -qxF -- "$1" "$WORK/host/.gitignore"; }
 
-# ALL FOUR, and `.env.tmp*` most of all: it has the sharpest reason --
-# `env.sh` writes the temporary file and renames it, so a `git add -A`
-# racing a worktree's setup commits the half-written secret -- and it was
-# the one line no phase covered, in the suite added because this is the one
-# thing in the payload that edits a file the host owns. Found by the
-# independent review.
-WANT=(".autofleet/run/" ".env" ".env.tmp*" "/findings.md")
+# BOTH, and `.env.tmp*` most of all: it has the sharpest reason -- `env.sh`
+# writes the temporary file and renames it, so a `git add -A` racing a
+# worktree's setup commits the half-written secret -- and it was the one line no
+# phase covered, in the suite added because this is the one thing in the payload
+# that edits a file the host owns.
+#
+# It was four. `.autofleet/run/` held the push markers and `/findings.md` was
+# what the self-review passes wrote; armaatus/autofleet#152 removed both, and a
+# line for a file nothing writes is a line a host has to wonder about.
+WANT=(".env" ".env.tmp*")
 
 case "${1:-}" in
 

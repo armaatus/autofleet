@@ -260,8 +260,14 @@ set_branch_protection() {
     echo "   branch protection on '$branch' (skipped: --dry-run)"
     return 0
   fi
+  # `|| nwo=""`, because this file runs under `set -e` and a repository with no
+  # remote -- or a machine with no `gh` -- makes that substitution non-zero.
+  # Without it the installer stops here, silently, having written the payload and
+  # nothing else, and the summary never prints. Found by the suite's host
+  # fixture, which is a git repo with no remote for exactly this class of reason.
   local nwo
-  nwo="$(GH_PAGER=cat gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
+  nwo="$(GH_PAGER=cat gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" \
+    || nwo=""
   if [ -z "$nwo" ]; then
     echo "   branch protection: gh could not say which repository this is; not set"
     return 0
