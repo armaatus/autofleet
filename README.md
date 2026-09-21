@@ -71,7 +71,7 @@ Then tell it about your project — the four files the installer seeds:
 | `.autofleet/config` | Ports, compose file, test command, labels, concurrency. |
 | `.autofleet/setup.sh` | What a fresh worktree needs before work can start. |
 | `.autofleet/guard.json` | Paths and secrets the guard hook must refuse to write. |
-| `orca.yaml` | The runner's own hooks. Already wired; edit the tabs. |
+| `orca.yaml` | Orca's own hooks, for worktrees a person opens by hand. Optional. |
 
 Nothing in `scripts/fleet/` knows about your project. See
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
@@ -80,11 +80,12 @@ Nothing in `scripts/fleet/` knows about your project. See
 
 - **GitHub**, with `gh` authenticated, and `merge-gate` set as a required check.
 - **Claude Code**, for the agents themselves and for `claude-review.yml`.
-- **[Orca](https://orca.computer)**, today, for worktrees and terminals. That
-  dependency is named rather than hidden: everything Orca-specific is in
-  `scripts/fleet/runner/`, behind a driver seam. A tmux/plain-`git worktree`
-  driver is the backlog's first real feature — see
-  [docs/RUNNERS.md](docs/RUNNERS.md).
+- **Nothing else.** A build is one `claude -p` in a plain `git worktree`, so
+  the fleet runs on any machine with `git`, `gh` and `claude`.
+  **[Orca](https://orca.computer)** is optional and runs the identical build in
+  a terminal you can watch; that dependency is named rather than hidden, and
+  everything Orca-specific is in `scripts/fleet/runner/` behind a driver seam —
+  see [docs/RUNNERS.md](docs/RUNNERS.md).
 - **macOS or Linux**, bash and Python 3.10+. No build, no dependencies.
 
 ## Where it came from
