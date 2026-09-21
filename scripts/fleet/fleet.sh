@@ -1824,6 +1824,17 @@ PREAMBLE
 # markers, because it had to put a live session back the way it found it.
 start_build() {
   local num="$1" path="$2" after="${3:-}" dir runs
+  # THE BUILD COMMAND IS CHECKED HERE, and this is the only place that knows a
+  # build is about to happen. The driver's `runner_available` asked for it once
+  # and stopped every fleet command on a machine with no agent CLI -- the
+  # reviewer, the validator, `cost`, none of which builds anything. Asked here
+  # it costs one `command -v` per launch and fails the launch out loud instead
+  # of spawning a run that dies instantly and is resumed up to
+  # AUTOFLEET_BUILD_MAX_RUNS. Found by the suite in CI.
+  local prog; prog="$(fleet_build_program)"
+  command -v "$prog" >/dev/null 2>&1 || {
+    say "  the build command is '$prog', which is not on PATH (AUTOFLEET_BUILD_CMD)"
+    return 1; }
   dir="$(fleet_build_dir "$num")"
   mkdir -p "$dir" || { say "  could not make the build directory $dir"; return 1; }
 

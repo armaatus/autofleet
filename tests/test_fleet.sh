@@ -1845,6 +1845,42 @@ DRIVER
     echo "ok: ...and the guard still refuses anything outward while it is stopped"
     ;;
 
+  no_build_command)
+    # A MACHINE WITH NO AGENT CLI STILL RUNS EVERY FLEET COMMAND THAT DOES NOT
+    # BUILD. `runner_available` asked for the build command for one round, and
+    # `fleet.sh` probes the driver at SOURCE time and dies on a no -- so on a CI
+    # runner with no `claude` installed the reviewer, the validator, `cost` and
+    # the whole review pipeline stopped, none of which builds anything. Eleven
+    # `review_mode` phases went red in CI and green here, for the one reason
+    # that makes this class of bug ship: this machine has `claude`.
+    make_fixture ok
+    # PATH without the build command, and with the tools the driver really
+    # needs. `fleet_build_program` is what the check reads, so pointing
+    # AUTOFLEET_BUILD_CMD at something absent is the same arrangement without
+    # having to rebuild PATH.
+    out="$( cd "$WORK/repo" && AUTOFLEET_BUILD_CMD=definitely-not-installed \
+              ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "a fleet command that builds nothing died because the build command is absent (rc $rc): $out"
+    grep -q "not on PATH" <<<"$out" \
+      && fail "the driver refused itself over a command it does not use: $out"
+    echo "ok: the driver is usable on a machine with no agent CLI installed"
+
+    # ...and a LAUNCH says so, out loud, on the pass that tried it -- rather
+    # than spawning a run that dies instantly and is resumed up to
+    # AUTOFLEET_BUILD_MAX_RUNS.
+    make_worktree
+    out="$( AUTOFLEET_BUILD_CMD=definitely-not-installed \
+            in_fleet start_build 42 "$WORK/wt" 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a build started with no build command on PATH: $out"
+    grep -q "definitely-not-installed" <<<"$out" \
+      || fail "it did not name the command it could not find: $out"
+    grep -q "AUTOFLEET_BUILD_CMD" <<<"$out" \
+      || fail "it did not name the knob that sets it, which is the only way to fix it: $out"
+    echo "ok: ...and a launch that cannot build says which command is missing"
+    ;;
+
   build_command)
     # THE SPEC'S CENTRAL ARTEFACT, and nothing asserted it. The issue names the
     # flags exactly and its design notes say `--bare` must not be passed --

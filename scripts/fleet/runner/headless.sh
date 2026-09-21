@@ -73,20 +73,21 @@ headless_link_file() {
 
 # Is this driver usable at all, and SAY WHY when it is not.
 #
-# All three are named in one line rather than stopping at the first, because the
-# person reading it is setting a machine up and "install gh" followed by
-# "install claude" is two round trips for one answer. The contract requires the
-# reason on stderr; `runner_available` returning 1 in silence is the failure
-# mode docs/RUNNERS.md's `orca_unavailable_says` exists to prevent.
+# GIT AND GH, AND NOT THE BUILD COMMAND. This asked for all three for one round
+# and the CI suite went red across eleven `review_mode` phases with
+# `headless: not on PATH: claude`: `fleet.sh` probes the driver at SOURCE time
+# and dies on a no, so on a runner with no agent CLI installed EVERY fleet
+# command stopped -- the reviewer, the validator, `cost`, the whole review
+# pipeline, none of which builds anything. It passed locally for the one reason
+# that makes this class of bug ship: the machine it was written on has `claude`.
+#
+# The question this function answers is "can this driver create and remove
+# worktrees". Whether a build can RUN is `start_build`'s question, asked once
+# per launch and answered loudly there -- which is also the only place that
+# knows a build is about to happen. Found by the suite in CI.
 runner_available() {
   local missing=""
-  # The PROGRAM, not the whole command line: AUTOFLEET_BUILD_CMD is advertised
-  # as a wrapper seam and docs/CONFIGURATION.md offers `ssh box claude` as a
-  # value, so `command -v` on the whole thing always said no and this driver
-  # reported itself unusable on every host that used the seam. Found by
-  # `/mattpocock-skills:code-review`.
-  local build; build="$(fleet_build_program)"
-  for tool in git gh "$build"; do
+  for tool in git gh; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing:+$missing, }$tool"
   done
   [ -z "$missing" ] && return 0
