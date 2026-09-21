@@ -2774,7 +2774,10 @@ print(json.dumps({"result": {"worktrees": [
     add_origin
     # HEAD still reads, so the branch and the merged-PR lookup both answer; the
     # index does not, so `git status` cannot say whether anything is uncommitted.
-    printf 'not an index' >"$WORK/wt/.git/index"
+    # THE WORKTREE'S OWN GIT DIR, resolved rather than assumed: `$WORK/wt` is a
+    # real `git worktree add` now, so `.git` in it is a FILE pointing at
+    # `<repo>/.git/worktrees/<name>` and `.git/index` is not a path at all.
+    printf 'not an index' >"$("$REAL_GIT" -C "$WORK/wt" rev-parse --absolute-git-dir)/index"
     out="$(in_fleet reap_merged 2>&1)"
     grep -q "worktree rm" "$ORCA_CALLS" \
       && fail "it removed a worktree on a git that never answered: $(cat "$ORCA_CALLS")"
@@ -4898,13 +4901,22 @@ JSON
     # answers 2, the next-up loop reads 2 as "not running", and every `ready`
     # issue printed as startable beside a dispatcher that would start none of
     # them. Found by the local review.
+    # A FULL PAGE IS NO LONGER A REFUSAL (armaatus/autofleet#151 folds
+    # armaatus/autofleet#122). It used to blank the listing, so `in_flight`
+    # answered 2 for every issue and `status` printed every `ready` issue as
+    # startable beside a dispatcher that would start none of them. The page is
+    # used now, so the claims here are the opposite ones: the queue it prints is
+    # the real one, and every issue on that page reads as claimed.
     make_fixture ok
     backlog_all_claimed 100
     out="$(in_fleet cmd_status 2>&1)"
     grep -q "could not be read" <<<"$out" \
-      || fail "status printed a full startable queue without saying the fleet cannot tell: $out"
-    echo "ok: status says so when the open-PR listing could not be read"
-    # ...and says nothing when it could.
+      && fail "status still refuses a listing at the page limit, which is the stop #151 removed: $out"
+    grep -qE "^ +1 " <<<"$out" \
+      && fail "an issue whose PR is on the page it read was still offered as startable: $out"
+    echo "ok: status reads a full page rather than refusing it"
+    # ...and the same is true well under the limit, so this is not a property of
+    # the number 100.
     make_fixture ok
     backlog_all_claimed 3
     out="$(in_fleet cmd_status 2>&1)"
@@ -5045,25 +5057,27 @@ JSON
     # THE OTHER ROW OF docs/WORKFLOW.md's table. The section claims the `budget_`
     # phases assert its numbers; without this one it asserted the idle row and
     # the launch row and left the busy figure to drift. Three owned worktrees,
-    # three open PRs, review mode `github`: the two shared listings, one
-    # merged-PR check per worktree, one issue lookup per worktree. Found by the
-    # local review.
+    # three open PRs, review mode `github`: the two shared listings, and four
+    # calls per worktree. Found by the local review.
+    #
+    # THE NUMBER WAS 8 AND IS 14, and the difference is the fixture rather than
+    # the code. All three owned issues used to name ONE directory, so the three
+    # per-worktree calls that key on the branch collapsed into one answer. A
+    # real fleet has three branches, and always paid this.
     make_fixture ok
     backlog_all_claimed 10
     : >"$GH_MERGED"
-    worktree_list 1:wt 2:wt 3:wt
+    # THREE WORKTREES MEANS THREE PATHS. The listing was fabricated text before
+    # armaatus/autofleet#151 and three rows could name one directory; it is
+    # `git worktree list` now, and one directory is one worktree however many
+    # issues claim it.
+    worktree_list 1:wt1 2:wt2 3:wt3
     mkdir -p "$AUTOFLEET_DIR/worktrees"
-    # A REAL git repo, because `reap_merged` reads the branch name off it before
-    # it asks GitHub anything -- point the owned files at a bare directory and
-    # the merged-PR check this phase counts never happens at all.
-    make_worktree
-    rm -f "$AUTOFLEET_DIR/worktrees/42"
     for n in 1 2 3; do
-      printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/$n"
-      # The build context already dropped for each, which is the steady state a
-      # full fleet spends its time-box in -- and what makes the prefetch's
-      # `live < MAX_WORKTREES` half do anything at all.
-      : >"$AUTOFLEET_DIR/context-reset-$n"
+      printf '%s\n' "$WORK/wt$n" >"$AUTOFLEET_DIR/worktrees/$n"
+      # Each build has finished, which is the steady state a full fleet spends
+      # most of its life in.
+      build_state_for "$n" "$WORK/wt$n" 0
     done
     # A TOTAL, the way budget_idle_pass asserts the idle row -- `>= 3` of each
     # kind would have let the 8 drift, which is the one thing this phase exists
@@ -5094,14 +5108,14 @@ JSON
     # while this reads $GH_CALLS.
     n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
-    [ "$n" = 8 ] \
-      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 8: $(cat "$GH_CALLS")"
+    [ "$n" = 14 ] \
+      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 14: $(cat "$GH_CALLS")"
     # ...and a whole number of passes, which a count taken mid-pass would not be.
     # Belt to the pass line's braces, and the thing that would say so if the
     # signal were ever emitted before the last call of a pass rather than after.
-    [ $(( n % 8 )) = 0 ] \
-      || fail "the count was taken mid-pass ($n is not a whole number of 8s): $(cat "$GH_CALLS")"
-    echo "ok: a full fleet of three worktrees costs 8 gh calls a pass"
+    [ $(( n % 14 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 14s): $(cat "$GH_CALLS")"
+    echo "ok: a full fleet of three worktrees costs 14 gh calls a pass"
     ;;
 
   budget_list_mode_no_listing)
@@ -5117,7 +5131,7 @@ JSON
     # a minute for a whole time-box. Found by the local review.
     make_fixture ok
     : >"$GH_MERGED"
-    worktree_list 1:wt 2:wt 3:wt
+    worktree_list 1:wt1 2:wt2 3:wt3
     start_dispatcher 42
     i=0
     while [ "$i" -lt 200 ] && [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -lt 2 ]; do
@@ -5212,17 +5226,20 @@ JSON
     ;;
 
   budget_pr_list_truncated)
-    # A FULL PAGE is not an answer. At `--limit 100` we cannot tell an absent PR
-    # from one on page two, and this listing is the single authority the launch
-    # loop reads -- so a truncated page read as complete makes every issue whose
-    # PR fell past the boundary look free, and the fleet opens a second worktree
-    # for each. "Could not tell" instead, which starts nothing.
+    # A FULL PAGE IS USED, which is armaatus/autofleet#122 folded into
+    # armaatus/autofleet#151. It used to answer "could not tell" for every issue
+    # -- the safe direction, at the price of the whole dispatcher: nothing
+    # launched, nothing was time-boxed, and the run loop polled forever on a
+    # repository whose only sin was 100 open pull requests. What it can still
+    # get wrong is bounded: an issue whose PR is past the page boundary reads as
+    # free and gets a second worktree, which `reap_merged`'s `Closes #N` sweep
+    # finds within a pass.
     make_fixture ok
     backlog_all_claimed 100
     out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
-    grep -q "rc=2" <<<"$out" \
-      || fail "a PR listing at the page limit was read as complete, so an issue past the boundary reads as free: $out"
-    echo "ok: an open-PR listing at its page limit answers 'could not tell', not 'no PR'"
+    grep -q "rc=0" <<<"$out" \
+      || fail "a PR listing at the page limit was refused, which is the stop that made a busy repository unusable: $out"
+    echo "ok: an open-PR listing at its page limit is read rather than refused"
     # One short of the limit is a whole listing and still answers.
     make_fixture ok
     backlog_all_claimed 99

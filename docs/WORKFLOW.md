@@ -182,8 +182,12 @@ issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`*
 whether the backlog holds ten issues or fifty. A launch adds no `gh` call at
 all, because the title and labels the card needs come out of the `ready` listing
 the pass already has. A **full** fleet of three worktrees on
-`AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared listings, one
-merged-PR check per worktree, and one issue lookup per worktree.
+`AUTOFLEET_REVIEW_MODE=github` is **14 `gh` calls**: the two shared listings,
+and per worktree a merged-PR check, an issue-state lookup, a merged-PR sweep for
+`Closes #N`, and a state-and-labels lookup. It was published as 8 until
+armaatus/autofleet#151, and 8 was measured on a fixture whose three owned issues
+all named ONE directory — so the three per-worktree calls that depend on the
+branch collapsed into one. A real fleet has three branches and always paid this.
 `AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
 spawns and two more per validator, and up to `AUTOFLEET_MAX` model agents **on
 top of** the worktree agents — six concurrent sessions at the defaults, which is
