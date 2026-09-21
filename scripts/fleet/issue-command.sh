@@ -12,32 +12,21 @@
 # the opening brief is written. orca.yaml and the dispatcher both only point
 # at it -- neither restates the workflow, so neither can drift from it.
 #
-# THE BRIEF ARRIVES IN TWO STAGES, and both are in this file:
+# THERE IS ONE STAGE. There were two: the spec and steps 1-3 here, and a
+# `--after-pr` half carrying steps 4 through 6 -- arm auto-merge, wait out the
+# review rounds, answer the findings, resolve the threads, triage
+# BLOCKED/DIRTY/BEHIND. That half was 1,272 of the brief's 1,521 words, and it
+# was fetched separately because all of it arriving before the agent had read a
+# file meant it rode in the prompt prefix of every request for the rest of the
+# session (armaatus/autofleet#49).
 #
-#   issue-command.sh <n>              the spec, steps 1-3, and a pointer
-#   issue-command.sh --after-pr <n>   steps 4-6, the post-PR contract
-#
-# Whole, the brief was 1,521 words, of which 1,272 were steps 4 through 6 --
-# arming auto-merge, the review rounds, the BLOCKED/DIRTY/BEHIND triage. All of
-# it arrived before the agent had read a file, and then rode in the prompt prefix
-# of every request for the rest of the session, to be acted on an hour later if
-# at all (armaatus/autofleet#49). Stage 2 is fetched at the moment it applies,
-# which is also when it is most likely to be followed.
-#
-# The split is WITHIN this file, and within ONE heredoc: the brief is a single
-# text with a `@@AFTER-PR@@` line in it, and the stage is chosen by which side of
-# that line gets printed. Not two heredocs, which was the first shape and which
-# `agent-config.yml` refused -- it re-runs main's `evals/lint.sh` against this
-# branch, main's extraction is the range from the `sed` line to `BRIEF`, and two
-# heredocs left it reading an empty brief and reporting that every script of the
-# loop had fallen out of it. The check was right: the property it is defending is
-# that the brief is one text, and keeping it one is cheaper than arguing.
-#
-# `evals/lint.sh` here asserts each stage separately -- an instruction that fell
-# out of both is a rule nobody enforces, and the failures the long tail was
-# written for (armaatus/rommsync-nx#90's unqueued auto-merge, and #88 and #89
-# of the same tracker sitting blocked on one unresolved thread) come straight
-# back.
+# armaatus/autofleet#152 deleted it instead. THE AGENT'S JOB ENDS AT AN OPEN
+# PULL REQUEST CARRYING `Closes #N`. Everything the second stage described is
+# the dispatcher's now -- `scripts/fleet/after-pr.sh` arms the merge, runs one
+# review, buys at most one fix session, re-reviews it once, and then either
+# GitHub merges on its own rules or a person is told why not. A brief that told
+# an agent to wait for a verdict was a brief that spent the agent's budget
+# waiting.
 #
 # THE BRIEF IS THE HOME OF THE LOOP, and it sends the agent to no other document.
 # Its first sentence used to read "following this repo's CLAUDE.md and the loop in
@@ -55,23 +44,20 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$REPO_ROOT/scripts/fleet/lib.sh"
 
-# Stage 2 on demand. Read BEFORE the issue is resolved so `--after-pr` with no
-# number still falls back to this worktree's linked issue, exactly as the bare
-# form does -- an agent in a fleet worktree types the flag and nothing else.
-#
-# Filtered out of the arguments wherever it appears, not matched against `$1`:
-# `issue-command.sh 42 --after-pr` is the order a person writes when the number
-# is already on the line, and matching `$1` alone printed stage 1 for it and
-# swallowed the flag as noise. Found by the local review.
-after_pr=false
-kept=()
+# `--after-pr` IS AN ERROR, NOT A NO-OP. The flag fetched a second half of this
+# brief that no longer exists, and an agent resumed in a worktree opened before
+# the change types it because the copy of stage 1 in its context still says to.
+# Printing stage 1 again for it would answer a question about what to do next
+# with the instructions for what it has already done. armaatus/autofleet#152.
 for arg in "$@"; do
-  if [ "$arg" = "--after-pr" ]; then after_pr=true; else kept+=("$arg"); fi
+  [ "$arg" = --after-pr ] || continue
+  echo "issue-command: there is no --after-pr brief any more." >&2
+  echo "  Your job ends at an open pull request carrying 'Closes #N'. The" >&2
+  echo "  dispatcher runs the review, buys at most one fix session if it asks" >&2
+  echo "  for changes, and GitHub merges on its own rules. Nothing is waiting" >&2
+  echo "  on you: say the PR is open and stop." >&2
+  exit 2
 done
-# `${kept[@]+...}`: `set -u` is on and bash 3.2 -- the /bin/bash every macOS
-# ships -- treats an empty array as unset, so the bare expansion is an error
-# here and only here.
-set -- ${kept[@]+"${kept[@]}"}
 
 ref="${1:-}"
 # Neither half may kill the script, because `set -e` is on and BOTH "no runner"
@@ -123,22 +109,17 @@ num="$(fleet_issue_number "$ref")" \
 # command this project actually runs rather than one autofleet guessed.
 test_command="${AUTOFLEET_TEST_COMMAND:-the full test suite}"
 
-# The spec belongs to stage 1 alone. An agent running `--after-pr` has it in
-# context already, and reprinting it is the duplication this split exists to
-# stop.
-if ! $after_pr; then
-  # GH_PAGER: Orca runs this hook on a TTY, and `gh` pages TTY output through
-  # less, which then waits for a keypress no one will press -- the hook never
-  # exits, Orca never gets the spec, and the agent tab sits on a bare URL forever.
-  GH_PAGER=cat gh issue view "$num" --json number,title,body,labels,milestone,url \
-    --template '{{printf "# %v: %v" .number .title}}
+# GH_PAGER: Orca runs this hook on a TTY, and `gh` pages TTY output through
+# less, which then waits for a keypress no one will press -- the hook never
+# exits, Orca never gets the spec, and the agent tab sits on a bare URL forever.
+GH_PAGER=cat gh issue view "$num" --json number,title,body,labels,milestone,url \
+  --template '{{printf "# %v: %v" .number .title}}
 {{.url}}
 Milestone: {{if .milestone}}{{.milestone.title}}{{else}}none{{end}}
 Labels: {{range $i, $l := .labels}}{{if $i}}, {{end}}{{$l.name}}{{end}}
 
 {{.body}}
 '
-fi
 
 # THE NOTE THE LAST ATTEMPT LEFT, if there is one, between the spec and the
 # brief. This is the "read at the start of a resumed session" half of
@@ -147,15 +128,18 @@ fi
 # from the issue body alone otherwise, and re-derives from the files every
 # decision the first attempt already made.
 #
-# ONE brief, cut in two. `@@AFTER-PR@@` is the cut, `awk` prints the half that is
-# due, and the `sed` substitutes the placeholders for both halves at once so they
-# cannot come to mean different things in the part that arrives an hour later.
+# ONE BRIEF, ONE TEXT, AND IT IS UNDER 400 WORDS -- evals/lint.sh holds it
+# there. Everything in it is actionable in the first hour, which is now the
+# whole of the agent's job: the post-PR half that used to sit below a
+# `@@AFTER-PR@@` cut in this same heredoc is gone with armaatus/autofleet#152,
+# because the dispatcher does what it described.
 #
-# Stage 1 is under 400 words and evals/lint.sh holds it there. Everything in it
-# is actionable in the first hour; anything that is not goes below the cut.
-# `if`, not `$after_pr && stage=2`: `set -e` is on, and that AND-list returns
-# non-zero on the bare form, which is the common one.
-if $after_pr; then stage=2; else stage=1; fi
+# STILL ONE HEREDOC, and that matters even with nothing to cut. `agent-config.yml`
+# re-runs main's `evals/lint.sh` against this branch, and main's extraction is
+# the range from the `sed` line to `BRIEF` -- so a second heredoc here leaves it
+# reading an empty brief and reporting that every script of the loop has fallen
+# out of it. The property that check defends is that the brief is one text.
+#
 # The test command does NOT go through `sed`: it comes from `.autofleet/config`
 # and may hold any character a `s###` delimiter could be, which would end the
 # expression early and print a broken brief -- with `make check # a/b&c` in the
@@ -169,14 +153,12 @@ if $after_pr; then stage=2; else stage=1; fi
 # line. Inline and wrapped, awk's own source sat between the `sed` and the text,
 # where the lint's extraction counted it as part of the brief.
 brief_filter='
-  BEGIN { half = 1; cmd = "`" ENVIRON["tc"] "`" }
-  $0 == "@@AFTER-PR@@" { half = 2; next }
-  half != want { next }
+  BEGIN { cmd = "`" ENVIRON["tc"] "`" }
   { i = index($0, "__TEST_COMMAND__")
     if (i) $0 = substr($0, 1, i - 1) cmd substr($0, i + length("__TEST_COMMAND__"))
     print }
 '
-sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk -v want="$stage" "$brief_filter"
+sed -e "s/__ISSUE__/$num/" <<'BRIEF' | tc="$test_command" awk "$brief_filter"
 
 ---
 
@@ -196,31 +178,33 @@ __TEST_COMMAND__ once at the end, and commits. For a bug, the failing test is
 committed before the fix. Read the suite output: a phase reporting `skip` judged
 nothing.
 
-**2. Review it yourself, before anything leaves this worktree.** One command,
-which runs both passes outside this session and records the marker:
+**2. Push, and open the pull request. THAT IS WHERE YOUR JOB ENDS.** The body
+must carry `## Plan` -- what the issue asked for, and where the implementation
+departed from it and why -- any issue you edited and why, and `Closes #__ISSUE__`
+on a line of its own. Departing from the issue is normal; departing silently is
+not, and the review checks that section against the diff. The closing line is
+the one the PR template leaves as a placeholder: fill it in, because the
+merge-gate check refuses a body without it.
 
-    ./scripts/fleet/self-review.sh   # findings: .autofleet/run/self-review.md
+**Do not queue the merge, do not wait for the review, and do not answer one.**
+The dispatcher arms auto-merge, runs one review, buys exactly one fix session if
+that review asks for changes, re-reviews the fix once, and then either GitHub
+merges on its own rules or a person is told why not. The guard hook refuses all
+three from here. Say the PR is open and stop.
 
-Commit first -- it refuses a dirty tree -- and **start it in the background**: it
-outlasts a tool call. `/code-review high` finds defects,
-`/mattpocock-skills:code-review` conformance; it names them the policy itself.
-Fix what is real, re-run the tests, run it again: the marker is per-commit, and
-without one the guard hook refuses `git push` and `gh pr create`.
-
-**3. The post-PR contract arrives when it applies.** Once the marker exists:
-
-    ./scripts/fleet/issue-command.sh --after-pr __ISSUE__
-
-It is what the body must carry, how the merge is queued, and the loop that ends
-it -- one review, then the validations that judge your answer to it. How many of
-each is stated there, where the wait for them is.
+**If your issue's scope is `.github/workflows/`, `.github/scripts/`, `.claude/`,
+or the files in `.autofleet/` that set the rules -- `guard.json`, `config` and
+the host's review policy beside them, though not `setup.sh` or `teardown.sh` --
+this PR will never merge itself, and that is not a failure.** A PR that could
+rewrite the rules judging PRs is not merged by the machinery those rules govern.
+Take it to a green, reviewed PR and stop there.
 
 **The `researcher` subagent** (`.claude/agents/`) answers "where is this
 handled" with the answer rather than the files it read.
 
-**This run is bounded by turns and dollars**, and it has to cover the build and
-the answers: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
-whole file, `researcher` before a wide search.
+**This run is bounded by turns and dollars**: `gh pr diff --stat` before
+`gh pr diff`, `sed -n '120,180p'` not a whole file, `researcher` before a wide
+search.
 
 **Commit as you go.** If this run stops at its limit, a second one starts in the
 same worktree from the branch and the pull request -- nothing else crosses, so
@@ -229,148 +213,4 @@ uncommitted work is work nobody sees again.
 If `~/.autofleet/STOP` exists, stop: say where you got to and do nothing
 further. Nothing can go out while it exists.
 
-@@AFTER-PR@@
-
-**4. Push, open the PR, and queue the merge -- in that order, now.**
-
-    gh pr merge <n> --auto --squash
-
-Run it the moment the PR exists. Not at the end, not after the review: GitHub
-refuses to queue auto-merge on a pull request that is ALREADY mergeable (`Pull
-request is in clean status`), and you are forbidden from merging directly, so a
-PR that goes green before anything queued it has nobody left to merge it. It sits
-clean and untouched forever, which is what #90 did. Queued here it simply waits,
-and fires the moment the last required check passes. Step 6 is only the check
-that you did it.
-
-The body must carry `## Plan` -- what the issue asked for, and where the
-implementation departed from it and why -- the findings of BOTH self-review
-passes and what you did about them, any issue you edited and why, and
-`Closes #__ISSUE__`. Departing from the issue is normal; departing silently is
-not, and the review checks that section against the diff.
-
-The `merge-gate` check reads that body: it looks for `/code-review`,
-`mattpocock-skills:code-review` and a closing line, and without any of the three
-the PR cannot merge. The closing line is the one the PR template leaves as a
-placeholder -- fill it in. Then tell the board where the work is:
-
-    ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
-
-**If your issue's scope is `.github/workflows/`, `.github/scripts/`,
-`.claude/`, or the files in `.autofleet/` that set the rules -- `guard.json`,
-`config`, and the host's review policy beside them, though not `setup.sh` or
-`teardown.sh` -- this PR will never merge itself, and that is not a failure.**
-`merge-gate` refuses those paths on purpose: a PR that could rewrite the rules
-judging PRs is not merged by the machinery those rules govern. Take it to a
-reviewed, green PR with every thread resolved, set the board comment to
-"#__ISSUE__: ready, needs a human merge -- touches <path>", and stop there.
-
-**5. Wait for the review. THERE IS ONLY ONE.** One blocking call, which costs
-nothing while it waits:
-
-    ./scripts/fleet/await-review.sh
-
-It returns when the review lands -- or early, without one, when nothing a review
-could say would help: exit 7 for a red build, and exit 8 when GitHub says `DIRTY`
-because something merged underneath your branch. Exit 8 wants a rebase, a fresh
-`./scripts/fleet/record-review.sh .autofleet/run/self-review.md` for the new
-head, and `git push --force-with-lease`; it prints all three. Do not come back here until it is
-rebased.
-
-The review runs ONCE, on the head the PR opened with. Pushing does not buy
-another: what judges your fix is the VALIDATOR, and it asks a narrower question
--- were these findings addressed, and did the commits answering them break
-anything. It is not looking for new things. So the findings in front of you are
-all the findings this branch will get, and the round you are in is the only one.
-
-**A clean verdict is not the same as no findings.** A review can come back
-COMMENTED and still carry inline comments, each of which is a THREAD, and
-`merge-gate` refuses to merge while any thread is unresolved. #88 and #89 both
-sat blocked on exactly one unresolved thread with every check green.
-
-So after the review, whatever its verdict:
-
-    ./scripts/fleet/review-status.sh
-
-It prints every thread that is still UNRESOLVED -- where it is, what it says,
-and the thread ID `resolveReviewThread` wants -- along with anything else
-keeping the PR from merging. Do NOT reach for
-`gh api repos/{owner}/{repo}/pulls/<n>/comments` instead: that endpoint cannot
-say whether a thread is resolved, so it hands you every comment ever left with
-the live ones buried among them.
-
-**A Critical or Important finding is FIXED. A Suggestion is ANSWERED.** That is
-the whole of what to do with them, and the asymmetry is because no second
-reviewer is coming: whatever an argument closes here, nothing else will catch.
-Reply on the thread either way -- silence is not an answer -- and where you
-fixed something, say which commit.
-
-Do NOT resolve the threads yourself. The validator resolves what it is satisfied
-by; that is what makes the resolution mean something, and a thread you close is
-one nobody checked.
-
-Then ANSWER the review, whether or not you changed anything:
-
-    ./scripts/fleet/answer-review.sh "<what you fixed, and why you did not fix the rest>"
-
-That answer is what the validator reads against the findings, so write it for
-that reader: one line per finding. "I am not doing this, because" is a complete
-answer to a Suggestion; silence is not an answer to anything. A review that
-reported nothing needs none, and `merge-gate` will say so rather than making you
-guess.
-
-IF YOU CHANGED ANYTHING, PUSH IT. Answer first, then push: `answer-review.sh`
-refuses an answer written against a head that has already moved, because an
-answer the review never saw is discarded by the next reader anyway.
-
-**6. Wait for the validation, then confirm the merge is queued.**
-
-    ./scripts/fleet/await-review.sh
-    ./scripts/fleet/review-status.sh
-
-A `pass` releases the gate: it stands in for the review, which your fix moved the
-head out from under. A `fail` names exactly what is unsettled -- a finding it did
-not accept as addressed, or something your fix broke. Fix that, push, and the
-next validation judges the new head.
-
-**At most TWO validations.** Past that a person decides, and that is the design
-rather than a failure. If a second `fail` still leaves something unresolved,
-stop: comment on the PR saying exactly what is unresolved and why you disagree,
-set the board comment to "#__ISSUE__: needs you -- 2 validations", and stop.
-Another lap is not what a disagreement needs.
-
-Exit 0 from `review-status.sh` means every thread is resolved and every check is
-green; exit 4 means the same on a PR only a person can merge. Both are done.
-Exit 1 prints the reasons. Three of them are NOT waiting for anything, and it
-says so in the output:
-
-- **`GitHub says BLOCKED`** with every check green is #84 -- branch protection is
-  still counting a stale run whose newer run passed. Run the `gh run rerun --job`
-  it prints, then run `review-status.sh` again.
-- **`GitHub says DIRTY`** is a conflict with the base. Rebase, re-run
-  `record-review.sh .autofleet/run/self-review.md` for the new head, and
-  `git push --force-with-lease` -- the
-  same three things `await-review.sh` exit 8 prints, for the same reason.
-- **`GitHub says BEHIND`** means the base moved and the branch has to catch up.
-  Rebase and push.
-
-Finally, the check that the queue took:
-
-    gh pr view <n> --json autoMergeRequest --jq '.autoMergeRequest != null'
-
-`true` and you are done -- GitHub merges it when the last required check passes.
-`false` means the queue did not take: read what `gh pr merge <n> --auto --squash`
-says now rather than merging by hand, which the guard hook refuses anyway.
-
-That does NOT merge. It asks GitHub to merge once the required checks pass, and
-`merge-gate` is one of them -- so the rules decide, not you. You may not merge
-directly; the hook will not let you, and that is the one review control this
-project has. Say the PR is queued and stop.
-
-A PR that touches `.claude/`, `.github/workflows/` or `.github/scripts/` never
-auto-merges: those are the paths that can disable or rewrite the checks gating
-their own PR, and a person merges them. All three, and the same three named
-above -- `merge_gate.py` refuses exactly this list, and a brief that named fewer
-would send an agent to spend its rounds turning green a gate that never will.
-`merge-gate` will say so.
 BRIEF
