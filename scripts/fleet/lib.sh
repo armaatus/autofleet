@@ -647,17 +647,17 @@ fleet_project_remnants() {
 #          waiting on.
 #   STOP   nothing goes out: no push, no PR, no comment, from any agent, whether
 #          or not it has read the news. Only `stop --now` and `stop --all` set
-#          it, and guard.py, await-review.sh, review-status.sh and
-#          resolve-thread.sh are the ones that read it.
+#          it, and guard.py, after-pr.sh, review.sh, fix.sh and await-review.sh
+#          are the ones that read it.
 FLEET_DIR="${AUTOFLEET_DIR:-$HOME/.autofleet}"
 FLEET_STOP="$FLEET_DIR/STOP"
 FLEET_DRAIN="$FLEET_DIR/DRAIN"
 FLEET_OWNED="$FLEET_DIR/worktrees"
-# ...and where the reviewer and validator locks and records live. Spelled here
-# rather than in `fleet.sh` because `review.sh` claims its own lock now
-# (armaatus/autofleet#64) and two spellings of a lock directory is one lock
-# nobody holds. `fleet.sh`'s REVIEWING_DIR is this, and the comment naming what
-# is in it is there, next to the four consumers that walk it.
+# ...and where the post-PR loop's locks and records live. Spelled here rather
+# than in `fleet.sh` because `after-pr.sh` reads its own review count out of it
+# and two spellings of a lock directory is one lock nobody holds. `fleet.sh`'s
+# REVIEWING_DIR is this, and the comment naming what is in it is there, next to
+# the consumers that walk it.
 FLEET_REVIEWING="$FLEET_DIR/reviewing"
 # ...and what it HAS run, which is a different question and is answered
 # somewhere else now. `$FLEET_DIR/ran` held every path an issue had run in,
@@ -666,23 +666,6 @@ FLEET_REVIEWING="$FLEET_DIR/reviewing"
 # instead -- keyed on the issue, outliving every worktree -- so the registry and
 # the three comments that claimed the report was built on it are gone with the
 # slug. armaatus/autofleet#151.
-
-# Which reviewer this repository runs, normalised -- `local` or `github`.
-#
-# ONE PLACE, for the same reason `independent_reviews()` is one place: three
-# copies of `[ "${AUTOFLEET_REVIEW_MODE:-github}" = local ]` are three chances to
-# drift, and the drift that matters is between the shell and
-# `merge_gate.review_mode()`. Anything that is not exactly `local` is `github`,
-# which is what every consumer already did by hand and what the gate does -- so
-# a typo is the STRONG mode, refusing PRs rather than admitting them.
-# evals/lint.sh drives this function against the gate, spelling for spelling.
-fleet_review_mode() {
-  case "${AUTOFLEET_REVIEW_MODE:-github}" in
-    local) printf 'local\n' ;;
-    *)     printf 'github\n' ;;
-  esac
-}
-fleet_review_is_local() { [ "$(fleet_review_mode)" = local ]; }
 
 # ------------------------------------------------- the compression proxy (#89)
 #
@@ -928,9 +911,10 @@ fleet_owner_repo() {
 # to $2. Needs fleet_owner_repo to have run.
 #
 # Here rather than in each caller for the reason the query itself is one file:
-# `review-status.sh` and `resolve-thread.sh` both want exactly this, and "resolve
-# the repo, then run the gather" written twice is two places for it to drift --
-# which is how the local answer and the gate's answer came apart in #114.
+# `review.sh`, `fix.sh` and `await-review.sh` all want exactly this, and
+# "resolve the repo, then run the gather" written three times is three places
+# for it to drift -- which is how the local answer and the gate's answer came
+# apart in #114.
 # stderr is NOT swallowed. pr_payload.sh distinguishes "could not read PR #N"
 # from "came back in a shape this cannot read", and a caller that turns both
 # into its own one-line "could not read the PR's reviews" has thrown away the
@@ -942,127 +926,6 @@ fleet_pr_payload() {
   bash .github/scripts/pr_payload.sh "$fleet_owner" "$fleet_repo_name" "$pr" >"$out"
 }
 
-# Ask merge-gate again about the head $1, and say so with $2 in front of it.
-#
-# NOTHING ON GITHUB DOES THIS. `merge-gate.yml` re-runs on the events that can
-# change its answer, and two of the things that change it are not events it can
-# subscribe to: `pull_request_review_thread` is a webhook event and not a
-# workflow trigger (putting it in `on:` invalidates the whole file), and an
-# issue comment -- which is what an answer to a review is -- would run against
-# the default branch, so its check run would not attach to this PR's head at
-# all. So the gate stays red on a condition that is already satisfied and
-# `--auto` never fires.
-#
-# Re-running the gate's own earlier run is what asks it again, because a re-run
-# updates that check run IN PLACE, which is the thing branch protection counts.
-# `merge-gate.yml`'s own `clear-stale` job relies on the same mechanism.
-#
-# Here rather than in each caller because `resolve-thread.sh` and
-# `answer-review.sh` need exactly this, down to the reasons not to do it -- and
-# the one that matters is a rule, not a detail: only the NEWEST gate run on the
-# head. Re-running an older failure that a newer success already superseded
-# enters merge-gate's cancel-in-progress group and can kill a live run, which is
-# #84's wedge inflicted from here.
-#
-# IT WAITS OUT A RUN IN FLIGHT rather than treating it as nothing to do. A run
-# already going was once read as "it will evaluate with the new state anyway",
-# which holds only if it reads the PR after the change -- and two of these
-# arrive back to back. They used to be one actor's: the author resolved its own
-# threads and then answered. They are now two actors' -- the author's
-# `answer-review.sh` and, minutes later, the validator's `resolve-thread.sh` --
-# which makes the overlap wider rather than narrower, since nothing sequences
-# the two. The second
-# one's newest run is the rerun the first just queued, which may well have
-# fetched the pull request before the answer was posted: it concludes `failure`
-# on a condition that is now satisfied, nothing asks again, and the PR sits red
-# with the answer already on it. Found in review of #170.
-#
-# Exits 0 whether or not a re-run was needed, 2 when it could not tell.
-FLEET_GATE_WAIT_SECONDS="${FLEET_GATE_WAIT_SECONDS:-180}"
-FLEET_GATE_POLL_SECONDS="${FLEET_GATE_POLL_SECONDS:-10}"
-fleet_reask_gate() {
-  local head="$1" said="$2" listing answer state run job waited=0
-  while :; do
-    listing="$(GH_PAGER=cat gh run list --repo "$fleet_owner/$fleet_repo_name" \
-                 --workflow merge-gate.yml --limit 40 \
-                 --json databaseId,conclusion,headSha 2>/dev/null)" || {
-      echo "$said, but could not list merge-gate runs; ask for the gate again with a push" >&2
-      return 2; }
-
-    # Two lines: what the newest run on this head concluded, and its id. Read
-    # back from one pass so the state and the id cannot come from different runs.
-    answer="$(printf '%s' "$listing" | python3 -c '
-import json, sys
-head = sys.argv[1]
-on_head = [r for r in json.load(sys.stdin) if r.get("headSha") == head]
-newest = on_head[0] if on_head else None
-print((newest or {}).get("conclusion") or ("running" if newest else "none"))
-print((newest or {}).get("databaseId") or "")
-' "$head" 2>/dev/null)"
-    state="$(printf '%s\n' "$answer" | sed -n 1p)"
-    run="$(printf '%s\n' "$answer" | sed -n 2p)"
-
-    case "$state" in
-      failure|cancelled) break ;;
-      running)
-        if [ "$waited" -ge "$FLEET_GATE_WAIT_SECONDS" ]; then
-          echo "$said, and a merge-gate run on ${head:0:8} is still going after ${waited}s." >&2
-          echo "If it fails, ask it again with: gh run rerun --job <its merge-gate job id>" >&2
-          return 2
-        fi
-        sleep "$FLEET_GATE_POLL_SECONDS"
-        waited=$((waited + FLEET_GATE_POLL_SECONDS))
-        continue ;;
-      *)
-        # Passed already, or no run on this head at all. Nothing to re-ask, and
-        # re-running an older failure underneath a success is #84's wedge.
-        echo "$said; the newest merge-gate run on ${head:0:8} is not one to re-ask"
-        return 0 ;;
-    esac
-  done
-
-  job="$(GH_PAGER=cat gh api \
-           "repos/$fleet_owner/$fleet_repo_name/actions/runs/$run/jobs" \
-           --jq '[.jobs[] | select(.name == "merge-gate") | .id][0]' 2>/dev/null || echo "")"
-  if [ -z "$job" ] || [ "$job" = "null" ]; then
-    # The gate JOB, never the whole run: `clear-stale` is `needs: gate` and
-    # would run a second copy of its own rerun loop, which is the wedge it
-    # exists to clear reproduced one level down (merge-gate.yml says the same).
-    echo "$said, but the gate job of run $run could not be found." >&2
-    echo "Ask the gate again with: gh run rerun --job <gate job id of run $run>" >&2
-    return 2
-  fi
-
-  if GH_PAGER=cat gh run rerun --job "$job" --repo "$fleet_owner/$fleet_repo_name" \
-       >/dev/null 2>&1; then
-    echo "$said; re-ran the gate job ($job) so merge-gate is asked again"
-    return 0
-  fi
-  echo "$said, but re-running the gate job failed." >&2
-  echo "Ask it again with: gh run rerun --job $job" >&2
-  return 2
-}
-
-
-# The Python that server/requirements.txt can actually be installed with.
-#
-# Not simply `python3`. This hook runs in whatever environment Orca hands it,
-# and that is not an interactive shell: creating a worktree from the Orca UI on
-# macOS resolves `python3` to Apple's Command Line Tools build (3.9.6), while the
-# same command typed into a terminal finds Homebrew's. The difference was
-# invisible until `requests` was pinned at 2.33.0, which declares
-# `requires-python >=3.10` -- pip then filters out every candidate and reports
-# "no matching distribution", two hundred lines long, naming neither Python nor
-# the reason.
-FLEET_PYTHON_MIN_MAJOR=3
-FLEET_PYTHON_MIN_MINOR=10
-
-# Usable means three things, not one: it runs, it is new enough, and it can
-# actually build a venv. On Debian and Ubuntu `python3.13` and `python3.13-venv`
-# are separate packages, so a version check alone can pick an interpreter whose
-# `-m venv` then dies with "ensurepip is not available" -- which would be this
-# same class of opaque failure, moved one step later.
-#
 # Sets fleet_python_reject to a one-line reason when it returns non-zero, so a
 # caller can say which interpreters it turned down and why, rather than
 # reporting "nothing is new enough" about one that will not start at all.
@@ -1150,159 +1013,9 @@ fleet_venv_is_usable() {
   fleet_python_is_usable "$1/bin/python" 2>/dev/null
 }
 
-# ---------------------------------------------- the reviewing phases' markers
-#
-# THREE FILES BESIDE A LOCK, and two scripts that keep them: `review.sh` for the
-# independent review, `validate.sh` for the validation that follows it. Both
-# hold a `.tries` (attempts on one head that produced nothing), a `.rounds`
-# (verdicts this pull request has had) and a `.done` (the head that has been
-# handled), and the dispatcher reads `.tries` again before either spawn.
-#
-# The arithmetic lives here because it did not, once. `validate.sh` arrived as
-# ~150 lines of `review.sh` re-typed, and what came with the copy was a bug:
-# `read -r h n <"$marker" 2>/dev/null` silences stderr after the open that fails
-# (armaatus/autofleet#87), which had to be fixed in seventeen places because it
-# had been re-typed seventeen times. Every one of those was a line somebody had
-# already written correctly somewhere else.
-#
-# The WRAPPERS stay in each script, thin, because the two phases genuinely
-# differ about when a try is refunded and about what a round is derived from --
-# see the comments on their own `unspent_try` and round functions. What is
-# shared is the file format and the arithmetic, which is what drifted.
-
-# THE `head n` RECORD, read in one place and written in one place.
-#
-# The format had three spellings and the arithmetic two: `fleet_try_refund`
-# defaulted a missing count to 1 and `fleet_tries_count` normalised it to 0,
-# both by hand, and the dispatcher's two spawn gates wrote the pair back with
-# their own `printf`. That is the naming half of what `is_review_record` was
-# introduced to stop -- one format, several readers, each free to disagree about
-# junk. armaatus/autofleet#71.
-#
-# Prints `head count` and returns 0; returns 1 when there is no marker, when it
-# cannot be read, or when it names no head. The count is normalised HERE, so a
-# corrupt one is 0 for every caller rather than 0 for whichever caller
-# remembered: `[ "" -ge 3 ]` is `integer expression expected` and exit 2, which
-# reads as FALSE, and a cap that silently does not exist is what this file's
-# other normalisation comment is about.
-#
-# `2>/dev/null` BEFORE the redirection it is there for -- see the note above on
-# the seventeen places this was re-typed the other way round.
-fleet_try_record() {
-  local marker="$1" h="" n=""
-  [ -n "$marker" ] || return 1
-  # THE STATUS IS NOT THE TEST, and `|| return 1` here was wrong: `read` returns
-  # non-zero at EOF with no delimiter as well as on a file it could not open, so
-  # a marker whose last line has no trailing newline -- written by hand, or by a
-  # future caller that is not `fleet_try_write` -- read as unreadable and every
-  # count came back 0. That is the "cap that silently does not exist" this file's
-  # other normalisation comment is about, arriving through the reader added to
-  # prevent it. What decides is whether a HEAD came out. Found by
-  # `/mattpocock-skills:code-review`.
-  read -r h n 2>/dev/null <"$marker"
-  [ -n "${h:-}" ] || return 1
-  case "${n:-}" in ''|*[!0-9]*) n=0 ;; esac
-  printf '%s %s\n' "$h" "$n"
-}
-
-# ...and the one writer. $1 the marker, $2 the head, $3 the count.
-#
-# SILENT, BUT NOT SUCCESSFUL. A $STATE_DIR that will not take the file must not
-# kill the poll -- that half is like every other marker write here. What changed
-# when the two open-coded `printf >"$marker.tries"` writes came through this
-# function -- the reviewer's spawn gate and the validator's -- is that they used
-# to let bash's own diagnostic out, and a swallowed one turns `.tries` into a
-# file that reads 0 forever: the cap never trips, and
-# `AUTOFLEET_REVIEW_MAX_TRIES` becomes a guard that silently stopped guarding
-# while a reviewer respawns every poll. So the STATUS is the caller's to read,
-# and both spawn gates say it in the fleet's own voice. Found by `/code-review`.
-#
-# `fleet_try_refund` drops it deliberately -- a refund that cannot write is one
-# attempt miscounted, not a cap that does not exist.
-#
-# `2>/dev/null` BEFORE the redirection that can fail: written the other way
-# round, a marker directory that has been swept from under us prints bash's
-# own "No such file or directory" and only then silences the stream.
-# CLAUDE.md's rule, in the direction `evals/late_stderr_silence.py` does not
-# scan (it reads the `<"$f"` form).
-fleet_try_write() {
-  [ -n "$1" ] || return 0
-  printf '%s %s\n' "$2" "$3" 2>/dev/null >"$1"
-}
-
-# Refund one attempt. $1 the `.tries` marker, $2 the head it must name -- empty
-# means "whatever head the marker names", which is the right refund for an exit
-# that failed before the head was known: the dispatcher spent that try for this
-# run and this run reached no agent.
-#
-# Silent about a missing marker on purpose: a person running either script by
-# hand has no marker at all, and a refund with nothing to refund is a no-op, not
-# an error.
-fleet_try_refund() {
-  local marker="$1" want="${2:-}" record h n
-  record="$(fleet_try_record "$marker")" || return 0
-  read -r h n <<<"$record"
-  [ -z "$want" ] || [ "$h" = "$want" ] || return 0
-  # A count of 0 -- an absent or corrupt one, normalised by the reader -- goes
-  # to -1 and the marker is dropped, which is what the hand-rolled `${n:-1}`
-  # here did by a different route. One route now.
-  n=$(( n - 1 ))
-  if [ "$n" -le 0 ]; then rm -f "$marker" 2>/dev/null || true
-  else fleet_try_write "$marker" "$h" "$n" || true
-  fi
-}
-
-# How many attempts stand against $2 on the `.tries` marker $1. Zero when the
-# marker names another head -- a new head is a new question -- and zero for an
-# empty or corrupt one.
-#
-# ALWAYS A NUMBER, never an empty string: `[ "" -ge 3 ]` is `integer expression
-# expected` and exit 2, which a caller reads as FALSE -- a cap that silently does
-# not exist, and the reason this is one function rather than a shape each caller
-# remembers. The readability test and the normalisation that used to be written
-# out here live in `fleet_try_record` now -- and the test is no longer an
-# `[ -f ]`, which is the point: that reader decides on whether a HEAD came out,
-# so an unreadable marker and one that exists but holds nothing answer the same.
-# The `h=""; n=0` below is what leans on that when the reader answers non-zero.
-fleet_tries_count() {
-  local marker="$1" want="${2:-}" record h n
-  h=""; n=0
-  record="$(fleet_try_record "$marker")" && read -r h n <<<"$record"
-  [ "${h:-}" = "$want" ] || n=0
-  printf '%s\n' "$n"
-}
-
-# The round this run is: what the marker $1 holds, or $2 if that is larger,
-# plus one. $2 is the count DERIVED from the pull request itself, which sees
-# rounds this fleet never recorded; the larger of the two is taken because the
-# marker is monotonic and a count that went backwards would hand a pull request
-# rounds it has already spent. Empty $2 means nothing was derived.
-#
-# An absent marker is round 1, which is the safe direction: a person running the
-# script by hand gets the first round's rules, and those suppress nothing.
-fleet_round_next() {
-  local marker="$1" derived="${2:-}" n=0
-  [ -n "$marker" ] && [ -f "$marker" ] && read -r n <"$marker"
-  n="${n:-0}"
-  case "$n" in (*[!0-9]*) n=0 ;; esac
-  if [ -n "$derived" ] && [ "$derived" -gt "$n" ]; then n="$derived"; fi
-  printf '%s\n' "$(( n + 1 ))"
-}
-
-# This head has been handled: write it to the `.done` marker $1 and drop the
-# `.tries` marker $3. The attempt count belongs to heads that got NO verdict,
-# and this one got one.
-fleet_record_done() {
-  local done_marker="$1" head="$2" tries_marker="${3:-}"
-  [ -n "$done_marker" ] || return 0
-  printf '%s\n' "$head" >"$done_marker" 2>/dev/null || true
-  [ -n "$tries_marker" ] && rm -f "$tries_marker" 2>/dev/null || true
-  return 0
-}
-
 # Is $1 a pid of one of this fleet's agents, still running?
 #
-#   0  alive, and `ps` says it is a review.sh or a validate.sh
+#   0  alive, and `ps` says it is one of the fleet's post-PR scripts
 #   1  gone, or alive and something else -- a recycled pid
 #   2  alive, but `ps` would not say what it is
 #
@@ -1319,9 +1032,10 @@ fleet_record_done() {
 # the very review the dispatcher starts. `stop_reviewers` SIGTERMs what this
 # matches, so a recycled pid landing on an agent's wait would kill the wait.
 #
-# BOTH SCRIPTS. The validator's lock lives in the same directory under a `v-`
-# prefix and its pid is a `validate.sh`; matching only the reviewer read every
-# live validator as dead, deleted its lock, and started another every poll.
+# ALL THREE SCRIPTS OF THE LOOP. The lock a dispatcher publishes names the
+# `after-pr.sh` subshell, and what that subshell is running at any moment is a
+# `review.sh` or a `fix.sh`. Matching only one of them read a live run as dead,
+# deleted its lock, and started another beside it every poll.
 #
 # Here rather than in fleet.sh because `review.sh` asks it too: a lock it may
 # not claim is one held by a live agent, and that is this question.
@@ -1332,7 +1046,7 @@ fleet_agent_alive() {
   line="$(ps -o command= -p "$pid" 2>/dev/null)"
   [ -n "$line" ] || return 2
   printf '%s\n' "$line" \
-    | grep -E '(^|[[:space:]/])(review|validate)\.sh([[:space:]]|$)' >/dev/null
+    | grep -E '(^|[[:space:]/])(after-pr|review|fix)\.sh([[:space:]]|$)' >/dev/null
 }
 
 # Drop the lock $1, but ONLY if it still names this process.

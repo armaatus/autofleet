@@ -1966,201 +1966,54 @@ launch() {
 }
 
 # -------------------------------------------------------------- the review ---
-# In AUTOFLEET_REVIEW_MODE=local, the dispatcher is what runs the independent
-# review. Nothing else can: the agent that wrote the PR must not review it
-# (.claude/hooks/guard.py refuses `gh pr review` from a fleet worktree), and the
-# workflow that normally does it needs a CLAUDE_CODE_OAUTH_TOKEN this repository
-# does not have. Without this, every PR sits blocked on a review that cannot
-# arrive and `await-review.sh` waits out its deadline three times.
+# THE DISPATCHER IS WHAT RUNS THE REVIEW, and nothing else can: the agent that
+# wrote the pull request must not review it (`.claude/hooks/guard.py` refuses
+# `gh pr review` from a fleet worktree), and there is no second venue --
+# `.github/workflows/claude-review.yml` is gone with armaatus/autofleet#152, and
+# a host that wants the review in Actions uses `anthropics/claude-code-action`
+# directly.
 #
-# In the default `github` mode this returns immediately and costs nothing.
+# What this pass decides is only WHETHER THERE IS A SLOT. Everything about the
+# loop itself -- arm the merge, review once, buy at most one fix, re-review, park
+# -- is `scripts/fleet/after-pr.sh`'s, which is also what a person runs by hand
+# on one pull request.
 REVIEWING_DIR="$FLEET_REVIEWING"
 # WHAT IS IN THIS DIRECTORY, in one place, because a fourth consumer that had to
 # work it out from three use sites is exactly how the third one came to disagree:
 #
-#   <pr>         the LOCK. Holds `pid head`. Its presence means a reviewer is
-#                running; `review.sh` removes it on every exit path.
-#   <pr>.done    a RECORD. Holds a head that has been handled, so a head with a
-#                review does not get a reviewer started every poll.
-#   <pr>.tries   a RECORD. Holds `head n` -- how many reviewers this head has
-#                had that produced no verdict, against AUTOFLEET_REVIEW_MAX_TRIES.
-#   <pr>.rounds  a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
-#                had that DID produce a verdict, across every head it has ever
-#                been on, against AUTOFLEET_REVIEW_MAX. Written by
-#                review.sh on exit 0 only. The opposite population from
-#                `.tries`, which is why it is a separate file and not a second
-#                column: a review that submits findings clears `.tries` and
-#                advances this. ADVANCES, not increments -- `review.sh` derives
-#                the count from the pull request as well as incrementing and
-#                keeps the larger, so a PR whose earlier rounds this fleet never
-#                saw jumps straight to the number it really has (#65).
+#   <pr>         the LOCK. Holds `pid head`. Its presence means the post-PR loop
+#                is running for this PR; the pass releases it when the pid goes.
+#   <pr>.done    a RECORD. Holds the head `after-pr.sh` finished with, so a PR
+#                that is waiting on a person is not re-examined every poll for
+#                the rest of its life. A head move clears it, because what it
+#                recorded was about that commit.
+#   <pr>.reviews a RECORD. Holds `n` -- how many reviews this PULL REQUEST has
+#                been bought, against the ceiling of two. Written by
+#                `after-pr.sh` BEFORE each review, because a reviewer that
+#                crashes has still been bought.
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
 #   .closed-<pr> NOT a record and NOT a lock: the sweep's own bookkeeping, and a
 #                DOTFILE, which is what keeps it out of every `"$REVIEWING_DIR"/*`
-#                loop above without any of them learning a new name. Its presence
+#                loop without any of them learning a new name. Its presence
 #                means "a previous pass found this number absent from the open
 #                listing"; the records go on the pass AFTER that, and only once
-#                `gh pr view --json state` confirms it. Same name and same
-#                meaning as the transcript store's, because it is the same
-#                function that writes it -- see `pr_sweep_verdict`.
+#                `gh pr view --json state` confirms it -- see `pr_sweep_verdict`.
 #
-#   v-<pr>       ...and the same four, for the VALIDATOR, under a `v-` prefix.
-#   v-<pr>.done  One directory rather than two, deliberately: `live_reviewers`,
-#   v-<pr>.tries `stop_reviewers` and the closed-PR sweep all walk this directory
-#   v-<pr>.rounds and all three want to treat a validator exactly as they treat a
-#                reviewer -- it is another agent holding this machine's `gh`
-#                login, it dies on a stop, and it is reaped the same way. A
-#                second directory would have been a second copy of each of them,
-#                and the copy that drifts is the one nobody is looking at.
-#
-#                `is_review_record` works on both unchanged -- it matches the
-#                SUFFIX -- and the one place that reads the number out of a
-#                filename strips the prefix first. Getting that wrong deletes
-#                `v-42.done` on the first poll after it is written, which starts
-#                a fresh validator every minute for the life of the PR.
-#
-# Only the first is a lock, and the four records must never be counted as one.
+# Only the first is a lock, and the records must never be counted as one.
 # `is_review_record` is the predicate; use it rather than respelling the suffix
-# list. `cmd_status` respelled it as a `find ! -name` and counted all three as
-# reviewers in flight, permanently, on the screen its own comment calls the
-# first anybody looks at. Found by the independent review, which noted the
-# comment two lines above already stated the rule this broke.
-is_review_record() { case "$1" in *.done|*.tries|*.said|*.rounds) return 0 ;; esac; return 1; }
+# list. `cmd_status` respelled it as a `find ! -name` and counted every record as
+# a reviewer in flight, permanently, on the screen its own comment calls the
+# first anybody looks at.
+is_review_record() { case "$1" in *.done|*.reviews|*.said) return 0 ;; esac; return 1; }
 
-# A TRANSCRIPT IS MORE THAN ONE FILE since armaatus/autofleet#65. A delta round
-# also leaves `pr-<n>-<head>.context.md` -- the carried-forward context it handed
-# the reviewer -- and a reviewer killed outside its own trap leaves `.log.raw`
-# and `.log.err`. All of them go WITH the log rather than by globs of their own,
-# so the set cannot fall out of step: anything that outlives its log is a store
-# that grows for as long as the fleet runs, which is the growth
-# AUTOFLEET_KEEP_REVIEWS exists to stop. Beside `is_review_record` and not
-# inside `prune_review_logs`, which is where it was: a helper defined mid-body
-# leaks to global scope anyway and is invisible to anyone reading the file-level
-# helpers. Found by `/mattpocock-skills:code-review`.
+# A TRANSCRIPT IS MORE THAN ONE FILE: a reviewer killed outside its own trap
+# leaves `.log.raw` and `.log.err` beside `pr-<n>-<head>.log`. They go WITH the
+# log rather than by globs of their own, so the set cannot fall out of step --
+# anything that outlives its log is a store that grows for as long as the fleet
+# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop.
 rm_transcript() { rm -f "$1" "${1%.log}.context.md" "$1.raw" "$1.err"; }
-
-# Start a validator for $1 at head $2, if a slot is free.
-#
-# Deliberately THIN. Every question about whether a validation is due -- has this
-# head one already, did any review leave findings to check, has this pull request
-# had its two -- is `validate.sh`'s, and it asks `merge_gate.py` rather than
-# answering from here. That is the #114 lesson applied to the second phase before
-# it can be learned again: three paraphrases of "what counts" drifted apart once,
-# always in the permissive direction, and the permissive direction here is a
-# branch merging on a validation nobody asked for.
-#
-# So this decides one thing only: is there an agent slot. The cost of asking too
-# often is one exit 8, two API calls.
-start_validator() {
-  local pr="$1" head="$2" marker="$REVIEWING_DIR/v-$1"
-
-  # ...AND THE HEAD THAT HAS HAD ITS ATTEMPTS. A validator that runs its whole
-  # budget and submits nothing (validate.sh exit 5) writes no `.done` record --
-  # correctly, because retrying is usually right and the next attempt may well
-  # succeed. Unbounded, that is a full-budget agent started every poll against a
-  # head that will never get a verdict, for the life of the pull request. It is
-  # the same shape as the reviewer's `.tries`, bounded by the same knob, and it
-  # was missing here for one round: the refund helpers in `validate.sh` were
-  # decrementing a file nothing ever wrote.
-  #
-  # NOT the same counter as `AUTOFLEET_VALIDATE_MAX`, and the difference is the
-  # one `.tries` and `.rounds` have always had. That one counts validations this
-  # pull request has HAD -- verdicts, on any head -- and past it a person
-  # decides. This counts attempts on ONE head that produced NOTHING, and a push
-  # starts it again, because a new head is a new question.
-  # An EMPTY or corrupt `.tries` must read as 0 and not as nothing: `[ "" -ge 3 ]`
-  # is `integer expression expected` and exit 2, which reads as FALSE, so the cap
-  # silently does not exist -- and fleet.sh runs without `-e` to notice. That
-  # normalisation is `fleet_tries_count`'s, in lib.sh, because this function and
-  # the reviewer's twin below both needed it and only one of them had it.
-  local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
-
-  # Already running one for this PR -- on any head. Unlike the reviewer's lock,
-  # which is per head and restarts when the head moves, a validator whose head
-  # moved is judging a commit whose successor it has not read. Killing and
-  # restarting it would spend a validation out of a cap of two on a commit that
-  # is already superseded; letting it finish costs one wasted verdict that the
-  # sha binding makes harmless, and the next poll starts the one that counts.
-  [ -e "$marker" ] && return 0
-  [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ] && return 0
-  rm -f "$marker.done"
-
-  # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding the
-  # reviewer's copy of this records at length: checked before it, the branch is
-  # taken while the LAST validator is still running -- the count is incremented
-  # before the spawn -- so at a cap of 3 the third spawn leaves `.tries` at 3 and
-  # every poll for the rest of that validator's timeout announces a cap only two
-  # attempts have reached. Below the lock the message is true whenever it prints.
-  if [ "$tries_n" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
-    hold_say_into "$REVIEWING_DIR/v-$pr.said" "vgaveup-$head" \
-      "PR #$pr: $tries_n validators on ${head:0:8} submitted nothing, which is the cap." \
-      "  Not starting more on this head. Read $FLEET_DIR/validations/pr-$pr-${head:0:8}.log," \
-      "  then either ./scripts/fleet/validate.sh $pr by hand, or push -- a new head" \
-      "  starts the count again. The PR stays held meanwhile, which is the safe" \
-      "  direction: a missing verdict is not a passing one."
-    return 0
-  fi
-
-  # RE-COUNTED, not carried: this shares the reviewers' pool because it is the
-  # same resource -- an agent holding this machine's `gh` login -- and the count
-  # has to be current or three fast exits hold every slot for the whole pass.
-  #
-  # `live_reviewers` is defined INSIDE `review_open_prs`, which is the only
-  # caller of this and defines it before the loop that calls here -- bash makes a
-  # nested definition global once the enclosing function has run. Said out loud
-  # because moving this call anywhere earlier would find it undefined, and `set
-  # -e` is not on in this file, so the failure would be a silent zero and a
-  # validator started past the cap.
-  local running; running="$(live_reviewers)"
-  [ "${running:-0}" -ge "$MAX_WORKTREES" ] && return 0
-
-  # `</dev/null` is load-bearing where this is called from: the caller's stdin IS
-  # the pipe carrying the remaining pull requests, and a background child that
-  # inherits it eats them -- the next PR in the pass then silently gets nothing.
-  #
-  # The marker is written AFTER the spawn, because the pid is what goes in it.
-  # The race that opens is benign HERE and is no longer the one review.sh
-  # documents: since armaatus/autofleet#64 the REVIEWER's marker is a lock the
-  # reviewer claims for itself, create-or-fail, and `review.sh` releases it by
-  # content rather than by path. The validator's is still this file's private
-  # bookkeeping, so an exit-8 validator can remove a marker that does not exist
-  # yet and the write below recreates it holding a dead pid, which
-  # `live_reviewers` reaps on its next call.
-  #
-  # EXIT 8, and not exit 5. `validate.sh`'s 8 is the "wants no validation" path,
-  # two API calls, and it is the only exit fast enough to lose the microsecond
-  # race with a write that happens right after the spawn; its 5 is reached only
-  # after `wait "$validator"` returns, which is minutes. An edit to this comment
-  # said 5 and was wrong -- the second time a comment in this neighbourhood has
-  # been rewritten from true to false, which is the failure the hunk below
-  # already records. Found by the independent review.
-  #
-  # THE SAME RACE THAT #64 CLOSED FOR REVIEWS IS STILL OPEN HERE, and the
-  # difference in what it costs is why it was left: two validations on one head
-  # spend a verdict out of a cap of two, where two reviews on one head lost a
-  # review's findings entirely. `fleet_lock_claim` and `fleet_lock_release` are
-  # in lib.sh for whoever converts this half; do not read the paragraph above as
-  # "both halves are locked".
-  # Written BEFORE the spawn, because the dispatcher has to decide from
-  # something and the decision is made here. `validate.sh` refunds it on every
-  # exit where no validator ran at all -- a stopped fleet, a `gh` that would not
-  # answer, no CLI on PATH, a kill at the deadline -- so what is left in it is
-  # attempts that reached an agent and got nothing back.
-  # Through `fleet_try_write`, like every other touch of this record: the
-  # `head n` format used to be respelled at each of its writers. #71.
-  # ...AND THE STATUS IS READ. A `.tries` that will not take the write reads 0
-  # on the next pass and forever after, so the cap never trips and this PR gets
-  # a validator every poll with nothing in the log saying why. Found by
-  # `/code-review`. #71.
-  fleet_try_write "$marker.tries" "$head" "$(( tries_n + 1 ))" \
-    || say "PR #$pr: could not write $marker.tries -- the validation cap is not counting"
-  AUTOFLEET_VALIDATE_MARKER="$marker" \
-    "$REPO_ROOT/scripts/fleet/validate.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
-  printf '%s %s\n' "$!" "$head" >"$marker"
-  say "validating PR #$pr at ${head:0:8} (pid $!)"
-}
 
 # Is pid $1 one of OUR reviewers, or merely a live pid?
 #
@@ -2206,10 +2059,10 @@ stop_reviewers() {
   # because `"$REVIEWING_DIR"/*` cannot see it: `.closed-<pr>` is a dotfile, which
   # is exactly what keeps it out of the three loops that would read it as a lock.
   # The loop below clears the records this function is allowed to clear -- not
-  # `.rounds`, which it skips on purpose -- so without this line a grace marker
+  # `.reviews`, which it skips on purpose -- so without this line a grace marker
   # is orphaned for good, and the number it names is then swept with no grace at
   # all if it comes round again, which is the one thing the marker exists to
-  # prevent. Unconditional for that reason: a PR whose `.rounds` survives loses
+  # prevent. Unconditional for that reason: a PR whose `.reviews` survives loses
   # its marker too, which costs one extra grace pass and cannot cost a record.
   # The record sweep in `review_open_prs` collects the markers it graces itself;
   # this is the other path out. Found by `/code-review` of the branch that added
@@ -2221,13 +2074,13 @@ stop_reviewers() {
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
     #
-    # `.rounds` is the exception, and it is not an oversight. What it counts is
-    # a property of the PULL REQUEST -- how many reviews it has cost -- not of
-    # this dispatcher's run, and nothing here re-derives it. Clearing it would
-    # hand every open PR a fresh set of rounds on each drain, which is exactly
-    # the cap not existing for anybody who restarts the fleet. It is pruned when
-    # the PR closes, by the sweep at the end of review_open_prs.
-    case "$marker" in *.rounds) continue ;; esac
+    # `.reviews` is the exception, and it is not an oversight. What it counts
+    # is a property of the PULL REQUEST -- how many of its two reviews have been
+    # bought -- not of this dispatcher's run, and nothing here re-derives it.
+    # Clearing it would hand every open PR a fresh pair on each drain, which is
+    # the ceiling not existing for anybody who restarts the fleet. It is pruned
+    # when the PR closes, by the sweep at the end of review_open_prs.
+    case "$marker" in *.reviews) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ 2>/dev/null <"$marker" || true
@@ -2291,18 +2144,6 @@ stop_reviewers() {
 # was fetched for is resolved against it for the whole run. `$2` is the same
 # "could the caller answer" signal the record sweep reads, so a listing nobody
 # could answer for prunes nothing.
-prune_review_refs() {
-  local open_prs="$1" ref num
-  [ "${2:-no}" = yes ] || return 0
-  while IFS= read -r ref; do
-    [ -n "$ref" ] || continue
-    num="${ref##*/}"
-    case " $open_prs " in *" $num "*) continue ;; esac
-    git update-ref -d "$ref" 2>/dev/null || true
-  done <<EOF
-$(git for-each-ref --format='%(refname)' 'refs/autofleet/review/*' 2>/dev/null)
-EOF
-}
 
 # WHAT THIS PASS MAY DO WITH PR $1's FILES -- a VERDICT and not a predicate, so
 # the name says `if` is the wrong construct at a callsite. $2 is the directory
@@ -2366,16 +2207,16 @@ pr_sweep_verdict() {
 
 # WHAT GITHUB SAYS PR $1 IS, asked at most once per pass however many sweeps ask.
 #
-# `pr_sweep_verdict` is called against THREE grace-marker stores every pass --
-# `prune_review_logs` runs twice, once for `reviews/` and once for
-# `validations/`, and the record sweep adds `$REVIEWING_DIR` -- and the
-# alternation the header above describes is per STORE. So on the passes they
-# ask, one pull request cost three identical `gh pr view` calls: for a host whose
-# PRs are opened under another account, and which therefore always answers OPEN,
-# that is calls every poll per PR forever, which is the "every one" that
-# paragraph promises to avoid. The bound is the point of asking at all. Found by
-# `/mattpocock-skills:code-review`, twice -- the first version of this paragraph
-# said two stores and did the arithmetic for two.
+# `pr_sweep_verdict` is called against TWO grace-marker stores every pass --
+# `prune_review_logs` for `reviews/`, and the record sweep for
+# `$REVIEWING_DIR` -- and the alternation the header above describes is per
+# STORE. So on the passes they ask, one pull request cost two identical
+# `gh pr view` calls: for a host whose PRs are opened under another account, and
+# which therefore always answers OPEN, that is calls every poll per PR forever,
+# which is the "every one" that paragraph promises to avoid. The bound is the
+# point of asking at all. (It was three stores until armaatus/autofleet#152 took
+# the validator's away; this paragraph has been wrong about the arithmetic once
+# already, which is why it states the number rather than saying "each".)
 #
 # A VARIABLE and not a file, for $OPEN_PR_MEMO's reason, and dropped by
 # `forget_poll_answers` with the rest of the pass's answers. Pure parameter
@@ -2399,16 +2240,17 @@ pr_state_once() {
   PR_STATE_MEMO="$PR_STATE_MEMO$num=$PR_STATE_ANSWER "
 }
 
-# BOTH TRANSCRIPT STORES, and this swept one. `validate.sh` writes
-# `$FLEET_DIR/validations/pr-<n>-<head>.log` in exactly the shape `reviews/`
-# uses, and nothing ever pruned it: a store that grows for as long as the fleet
-# runs, which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. Found by the
-# self-review.
+# ONE TRANSCRIPT STORE NOW. There were two: `validate.sh` wrote
+# `$FLEET_DIR/validations/` in exactly the shape `reviews/` uses, and for a
+# while nothing pruned it -- a store that grows for as long as the fleet runs,
+# which is the growth AUTOFLEET_KEEP_REVIEWS exists to stop. The validator is
+# gone with armaatus/autofleet#152 and so is its store.
 #
-# $3 is the directory and $4 the prefix its locks carry in $REVIEWING_DIR --
-# empty for the reviewer, `v-` for the validator -- because the "a run is still
-# writing this one" test has to ask about the right lock. Defaulted, so the
-# reviewer call site reads as it did.
+# $3 and $4 -- the directory, and the prefix its locks carry in $REVIEWING_DIR --
+# stay parameters rather than becoming constants. They are what made the second
+# store cost one call site instead of a second copy of this function, and the
+# next store to appear is cheaper for the same reason. Defaulted, so the one
+# call site reads as if they were not there.
 prune_review_logs() {
   local open_prs="$1" dir="${3:-$FLEET_DIR/reviews}" lock="${4:-}" f base num kept orphans=0 ref
   [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -2691,116 +2533,37 @@ rotate_fleet_log() {
 
 # `.autofleet/run/reviewed-<sha>` records, which guard.py reads as "the local
 # review for this commit is recorded". A sha that is on no branch is a commit
-# that was amended or rebased away, and its record can only ever answer for a
-# commit nobody will push again.
-prune_reviewed_markers() {
-  # The same off switch the other two have, because config.sh promises one --
-  # "set either to 0 to keep everything" -- and this sweep was governed by
-  # neither knob. A host project that sets AUTOFLEET_KEEP_REVIEWS=0 to stop the
-  # dispatcher deleting review state still had these deleted every 60 seconds.
-  # Found by `/code-review`.
-  [ "${AUTOFLEET_KEEP_REVIEWS:-0}" -gt 0 ] 2>/dev/null || return 0
-  # EVERY CHECKOUT THAT HAS ONE, not just the dispatcher's. `REPO_ROOT` here is
-  # the main worktree, and that is not where the push gate reads: `guard.py`
-  # builds its path from `git rev-parse --show-toplevel`, the WORKTREE root, and
-  # `record-review.sh` sets its own REPO_ROOT from `BASH_SOURCE` and writes
-  # `<worktree>/.autofleet/run/reviewed-<sha>`. So this swept a directory the
-  # gate never reads and never reached the markers that answer it -- while the
-  # comment and #74's Scope both claimed otherwise. The phase could not catch it
-  # either: it built markers under the same path the code used. Found by the
-  # independent review.
-  # NEWLINE-DELIMITED, and read as lines. A space-joined list word-splits, and
-  # `$FLEET_DIR` and the worktree paths are both things a host sets -- so a
-  # worktree under `/Users/me/my projects/...` was silently skipped, which is the
-  # same shape as the `$STATE_DIR`-with-a-space glob this file already guards.
-  # Found by the independent review.
-  local roots w
-  roots="$REPO_ROOT"
-  for w in "$OWNED_DIR"/*; do
-    [ -e "$w" ] || continue
-    w="$(cat "$w" 2>/dev/null)"
-    [ -d "$w/.autofleet/run" ] && roots="$roots
-$w"
-  done
-  local dir f sha removed=0 root
-  while IFS= read -r root; do
-    [ -n "$root" ] || continue
-    dir="$root/.autofleet/run"
-    # `continue`, NOT `return 0`. This was left over from the single-root version,
-    # where returning was right. Multi-root it exits the whole function on the
-    # FIRST root -- the dispatcher checkout -- and that is the one most likely to
-    # lack the directory: `.autofleet/run/` is gitignored and created on demand by
-    # `record-review.sh` in the checkout that records a review, which is a
-    # WORKTREE. So on any host where no review was ever recorded from the main
-    # checkout, the sweep returned on iteration one every poll and examined
-    # nothing at all. Found by the independent review.
-    [ -d "$dir" ] || continue
-    for f in "$dir"/reviewed-*; do
-      [ -e "$f" ] || continue
-      sha="$(basename "$f")"; sha="${sha#reviewed-}"
-      case "$sha" in *[!0-9a-f]*|"") continue ;; esac
-      # `cat-file -e` first: a sha git has never heard of is not ours to judge.
-      git -C "$root" cat-file -e "$sha^{commit}" 2>/dev/null || continue
-      # NO PIPE. `git branch -a --contains "$sha" | grep -q .` exits after the
-      # first line, git dies of SIGPIPE, and `set -o pipefail` makes the pipeline
-      # 141 -- so past a few hundred refs this said "on no branch" about a commit
-      # that is on a thousand of them, and deleted the record. Measured: 500 refs
-      # exits 0, 1000 exits 141. guard.py then refuses the push with "record the
-      # local review first" and both passes have to be run again.
-      #
-      # It fails SAFE now, like the `cat-file -e` above it: anything other than a
-      # confidently empty answer keeps the record.
-      local on_branch
-      on_branch="$(git -C "$root" branch -a --contains "$sha" --format='%(refname)' 2>/dev/null)" \
-        || continue
-      [ -n "$on_branch" ] && continue
-      rm -f "$f" && removed=$((removed + 1))
-    done
-  done <<EOF
-$roots
-EOF
-  [ "$removed" -gt 0 ] && say "swept $removed review marker(s) for commits on no branch"
-  return 0
-}
 
 review_open_prs() {
-  fleet_review_is_local || return 0
-  # A stopped fleet writes nothing to a pull request, and `review.sh` knows that
-  # -- it exits 3. But it exits 3 AFTER being spawned, once per open PR, every
-  # poll: churn with an answer already known here. A DRAIN deliberately does not
-  # stop reviews, because a drain lets the work in flight finish and a PR waiting
-  # on a verdict is exactly that work.
+  # A stopped fleet writes nothing to a pull request, and the scripts below know
+  # that -- they exit 3. But they exit 3 AFTER being spawned, once per open PR,
+  # every poll: churn with an answer already known here. A DRAIN deliberately
+  # does not stop this, because a drain lets the work in flight finish and a PR
+  # waiting on a verdict is exactly that work.
   fleet_stopped && return 0
   mkdir -p "$REVIEWING_DIR"
 
   # OUR OWN PULL REQUESTS, and this is a limit rather than an oversight. The
   # reviewer is an agent with this machine's credentials reading a diff written
   # by somebody else; starting one unattended on every PR a repository receives
-  # is a thing to opt into deliberately, not a side effect of turning on local
-  # review. `@me` is the account gh is logged in as, which in the fleet's case
-  # is also the account every worktree opens PRs with.
+  # is a thing to opt into deliberately, not a side effect of running a fleet.
+  # `@me` is the account gh is logged in as, which in the fleet's case is also
+  # the account every worktree opens PRs with.
+  #
   # ONE NUMBER, because the guard below only guards while it equals the limit.
   # Both were literal `50`, and a page size changed in one place would have left
   # the guard passing a truncated listing through as an answer -- which empties
   # the transcript store once, permanently, and that is the single failure the
-  # `prs_answered` split exists to prevent. Hard rule 3. Found by the
-  # independent review.
+  # `prs_answered` split exists to prevent. Hard rule 3.
   local listing pr_page=50
   listing="$(GH_PAGER=cat gh pr list --state open --author "@me" \
                --json number,isDraft,headRefOid --limit "$pr_page" 2>/dev/null)" || {
     say "could not list the open PRs; skipping the review pass"
     return 0; }
 
-  # The open numbers, drafts included, from the listing already in hand -- no
-  # second API call. The transcripts of pull requests that are no longer open go
-  # here, because this is the one place that knows which those are, and because
-  # a review of a closed PR is answering a question nobody is asking.
-  #
-  # Drafts count as open: sweeping a draft's transcripts out from under it while
-  # somebody is still reading them is the failure this sweep must not have.
   # TWO ANSWERS, not one: the numbers, and whether the parse worked at all.
-  # `except: pass` with `2>/dev/null` made a missing python3 and a real `[]`
-  # the same string, and the sweep below treats them oppositely.
+  # `except: pass` with `2>/dev/null` made a missing python3 and a real `[]` the
+  # same string, and the sweep below treats them oppositely.
   local open_prs prs_answered=no
   open_prs="$(printf '%s' "$listing" | python3 -c '
 import json, sys
@@ -2814,391 +2577,133 @@ print(len(json.load(sys.stdin)))
 ' 2>/dev/null)" = "$pr_page" ]; then
     prs_answered=no
   fi
-  # `yes` only when the parse produced something we can trust: `gh` succeeding
-  # is not enough, because the parse below it can fail silently.
   prune_review_logs "$open_prs" "$prs_answered"
-  prune_review_logs "$open_prs" "$prs_answered" "$FLEET_DIR/validations" "v-"
-  # Past the keep-reviews gate on purpose -- see the function's own comment.
-  prune_review_refs "$open_prs" "$prs_answered"
 
-  # `kill`/`kill -0` with a pid this could not read must never fall back to `0`,
-  # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and every
-  # child it has. A marker truncated by a crash between the `>` and the write is
-  # enough to reach it. `kill -0 0` also SUCCEEDS, so the same default on the
-  # reaping path below made an empty marker immortal and its PR never reviewed
-  # again. Both found by the local review of the change that added this.
-  #
-  # A marker whose first field is not a number is treated as gone, which is what
-  # it is: nothing here can signal a process it cannot name.
-  local marker held
-
-  # Forget the reviewers that have finished, and count what is left. Both in one
-  # function, because the count has to be RE-TAKEN inside the loop below and a
-  # count that is only taken once is what starved the fourth pull request.
-  #
-  # A `review.sh` that finds a counting review already on the head exits 8 in
-  # about two API calls -- but it had claimed a slot, and the sweep that frees it
-  # ran only at the top of the pass. With three such PRs and MAX_WORKTREES=3, the
-  # first three took every slot every pass, the fourth hit `continue`, and it was
-  # never reviewed at all: it waited out await-review.sh three times, which is
-  # verbatim the failure #20 exists to remove. Reachable today -- a PR touching
-  # HUMAN_ONLY_PREFIXES sits open waiting for a person, and this one does. Found
-  # by the independent review.
+  # Forget the runs that have finished, and count what is left. Both in one
+  # function, because the count has to be RE-TAKEN inside the loop below: a
+  # count taken only at the top of the pass is what starved the fourth pull
+  # request when the first three each exited in two API calls having claimed a
+  # slot for the whole pass.
   live_reviewers() {
     local m p n=0
     for m in "$REVIEWING_DIR"/*; do
       [ -e "$m" ] || continue
-      # `<pr>.done` is a record, not a lock: it holds a head, not a pid, and
-      # reaping it as a dead reviewer would put the re-spawn loop straight back.
       is_review_record "$m" && continue
       p=""
       read -r p _ 2>/dev/null <"$m" || true
+      # `kill -0` with a pid this could not read must never fall back to `0`,
+      # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and
+      # every child it has -- and `kill -0 0` SUCCEEDS, which made an empty
+      # marker immortal and its PR never reviewed again.
       reviewer_alive "$p"; local is=$?
-      # 0 is ours; 2 is "alive, but ps would not say", which reviewer_alive
-      # documents as treat-it-as-ours, so it keeps both its marker and its slot.
-      # Only a definite 1 clears it.
-      # REAPED BY CONTENT, not by path: between the read above and this line a
-      # hand-run `review.sh` can have taken the stale lock over under its own
-      # pid, and deleting it here let the same pass spawn a second reviewer on
-      # that head. See `fleet_lock_reap`.
-      if [ "$is" != 1 ]; then n=$((n + 1)); else fleet_lock_reap "$m" "$p"; fi
+      if [ "$is" = 0 ]; then
+        n=$((n + 1))
+      elif [ "$is" = 1 ]; then
+        rm -f "$m"
+      fi
+      # rc 2 is "ps would not say", which is neither alive nor reapable: the
+      # marker stands and the slot stays taken until something can answer.
     done
     printf '%s\n' "$n"
   }
 
+  # ONE PER PULL REQUEST, and the same ceiling the worktrees have. Each of these
+  # is a model call holding this machine's gh login; there is no reason the
+  # post-PR half of the fleet should be able to run more of them at once than
+  # the building half.
   local running; running="$(live_reviewers)"
-
-  printf '%s' "$listing" | python3 -c '
-import json, sys
-try:
-    prs = json.load(sys.stdin)
-except ValueError:
-    raise SystemExit(0)
-for p in prs:
-    # A draft is not asking for a verdict yet -- the same condition
-    # claude-review.yml puts in its own `if`.
-    if p.get("isDraft"):
-        continue
-    print(p["number"], p.get("headRefOid") or "-", sep="\t")
-' | while IFS="$(printf '\t')" read -r pr head; do
+  local pr head draft marker rpid
+  while read -r pr head draft; do
     [ -n "$pr" ] || continue
+    # A DRAFT IS NOT READY TO BE JUDGED. It is open, so its transcripts and
+    # records are spared above; it is not finished, so nothing spends a review
+    # on it.
+    [ "$draft" = true ] && continue
+    fleet_stopped && return 0
+    [ "$running" -ge "$AUTOFLEET_MAX" ] && break
+
     marker="$REVIEWING_DIR/$pr"
+    # The LOCK, claimed before the spawn and released by the loop above once the
+    # pid is gone. `fleet_lock_claim` refuses when a live process already holds
+    # it, which is what makes two dispatchers, or a dispatcher and a person,
+    # safe on one pull request.
+    fleet_lock_claim "$marker" "$head" || continue
 
-    # THE PR-LEVEL CAP, AND IT IS CHECKED FIRST -- above the `.done`
-    # short-circuit, which is the opposite of where the head-level cap belongs
-    # and for a reason worth stating. The run that reaches this cap is the one
-    # that just wrote BOTH `.done = head` and `.rounds = cap`. Checked below the
-    # short-circuit, every later poll takes that `continue` and the hold is
-    # never said: the message appears only after the next push, and the case it
-    # is FOR is the one where no next push comes -- an agent that stopped at its
-    # own three-round cap while reviews kept landing. That was #85 exactly.
-    # Found by the independent review, which called it unreachable in the steady
-    # state, and it was.
-    #
-    # Safe this early, unlike the tries cap below: `.rounds` is written only on
-    # review.sh exit 0, so at the cap that many reviews have DEFINITIVELY
-    # completed. There is no "the running one might still submit" ambiguity to
-    # get wrong, which is the whole reason the other cap has to wait for the
-    # lock.
-    #
-    # This is the backstop, not the mechanism. If the nit-only path in
-    # await-review.sh does its job a PR converges in two rounds and never
-    # arrives here; a PR that does arrive here has a real disagreement in it or
-    # an agent that died mid-loop, and both of those want a person.
-    local rounds_n=0
-    [ -f "$marker.rounds" ] && read -r rounds_n <"$marker.rounds"
-    # ASSIGN the defaulted value, then test THAT. `case "${rounds_n:-0}"` tests
-    # the default and leaves the variable empty, which an EMPTY `.rounds` file
-    # produces: `read` assigns "" and returns 1 at EOF. `[ "" -ge 4 ]` is not
-    # false, it is `integer expression expected` and exit 2 -- which reads as
-    # false, so the cap silently does not exist, and fleet.sh runs without `-e`
-    # to notice. The same shape config.sh's own validation comment warns about,
-    # one file over. Found by the independent review, round 1, and answered
-    # here rather than in words.
-    rounds_n="${rounds_n:-0}"
-    case "$rounds_n" in (*[!0-9]*) rounds_n=0 ;; esac
-    if [ "$rounds_n" -ge "$AUTOFLEET_REVIEW_MAX" ]; then
-      # THIS IS THE ORDINARY PATH NOW, not the exhausted one. The cap is 1: a
-      # pull request that has had its review reaches here on every later poll,
-      # and what it wants from then on is a VALIDATION -- did the commits
-      # answering the findings address them, and did they break anything.
-      #
-      # `validate.sh` decides whether one is actually due (it asks
-      # `merge_gate.needs_validation`, the one definition) and enforces its own
-      # cap, so this only decides whether to ASK. A PR with nothing to validate
-      # costs one cheap exit 8, the same shape `review.sh` has on the other side.
-      #
-      # No `hold_say_into` here any more. The old message announced "N reviews,
-      # which is the cap. Needs you." -- true when the cap was four and reaching
-      # it meant a PR had failed to converge, and false now that reaching it is
-      # what every healthy pull request does on its second poll. The hold that
-      # still means something is the VALIDATION cap, and `validate.sh` says it
-      # where the number lives.
-      start_validator "$pr" "$head"
+    # `<pr>.done` is this PR's head-shaped record of "there is nothing left to
+    # do here": written when `after-pr.sh` finishes with it, so a PR waiting on
+    # a person is not re-examined every poll for the rest of its life. A head
+    # move clears it, because the thing it recorded was about that commit.
+    local done_head=""
+    read -r done_head _ 2>/dev/null <"$marker.done" || true
+    if [ "$done_head" = "$head" ]; then
+      fleet_lock_release "$marker"
       continue
     fi
 
-    # ...and the record of a head already handled, which is not the same
-    # question as "is a reviewer running". Without it, a head that HAS its
-    # review had a reviewer started for it every poll -- each exiting 8 two API
-    # calls later, once a minute, until the agent pushed. Per head, so a push
-    # invalidates it. armaatus/autofleet#33.
-    if [ "$(cat "$marker.done" 2>/dev/null)" = "$head" ]; then
-      continue
-    fi
-    rm -f "$marker.done"
-
-    # ...and a head that has had its attempts. A reviewer that submits nothing
-    # is retried -- that is usually transient -- but not forever: unbounded, it
-    # is a full-budget reviewer started every poll against a head that will
-    # never get a verdict. claude-review.yml bounds the same case at one more
-    # attempt and then says a person decides; this says the same thing.
-    # THE SAME COUNT AS THE VALIDATOR'S, from the same helper. This site had
-    # the head comparison and not the normalisation: a `.tries` holding
-    # anything non-numeric left the comparison below at exit 2, which `if`
-    # reads as false, so the reviewer cap was off for that head with a green
-    # log beside it. The validator's copy already normalised; deduplicating
-    # them is what made the difference visible.
-    local tries_n; tries_n="$(fleet_tries_count "$marker.tries" "$head")"
-    if [ -e "$marker" ]; then
-      local for_head
-      held=""; for_head=""
-      read -r held for_head 2>/dev/null <"$marker" || true
-      if [ "${for_head:-}" = "$head" ]; then
-        continue                      # one is running, on this very commit
-      fi
-      # The head moved under a running reviewer. Its verdict would carry a
-      # marker for a commit that is no longer current, so merge_gate would
-      # ignore it and the round would be spent for nothing. Kill it and let the
-      # next pass start one on what is there now.
-      reviewer_alive "$held"; local is=$?
-      # Said only where it is true: the `2)` branch below declines to restart.
-      [ "$is" = 0 ] && say "PR #$pr moved to ${head:0:8} mid-review; restarting the reviewer"
-      # ...and both removals here are by content too, for the same reason: the
-      # liveness probe above is a `ps`, and a takeover landing during it turned
-      # this arm into the thing that deleted a live claim.
-      case "$is" in
-        0) kill "$held" 2>/dev/null; fleet_lock_reap "$marker" "$held" ;;
-        # "Alive, but ps would not say." Removing the marker here declined to
-        # kill it AND freed its slot, which is an orphan nothing can ever reap --
-        # the opposite of the documented contract two lines up. Keep the marker;
-        # the next pass asks again, and if ps has an answer by then it is either
-        # killed or reaped normally. Found by the independent review.
-        2) say "  (ps would not say what pid $held is; leaving it and its slot alone)"
-           continue ;;
-        *) fleet_lock_reap "$marker" "$held" ;;
-      esac
-      # ...and it is no longer running, so it must not keep occupying a slot.
-      # Without this, three reviewers whose heads all moved in one pass are all
-      # killed and none replaced, costing a whole poll interval out of the
-      # time-box of the very agents that are waiting on them.
-      [ "${running:-0}" -gt 0 ] && running=$((running - 1))
-    fi
-    # THE CAP IS CHECKED AFTER THE LOCK, and the order is the finding. Checked
-    # before it, the branch was taken while the LAST reviewer was still running:
-    # the count is incremented before the spawn, so with a cap of 3 the third
-    # spawn leaves `.tries` at 3 and every poll for the rest of that reviewer's
-    # timeout announced "3 reviewers submitted nothing, which is the cap". Only
-    # two had. The third might still submit -- and a person acting on the line
-    # starts a second full-budget reviewer on a head that already has one, while
-    # `.said` keeps the claim unrepeated and uncorrected even after the running
-    # one succeeds. Below the lock check the message is true whenever it prints.
-    # Found by the independent review.
-    if [ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]; then
-      # Its OWN marker, per pull request: sharing the foundation one made the
-      # two holds overwrite each other every poll.
-      hold_say_into "$REVIEWING_DIR/$pr.said" "gaveup-$head" \
-        "PR #$pr: $tries_n reviewers on ${head:0:8} submitted nothing, which is the cap." \
-        "  Not starting more. Read $FLEET_DIR/reviews/pr-$pr-${head:0:8}.log, then either" \
-        "  ./scripts/fleet/review.sh $pr by hand, or push -- a new head starts the count again."
-      continue
-    fi
-    # Bounded by the same number as the worktrees. NOT the same pool, and the
-    # difference is worth knowing before you raise either: at the cap this is
-    # three worktree agents plus three reviewers, six agents at once. Three
-    # apiece is still what a person can read the output of, and a reviewer is
-    # short-lived where a worktree agent is not -- but an earlier version of this
-    # comment implied one pool of three. Found by the independent review.
-    #
-    # RE-COUNTED, not carried: the reviewers this pass started for PRs that
-    # needed none have already exited by now, and a stale count is what let three
-    # two-second exits hold every slot for the whole pass, forever.
-    running="$(live_reviewers)"
-    if [ "${running:-0}" -ge "$MAX_WORKTREES" ]; then
-      continue
-    fi
-    # `review.sh` is what decides whether this PR actually needs a review -- it
-    # asks merge_gate.py, which is the one place that answer lives (#114). This
-    # only decides whether to ASK, so a PR already reviewed costs one cheap exit
-    # 8 rather than a second review.
-    # `</dev/null`, and it is load-bearing: this loop's stdin IS the pipe
-    # carrying the remaining PRs, and a background child inheriting it can eat
-    # them. The second PR in a two-PR pass then silently never gets reviewed.
-    # `review.sh` removes this marker itself on every exit path, so a reviewer
-    # that decides there is nothing to do frees its slot at once rather than at
-    # the top of the next pass. AUTOFLEET_REVIEW_MARKER is how it knows which
-    # file is its own.
-    #
-    # WRITTEN AFTER THE SPAWN, because the pid is what goes in it and there is no
-    # pid until the job exists -- and CREATE-OR-FAIL, because since
-    # armaatus/autofleet#64 this file is a LOCK that `review.sh` claims for
-    # itself, not this loop's private bookkeeping.
-    #
-    # An unconditional write here undid that claim. A hand-run `review.sh` that
-    # wins the lock in the window between the `[ -e "$marker" ]` above and this
-    # line had its pid overwritten with the pid of the reviewer THIS pass
-    # spawned -- which then lost `fleet_lock_claim`, printed its exit-9 refusal
-    # and died, leaving the marker naming a dead process while the hand-run was
-    # still reviewing. `live_reviewers` reaps that on the next poll and starts a
-    # third, and two reviews land on one head: the failure this whole change
-    # exists to prevent, delivered by the half of it that was not converted.
-    # Found by both self-review passes.
-    #
-    # So it writes only when nothing holds the file. The child writes `$$ $head`
-    # and `$!` here IS that pid, so the two agree whenever both run; whichever
-    # lands first is right and the other is a no-op. The old benign race stays
-    # benign and is now smaller: a `review.sh` that exits before this line --
-    # the exit-8 path is two API calls -- leaves no marker, this recreates one
-    # holding a pid that has just died, and `live_reviewers` reaps it on the
-    # very next candidate in this loop.
-    #
-    # THROUGH `fleet_try_write`, like every other touch of this record since
-    # armaatus/autofleet#71: the open failure is silenced before the redirection
-    # rather than after it, and the STATUS comes back to the caller. An
-    # open-coded `printf >` swallowed bash's own diagnostic, and a `.tries` that
-    # cannot be written reads 0 forever -- `AUTOFLEET_REVIEW_MAX_TRIES` becomes a
-    # guard that silently stopped guarding while a reviewer respawns every poll.
-    # So the status is READ here, for the reason on the validator's gate above.
-    # Found by `/code-review`.
-    fleet_try_write "$marker.tries" "$head" "$(( ${tries_n:-0} + 1 ))" \
-      || say "PR #$pr: could not write $marker.tries -- the review cap is not counting"
-    AUTOFLEET_REVIEW_MARKER="$marker" \
-      "$REPO_ROOT/scripts/fleet/review.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
-    # CAPTURED, not read twice: `$!` inside the subshell below is the parent's
-    # value today and would be a subtle thing to depend on, and the `say` after
-    # it wants the same number the marker got.
-    local rpid=$!
-    # SAID FROM WHAT THE LOCK HOLDS, not from whether this write won it. The
-    # write fails for two reasons that mean opposite things: somebody else holds
-    # the marker -- a hand-run that won the window above, and the child just
-    # spawned will exit 9 -- or THE CHILD ITSELF claimed it first, which is the
-    # ordinary case and is a review that is running. The child writes `$$`,
-    # which is this same `$rpid`, so the file says which happened. Announcing
-    # "stands down" on the second put a false line in the one log a person reads
-    # to find out what the fleet did; announcing "reviewing" on the first put a
-    # review in it that never ran. Both found by the independent review.
-    # `fleet_lock_publish`, NOT `set -C` here either. This was the one write
-    # left using the construct lib.sh rejects: create-then-write leaves the file
-    # existing and EMPTY between two syscalls, and a hand-run claiming in that
-    # window reads no pid, gets "the lock names nothing this can read", and is
-    # told to delete a lock that is being written normally -- in exactly the
-    # hand-run-beside-a-dispatcher case #64's Design notes name. Found by the
-    # independent review.
-    fleet_lock_publish "$marker" "$rpid" "$head"; local published=$?
-    local lockpid=""
-    read -r lockpid _ 2>/dev/null <"$marker" || true
-    if [ "${lockpid:-}" = "$rpid" ]; then
-      say "reviewing PR #$pr at ${head:0:8} (pid $rpid)"
-    elif [ "$published" = 2 ]; then
-      # THE RETURN IS NOT DISCARDABLE, and this is the 1-vs-2 conflation
-      # `review.sh`'s own exit-2 arm exists to avoid. A state directory that
-      # cannot be written leaves no marker at all, so `lockpid` is empty and
-      # every poll announced a reviewer already in flight -- naming a holder
-      # that does not exist and never the one thing a person could fix. Found
-      # by the independent review.
-      say "PR #$pr: could not write $marker, so nothing here can stop a second"
-      say "  reviewer starting on this head. Check that directory is writable."
-    elif [ -z "${lockpid:-}" ]; then
-      # EMPTY IS NOT SOMEBODY ELSE'S PID, and the `else` below claimed it was.
-      # `validate.sh`'s exit 8 -- "this head wants no validation" -- is two API
-      # calls, and `review.sh` has a fast path of its own: the child can claim,
-      # decide, and `fleet_lock_release` before the parent reaches this read. The
-      # marker is then gone, `lockpid` is empty, and the log said "a reviewer is
-      # already in flight; the one just spawned stands down" about a child that
-      # ran to completion perfectly normally. A false line in the one log a
-      # person reads to find out what the fleet did -- the third case the comment
-      # above does not enumerate. Found by the independent review.
-      say "PR #$pr: the reviewer (pid $rpid) finished or stood down before this"
-      say "  poll could record it; its own exit is what says which"
-    else
-      say "PR #$pr: a reviewer is already in flight (pid $lockpid); the one just spawned stands down"
-    fi
-  done
+    # The whole post-PR loop for this PR, in one background process:
+    # arm the merge, review, at most one fix, re-review, park. `after-pr.sh`
+    # carries the reasoning and the ceiling; this decides only that there is a
+    # slot for it.
+    ( "$REPO_ROOT/scripts/fleet/after-pr.sh" "$pr"
+      printf '%s\n' "$head" >"$REVIEWING_DIR/$pr.done"
+      fleet_lock_release "$REVIEWING_DIR/$pr"
+    ) >>"$LOG" 2>&1 </dev/null &
+    rpid=$!
+    # The marker holds the pid of the process the sweep above will reap, which
+    # is the subshell and not `after-pr.sh`: signalling the wrong one leaves the
+    # review running with nothing left to reap it.
+    fleet_lock_publish "$marker" "$rpid" "$head" \
+      || say "PR #$pr: could not write $marker; the review slot is not counting"
+    say "PR #$pr: working the post-PR loop at ${head:0:8} (pid $rpid)"
+    running="$((running + 1))"
+  done <<EOF
+$(printf '%s' "$listing" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin):
+    print(p["number"], p.get("headRefOid") or "", str(bool(p.get("isDraft"))).lower())
+' 2>/dev/null)
+EOF
 
   # ...and the records of pull requests that are no longer open. They were
-  # pruned ONLY by `stop_reviewers`, so a merged PR's `.done`, `.tries` and
-  # `.said` sat here until the next dispatcher start -- days, on a fleet that
-  # stays up. Harmless in size, and it was the input to the count `cmd_status`
-  # got wrong, which is reason enough to keep the directory honest. A LOCK is
-  # never pruned here: a reviewer running on a PR that just merged still owns its
-  # pid and its slot, and `live_reviewers` is what reaps it.
+  # pruned ONLY by `stop_reviewers`, so a merged PR's records sat here until the
+  # next dispatcher start -- days, on a fleet that stays up. A LOCK is never
+  # pruned here: a run on a PR that just merged still owns its pid and its slot,
+  # and `live_reviewers` is what reaps it.
   #
-  # The open list is the one already in hand from the query above, so this costs
-  # no API call. `$open_prs` carries every number the query returned INCLUDING
-  # drafts, which the loop skips -- a draft's records must not be swept out from
-  # under it while it is still open. Found by the independent review.
   # NOT on an empty answer. `open_prs` is empty both when no PR is open and when
-  # the parse above failed, and those are opposite instructions: the first means
-  # sweep everything, the second means sweep nothing. A repository with no open
-  # PRs has no records worth keeping anyway, so refusing to sweep on empty costs
-  # nothing and cannot delete a live PR's attempt count on a bad parse.
+  # the parse above failed, and those are opposite instructions.
   [ -n "${open_prs:-}" ] || return 0
-  # ...and NOT on a truncated one either. #72 added `prs_answered` because a
-  # listing at the page limit cannot tell an absent PR from one on the next page,
-  # and there `open_prs` is non-empty and still not an answer -- the emptiness
-  # guard above does not see it. The records this sweeps are a live PR's attempt
-  # count and its say-once marker, so the same listing that is too weak to prune
-  # a transcript is too weak to prune these. Both readers of `open_prs` honour
-  # the one signal, which is the point of #72 having made it a signal.
+  # ...and NOT on a truncated one either: the same listing that is too weak to
+  # prune a transcript is too weak to prune these.
   [ "${prs_answered:-no}" = yes ] || return 0
   # ...and NOT on the pass a number drops off the listing, nor without asking
-  # GitHub. Both are `pr_sweep_verdict`'s, and this sweep had neither: it deleted as
-  # soon as a number was absent. The file it deletes is `<pr>.done`, and a
-  # `.done` deleted in error is the re-spawn loop armaatus/autofleet#42 exists to
-  # remove, back for a poll. armaatus/autofleet#71.
-  #
-  # DECIDED ONCE PER PULL REQUEST, not once per record: a PR carries up to four
-  # of them, and the confirmation is a `gh` call. `$verdict_keep` and
-  # `$verdict_go` are this pass's answers, so the second record of a PR costs
-  # nothing.
+  # GitHub. Both are `pr_sweep_verdict`'s. DECIDED ONCE PER PULL REQUEST, not
+  # once per record: a PR carries several, and the confirmation is a `gh` call.
   local rec base num verdict_keep="" verdict_go=""
   for rec in "$REVIEWING_DIR"/*; do
     [ -e "$rec" ] || continue
     is_review_record "$rec" || continue
-    # `v-` is the validator's half of this directory -- the two phases share it
-    # so that `live_reviewers`, `stop_reviewers` and this sweep keep working on
-    # both with no second copy of any of them. Strip it before the number is
-    # read, or `v-42.done` parses as pull request "v-42", matches no open PR, and
-    # is deleted on the first poll after it is written -- which starts a fresh
-    # validator every minute for the life of the PR.
-    base="$(basename "$rec")"; base="${base#v-}"; num="${base%%.*}"
+    base="$(basename "$rec")"; num="${base%%.*}"
     # ...AND THE GRACE GOES WITH IT, the way the transcript sweep's does. A PR
-    # that drops off the listing (marker written), comes back -- reopened, or the
-    # listing flapped -- and later closes for good would otherwise find its
-    # marker already there and lose the grace pass entirely: every record gone on
-    # the first absent pass, on one `gh` answer. That is the case the cleanup
-    # loop at the bottom of this function names, arriving through the other door.
-    # Found by `/code-review` of the branch.
+    # that drops off the listing, comes back, and later closes for good would
+    # otherwise find its marker already there and lose the grace pass entirely.
     case " ${open_prs:-} " in
       *" $num "*) rm -f "$REVIEWING_DIR/.closed-$num"; continue ;;
     esac
     case " $verdict_keep " in *" $num "*) continue ;; esac
     case " $verdict_go "   in *" $num "*) rm -f "$rec"; continue ;; esac
-    # `case $?`, not `if`: `pr_sweep_verdict` has THREE answers and only one of them
-    # deletes. Read as a boolean the OPEN answer disappears into an `else` that
-    # happens to do the right thing, which is a callsite that stops saying what
-    # it knows. Found by `/mattpocock-skills:code-review`.
+    # `case $?`, not `if`: `pr_sweep_verdict` has THREE answers and only one of
+    # them deletes. Read as a boolean the OPEN answer disappears into an `else`
+    # that happens to do the right thing, which is a callsite that stops saying
+    # what it knows.
     pr_sweep_verdict "$num" "$REVIEWING_DIR"
     case $? in
       0) verdict_go="$verdict_go$num "; rm -f "$rec" ;;
-      # 1 is "first pass, or gh would not say" and 2 is "GitHub says it is open".
-      # Both keep the records; only the second is a statement about the PR.
+      # 1 is "first pass, or gh would not say" and 2 is "GitHub says it is
+      # open". Both keep the records; only the second is a statement about the PR.
       *) verdict_keep="$verdict_keep$num " ;;
     esac
   done
-  # The grace marker goes with the records it graced. Left behind, a number that
-  # comes round again -- a PR reopened, or a fresh dispatcher on a long-lived
-  # store -- would be swept on the first pass it is absent, with no grace at all.
   for num in $verdict_go; do rm -f "$REVIEWING_DIR/.closed-$num"; done
 }
 
@@ -4230,82 +3735,56 @@ warn_blind_dispatcher() {
 # --------------------------------------------------------------- commands ---
 cmd_status() {
   echo "fleet state: $STATE_DIR"
-  # Which reviewer is going to answer the agents waiting in await-review.sh, and
-  # said on the FIRST screen anybody looks at. The failure this heads off is a
-  # quiet one: in `github` mode with no CLAUDE_CODE_OAUTH_TOKEN the review job
-  # no-ops, every PR blocks on a review that cannot arrive, and nothing anywhere
-  # says which of the two reviewers this repository actually has.
-  if fleet_review_is_local; then
-    # LOCKS only. `stop_reviewers` and `live_reviewers` both learned to skip
-    # the record files; this third reader of the directory did not -- and it is
-    # the one its own comment calls the first screen anybody looks at. A `.done`
-    # stands for as long as its head does, which is the point of the file, so
-    # status reported a reviewer in flight permanently rather than transiently,
-    # and three reviewed PRs read as every slot taken. Found by the independent
-    # review, on both axes independently.
-    # Through the predicate, not a fourth spelling of the suffix list: the
-    # `find ! -name` this replaces WAS the drift, and it is the only one of the
-    # three consumers a person reads on every `status`.
-    local n=0 m
-    for m in "$REVIEWING_DIR"/*; do
-      [ -e "$m" ] || continue
-      is_review_record "$m" && continue
-      n=$((n + 1))
-    done
-    echo "review:      local -- the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
-    # How many rounds each open pull request has spent, on the first screen
-    # anybody looks at. A PR quietly on its eleventh round is the failure
-    # armaatus/autofleet#65 is about, and before this nothing anywhere counted
-    # them -- not the log, not this screen, not `cost`.
-    # A GLOB, not `is_review_record`, and deliberately: the predicate answers
-    # "is this any record", and this wants ONE kind of record and its number.
-    # The rule the comment above states is about counting records as reviewers,
-    # which is what a `find ! -name` got wrong; naming one suffix to read one
-    # file is not that.
-    #
-    # THE PREFIX IS STRIPPED AND THE CAP IS CHOSEN BY IT. Both phases keep a
-    # `.rounds` record in this one directory -- `<pr>.rounds` for reviews,
-    # `v-<pr>.rounds` for validations -- so a glob that reads the number and
-    # not the prefix prints `PR #v-42: 2/1 rounds`: a pull request that does not
-    # exist, at a cap that is not its own, on the first screen anybody looks at.
-    # The two counts are bounded by two different knobs for the reason
-    # docs/CONFIGURATION.md gives, and a screen that shows one cap for both is
-    # the "three paraphrases of what counts" failure in display form.
-    local r rn rpr rwhat rcap found=0
-    for r in "$REVIEWING_DIR"/*.rounds; do
-      [ -e "$r" ] || continue
-      rn="$(cat "$r" 2>/dev/null)"
-      case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
-      rpr="$(basename "$r")"; rpr="${rpr%.rounds}"
-      case "$rpr" in
-        v-*) rpr="${rpr#v-}"; rwhat=validations; rcap="$AUTOFLEET_VALIDATE_MAX" ;;
-        *)   rwhat=reviews;   rcap="$AUTOFLEET_REVIEW_MAX" ;;
-      esac
-      if [ "$rn" -ge "$rcap" ]; then
-        echo "             PR #$rpr: $rn/$rcap $rwhat -- AT THE CAP, a person decides"
-      else
-        echo "             PR #$rpr: $rn/$rcap $rwhat"
-      fi
-      found=1
-    done
-    # ...AND WHAT THE LIST IS, because it is local state and not a query. These
-    # records are swept when the dispatcher next sees the PR fall off the open
-    # list, so on a machine where nothing is polling -- which is exactly when a
-    # person runs this -- a merged PR can still print "AT THE CAP, a person
-    # decides" on the first screen anybody reads. Filtering would cost a
-    # `gh pr list` of its own, so the line says what it is instead.
-    #
-    # It used to say this screen "deliberately does not spend" one at all. That
-    # stopped being true when the next-up table above gained its own probe, so
-    # the reason is now the cost of the SECOND listing rather than of the first
-    # -- and the open-PR listing is `--state open`, which would not answer this
-    # question anyway. Found by the local review.
-    [ "${found:-0}" = 1 ] \
-      && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
-  else
-    echo "review:      github -- .github/workflows/claude-review.yml, which needs"
-    echo "             a CLAUDE_CODE_OAUTH_TOKEN secret on the repository"
-  fi
+  # HOW MUCH OF THE POST-PR LOOP IS RUNNING, on the FIRST screen anybody looks
+  # at. The failure this heads off is a quiet one: a pull request sitting with
+  # nothing happening to it, and nothing anywhere saying whether that is because
+  # it is finished, because it is at its review ceiling, or because a slot never
+  # came free.
+  #
+  # LOCKS only. `stop_reviewers` and `live_reviewers` both skip the record
+  # files; this third reader of the directory once did not -- and it is the one
+  # its own comment calls the first screen anybody looks at. A `.done` stands
+  # for as long as its head does, which is the point of the file, so status
+  # reported a reviewer in flight permanently and three reviewed PRs read as
+  # every slot taken. Through the predicate, not a fourth spelling of the suffix
+  # list: the `find ! -name` this replaces WAS the drift.
+  local n=0 m
+  for m in "$REVIEWING_DIR"/*; do
+    [ -e "$m" ] || continue
+    is_review_record "$m" && continue
+    n=$((n + 1))
+  done
+  echo "review:      the dispatcher runs it ($AUTOFLEET_REVIEW_CMD), $n in flight"
+  # ...and how many of its two reviews each open pull request has spent. A PR
+  # quietly on its eleventh round is the failure armaatus/autofleet#65 was
+  # about; the ceiling of two makes that impossible, and this is what shows the
+  # ceiling being reached rather than leaving "nothing is happening" to be
+  # guessed at.
+  #
+  # A GLOB, not `is_review_record`, and deliberately: the predicate answers "is
+  # this any record", and this wants ONE kind of record and its number.
+  local r rn rpr found=0
+  for r in "$REVIEWING_DIR"/*.reviews; do
+    [ -e "$r" ] || continue
+    rn="$(cat "$r" 2>/dev/null)"
+    case "${rn:-}" in ''|*[!0-9]*) continue ;; esac
+    rpr="$(basename "$r")"; rpr="${rpr%.reviews}"
+    if [ "$rn" -ge 2 ]; then
+      echo "             PR #$rpr: $rn/2 reviews -- AT THE CEILING, a person decides"
+    else
+      echo "             PR #$rpr: $rn/2 reviews"
+    fi
+    found=1
+  done
+  # ...AND WHAT THE LIST IS, because it is local state and not a query. These
+  # records are swept when the dispatcher next sees the PR fall off the open
+  # list, so on a machine where nothing is polling -- which is exactly when a
+  # person runs this -- a merged PR can still print "AT THE CEILING" on the
+  # first screen anybody reads. Filtering would cost a `gh pr list` of its own,
+  # and the open-PR listing above is `--state open`, which would not answer this
+  # question anyway. So the line says what it is instead.
+  [ "${found:-0}" = 1 ] \
+    && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
   # ...and whether the fleet's own model calls are going through the compression
   # proxy, on the same first screen and for the same reason: a seam whose whole
   # point is that it changes nothing when off is a seam nobody can tell is on.
@@ -4871,7 +4350,6 @@ while that one is up."
     # Between passes, before anything writes: the log rotation must not land
     # mid-pass, and the marker sweep reads git, which is cheap and local.
     rotate_fleet_log
-    prune_reviewed_markers
 
     forget_poll_answers
     # ...here, once per pass, and nowhere else: see the note beside the
