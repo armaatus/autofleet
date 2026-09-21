@@ -1274,6 +1274,29 @@ backlog_all_claimed() {
     done
     printf ']\n'
   } >"$GH_PRS"
+  # ...and the post-PR loop has already finished with every one of them, which
+  # is the other half of "all claimed". Without it every phase below measures a
+  # FIRST pass, whose cost grows with the number of open pull requests rather
+  # than with the backlog -- and the property these phases exist to defend is
+  # the second.
+  post_pr_settled "$n"
+}
+
+# THE POST-PR LOOP ALREADY FINISHED WITH EVERY OPEN PR, which is what "idle"
+# means for a dispatcher that has one. `review_open_prs` spawns
+# `after-pr.sh` once per open pull request per HEAD, and the `<pr>.done` record
+# is how a PR that is waiting on a person stops being re-examined every poll --
+# so a budget phase that plants none is measuring a first pass, not an idle one,
+# and would grow with the number of open PRs rather than with the backlog.
+#
+# The heads match `backlog_all_claimed`'s, because the record is per head: a
+# `.done` naming another commit is correctly ignored.
+post_pr_settled() {
+  local n="$1" i
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  for i in $(seq 1 "$n"); do
+    printf 'deadbee\n' >"$AUTOFLEET_DIR/reviewing/$((100 + i)).done"
+  done
 }
 
 # fleet.sh sourced from somewhere OTHER than the dispatcher's own checkout --
@@ -4968,20 +4991,27 @@ GITSTUB
   # docs/WORKFLOW.md's budget table are these. armaatus/autofleet#69.
   budget_idle_pass)
     # The ordinary state of a fleet whose slate is all claimed: every `ready`
-    # issue already has a PR, so the launch loop scans the list to the end and
-    # starts nothing. Before the per-poll PR listing this pass made 13 `gh`
-    # calls -- one `pr list` per candidate scanned, plus two `issue list`, plus
-    # `count_startable`'s own `pr list` -- and every one of those grew with the
-    # backlog.
+    # issue already has a PR, the post-PR loop has finished with each of them,
+    # so the launch loop scans the list to the end and starts nothing. Before
+    # the per-poll PR listing this pass made 13 `gh` calls -- one `pr list` per
+    # candidate scanned, plus two `issue list`, plus `count_startable`'s own
+    # `pr list` -- and every one of those grew with the backlog.
+    #
+    # THREE, and it was two. The third is `review_open_prs`' own
+    # `pr list --author @me`, which is a listing the dispatcher did not take
+    # while the review ran in GitHub Actions and the pass returned early
+    # (armaatus/autofleet#152). It is one call whatever the backlog is, which is
+    # the property this phase exists to defend -- `budget_scales` drives the
+    # same pass at 10 and at 50 and compares.
     make_fixture ok
     backlog_all_claimed 10
     out="$(in_fleet cmd_run --auto 2>&1)"
     grep -q "nothing startable left" <<<"$out" \
       || fail "the pass did not end on an empty slate, so what follows is not one pass: $out"
     gh="$(grep -c . "$GH_CALLS" || true)"
-    [ "$gh" = 2 ] \
-      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 2: $(cat "$GH_CALLS")"
-    echo "ok: one idle pass costs 2 gh calls"
+    [ "$gh" = 3 ] \
+      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 3: $(cat "$GH_CALLS")"
+    echo "ok: one idle pass costs 3 gh calls"
     # ...and ONE worktree listing, which is #30's cache doing its job with
     # `in_flight` reading it too. One cache, one invalidation point: this
     # asserts the number, #30's own phases assert where it is dropped.
@@ -5172,8 +5202,10 @@ JSON
     grep -q "pass complete" <<<"$out" \
       || fail "AUTOFLEET_LOG_PASSES=on said nothing: $out"
     # ...AFTER the last call a pass makes, which is what makes it usable as the
-    # end-of-pass signal budget_busy_pass waits on rather than a clock.
-    [ "$(grep -c . "$GH_CALLS")" = 2 ] \
+    # end-of-pass signal budget_busy_pass waits on rather than a clock. Three
+    # since armaatus/autofleet#152: `review_open_prs` takes a listing of its own
+    # now, and budget_idle_pass is where that number is explained.
+    [ "$(grep -c . "$GH_CALLS")" = 3 ] \
       || fail "the pass line landed before the pass was done: $(cat "$GH_CALLS")"
     echo "ok: ...and on, it says so once the pass has spent everything it spends"
 
@@ -5340,13 +5372,18 @@ JSON
     # while this reads $GH_CALLS.
     n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
-    [ "$n" = 14 ] \
-      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 14: $(cat "$GH_CALLS")"
+    # FIFTEEN, and it was fourteen. The extra is `review_open_prs`' own
+    # `pr list --author @me`: one call whatever the fleet holds, taken since
+    # armaatus/autofleet#152 because the dispatcher runs the post-PR loop rather
+    # than returning early and leaving it to GitHub Actions. budget_idle_pass
+    # carries the same note against its own number.
+    [ "$n" = 15 ] \
+      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 15: $(cat "$GH_CALLS")"
     # ...and a whole number of passes, which a count taken mid-pass would not be.
     # Belt to the pass line's braces, and the thing that would say so if the
     # signal were ever emitted before the last call of a pass rather than after.
-    [ $(( n % 14 )) = 0 ] \
-      || fail "the count was taken mid-pass ($n is not a whole number of 14s): $(cat "$GH_CALLS")"
+    [ $(( n % 15 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 15s): $(cat "$GH_CALLS")"
     echo "ok: a full fleet of three worktrees costs 14 gh calls a pass"
     ;;
 
@@ -5493,11 +5530,16 @@ JSON
     backlog_all_claimed 10
     out="$(in_fleet cmd_run --auto 2>&1)"
     grep -q "nothing startable left" <<<"$out" || fail "the pass did not end: $out"
-    first="$(head -1 "$GH_CALLS")"
-    case "$first" in
-      "pr list --state open --json number,body"*) : ;;
-      *) fail "the pass's first gh call was '$first', not the open-PR listing: the launch loop got there first, and the window named at the cache is no longer the one the code takes" ;;
-    esac
+    # BEFORE THE LAUNCH LOOP, not first in the pass. `review_open_prs` runs
+    # ahead of both and takes a listing of its own, and that is not what the
+    # window is about: what may not get there first is `ready_issues`, the one
+    # reader that acts on the answer by opening a worktree.
+    listing_at="$(grep -n '^pr list --state open --json number,body' "$GH_CALLS" | head -1 | cut -d: -f1)"
+    launch_at="$(grep -n '^issue list --state open' "$GH_CALLS" | head -1 | cut -d: -f1)"
+    [ -n "$listing_at" ] || fail "the pass never took an open-PR listing at all: $(cat "$GH_CALLS")"
+    [ -n "$launch_at" ] || fail "the pass never reached the launch loop: $(cat "$GH_CALLS")"
+    [ "$listing_at" -lt "$launch_at" ] \
+      || fail "the launch loop listed issues before the open-PR listing was taken, so the window named at the cache is no longer the one the code takes: $(cat "$GH_CALLS")"
     echo "ok: the pass takes its open-PR listing before the launch loop scans anything"
     ;;
 

@@ -2058,11 +2058,12 @@ stop_reviewers() {
   # because `"$REVIEWING_DIR"/*` cannot see it: `.closed-<pr>` is a dotfile, which
   # is exactly what keeps it out of the three loops that would read it as a lock.
   # The loop below clears the records this function is allowed to clear -- not
-  # `.reviews`, which it skips on purpose -- so without this line a grace marker
-  # is orphaned for good, and the number it names is then swept with no grace at
-  # all if it comes round again, which is the one thing the marker exists to
-  # prevent. Unconditional for that reason: a PR whose `.reviews` survives loses
-  # its marker too, which costs one extra grace pass and cannot cost a record.
+  # `.reviews` or `.done`, which it skips on purpose -- so without this line a
+  # grace marker is orphaned for good, and the number it names is then swept
+  # with no grace at all if it comes round again, which is the one thing the
+  # marker exists to prevent. Unconditional for that reason: a PR whose records
+  # survive loses its marker too, which costs one extra grace pass and cannot
+  # cost a record.
   # The record sweep in `review_open_prs` collects the markers it graces itself;
   # this is the other path out. Found by `/code-review` of the branch that added
   # it, and its "every record" corrected by the next round of the other pass.
@@ -2073,13 +2074,17 @@ stop_reviewers() {
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
     #
-    # `.reviews` is the exception, and it is not an oversight. What it counts
-    # is a property of the PULL REQUEST -- how many of its two reviews have been
-    # bought -- not of this dispatcher's run, and nothing here re-derives it.
-    # Clearing it would hand every open PR a fresh pair on each drain, which is
-    # the ceiling not existing for anybody who restarts the fleet. It is pruned
+    # `.reviews` AND `.done` are the exceptions, and neither is an oversight.
+    # Both are properties of the PULL REQUEST rather than of this dispatcher's
+    # run: how many of its two reviews have been bought, and the head the loop
+    # finished with. Clearing `.reviews` would hand every open PR a fresh pair
+    # on each drain, which is the ceiling not existing for anybody who restarts
+    # the fleet. Clearing `.done` would re-run the whole post-PR loop over every
+    # open pull request on every dispatcher start -- cheap per PR, since the
+    # review exits in two API calls once a verdict is on the head, and pure
+    # churn. `.done` is per HEAD, so a push clears it by itself; both are pruned
     # when the PR closes, by the sweep at the end of review_open_prs.
-    case "$marker" in *.reviews) continue ;; esac
+    case "$marker" in *.reviews|*.done) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ 2>/dev/null <"$marker" || true
@@ -2643,8 +2648,17 @@ print(len(json.load(sys.stdin)))
     # arm the merge, review, at most one fix, re-review, park. `after-pr.sh`
     # carries the reasoning and the ceiling; this decides only that there is a
     # slot for it.
-    ( "$REPO_ROOT/scripts/fleet/after-pr.sh" "$pr"
-      printf '%s\n' "$head" >"$REVIEWING_DIR/$pr.done"
+    # `.done` ON EXIT 0 ONLY, which is the asymmetry that decides whether a
+    # pull request is ever looked at again. `after-pr.sh` exits 0 when it is
+    # FINISHED with this head -- approved, or parked with a reason on it -- and
+    # 5 when something went wrong that the next poll should retry. Writing the
+    # record on both would strand a PR on one `gh` outage; writing it on
+    # neither is the re-spawn loop armaatus/autofleet#42 exists to remove. What
+    # bounds the retry is the review ceiling, which is counted in a file of its
+    # own and is not refunded.
+    ( if "$REPO_ROOT/scripts/fleet/after-pr.sh" "$pr"; then
+        printf '%s\n' "$head" >"$REVIEWING_DIR/$pr.done"
+      fi
       fleet_lock_release "$REVIEWING_DIR/$pr"
     ) >>"$LOG" 2>&1 </dev/null &
     rpid=$!
