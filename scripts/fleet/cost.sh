@@ -81,11 +81,9 @@ wanted = [a for a in sys.argv[2:] if a]
 root = os.environ["FLEET_BUILDS"]
 as_json = shape == "json"
 
-notes = []
 def note(msg):
     # ONE line on stderr and never an exit: see the header. A reporting command
     # that can go non-zero is one more thing a night run can die of.
-    notes.append(msg)
     print("cost.sh: " + msg, file=sys.stderr)
 
 # The four token fields, in the order the table prints them, paired with the
@@ -155,13 +153,18 @@ def measure(issue_dir):
         usage = doc.get("usage") or {}
         for _, key in FIELDS:
             value = usage.get(key)
-            if isinstance(value, int):
+            # `not isinstance(value, bool)` -- `isinstance(True, int)` is True in
+            # Python, so a bool anywhere in a `usage` block sums as 1 and the
+            # row reads as a measurement. The reader this replaced carried the
+            # guard and the rewrite dropped it; found by
+            # `/mattpocock-skills:code-review`.
+            if isinstance(value, int) and not isinstance(value, bool):
                 sums[key] += value
         usd = doc.get("total_cost_usd")
-        if isinstance(usd, (int, float)):
+        if isinstance(usd, (int, float)) and not isinstance(usd, bool):
             sums["usd"] += float(usd)
         turns = doc.get("num_turns")
-        if isinstance(turns, int):
+        if isinstance(turns, int) and not isinstance(turns, bool):
             sums["turns"] += turns
     return runs, sums
 
@@ -169,11 +172,9 @@ if not os.path.isdir(root):
     note("no builds under %s yet" % root)
     order = []
 else:
-    order = []
-    for name in sorted(os.listdir(root), key=lambda n: (not n.isdigit(), n.isdigit() and int(n) or 0, n)):
-        if not name.isdigit():
-            continue
-        order.append(name)
+    # Numerically, and only the issue-numbered directories: `#9` sorts before
+    # `#10` in a report whose rows a person compares.
+    order = sorted((n for n in os.listdir(root) if n.isdigit()), key=int)
 
 if wanted:
     asked = set(wanted)

@@ -227,7 +227,14 @@ fleet_build_dir() { printf '%s/%s\n' "$FLEET_BUILDS" "$1"; }
 # prevent. `/` folds to `%` because `%` cannot appear in a path component git
 # would accept as a branch name, and unlike a hash the directory is readable
 # when something has gone wrong.
-fleet_build_key() { printf '%s' "$1" | tr '/' '%'; }
+fleet_build_key() {
+  # RESOLVED, for the reason `headless_link_file` gives: a path written under
+  # one spelling and read under another is an index that answers about nothing.
+  local path="$1" dir base
+  dir="$(dirname "$path")"; base="$(basename "$path")"
+  if dir="$(cd "$dir" 2>/dev/null && pwd -P)"; then path="$dir/$base"; fi
+  printf '%s' "$path" | tr '/' '%'
+}
 fleet_build_dir_for_path() {
   local issue
   issue="$(cat "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")" 2>/dev/null)" || return 1
@@ -279,9 +286,23 @@ fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # recorded. A driver that passed `--bare` would disable every rule in
 # .claude/hooks/guard.py and nothing else would notice.
 #
-# `set -o pipefail` and the `tee` are load-bearing together: stdout is the result
-# JSON AND the thing a watching maintainer reads, and without pipefail the exit
-# status would be tee's, so every build would look like it succeeded.
+# WHICH STREAM GOES WHERE IS THE WHOLE OF WHY THE APP-BACKED DRIVER EXISTS.
+# `--output-format json` prints ONE object, at exit. Sending that to the
+# terminal and the running commentary to a file left the tab blank for the whole
+# of a build -- which is the one Acceptance bullet that driver survives to
+# satisfy, and three comments in this tree claimed the opposite. Found by
+# `/mattpocock-skills:code-review`.
+#
+# So they are swapped: `2>&1 1>result` sends STDOUT to the result file and
+# STDERR down the pipe, where `tee -a` puts it in `build.log` and on whatever is
+# watching. `claude -p` writes its progress and its warnings to stderr, so the
+# tab shows the build as it happens and the headless driver, which discards the
+# pipe, still gets the same log. The order matters and is not tidy-able: `1>`
+# after `2>&1` redirects only stdout, because the `2>&1` already copied the
+# pipe.
+#
+# `set -o pipefail` keeps the exit status the BUILD's rather than `tee`'s --
+# without it every build would look like it succeeded.
 #
 # THE LINE WRITES ITS OWN EXIT STATUS, last, and that is what makes one state
 # reader serve both drivers. A background child has a pid the dispatcher can
@@ -290,15 +311,15 @@ fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 # one question the dispatcher asks every poll.
 fleet_build_command_line() {
   local dir="$1"
-  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode %s --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s; printf "%%s\\n" "$?" >%s\n' \
+  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode %s --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>&1 1>%s | tee -a %s; printf "%%s\\n" "$?" >%s\n' \
     "$(fleet_build_cmd)" \
     "$(fleet_sq "$dir/prompt")" \
     "${AUTOFLEET_BUILD_PERMISSION_MODE}" \
     "${AUTOFLEET_BUILD_MAX_TURNS}" \
     "${AUTOFLEET_BUILD_MAX_BUDGET_USD}" \
     "$(fleet_sq "$dir/system.md")" \
-    "$(fleet_sq "$dir/build.log")" \
     "$(fleet_sq "$dir/result.json")" \
+    "$(fleet_sq "$dir/build.log")" \
     "$(fleet_sq "$dir/rc")"
 }
 

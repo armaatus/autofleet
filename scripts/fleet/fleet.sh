@@ -726,7 +726,14 @@ parked_for_person() {
       # runtime to classify a terminal -- `working`, `waiting`, idle -- and the
       # classification is what `notice_stalled` was built on. `claude -p` has
       # exactly two states and neither of them is ambiguous.
-      if ! state="$(runner_build_state "$(owned_path "$n")")"; then
+      # NO BUILD RECORDED IS NOT "COULD NOT TELL". A worktree the dispatcher
+      # never started a build in -- one a restart inherited, one whose build
+      # directory was swept -- has nothing running in it, which is a real
+      # answer and the one that lets a drain end. Read as blind it never counted
+      # as parked, `owned` never reached 0, and the drain polled forever. Found
+      # by the local `/code-review` pass.
+      state="$(runner_build_state "$(owned_path "$n")")" || state="none"
+      if [ "$state" = none ] && [ -e "$(fleet_build_dir "$n")/worktree" ]; then
         # SAID, once per pass. Taking the safe direction silently is #37's own
         # complaint -- "nothing says the drain has become unbounded". One
         # unreadable `worktree ps` is a hiccup; a persistent one means this
@@ -1241,22 +1248,11 @@ open_pr_listing() {
   # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
   # so a zero-length body is a `gh` that printed nothing, which the parsers
   # below would each read as "no PR". Caught here, once, rather than five times.
-  # AND NEITHER IS A FULL PAGE. At the limit we cannot tell an absent PR from
-  # one on the next page, and this listing is now the single authority the
-  # launch loop reads -- so a repository with 100 open PRs would have every
-  # issue whose PR sits past the page boundary read as free, and the duplicate
-  # worktree this function's header is about would arrive on the first poll
-  # rather than in a one-poll window. `review_open_prs` refuses a listing at its
-  # own limit for exactly this (`prs_answered=no`); so does this one, into
-  # "could not tell" rather than into a wrong answer. It is a hard stop when a
-  # host really does keep 100 PRs open, and a wider one than "nothing launches":
-  # `enforce_timebox` stops no runaway agent, `reset_context_for_answering` hands
-  # nothing over, and `count_startable`'s non-zero keeps `cmd_run` polling
-  # forever. That is still the SAFE direction -- guessing opens a duplicate
-  # worktree per issue past the boundary -- and armaatus/autofleet#122, filed
-  # for it, owns removing the cliff. NOT armaatus/autofleet#31, which this
-  # comment cited first and which is closed and about `live_worktrees` seeing
-  # another repository's worktrees. Found by the local review.
+  # A FULL PAGE IS A DIFFERENT QUESTION, and it is answered below rather than
+  # here: at the limit an absent PR cannot be told from one on page two, and
+  # this listing is the single authority the launch loop reads. It used to be
+  # refused outright; see the `case` below for why it is used instead, and what
+  # that costs. armaatus/autofleet#151, folding armaatus/autofleet#122.
   # THE COUNT AND THE PARSE ARE ONE THING. What the probe below prints is
   # `row_count`, and it carries a third state in the empty string: "the body was
   # not a listing at all". The `case` below reads all three.
@@ -1635,11 +1631,10 @@ foundation_in_flight() {
 # rather than cached at launch, because a label is often what a person adds AFTER
 # seeing the card.
 #
-# One answer per issue per POLL, though. reap_abandoned, enforce_timebox and
-# notice_stalled all ask about the same issue in the same pass -- an issue stuck
-# long enough to overrun is often also the one sitting at a prompt, and the one a
-# maintainer has just blocked -- and three calls for one answer is the pattern
-# count_startable exists to avoid. State and labels come back together for that
+# One answer per issue per POLL, though. `reap_abandoned` and
+# `notice_build_exit` both ask about the same issue in the same pass -- an issue stuck
+# long enough to overrun is often also the one a maintainer has just blocked --
+# and two calls for one answer is the pattern count_startable exists to avoid. State and labels come back together for that
 # same reason: they are one `gh issue view`, not two. The cache lives for one
 # pass, so a label a person adds is still seen on the next one.
 poll_issue() {
@@ -1919,12 +1914,24 @@ launch() {
   # Fatal to the launch. Everything it provisions is for the build that is about
   # to start, and a worktree that failed to provision is one where every test
   # run fails for a reason that has nothing to do with the issue.
+  # BOUNDED, like the teardown hook it mirrors: a project setup hook that never
+  # returns held the whole poll loop, and `remove_worktree` already runs
+  # `archive.sh` through the watchdog for exactly that reason. Found by the
+  # local `/code-review` pass, which noticed the same PR guarding one side and
+  # not the other.
   local setup_out; setup_out="$(mktemp)"
-  if ! ( cd "$path" && ./scripts/fleet/setup.sh ) >"$setup_out" 2>&1; then
+  FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "${AUTOFLEET_SETUP_DEADLINE:-900}" \
+    "$setup_out" env -C "$path" ./scripts/fleet/setup.sh
+  if [ $? != 0 ]; then
     say "  #$num: its worktree would not provision:"
     sed -n '1,10p' "$setup_out" | sed 's/^/    /' | tee -a "$LOG"
     rm -f "$setup_out"
     card "$path" comment "#$num: the worktree would not provision -- needs you"
+    # THE SLOT GOES BACK. `own` ran above, and a `launch` that returns 1 after
+    # it left the issue owned with no build in it -- held for the life of the
+    # dispatcher, counted against AUTOFLEET_MAX, with nothing that retries or
+    # releases it. Found by the local `/code-review` pass.
+    disown_issue "$num"
     return 1
   fi
   rm -f "$setup_out"
@@ -1938,6 +1945,10 @@ launch() {
   if ! start_build "$num" "$path"; then
     say "  #$num has a worktree at $path but no build running"
     card "$path" comment "#$num: worktree opened, but the build would not start"
+    # ...and the same release. The worktree stays -- whatever provisioning did
+    # is in it and a person may want to look -- but the ISSUE is not owned by a
+    # dispatcher that has nothing running for it.
+    disown_issue "$num"
     return 1
   fi
   say "  #$num is building in $path"
@@ -3850,7 +3861,7 @@ build_exited() {
 
   if [ "$pr_open" = 0 ]; then
     runs="$(cat "$dir/run-count" 2>/dev/null || echo 1)"
-    if [ "$runs" -ge "$AUTOFLEET_BUILD_MAX_RUNS" ]; then
+    if [ "$runs" -ge "$BUILD_MAX_RUNS" ]; then
       # SAID ONCE. `notice_build_exit` re-enters this function on every poll for
       # every owned worktree whose state is `exited`, and that state never
       # changes by itself -- so an unguarded branch here posts the same issue
@@ -4476,6 +4487,11 @@ cmd_stop() {
           [ -e "$f" ] || continue
           path="$(cat "$f")"
           [ -n "$path" ] || continue
+          # ASKED FIRST, so the line is about what happened. It printed "stopped
+          # the build" for every owned worktree whether or not one was running,
+          # which on an idle fleet is a screen of stops that did not occur.
+          # Found by the local `/code-review` pass.
+          [ "$(runner_build_state "$path" 2>/dev/null)" = running ] || continue
           stop_build_in "$path"
           echo "    stopped the build for #$(basename "$f")"
           stopped=$((stopped + 1))

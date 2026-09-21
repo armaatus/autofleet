@@ -47,6 +47,7 @@ hand an explicitly emptied value straight back the default.
 | `AUTOFLEET_BUILD_CMD` | `claude` | What a build is. A wrapper seam, like `AUTOFLEET_REVIEW_CMD`: point it at a different model, a different account, or an `ssh` to the machine that holds the subscription. A wrapper need not honour `--output-format json`, and one that does not gets a cost report with no figures in it and a line on stderr saying so, rather than a crash. |
 | `AUTOFLEET_BUILD_MAX_TURNS` | `400` | **What bounds a build, together with the row below.** There used to be two wall clocks here — one for the build and one for the answering half — because an interactive session runs until something stops it, and stopping it meant interrupting a live terminal with a turn that asked it to stop. A `claude -p` run ends by itself at whichever of these two it reaches, and the dispatcher reads the exit instead of enforcing one. Hours were never what cost anything: issue #71 spent 65M tokens *inside* its three-hour box. **Must be a positive whole number** — it reaches the build command as a flag, and a non-number is a build that dies the instant it starts, once per launch, forever. |
 | `AUTOFLEET_BUILD_MAX_BUDGET_USD` | `25` | The other half. Two numbers rather than one because they fail differently: a build that reads whole files burns dollars at a low turn count, and one that greps in a loop burns turns cheaply. When a run ends at either, the worktree **stays** — its diff is the evidence — the dispatcher logs what it ran out of, and `gaveup-<n>` keeps the fleet from handing the same issue the same budget again. `./scripts/fleet/fleet.sh retry N` is how it comes back. |
+| `AUTOFLEET_BUILD_PERMISSION_MODE` | `auto` | **What the build may do without asking, and the one default here that departs from what armaatus/autofleet#151 asked for.** The issue names `--permission-mode acceptEdits`; that mode auto-accepts *file edits only*, so every Bash call not on the settings allow-list still asks — and under `-p` there is nobody to ask, so it is denied. A build that edits files and cannot run `git commit`, `git push` or the test command is not a build. `auto` is Claude Code's own per-call decision and is what `.claude/settings.json` already sets for this repository's sessions. Set it to `acceptEdits` for the issue's literal flag, and get a build that edits and never commits. Whatever the value, `--bare` is never passed: the guard hook has to run, and it is what keeps a headless agent from merging its own pull request. |
 | `AUTOFLEET_BUILD_MAX_RUNS` | `3` | How many runs one worktree gets. A run that stopped at a limit **with its pull request open** is resumed: a second `claude -p` in the same worktree, whose brief is the after-PR contract. Nothing is carried across, because the branch and the PR are the state. Without a bound, a run that ends the instant it starts — a bad model name, an expired token — is an infinite resume loop that spends the account one session at a time with the log saying "resuming". **Must be a positive whole number**; `1` means a build is never resumed. |
 | `AUTOFLEET_WORKTREE_ROOT` | `$AUTOFLEET_DIR/trees` | Where the headless driver creates worktrees. Empty is the default, which is the answer for every host that does not care; a host that keeps its checkouts on another volume sets this. |
 | `AUTOFLEET_RM_DEADLINE` | `180` | How long a worktree removal may take before it is reported as refused. |
@@ -533,11 +534,17 @@ see, and `lint.sh` runs that selftest before trusting the scan.
 
 It does **not** cover the worktree agent. That process is started by the runtime,
 not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
-Orca driver the agent's terminal is a child of the Orca app, not of the
-dispatcher — `printenv` inside a fleet-opened worktree shows no `AUTOFLEET_*` at
-all, and the process tree runs `Orca Helper → login → zsh → bash → claude` with
-`fleet.sh` nowhere in it. The `runner_*` contract in [RUNNERS.md](RUNNERS.md) has
-no environment parameter, and this knob did not add one.
+Orca driver the build's terminal is a child of the Orca app, not of the
+dispatcher — the process tree runs `Orca Helper → login → zsh → bash → claude`
+with `fleet.sh` nowhere in it, so nothing the dispatcher exports reaches it.
+
+**On the default driver it does reach it, and that is only half of what #130
+asked for.** The headless build is a `bash -c` child of `fleet.sh`, so it
+inherits the dispatcher's whole environment — which is the structural half of
+the fold #151's Scope claims. The other half is not done: `fleet_headroom_env`
+is still called only by the reviewer, the self-review and the validator, never
+before a build starts, so this knob still does not reach the build on either
+driver. What changed is that it now *could*.
 
 To cover the worktree agent, wrap `claude` on the machine instead. This is
 durable and global to your user, which is why it is a person's step and not the
@@ -564,8 +571,10 @@ So:
 - **Want the worktree agent covered?** Use `wrap`, and leave `AUTOFLEET_HEADROOM`
   at `0`. `headroom doctor` is then the thing that tells you the proxy is down.
 - **Want the probe, the degrade and the `status` row?** Use the knob, and leave
-  `claude` unwrapped. The worktree agent pays full price; #130 is the issue that
-  would close that gap properly.
+  `claude` unwrapped. The build pays full price: nothing calls
+  `fleet_headroom_env` before `runner_build_start`, on either driver. #151 made
+  that wiring possible on the headless path and did not do it; #153's scope is
+  where the knob is measured and kept or dropped.
 - Setting both is the "two mechanisms for one behaviour" outcome this seam was
   written to avoid.
 
@@ -682,7 +691,7 @@ and a port nothing can re-derive is a port nothing can release.
 
 ### The rest
 
-`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
+`AUTOFLEET_RUNNER` (`headless`) — see [RUNNERS.md](RUNNERS.md). A name with no
 `scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
 the file it looked for and the drivers that do ship — and stops the three scripts
 that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is

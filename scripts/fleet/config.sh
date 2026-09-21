@@ -508,21 +508,6 @@ config_whole_number AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOU
 config_whole_number AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS" \
   1 "a positive whole number of turns"
 
-# The same shape of failure as the one above, one step earlier: `[ "$words" -le
-# "$cap" ]` in handoff.sh with a non-number prints "integer expression expected"
-# and returns 2, so the test is FALSE, `refuse_if_over_cap` returns early, and a
-# note of any length is accepted -- the guard absent, silently, which is hard
-# rule 3.
-#
-# BELOW the block above, and not between that block's comment and its `case`:
-# the paragraph ending "One spare zero and the guard was the failure" is about
-# AUTOFLEET_REVIEW_MAX_TRIES and has to stay next to it. Found by the local
-# /mattpocock-skills:code-review pass, which is the one that reads comments as
-# load-bearing.
-#
-# Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
-# non-number has to be refused, because only a non-number turns the guard off
-# without saying so.
 # The same shape, for the same reason: anything that is not `on` would leave the
 # quiet default, but silently -- and here the misspelling fails in the LOUD
 # direction instead (`[ -n ]` read `0` and `off` as on), which is worse than
@@ -556,11 +541,27 @@ case "$AUTOFLEET_BUILD_MAX_BUDGET_USD" in
          "got '$AUTOFLEET_BUILD_MAX_BUDGET_USD'" >&2
     exit 2 ;;
 esac
+# ...and it must be more than nothing. COMPARED, not enumerated: the first
+# version of this guard listed `0|0.|0.0|0.00|.0|.00`, and `00`, `0.000` and
+# `0.0000` walked straight past it into the failure the guard was added to
+# prevent. A list of spellings is not a test of a number. Found by
+# `/mattpocock-skills:code-review`, on a guard added one round earlier to answer
+# a finding of its own.
+# NO EXTERNAL COMMAND, not even `awk`. This file is sourced by every fleet
+# command including `setup.sh`, whose job is to diagnose a machine that is
+# missing its basic tools -- and `tests/test_env.sh setup_fails_fast` drives it
+# on a PATH stripped down to prove exactly that. An `awk` here turned "python3
+# is missing" into "your budget of $25 is zero", which is the wrong machine
+# named confidently. Caught by the suite, one commit after the guard was added.
+#
+# The first `case` above has already refused anything that is not digits and at
+# most one dot, so "more than nothing" is "carries a digit that is not zero".
 case "$AUTOFLEET_BUILD_MAX_BUDGET_USD" in
-  0|0.|0.0|0.00|.0|.00)
-    echo "AUTOFLEET_BUILD_MAX_BUDGET_USD is 0, which is a build that may spend" \
-         "nothing and therefore do nothing" >&2
-    exit 2 ;;
+  *[1-9]*) ;;
+  *) echo "AUTOFLEET_BUILD_MAX_BUDGET_USD must be more than \$0;" \
+          "got '$AUTOFLEET_BUILD_MAX_BUDGET_USD', which is a build that may" \
+          "spend nothing and therefore do nothing" >&2
+     exit 2 ;;
 esac
 
 # The same validation, for the same reason: the only consumer is an integer `[`

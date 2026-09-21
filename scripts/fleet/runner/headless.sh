@@ -57,7 +57,18 @@ headless_tree_root() {
 # when something has gone wrong.
 headless_link_dir() { printf '%s\n' "$FLEET_DIR/headless/links"; }
 headless_link_file() {
-  printf '%s/%s\n' "$(headless_link_dir)" "$(printf '%s' "$1" | tr '/' '%')"
+  # RESOLVED FIRST. `git worktree list` and `rev-parse --show-toplevel` both
+  # report a path with every symlink resolved; a caller that hands us the
+  # unresolved one -- which is what `$AUTOFLEET_DIR` under a symlinked `$HOME`
+  # gives, and what macOS `/tmp` gives for free -- writes its link under one
+  # name and reads it under another. Every worktree then lists with issue `-`,
+  # the dispatcher believes nothing is in flight, and it launches a second
+  # worktree for an issue already running. Found by the local `/code-review`
+  # pass, which could not run the probe and marked it plausible; it reproduces.
+  local path="$1" dir base
+  dir="$(dirname "$path")"; base="$(basename "$path")"
+  if dir="$(cd "$dir" 2>/dev/null && pwd -P)"; then path="$dir/$base"; fi
+  printf '%s/%s\n' "$(headless_link_dir)" "$(printf '%s' "$path" | tr '/' '%')"
 }
 
 # Is this driver usable at all, and SAY WHY when it is not.
@@ -275,7 +286,14 @@ runner_build_start() {
     # `fleet_build_command_line`. Stdout is discarded HERE and nowhere else:
     # the app-backed driver runs the same line in a terminal, where that same
     # stdout is what the maintainer watches.
-    bash -c "$line" >/dev/null 2>&1
+    # `</dev/null`, and it is not decoration. The spawn is under `set -m`, so
+    # the child gets its own process group and INHERITS the dispatcher's
+    # terminal; a background process group that reads from that terminal is sent
+    # SIGTTIN and STOPS. The pid then stays alive, `kill -0` keeps answering
+    # yes, and `fleet_build_state_of` reports `running` for a build that will
+    # never move again. `self-review.sh` documents this exact trap and guards
+    # against it; this spawn did not. Found by the local `/code-review` pass.
+    bash -c "$line" </dev/null >/dev/null 2>&1
   ) &
   local pid=$!
   set +m
@@ -297,7 +315,32 @@ runner_build_stop() {
   dir="$(fleet_build_dir_for_path "$1")" || return 0
   pid="$(cat "$dir/pid" 2>/dev/null)" || return 0
   [ -n "$pid" ] || return 0
-  kill -0 "$pid" 2>/dev/null || return 0
-  fleet_kill_group "$pid"
+  if kill -0 "$pid" 2>/dev/null && headless_pid_is_ours "$pid"; then
+    fleet_kill_group "$pid"
+  fi
+  # THE PID FILE GOES EITHER WAY. It outlives a `kill -9` and a reboot, and the
+  # number in it is then whatever the system reused it for -- so a file left
+  # behind is a TERM and a KILL aimed at an unrelated process group of the
+  # user's, the next time anything stops this worktree. The watcher stop this
+  # replaced carried exactly this precaution and it was not carried over. Found
+  # by the local `/code-review` pass.
+  rm -f "$dir/pid"
   return 0
+}
+
+# Is this pid the build we forked, rather than whatever the system has since
+# reused the number for?
+#
+# The command line is what says so: the build runs under `bash -c` with the
+# generated line as its argument, and that line always names this fleet's build
+# directory. `ps` rather than a stored start time, because `ps` is what every
+# machine has. A `ps` that cannot answer is read as "not ours", which errs
+# towards not signalling -- the direction where the cost is a build that outlives
+# its worktree rather than a stranger's process group killed.
+#
+# `grep` without `-q`: every caller sources lib.sh under `pipefail`, and `-q`
+# exits on the first match, so `ps` can write into a closed pipe and the
+# pipeline is 141 for a probe that MATCHED. CLAUDE.md carries the rule.
+headless_pid_is_ours() {
+  ps -o command= -p "$1" 2>/dev/null | grep -F "$FLEET_BUILDS" >/dev/null
 }

@@ -728,7 +728,7 @@ build_state_for() {
   else
     rm -f "$dir/rc"
     set -m
-    ( sleep 300 ) & BUILD_SLEEPER=$!
+    ( exec -a "build $dir" sleep 300 ) & BUILD_SLEEPER=$!
     set +m
     printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
   fi
@@ -749,8 +749,13 @@ build_running() {
   # Its own process GROUP, because that is what the driver signals -- the build
   # command is a wrapper seam, so the process holding the credentials is
   # routinely a child of what was forked.
+  # ITS COMMAND LINE NAMES THE BUILD DIRECTORY, because that is what the driver
+  # identifies its own build by: a pid file outlives a `kill -9` and a reboot,
+  # and the number in it is then whatever the system reused it for. A fake build
+  # that did not look like one would pass the phases while the identity check
+  # rejected every real build, or the other way round.
   set -m
-  ( sleep 300 ) & BUILD_SLEEPER=$!
+  ( exec -a "build $dir" sleep 300 ) & BUILD_SLEEPER=$!
   set +m
   printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
 }
@@ -759,6 +764,21 @@ build_exited() {
   printf '%s\n' "${1:-0}" >"$AUTOFLEET_DIR/builds/42/rc"
   rm -f "$AUTOFLEET_DIR/builds/42/pid"
 }
+# ...and a build the driver CANNOT DESCRIBE, which is a third answer and not the
+# same as "there is no build here". The dispatcher has a record that issue $1
+# ran in `$WORK/wt`, and the index that would let the driver answer about it is
+# gone -- a build directory half-swept, a fleet directory restored from a
+# backup. Read as "nothing is running" it would count the worktree as waiting
+# for a person and end a drain with an agent still in there; read as blind it is
+# left alone and said once.
+build_blind() {
+  local num="${1:-42}" dir="$AUTOFLEET_DIR/builds/${1:-42}"
+  mkdir -p "$dir"
+  printf '%s\n' "$WORK/wt" >"$dir/worktree"
+  rm -rf "$AUTOFLEET_DIR/builds/by-path"
+  rm -f "$dir/pid" "$dir/rc"
+}
+
 # ...and what that run said it cost, which `build_exited` alone does not write.
 build_result() {
   mkdir -p "$AUTOFLEET_DIR/builds/42"
@@ -1644,7 +1664,7 @@ runner_available() {
 runner_worktree_create() { printf 'worktree_create\n' >>"$DOWN_CALLS"; return 1; }
 runner_worktree_list()   { printf 'worktree_list\n'   >>"$DOWN_CALLS"; }
 runner_worktree_set()    { printf 'worktree_set\n'    >>"$DOWN_CALLS"; }
-runner_agent_states()    { printf 'agent_states\n'    >>"$DOWN_CALLS"; }
+runner_build_state()     { printf 'build_state\n'     >>"$DOWN_CALLS"; return 1; }
 runner_set_deadline()    { printf 'set_deadline\n'    >>"$DOWN_CALLS"; }
 DRIVER
     : >"$WORK/down-calls"
@@ -1773,6 +1793,58 @@ DRIVER
 
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
+  stop_now_stops_builds)
+    # WHAT `stop --now` DOES NOW. Its pair `drain_lets_agents_finish` survives on
+    # the same line in tests/run.sh; this is the half that changed shape.
+    # `stop_freezes_agents` asserted that the freeze reached a live session and
+    # that the guard still refused anything outward afterwards -- and there is no
+    # session to freeze, so the first half became "the build is killed". The
+    # second half did not change at all and is the escape hatch, so it is
+    # asserted against the real `.claude/hooks/guard.py` exactly as before.
+    # Named in the PR body rather than dropped; found by
+    # `/mattpocock-skills:code-review`.
+    make_fixture ok
+    make_worktree
+    build_running
+    pid="$(cat "$AUTOFLEET_DIR/builds/42/pid")"
+    kill -0 "$pid" 2>/dev/null \
+      || fail "the fixture build is not running, so this phase would assert nothing"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    grep -q "stopped the build for #42" <<<"$out" \
+      || fail "stop --now did not say it stopped the build it stopped: $out"
+    # REAPED before the check: the fake build is a job of this shell, so a
+    # killed one stays a zombie until it is waited on and `kill -0` goes on
+    # answering yes about a process that is already dead.
+    wait "$BUILD_SLEEPER" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null \
+      && { kill -9 "$pid" 2>/dev/null; fail "stop --now left the build running: $out"; }
+    echo "ok: stop --now stops the build it owns, and says which"
+
+    # ...and a fleet with no build running does not claim to have stopped one.
+    in_fleet cmd_resume >/dev/null 2>&1
+    rm -rf "$AUTOFLEET_DIR/builds"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    grep -q "stopped the build" <<<"$out" \
+      && fail "it reported a stop for a worktree with no build in it: $out"
+    grep -q "there were none" <<<"$out" \
+      || fail "it said nothing at all where there was nothing to stop: $out"
+    echo "ok: ...and says so plainly when there is nothing to stop"
+
+    # THE ESCAPE HATCH, unchanged by this issue and asserted against the real
+    # hook rather than a copy of its rule: a stopped fleet lets nothing out.
+    # Stopped again first -- the second half above resumed, and asserting a
+    # stopped fleet's refusals against a running one asserts nothing.
+    in_fleet cmd_stop --now >/dev/null 2>&1
+    [ "$(guard_says 'git push')" = 2 ] \
+      || fail "a stopped fleet allowed a push"
+    [ "$(guard_says 'gh pr create --fill')" = 2 ] \
+      || fail "a stopped fleet allowed a pull request"
+    in_fleet cmd_resume >/dev/null 2>&1
+    [ "$(guard_says 'git push')" = 0 ] \
+      || fail "the stop outlived the resume, so the fleet can never push again"
+    echo "ok: ...and the guard still refuses anything outward while it is stopped"
+    ;;
+
   build_command)
     # THE SPEC'S CENTRAL ARTEFACT, and nothing asserted it. The issue names the
     # flags exactly and its design notes say `--bare` must not be passed --
@@ -2209,6 +2281,9 @@ GHSTUB
     : >"$AUTOFLEET_DIR/held-99"
     # Neither has a build the driver can describe, which is the outage: "I could
     # not tell" for both, so the farewell can name neither.
+    build_blind 42
+    mkdir -p "$AUTOFLEET_DIR/builds/99"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/builds/99/worktree"
     out="$(in_fleet farewell_parked 2 2>&1)"
     grep -q "the runner would not say" <<<"$out" \
       || fail "the farewell announced 2 worktrees and named none, with nothing saying why: $out"
@@ -2349,12 +2424,10 @@ GHSTUB
     # Found by `/mattpocock-skills:code-review`.
     : >"$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-99"
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
-    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
-' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    # #42's build has stopped; #99's is still running, which is what makes the
+    # gate on `held-99` decide anything.
+    build_state_for 42 "$WORK/wt" 0
+    build_state_for 99 "$WORK/wt99"
     dispatcher_running
     in_fleet record_dispatcher
     out="$(in_fleet cmd_status 2>&1)"
@@ -2453,9 +2526,10 @@ print(json.dumps({"result": {"worktrees": [
 
     # "Could not tell" is not "it has stopped": a state the driver cannot read
     # leaves the worktree uncounted, because somebody may still be in there.
-    # Reached by taking the build's record away, which is what a driver with
-    # nothing to say about this worktree looks like.
-    rm -rf "$AUTOFLEET_DIR/builds"
+    # Reached by taking the driver's INDEX away and leaving the record, which is
+    # the shape that is genuinely unanswerable -- no build recorded at all is a
+    # real answer, and one this phase asserts the other way below.
+    build_blind
     in_fleet count_parked_owned >/dev/null 2>&1
     [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "an agent-state listing that could not be read was treated as 'nobody is working'"
@@ -2470,7 +2544,7 @@ print(json.dumps({"result": {"worktrees": [
     # independent review.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    rm -rf "$AUTOFLEET_DIR/builds"
+    build_blind
     # THE LOG, not stdout: `count_parked_owned` discards the predicate's stdout
     # (it wants the rc, not the reason), and `say` tees to the log regardless --
     # which is the channel an operator actually reads.
@@ -2490,7 +2564,7 @@ print(json.dumps({"result": {"worktrees": [
     # wrong channel. armaatus/autofleet#71.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    rm -rf "$AUTOFLEET_DIR/builds"
+    build_blind
     # `2>&1 >/dev/null` in that ORDER: stderr onto the capture, then stdout away.
     onscreen="$(in_fleet count_parked_owned 2>&1 >/dev/null)"
     grep -q "could not read the build's state" <<<"$onscreen" \

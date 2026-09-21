@@ -23,16 +23,15 @@ echo "==> deriving isolated worktree environment"
 ./scripts/fleet/env.sh
 set -a; . ./.env; set +a
 
-# BEFORE anything expensive, and before the watcher.
+# BEFORE anything expensive.
 #
-# `fleet.sh` and `board.sh` both probe; this hook ran earliest of the
-# three and probed last, which is the worst order available -- the runner holds
-# the agent's tab until this returns (`setupAgentStartupPolicy: wait-for-setup`),
-# so a runtime that is not answering surfaced as: submodules initialised,
-# containers built, a watcher started, and then an agent tab that never receives
-# a prompt, with the only explanation in a log nobody opens. The driver has
-# already said what it tried and what to install; this adds the consequence.
-# armaatus/autofleet#13.
+# `fleet.sh` and `board.sh` both probe; this hook ran earliest of the three and
+# probed last, which is the worst order available -- the dispatcher waits for
+# this to return before it starts a build, so a runtime that is not answering
+# surfaced as: submodules initialised, containers built, and then a worktree
+# nothing runs in, with the only explanation in a log nobody opens. The driver
+# has already said what it tried and what to install; this adds the
+# consequence. armaatus/autofleet#13.
 #
 # AFTER env.sh, not before it, and that order is the finding rather than a
 # convenience. env.sh is milliseconds and it is where a machine that is missing
