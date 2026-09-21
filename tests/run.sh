@@ -33,7 +33,7 @@ SUITES=(
 "lint:"
 "ceilings:over wellformed"
 "brief:stage1 stage2 reading"
-"env:concurrent readable python venv setup_fails_fast"
+"env:concurrent readable python venv setup_fails_fast unstarted"
 "teardown:derives reap profiles mtime"
 "runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
 "resolve_thread:last more partial green stopped"

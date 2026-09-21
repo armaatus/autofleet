@@ -25,6 +25,16 @@
 #   test_orca_env.sh setup_fails_fast
 #                                 setup.sh itself stops on the interpreter
 #                                 before seeding or building, and says why.
+#   test_orca_env.sh unstarted    a worktree the dispatcher did not open is told
+#                                 so, and told the command that starts its
+#                                 agent. This is the regression: #151 deleted
+#                                 the watcher that pressed Return on the drafted
+#                                 prompt, the dispatcher took over starting the
+#                                 build, and the path where there IS no
+#                                 dispatcher kept provisioning cleanly and
+#                                 stopping -- a worktree sitting on an unsent
+#                                 prompt for four and a half hours, observed on
+#                                 a real worktree on 2026-09-21 (#156).
 #   test_orca_env.sh python       setup.sh installs server/requirements.txt with
 #                                 an interpreter new enough for it, and says so
 #                                 in one line when there is none. This is the
@@ -282,8 +292,38 @@ case "${1:-}" in
     echo "PASS: .env is never observed partially written"
     ;;
 
+  unstarted)
+    # END TO END THROUGH setup.sh, not a grep of it. The stanza is one `if` away
+    # from being printed for every worktree or for none, and both of those read
+    # as a pass to anything that only checks the text exists somewhere.
+    make_fixture
+    cd "$FIXTURE" || fail "could not enter the fixture"
+
+    # The headless runner asks for git and gh and nothing else, so the probe
+    # setup.sh runs before any of this passes on a bare machine.
+    out="$(AUTOFLEET_RUNNER=headless "$BASH" ./scripts/fleet/setup.sh 2>&1)" \
+      || fail "setup.sh did not provision the fixture at all: $out"
+
+    grep -q "worktree ready" <<<"$out" || fail "setup.sh never finished: $out"
+    # The three things a person stranded here needs: that nothing is running,
+    # what to run, and the number to run it on.
+    grep -qi "not started" <<<"$out" \
+      || fail "a worktree with no dispatcher behind it was not told its agent is unstarted: $out"
+    grep -q "issue-command.sh" <<<"$out" \
+      || fail "setup.sh said the agent is unstarted without naming the command that starts it: $out"
+
+    # ...and the dispatcher, which starts the build itself, must not print any
+    # of it. A build that is already running told to run issue-command.sh by
+    # hand is the same confusion pointed the other way.
+    out="$(AUTOFLEET_RUNNER=headless AUTOFLEET_DISPATCHER_LAUNCH=1 "$BASH" ./scripts/fleet/setup.sh 2>&1)" \
+      || fail "setup.sh failed under the dispatcher: $out"
+    grep -qi "not started" <<<"$out" \
+      && fail "the dispatcher's own launch was told to start the agent by hand: $out"
+    echo "PASS: a worktree nothing opened is told so, and told what starts its agent"
+    ;;
+
   *)
-    echo "usage: $0 concurrent|readable|python|venv|setup_fails_fast" >&2
+    echo "usage: $0 concurrent|readable|python|venv|setup_fails_fast|unstarted" >&2
     exit 2
     ;;
 esac
