@@ -574,15 +574,17 @@ def check_bash(command, cwd=""):
         # protected transitively -- a reviewer it spawned from here would inherit
         # this worktree and be refused at its own `gh pr review` -- but that
         # refusal arrives one process deep, in a log, after a full-budget agent
-        # run. `validate.sh` gets it said here instead, and for a sharper reason:
-        # a `pass` validation is what releases the merge gate, so an agent that
-        # could start its own validator could certify its own branch.
+        # run. It gets said here instead, and for a sharper reason since
+        # armaatus/autofleet#152: the reviewer's verdict is what releases the
+        # merge gate outright, so an agent that could start its own could certify
+        # its own branch. `after-pr.sh` is the loop that runs it and `fix.sh` the
+        # session that answers it -- both the dispatcher's, both refused here.
         #
-        # Both scripts, by basename, because `./scripts/fleet/validate.sh`,
-        # `bash scripts/fleet/validate.sh` and an absolute path are the same act.
-        # Only in a fleet-owned worktree: the DISPATCHER runs both from the repo
-        # root, which is not one, and a person running either by hand is the
-        # ordinary case this must not argue about.
+        # By BASENAME, because `./scripts/fleet/review.sh`,
+        # `bash scripts/fleet/review.sh` and an absolute path are the same act.
+        # Only in a fleet-owned worktree: the DISPATCHER runs all three from the
+        # repo root, which is not one, and a person running any of them by hand
+        # is the ordinary case this must not argue about.
         #
         # POSITIONALLY, like every other rule in this file (`words[:len(prefix)]`
         # above), and this scanned EVERY word for one commit. A script name is a
@@ -615,60 +617,39 @@ def check_bash(command, cwd=""):
                             break
             for w in verbs:
                 base = os.path.basename(w)
-                if base in ("validate.sh", "review.sh"):
+                if base in ("review.sh", "fix.sh", "after-pr.sh"):
                     deny(
                         "Blocked: this worktree was opened by the fleet, and an agent does "
                         "not start\n"
-                        f"the {base.split('.')[0]} that judges its own pull request.\n"
+                        f"the {base.split('.')[0]} pass that judges its own pull request.\n"
                         "\n"
-                        "The dispatcher runs both, from the repository root, which is not a "
+                        "The dispatcher runs them, from the repository root, which is not a "
                         "fleet\n"
                         "worktree -- that is the whole of what separates their verdict from "
-                        "yours. A\n"
-                        "validation `pass` is what releases the merge gate, so a branch that "
-                        "could\n"
-                        "start its own validator could certify itself.\n"
+                        "yours. The\n"
+                        "verdict is what releases the merge gate, so a branch that could "
+                        "start its own\n"
+                        "reviewer could certify itself.\n"
                         "\n"
-                        "Wait for them instead:\n"
-                        "  ./scripts/fleet/await-review.sh\n"
-                        "\n"
-                        "To answer findings, reply on the thread with what you did or why "
-                        "you did not,\n"
-                        "then say it once for the whole review:\n"
-                        "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\"\n"
-                        "\n"
-                        "Do NOT resolve the threads. The validator resolves the ones it is "
-                        "satisfied by,\n"
-                        "which is the whole of what makes a resolved thread mean anything -- "
-                        "a thread you\n"
-                        "close is one nobody checked."
+                        "Your job ends at an open pull request carrying `Closes #N`. What "
+                        "happens after\n"
+                        "that -- one review, at most one fix answering it, and then GitHub's "
+                        "own rules --\n"
+                        "is the dispatcher's. If you are waiting to see a verdict land:\n"
+                        "  ./scripts/fleet/await-review.sh"
                     )
 
-        # In the automatic flow, a PR arrives already reviewed or it does not
-        # arrive. `/code-review` locally, findings recorded, THEN push -- so the
-        # independent review on the PR is a second opinion rather than the first
-        # one. Only in fleet-owned worktrees: pushing a half-finished branch by
-        # hand is a normal thing to do and this must not argue about it.
-        pushes = _is_git(words, "push")
-        # Stripped, for the reason above: `gh -R owner/repo pr create` opened a
-        # PR out of an unreviewed fleet worktree.
-        opens_pr = _gh_rest(words)[:2] == ["pr", "create"]
-        if (pushes or opens_pr) and _fleet_owns_this_worktree():
-            sha = _head_sha()
-            marker = os.path.join(_repo_root(), ".autofleet", "run", f"reviewed-{sha}")
-            if sha and not os.path.exists(marker):
-                deny(
-                    "Blocked: this worktree was opened by the fleet, and nothing leaves "
-                    "one of those\n"
-                    "unreviewed. Run the local review first, then record it:\n"
-                    "  /code-review high\n"
-                    "  /mattpocock-skills:code-review\n"
-                    "  ./scripts/fleet/record-review.sh   # writes .autofleet/run/reviewed-<sha>\n"
-                    "Fix what it found, re-run the tests, and push then. The marker is "
-                    "per-commit,\n"
-                    "so amending or adding a commit needs the review re-run -- which is "
-                    "the point."
-                )
+        # THE PUSH MARKER RULE IS GONE, and this note is what stops it being
+        # re-derived. `.autofleet/run/reviewed-<sha>` gated `git push` and
+        # `gh pr create` out of a fleet worktree on a local review having been
+        # run and recorded first. The two passes it recorded were the largest
+        # per-issue line item after the build -- sixteen rounds on PR #126,
+        # eight on #129, two fresh full-budget agents each -- and what they
+        # bought was a second opinion from the same context that wrote the
+        # code. armaatus/autofleet#152 removed them and moved the one opinion
+        # that is independent to after the PR exists, where the dispatcher runs
+        # it and this file's `review.sh` refusal above keeps it out of the
+        # author's reach. There is nothing left for a push to be gated on.
 
         # "A human merges. Do not merge your own PR." -- CLAUDE.md, "Finishing a
         # task". Separation of duties is the one review control this project
@@ -698,21 +679,19 @@ def check_bash(command, cwd=""):
                     "not submit\n"
                     "the independent review of its own pull request.\n"
                     "\n"
-                    "In local review mode the reviewer signs in as the same GitHub "
-                    "account you do,\n"
-                    "so the ONLY thing separating its verdict from yours is a marker in "
-                    "the review\n"
-                    "body -- and this is what keeps that marker out of your reach. The "
+                    "The reviewer signs in as the same GitHub account you do, so the "
+                    "ONLY thing\n"
+                    "separating its verdict from yours is a marker in the review body "
+                    "-- and this is\n"
+                    "what keeps that marker out of your reach. `review.sh` writes it "
+                    "from a JSON\n"
+                    "field the model cannot spell; you cannot write it at all.\n"
+                    "\n"
+                    "Your job ends at an open pull request carrying `Closes #N`. The "
                     "dispatcher\n"
-                    "runs the reviewer for you; wait for it:\n"
-                    "  ./scripts/fleet/await-review.sh\n"
-                    "\n"
-                    "To answer findings, reply on the thread with what you did or why "
-                    "you did not,\n"
-                    "then say it once for the whole review:\n"
-                    "  ./scripts/fleet/answer-review.sh \"<what you did, or why you did not>\"\n"
-                    "\n"
-                    "Resolving them is the VALIDATOR's, not yours."
+                    "runs the review, and buys one fix session if it asks for changes. "
+                    "To watch:\n"
+                    "  ./scripts/fleet/await-review.sh"
                 )
             if sub_cmd[:2] == ["pr", "merge"]:
                 # `--auto` does not merge. It asks GitHub to merge later, once
@@ -760,8 +739,8 @@ def check_bash(command, cwd=""):
             # independently, which is what two axes are for.
             #
             # A GET is left alone: reading the reviews on a PR is how
-            # `review-status.sh` and `await-review.sh` answer "has this been
-            # reviewed yet", and refusing that would break the loop this guards.
+            # `await-review.sh` answers "has this been reviewed yet", and
+            # refusing that would break the loop this guards.
             # ...and the GRAPHQL spelling, which has no `/pulls/N/reviews` path
             # in it at all. `gh api graphql -f query='mutation{
             # addPullRequestReview(...) }'` creates the same review record, with
@@ -851,8 +830,9 @@ def check_bash(command, cwd=""):
                     "found\n"
                     "something clears the changes-requested block AND the answer requirement "
                     "at\n"
-                    "once. Answer the findings instead:  "
-                    "./scripts/fleet/answer-review.sh \"<what you did>\""
+                    "once. A verdict is not yours to clear: push a fix and the "
+                    "dispatcher re-reviews\n"
+                    "the head you pushed, which is the only thing that supersedes one."
                 )
             if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
                 "addPullRequestReview" in w or "submitPullRequestReview" in w
@@ -1180,7 +1160,7 @@ SELFTEST = [
     # The enforcement layer is guarded only in a fleet worktree, so both halves
     # of that live in _stateful_checks below.
     ("Edit", {"file_path": "/w/demo-project/.claude/skills/house-style/SKILL.md"}, 0, "skills are advisory and stay editable"),
-    ("Edit", {"file_path": "/w/demo-project/.claude/agents/validator.md"}, 0, "so do subagents"),
+    ("Edit", {"file_path": "/w/demo-project/.claude/agents/reviewer.md"}, 0, "so do subagents"),
     ("Edit", {"file_path": "/w/demo-project/src/app.c"}, 0, "ordinary source files are editable"),
     ("NotebookEdit", {"notebook_path": "/w/demo-project/.env"}, 2, "NotebookEdit names its target notebook_path, and is guarded too"),
     ("Bash", {"command": "cat > /tmp/doc.md <<'EOF'\nrm .env\nEOF"}, 0,
@@ -1322,32 +1302,25 @@ def _stateful_checks():
         expect(0, {"command": "git status"}, "...and still read git")
         os.remove(STOP_FILE)
 
-        # Fleet-owned and unreviewed: the push gate. The marker is per-commit,
-        # so a fresh HEAD has none.
+        # Fleet-owned: what an agent may and may not do from one of these.
+        #
+        # THE PUSH GATE IS GONE and there is no row for it, deliberately. It
+        # refused `git push` and `gh pr create` until a local review had been
+        # recorded for the exact HEAD; the passes that produced that record went
+        # with armaatus/autofleet#152, and a marker nothing writes is a gate
+        # nothing can ever pass. What replaces it is the review AFTER the push,
+        # which the rows below keep out of the author's reach.
         root = _repo_root()
         if root:
             with open(os.path.join(OWNED_DIR, "999"), "w") as fh:
                 fh.write(root + "\n")
-            sha = _head_sha()
-            marker = os.path.join(root, ".autofleet", "run", f"reviewed-{sha}")
-            had_marker = os.path.exists(marker)
-            if had_marker:
-                os.rename(marker, marker + ".selftest")
             try:
-                expect(2, {"command": "git push origin HEAD"},
-                       "a fleet worktree cannot push before the local review")
-                expect(2, {"command": "gh pr create --title x"},
-                       "...nor open a PR")
-                expect(2, {"command": "gh -R owner/repo pr create --title x"},
-                       "...nor open one by naming the repository")
-                expect(0, {"command": "ctest --test-dir build"},
-                       "...but the gate is only on what leaves")
-                os.makedirs(os.path.dirname(marker), exist_ok=True)
-                with open(marker, "w") as fh:
-                    fh.write("reviewed\n")
                 expect(0, {"command": "git push origin HEAD"},
-                       "...and lifts once the review is recorded")
-                # The other half of local review mode, and the sharp one:
+                       "a fleet worktree pushes; the review is what comes after")
+                expect(0, {"command": "gh pr create --title x"},
+                       "...and opens the pull request, which is where its job ends")
+                # The other half of a reviewer signed in as the author, and the
+                # sharp one:
                 # with `gh pr review` reachable from here, the marker that makes
                 # a self-review count is a string an agent can type.
                 expect(2, {"command": "gh pr review 7 --comment --body x"},
@@ -1355,17 +1328,21 @@ def _stateful_checks():
                        because="does not submit")
                 expect(0, {"command": "gh pr view 7 --json body"},
                        "...but reading the PR is not reviewing it")
-                # ...nor start the validator, which is the sharper half: a `pass`
-                # validation releases the merge gate outright, so an agent that
+                # ...nor start the reviewer, which is the sharper half: its
+                # verdict releases the merge gate outright, so an agent that
                 # could run this would be certifying its own branch.
-                expect(2, {"command": "./scripts/fleet/validate.sh 7"},
-                       "a fleet worktree cannot start its own validator",
+                expect(2, {"command": "./scripts/fleet/review.sh 7"},
+                       "a fleet worktree cannot start its own reviewer",
                        because="does not start")
-                expect(2, {"command": "bash scripts/fleet/validate.sh"},
+                expect(2, {"command": "bash scripts/fleet/review.sh"},
                        "...nor through bash, which is the same act",
                        because="does not start")
-                expect(2, {"command": "./scripts/fleet/review.sh 7"},
-                       "...nor its own reviewer, said here rather than one process deep",
+                expect(2, {"command": "./scripts/fleet/after-pr.sh 7"},
+                       "...nor the loop that runs it",
+                       because="does not start")
+                expect(2, {"command": "./scripts/fleet/fix.sh 7"},
+                       "...nor the fix session answering it, which is also the "
+                       "dispatcher's",
                        because="does not start")
                 # THE OTHER DIRECTION, which this rule did not have and needed:
                 # it scanned every word, so naming either script as an OPERAND
@@ -1376,19 +1353,19 @@ def _stateful_checks():
                 # tighten silently.
                 expect(0, {"command": "bash -n scripts/fleet/review.sh"},
                        "...but the parse check CLAUDE.md requires is not starting one")
-                expect(0, {"command": "bash -n scripts/fleet/validate.sh"},
-                       "...on either of them")
+                expect(0, {"command": "bash -n scripts/fleet/fix.sh"},
+                       "...on any of them")
                 expect(0, {"command": "git log --oneline -- scripts/fleet/review.sh"},
                        "...nor is reading either one's history")
-                expect(0, {"command": "git diff scripts/fleet/validate.sh"},
+                expect(0, {"command": "git diff scripts/fleet/fix.sh"},
                        "...nor diffing it")
                 expect(2, {"command": "bash scripts/fleet/review.sh 7"},
                        "...while an interpreter RUNNING one is still the same act",
                        because="does not start")
                 expect(0, {"command": "./scripts/fleet/await-review.sh"},
                        "...but WAITING for them is the whole of what it should do")
-                expect(0, {"command": "./scripts/fleet/answer-review.sh 'fixed it'"},
-                       "...and answering the findings is still its job")
+                expect(0, {"command": "gh pr comment 7 --body 'rebased'"},
+                       "...and saying something on the pull request is not reviewing it")
                 # The REST spelling. `gh pr merge` has had one of these since it
                 # was written; `gh pr review` did not, and `Bash(gh api:*)` is on
                 # the agent allowlist -- so this was the live way to forge the
@@ -1573,10 +1550,11 @@ def _stateful_checks():
                        "...and the refusal names the enforcement layer",
                        because="enforcement layer")
             finally:
-                if os.path.exists(marker):
-                    os.remove(marker)
-                if had_marker:
-                    os.rename(marker + ".selftest", marker)
+                # Nothing to put back: the rows above write no marker. The
+                # `try` stays because `OWNED_DIR` below is what has to be
+                # restored whatever these rows do, and a `finally` that once
+                # held a rename is not a reason to unwind the block.
+                pass
 
     STOP_FILE, OWNED_DIR = saved
     return failures
