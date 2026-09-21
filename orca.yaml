@@ -35,6 +35,19 @@ setupAgentStartupPolicy: wait-for-setup
 # work from a bare URL and never reads the spec. So this points the agent at
 # issue-command.sh, which resolves the issue to its body, labels and milestone --
 # the sole channel design intent travels through.
+#
+# THIS HAS NEVER BEEN OBSERVED TO TAKE EFFECT, and the evidence is in the code
+# #151 deleted. `agent-autostart.sh` did not write the prompt: it read the
+# composer draft, matched it against `^https?://.../(issues|pull)/([0-9]+)/?$`
+# and APPENDED the run-instruction. A draft rendered from this block would not
+# have matched that anchored pattern and the watcher would have sent nothing --
+# so every agent that ever started here started from a bare URL that the
+# watcher completed. The app's own delivery log agrees: 48 bytes, the length of
+# the URL alone, for every worktree back to #69. Keep the block -- it costs
+# nothing and it is the documented seam -- but do NOT treat it as the thing
+# that gets the spec in front of an agent. `scripts/fleet/setup.sh`'s closing
+# stanza prints the same command for a person to run, and that one is tested
+# (`tests/test_env.sh unstarted`). armaatus/autofleet#156.
 issueCommand: |
   Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh {{issue}}` first and follow
   everything it prints. It resolves issue #{{issue}} ({{artifact_url}}) to its

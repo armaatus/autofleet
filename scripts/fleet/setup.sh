@@ -8,10 +8,11 @@
 # up reads the connection error as a code bug and goes chasing it; the seconds
 # this costs buy away that whole failure mode.
 #
-# autofleet's own half is small: derive the worktree's identity, initialise
-# submodules, and start the watcher that submits the agent's prompt. Everything
-# that is about THIS project -- containers, fixtures, a build, a venv -- lives
-# in `.autofleet/setup.sh` in the host repo, which this calls with .env already
+# autofleet's own half is small: derive the worktree's identity and initialise
+# submodules. It does NOT start the agent -- see the closing stanza for who
+# does, which differs by who opened the worktree. Everything that is about THIS
+# project -- containers, fixtures, a build, a venv -- lives in
+# `.autofleet/setup.sh` in the host repo, which this calls with .env already
 # exported.
 set -euo pipefail
 
@@ -41,8 +42,8 @@ set -a; . ./.env; set +a
 # install Orca when what is actually wrong is their PATH. That is the same
 # consequence-reported-as-cause this issue exists to remove, reintroduced by
 # the fix for it. `tests/test_env.sh setup_fails_fast` is the phase that caught
-# it. Everything the probe still guards -- submodules, the project hook, the
-# watcher -- is below.
+# it. Everything the probe still guards -- submodules and the project hook --
+# is below.
 #
 # It is FATAL rather than a warning: everything this hook exists to prepare is
 # for an agent the runner is supposed to start, and provisioning a worktree
@@ -81,10 +82,13 @@ if [ -f .gitmodules ]; then
   git submodule update --init --recursive
 fi
 
-# Before the watcher, not after it. The project hook is the step that fails on a
-# bad day -- an image pull with no network, a scan that never finishes -- and
-# `set -e` means a failure here must not leave a watcher polling the runtime
-# from a worktree nobody will ever work in.
+# LAST of the provisioning steps, and that order outlived its first reason. It
+# was "before the watcher": the project hook is the step that fails on a bad
+# day -- an image pull with no network, a scan that never finishes -- and under
+# `set -e` a failure here must not leave a watcher polling the runtime from a
+# worktree nobody will ever work in. #151 deleted the watcher; the ordering
+# still holds, because the stanza below tells a person what to run and a hook
+# that died owes them that line before they read it as an invitation.
 if [ -n "${AUTOFLEET_SETUP_HOOK:-}" ] && [ -x "$AUTOFLEET_SETUP_HOOK" ]; then
   echo "==> $AUTOFLEET_SETUP_HOOK"
   "./$AUTOFLEET_SETUP_HOOK"
@@ -106,4 +110,36 @@ echo "worktree ready."
 echo "  project     $FLEET_PROJECT"
 fleet_ports | sed 's/^/  port        /'
 [ -n "${AUTOFLEET_TEST_COMMAND:-}" ] && echo "  tests       $AUTOFLEET_TEST_COMMAND"
+
+# WHO STARTS THE AGENT, said where the person who has to do it is looking.
+#
+# `start_build` covers the worktrees the dispatcher opened and nothing covers
+# the rest: a person opening one through the app gets a provisioned worktree, a
+# prompt drafted in a tab, and no watcher to press Return -- which is, word for
+# word, the failure `runner/orca.sh` gives as the reason #151 was made, reached
+# now by succeeding instead of by failing. Observed on 2026-09-21: four and a
+# half hours on an unsent prompt. armaatus/autofleet#156.
+#
+# The MARKER IS THE DISPATCHER'S, not the runner's. Asking which driver is
+# configured answers a different question -- `headless` is the default
+# everywhere, including in a worktree a person opened by hand -- and asking the
+# app whether it drafted anything makes this hook's output depend on a runtime
+# the headless path does not have. `launch` sets the variable in the one place
+# that knows a build is about to be started.
+if [ -z "${AUTOFLEET_DISPATCHER_LAUNCH:-}" ]; then
+  # A dispatcher-opened branch begins with its issue number, and a person's
+  # does not. A PLACEHOLDER rather than a guess: the number is the one part of
+  # this line a reader cannot check, and a wrong one sends them to somebody
+  # else's issue with no sign anything is off.
+  issue="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || issue=""
+  issue="${issue##*/}"
+  case "$issue" in
+    [0-9]*) issue="${issue%%-*}" ;;
+    *)      issue="<issue>" ;;
+  esac
+  echo "  agent       NOT started -- no dispatcher opened this worktree."
+  echo "              Start it here, in the agent's tab:"
+  echo "                GH_PAGER=cat ./scripts/fleet/issue-command.sh $issue"
+  echo "              and follow what it prints. Nothing else will submit one."
+fi
 exit 0
