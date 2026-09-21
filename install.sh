@@ -419,19 +419,20 @@ Next, in the repo you just installed into:
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.
-  6. Choose where the independent review runs -- AUTOFLEET_REVIEW_MODE in
-     .autofleet/config. The default `github` needs a CLAUDE_CODE_OAUTH_TOKEN
-     secret on the repository (mint one with `claude setup-token`); WITHOUT it
-     that job no-ops and every PR blocks forever on a review that cannot arrive.
-     `local` runs the reviewer on your machine instead, with a weaker
-     independence guarantee that docs/CONFIGURATION.md spells out.
+  6. Check the branch rules this installer tried to set. It needs admin on the
+     repository, and it says so above if it could not: required checks,
+     conversation resolution, and dismissing an approval when the head moves are
+     branch protection, and merge_gate.py deliberately does not re-check them.
+     docs/CONFIGURATION.md has the gh api call to run by hand.
   7. Write .autofleet/review.md -- YOUR project's correctness rules, the ones
      REVIEW.md cannot know. The file that must be written atomically, the header
      that may not appear in that directory, the address a test may not reach.
      The reviewer reads it after REVIEW.md wherever it exists, and it is not
      seeded because seeding it would hand you somebody else's. REVIEW.md's "...and
      this project's own" section says what belongs in it.
-  8. Make `merge-gate` a required check on your default branch.
+  8. Read what the review gives up -- the reviewer signs in as whoever `gh` is,
+     which is normally the account that opened the pull request.
+     docs/CONFIGURATION.md, "What this gives up, exactly".
   9. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
 
 If the plugin step above could not run, these are the two commands, from inside

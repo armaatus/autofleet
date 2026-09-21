@@ -2075,9 +2075,11 @@ for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
 
 # The loop's steps. `issue-command.sh` itself is NOT here: printing the command
 # that fetches the brief is the pointer this check is asking for.
-STEPS = ["self-review.sh", "record-review.sh", "await-review.sh",
-         "review-status.sh", "resolve-thread.sh", "answer-review.sh",
-         "gh pr merge", "/code-review", "/mattpocock-skills:code-review"]
+# Six of these went with the post-PR protocol (armaatus/autofleet#152) and
+# `gh pr merge` is the dispatcher's now. What is left is what an AGENT could
+# still be told to run from the wrong page.
+STEPS = ["await-review.sh", "review.sh", "fix.sh", "after-pr.sh",
+         "gh pr merge", "/implement", "/mattpocock-skills:tdd"]
 found = sorted({s for b in blocks for s in STEPS if s in b})
 if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
@@ -2310,118 +2312,22 @@ else
 
 fi
 
-# Silence is this workflow's failure mode and it is invisible: the action can
-# burn 35 turns and real money, decide a verdict, and end without ever running
-# `gh pr review` -- is_error false, job green, nothing on the PR. That happened
-# on #99 twice on one head, and every watcher downstream then waits forever for
-# a review that already came and went.
+# THE WORKFLOW REVIEWER'S CHECKS WENT WITH THE WORKFLOW.
 #
-# Two things have to stay true, and both are one careless edit from gone.
-review_wf=".github/workflows/claude-review.yml"
-if [ -f "$review_wf" ]; then
-  grep -q "no verdict was submitted" "$review_wf" \
-    || fail "claude-review.yml no longer notices a review that submitted nothing"
-  ok "a review that submits nothing is reported"
-
-  # It must stay a COMMENT. A generated review would satisfy merge_gate.py's
-  # requirement for an independent review while carrying no judgement at all --
-  # worse than the silence it replaces, because it would merge things.
-  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | qgrep "gh pr review"; then
-    fail "the no-verdict notice submits a REVIEW; that would satisfy merge-gate with no judgement"
-  fi
-  ok "the no-verdict notice is a comment, never a review"
-
-  # ...and the reviewer is told to declare what it found. Without the trailer
-  # every review fails closed, so this does not break a PR -- it makes every one
-  # of them wait for an answer to findings that may not exist, which is the
-  # slow way for a gate to stop meaning anything.
-  grep -q 'review-findings' "$review_wf" \
-    || fail "claude-review.yml no longer tells the reviewer to end with <!-- review-findings: N -->, which merge_gate.py reads to tell a clean review from one with findings"
-  ok "the reviewer is told to declare how many findings it left"
-fi
-
-# The reviewer is told to submit its verdict with a command it can actually run.
+# Four lived here, all about one failure: `claude-review.yml` could burn 35
+# turns and real money, decide a verdict, and end without ever running
+# `gh pr review` -- is_error false, job green, nothing on the pull request. It
+# happened on #99 twice on one head and on #131 three times. So the workflow had
+# to notice the silence, had to report it as a COMMENT rather than a generated
+# review, had to tell the reviewer to declare its finding count, and had to
+# name a submit command its own `claude_args` could actually run.
 #
-# `claude_args` grants Read, Grep, Glob and a fixed list of gh/git calls -- no
-# Write, no generic Bash, no redirection and no mktemp. The prompt nonetheless
-# told it to submit with `--body-file <file>`, a file it had no way to create.
-# So a run only submitted at all if it improvised away from its instruction, and
-# PR #131 got three green review runs and zero reviews out of it. A green job
-# that did nothing is the shape nothing else here catches.
-if [ -f "$review_wf" ]; then
-  # 2>&1 because the checks below report by `sys.exit("...")`, which writes to
-  # stderr; without it the failure would print a reason that is an empty string.
-  if reason="$(python3 - "$review_wf" 2>&1 <<'REVIEWCMD'
-import re, sys
-
-text = open(sys.argv[1]).read()
-# From `review:` to the next top-level job key, BY SHAPE. Naming the job that
-# follows would hard-code the very thing the comment on the sed below says not
-# to, and the two slices of this same file must not disagree.
-start = text.find("\n  review:")
-if start < 0:
-    sys.exit("claude-review.yml has no `review:` job")
-after = re.search(r"\n  [a-z][a-z_-]*:\n", text[start + 1:])
-job = text[start:start + 1 + after.start()] if after else text[start:]
-
-args = re.search(r"claude_args:\s*(.+)", job)
-if not args:
-    sys.exit("the review job has no claude_args, so what it may run is unknown")
-allowed = args.group(1)
-# Anything that could create a file for --body-file to read.
-can_write = ("Write" in allowed
-             or re.search(r"Bash(?!\()", allowed)
-             or "Bash(mktemp" in allowed)
-# The COMMAND, not the word: the prompt explains why --body-file is wrong, and a
-# bare search flags its own explanation.
-told_to = [ln for ln in job.splitlines()
-           if "gh pr review" in ln and "--body-file" in ln]
-if told_to and not can_write:
-    sys.exit("the review prompt submits with `--body-file`, and the job grants "
-             "no tool that can create a file: " + told_to[0].strip())
-if "gh pr review" not in job:
-    sys.exit("the review prompt no longer names `gh pr review`, so nothing tells "
-             "it to submit a review at all")
-if "Bash(gh pr review:" not in allowed:
-    sys.exit("the review job does not allow `gh pr review`, so it cannot submit")
-REVIEWCMD
-)"
-  then
-    ok "the reviewer can run the command it is told to submit with"
-  else
-    # The check's OWN words. A fixed string here reported a renamed job or a
-    # missing claude_args as "the reviewer cannot run its submit command",
-    # which sends the reader to the wrong line.
-    fail "claude-review.yml: $reason"
-  fi
-
-  # A review is not a build. Cancelling the run that was producing the verdict
-  # leaves that head with none -- and the no-verdict notice is `needs: review`,
-  # so it does not fire either. #86's merged head and #81's both show
-  # `cancelled` for this job.
-  # From `review:` to the next top-level job key, by shape rather than by name:
-  # a range hard-coded to `verdict:` would silently swallow the rest of the file
-  # the day that job is renamed, and pick up the `mention` job's own
-  # cancel-in-progress -- a failure about the wrong job.
-  if sed -n '/^  review:/,/^  [a-z][a-z_-]*:$/p' "$review_wf" \
-       | qgrep -E "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
-    fail "the review job cancels in progress; a killed review leaves the head with no verdict and nothing that says so"
-  fi
-  ok "a review in flight is never cancelled by the next event"
-
-  # ...and when a review IS silent, the pipeline asks once more on its own. The
-  # comment alone named two remedies and both were manual, so a PR whose review
-  # said nothing waited for a person to notice it.
-  grep -q 'gh workflow run claude-review.yml' "$review_wf" \
-    || fail "a review that submitted nothing no longer asks for another one; the PR waits for a person"
-  # ...and the run it asks for must be allowed to happen. A dispatch by
-  # GITHUB_TOKEN runs as github-actions[bot], and claude-code-action refuses a
-  # non-human actor unless it is named here -- so without this the retry starts
-  # a run that always declines, which is a mechanism that cannot fire.
-  grep -qE "^[[:space:]]*allowed_bots:.*(github-actions|\*)" "$review_wf" \
-    || fail "the review job does not allow github-actions, so the review it asks for after a silent one is refused as a non-human actor"
-  ok "a silent review asks for exactly one more, and that one is allowed to run"
-fi
+# That whole class of failure is gone rather than unguarded: the reviewer
+# returns a VALUE now (armaatus/autofleet#152), `review.sh` posts it, and a
+# model that returns a value cannot forget to return it. The checks are deleted
+# rather than left behind an `[ -f ]` that silently passes -- a guard that
+# stops guarding is hard rule 3's own example -- and this note is what stops
+# the next reader concluding they were merely dropped.
 
 # A cancelled run is not a green run. `cancel-in-progress` is right on a branch,
 # where only the newest push matters, and wrong on main, where every commit is
