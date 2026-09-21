@@ -168,9 +168,8 @@ for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 #                        and in a host that sentence is only true because of
 #                        this line. A project with ports and a setup hook that
 #                        appends a token to `.env` is the ordinary case.
-#   .autofleet/run/      `record-review.sh`'s `reviewed-<sha>` markers,
-#                        `agent-autostart.sh`'s pidfile, and -- since
-#                        armaatus/autofleet#55 -- `handoff.sh`'s note.
+#   .autofleet/run/      `record-review.sh`'s `reviewed-<sha>` markers and
+#                        what the local review passes write.
 #   /findings.md         what the local review passes write on the way to the
 #                        PR body.
 #
@@ -211,8 +210,8 @@ ensure_ignored() {
     # so a re-run does not stack them.
     if [ -s "$gi" ] && [ -n "$(tail -c 1 "$gi" 2>/dev/null)" ]; then printf '\n'; fi
     printf '# Written at runtime by the autofleet payload, never committed:\n'
-    printf '# the per-worktree .env, review markers, the autostart pidfile,\n'
-    printf '# the handoff note, and what the local review writes.\n'
+    printf '# the per-worktree .env, review markers, and what the local\n'
+    printf '# review passes write.\n'
     printf '%s\n' "${missing[@]}"
   } >>"$gi"
 }

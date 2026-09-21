@@ -1909,7 +1909,32 @@ launch() {
   # foundation_in_flight for why it is cleared here rather than on its no-hold
   # path. Found by the independent review.
   rm -f "$FOUNDATION_HOLD_SAID"
-  card "$path" workspace-status in-progress comment "#$num: building"
+  card "$path" workspace-status in-progress comment "#$num: provisioning"
+
+  # THE WORKTREE PROVISIONS ITSELF FROM HERE, not from a runtime hook.
+  #
+  # `setup.sh` derives the worktree's isolated identity, writes its `.env`,
+  # updates submodules and runs the project's own setup hook. The app-backed
+  # runner used to call it through `orca.yaml`, which meant it did not happen at
+  # all for a driver with no hook mechanism -- and a build whose rig is not up
+  # reads the connection error as a code bug and goes chasing it, which is the
+  # failure `setupAgentStartupPolicy: wait-for-setup` was there to prevent.
+  # Running it HERE gives every driver the same guarantee, in the one place that
+  # knows the build has not started yet.
+  #
+  # Fatal to the launch. Everything it provisions is for the build that is about
+  # to start, and a worktree that failed to provision is one where every test
+  # run fails for a reason that has nothing to do with the issue.
+  local setup_out; setup_out="$(mktemp)"
+  if ! ( cd "$path" && ./scripts/fleet/setup.sh ) >"$setup_out" 2>&1; then
+    say "  #$num: its worktree would not provision:"
+    sed -n '1,10p' "$setup_out" | sed 's/^/    /' | tee -a "$LOG"
+    rm -f "$setup_out"
+    card "$path" comment "#$num: the worktree would not provision -- needs you"
+    return 1
+  fi
+  rm -f "$setup_out"
+  card "$path" comment "#$num: building"
   # THE BUILD IS STARTED BY THE DISPATCHER, not by the runtime's own hooks. The
   # app-backed runner used to start an agent from a worktree-creation hook and
   # the dispatcher never saw it happen; when the hook failed, a fully
@@ -3218,6 +3243,18 @@ remove_worktree() {
   # `sed` and sourcing it alone, so anything it reads from the file around it
   # arrives empty -- and an empty deadline is not 180, it is zero.
   local deadline="${AUTOFLEET_RM_DEADLINE:-180}"
+  # THE WORKTREE'S OWN TEARDOWN, before anything is destroyed and from INSIDE
+  # it -- the project's teardown hook and whatever stack `.autofleet/config`
+  # named. The app-backed runner used to run this through `orca.yaml`'s archive
+  # hook; a driver with no hook mechanism ran it never, and a host project's
+  # containers would have outlived every worktree the fleet released.
+  #
+  # Never fatal, and bounded: this is teardown, and a hook that hangs must not
+  # take the removal with it. `finish_removal` sweeps the stack by name
+  # afterwards for whatever this did not reach.
+  if [ -x "$path/scripts/fleet/archive.sh" ]; then
+    ( cd "$path" && ./scripts/fleet/archive.sh ) >/dev/null 2>&1 || true
+  fi
   # Pure reads, before anything can be destroyed. Both live INSIDE the worktree
   # and the sweep below needs them after it is gone.
   # Both names archive.sh would have used. The derived one is what setup.sh

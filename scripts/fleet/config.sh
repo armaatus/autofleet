@@ -346,36 +346,19 @@
 # of those one worktree gets.
 : "${AUTOFLEET_BUILD_MAX_RUNS:=3}"
 
-# --------------------------------------------------------------- the cost
-# Where the agent CLI writes its session transcripts, and therefore the only
-# place `cost.sh` can find out what a worktree run actually spent.
+# ------------------------------------------------ what the cost report reads
+# NOTHING TO CONFIGURE, which is the point. AUTOFLEET_TRANSCRIPT_DIR lived here
+# and named where the agent CLI writes its session transcripts, because
+# `cost.sh` reconstructed what an issue spent by slugging a worktree path,
+# finding the matching directory and summing the `usage` block on every
+# assistant message in it. That inference is gone: `--output-format json` makes
+# the build print its own total, and it lands in
+# `$AUTOFLEET_DIR/builds/<issue>/`, which the fleet already owns.
 #
-# Claude Code writes one JSONL per session under
-# `<root>/<cwd-slug>/<session-id>.jsonl`, where the slug is the absolute working
-# directory with every NON-ALPHANUMERIC character turned into `-`, truncated at
-# 200 characters with a hash appended past that. That is the whole of the tie
-# between a session and an issue: the fleet knows each issue's worktree path, and
-# the path is what names the directory.
-#
-# A knob rather than a constant because it is the one project-specific thing the
-# report needs, and hard rule 2 says a script may not know it. WHAT IT MOVES IS
-# THE PATH, NOT THE FORMAT: `cost.sh` reads the entry shape above and the
-# non-alphanumeric-to-`-` slug rule, so a host whose CLI writes the same shape
-# somewhere else points this at it, and a host whose CLI writes something else
-# gets a report of zeros. That host sets it EMPTY, which `cost.sh` answers with
-# one line and exit 0 rather than an error -- a reporting command must never be
-# the thing that fails a run.
-#
-# `=` AND NOT `:=`, alone among the knobs in this file. Every other default
-# substitutes on unset OR NULL, which is right when empty has no meaning; here
-# empty IS the off switch, and `:=` handed it straight back the default -- so
-# `AUTOFLEET_TRANSCRIPT_DIR= ./scripts/fleet/fleet.sh cost` reported the whole
-# machine instead of declining, and the one documented way to turn the report off
-# from the environment did nothing. The host-config route was unaffected (a plain
-# assignment there is read after these defaults and wins either way), which is
-# exactly the shape of bug that ships: the documented off switch works in the
-# place nobody tests it from.
-: "${AUTOFLEET_TRANSCRIPT_DIR=$HOME/.claude/projects}"
+# A host that points AUTOFLEET_BUILD_CMD at a wrapper which does not honour the
+# flag gets rows with no figures in them and a line on stderr saying so, rather
+# than a knob to set. armaatus/autofleet#151.
+
 
 # ------------------------------------------------- the compression proxy
 # Every model call this fleet makes pays full price for its context, and the
