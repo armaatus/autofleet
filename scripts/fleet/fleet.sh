@@ -1861,8 +1861,13 @@ start_build() {
   # that ends the instant it starts -- a bad model name, an expired token -- is
   # otherwise an infinite resume loop that spends the account one session at a
   # time with the log saying "resuming" forever.
-  runs="$(cat "$dir/runs" 2>/dev/null || echo 0)"
-  printf '%s\n' "$((runs + 1))" >"$dir/runs"
+  # `run-count`, and NOT `runs`, which is the DIRECTORY `fleet_build_started`
+  # keeps each finished run's result in. One name for both made `launch`'s reset
+  # write a file where a directory had to go, and the next build refused to
+  # start with `mkdir: .../runs: File exists` -- a worktree opened, provisioned
+  # and left with nothing running in it.
+  runs="$(cat "$dir/run-count" 2>/dev/null || echo 0)"
+  printf '%s\n' "$((runs + 1))" >"$dir/run-count"
   # The marker the build's own exit is reported through, cleared here so a
   # second run is reported as its own.
   rm -f "$STATE_DIR/build-done-$num" "$STATE_DIR/build-blind-$num" "$STATE_DIR/exit-blind-$num"
@@ -1902,7 +1907,7 @@ launch() {
   # A FRESH RUN COUNT, here rather than in `start_build`: `own` is what says
   # this worktree is a new attempt, and a `fleet.sh retry` that inherited the
   # previous attempt's count would give the new one one run and then stop.
-  rm -f "$(fleet_build_dir "$num")/runs"
+  rm -f "$(fleet_build_dir "$num")/run-count"
   # The announcement is stale once the fleet has actually MOVED, and this is
   # where it has: a `launch` that FAILED moved nothing and must not re-arm the
   # line, which is what clearing this at the top of the function did. See
@@ -3855,7 +3860,7 @@ build_exited() {
   fi
 
   if [ "$pr_open" = 0 ]; then
-    runs="$(cat "$dir/runs" 2>/dev/null || echo 1)"
+    runs="$(cat "$dir/run-count" 2>/dev/null || echo 1)"
     if [ "$runs" -ge "$AUTOFLEET_BUILD_MAX_RUNS" ]; then
       say "#$num: its build stopped again -- $(build_summary "$num") -- after $runs runs, which is AUTOFLEET_BUILD_MAX_RUNS"
       card "$path" comment "#$num: out of runs with its pull request open -- needs you"

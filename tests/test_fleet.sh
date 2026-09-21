@@ -448,7 +448,14 @@ doc.setdefault("result", {}).setdefault("worktrees", []).append(
      "path": where + "-" + (issue or "x")})
 json.dump(doc, open(path, "w"))
 PYWT
+    # A REAL worktree at the path it reports, because the dispatcher provisions
+    # one: `launch` runs `setup.sh` inside it before starting the build, and a
+    # bare directory has no payload to run.
+    "${REAL_GIT:-git}" -C "$WORK_FOR_STUB/repo" worktree add -q --detach \
+      "$WORK_FOR_STUB/created" 2>/dev/null || mkdir -p "$WORK_FOR_STUB/created"
     echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
+  "terminal create") echo '{"result":{"terminal":{"handle":"t1"}}}'; exit 0 ;;
+  "terminal close")  echo '{"ok":true}'; exit 0 ;;
   "worktree ps")   cat "$ORCA_PS"; exit 0 ;;
   "terminal list") cat "$ORCA_TERMINALS"; exit 0 ;;
   "terminal send") echo '{"ok":true}'; exit 0 ;;
@@ -633,11 +640,6 @@ GITSHIM
   # a test about the OTHER reap empties it, or reap_merged gets there first.
   GH_MERGED="$WORK/merged";         echo 7 >"$GH_MERGED"
   WORK_FOR_STUB="$WORK"; mkdir -p "$WORK/created"
-  # THE FIXTURE REPO IS A GIT REPO from the start. The default driver's worktree
-  # listing is `git worktree list`, so a fixture whose repo git has never heard
-  # of answers "could not read the listing" -- which is a real answer, and not
-  # the one an empty fleet is supposed to give.
-  make_repo_git_at "$WORK/repo"
   export ORCA_CALLS ORCA_MODE GH_CALLS ORCA_PS ORCA_WORKTREES ORCA_TERMINALS \
          ORCA_REPO_ROOTS \
          GH_PRS GH_ISSUES GH_LABELS GH_STATE GH_MERGED WORK_FOR_STUB REAP_CALLS
@@ -659,6 +661,16 @@ GITSHIM
   export AUTOFLEET_BUILD_CMD="$WORK/bin/build-stub"
   export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
   export AUTOFLEET_DIR="$WORK/fleet"
+  # THE FIXTURE REPO IS A GIT REPO, WITH THE PAYLOAD IN IT, from the start.
+  #
+  # Two reasons, both new with armaatus/autofleet#151. The default driver's
+  # worktree listing is `git worktree list`, so a fixture whose repo git has
+  # never heard of answers "could not read the listing" -- a real answer, and
+  # not the one an empty fleet is supposed to give. And `launch` provisions the
+  # worktree it opens by running `setup.sh` INSIDE it, so a worktree checked out
+  # of a repo whose commit does not carry the payload has no setup.sh to run.
+  make_repo_git
+  : >"$WORK/planted"
   PATH="$WORK/bin:$PATH"
   export PATH
 }
@@ -1924,7 +1936,7 @@ DRIVER
     out="$(in_fleet launch 44 "a second issue" 2>&1)"
     grep -q "reported no path" <<<"$out" \
       && fail "a warning on stderr broke the JSON parse, so the fleet created a worktree it does not own and cannot reap: $out"
-    grep -q "#44 is running in" <<<"$out" \
+    grep -q "#44 is building in" <<<"$out" \
       || fail "the created worktree was not tracked: $out"
     [ -e "$AUTOFLEET_DIR/worktrees/44" ] \
       || fail "nothing owns the worktree that was just created, so no reap will ever look at it: $out"
@@ -1949,6 +1961,7 @@ DRIVER
     # fails against the `FLEET_RUN_CAPTURE_STDERR=1` form the separate `$err`
     # replaced.
     make_fixture set_noisy
+    use_orca_runner
     out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
     grep -q "the real reason: worktree is not registered" <<<"$out" \
       || fail "the runtime's reason was pushed past the three-line bound by its own stdout, which is what relaying stderr first prevents: $out"
