@@ -720,7 +720,11 @@ build_state_for() {
   if [ -n "$rc" ]; then
     printf '%s\n' "$rc" >"$dir/rc"; rm -f "$dir/pid"
   else
-    rm -f "$dir/rc"; printf '%s\n' "$$" >"$dir/pid"
+    rm -f "$dir/rc"
+    set -m
+    ( sleep 300 ) & BUILD_SLEEPER=$!
+    set +m
+    printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
   fi
 }
 
@@ -730,8 +734,19 @@ build_running() {
   rm -f "$dir/rc"
   printf '%s\n' "$WORK/wt" >"$dir/worktree"
   printf '%s\n' 42 >"$AUTOFLEET_DIR/builds/by-path/$(printf '%s' "$WORK/wt" | tr '/' '%')"
-  # A pid that is certainly alive and certainly not ours to signal: this shell.
-  printf '%s\n' "$$" >"$dir/pid"
+  # A pid that is alive and IS ours to signal -- `stop_build_in` really does
+  # kill it, which is the whole of what the reaper's warning pass promises. It
+  # was `$$` for one round, and the first phase that reached a stop killed the
+  # test process itself: the phase exited silently with no failure message at
+  # all, which is a much worse way to fail than red.
+  #
+  # Its own process GROUP, because that is what the driver signals -- the build
+  # command is a wrapper seam, so the process holding the credentials is
+  # routinely a child of what was forked.
+  set -m
+  ( sleep 300 ) & BUILD_SLEEPER=$!
+  set +m
+  printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
 }
 build_exited() {
   build_running
@@ -2268,6 +2283,12 @@ print(json.dumps({"result": {"worktrees": [
     # #99 still mid-work and the dispatcher exited -- #36's failure, re-created
     # by the fix for #37. The `-lt 0` clamp turned it from a visible wrong answer
     # into a silent one. Found by the independent review.
+    # STDOUT ONLY on every count below, and the reason is the gate. A worktree
+    # whose build state cannot be read is NOT counted as waiting for a person,
+    # and it says so once on stderr -- which is the right behaviour and was
+    # never in this phase's way while the gate read a machine-wide agent
+    # listing that always answered. Folded into the count, that sentence made
+    # `= 0` compare a number against a paragraph.
     make_fixture ok
     mkdir -p "$AUTOFLEET_DIR/worktrees" "$AUTOFLEET_DIR"
     printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
@@ -2276,10 +2297,10 @@ print(json.dumps({"result": {"worktrees": [
     : >"$AUTOFLEET_DIR/stuck-42"
     # TWO passes, because a marker must survive one before it counts -- the
     # first pass records it, the second counts it. See count_parked_owned.
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a marker counted on the pass it appeared; a transient one would end the drain with an agent still working"
     echo "ok: a marker does not count on the pass it appears"
-    out="$(in_fleet count_parked_owned 2>&1)"
+    out="$(in_fleet count_parked_owned 2>/dev/null)"
     [ "$out" = 1 ] \
       || fail "two markers on one worktree counted as $out parked; #99 is still in flight and the drain would exit: $out"
     echo "ok: a worktree with two keep-markers is one parked worktree"
@@ -2289,13 +2310,13 @@ print(json.dumps({"result": {"worktrees": [
     # every pass, and one transient `blocked` label would otherwise sign the
     # dispatcher off with an agent still writing.
     rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a marker that cleared still counted as a worktree waiting for a person"
     : >"$AUTOFLEET_DIR/held-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a transient held- counted on its first pass"
     rm -f "$AUTOFLEET_DIR/held-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a held- that came and went across two passes was counted"
     echo "ok: ...and a marker that comes and goes never counts"
 
@@ -2315,7 +2336,7 @@ print(json.dumps({"result": {"worktrees": [
     build_running
     : >"$AUTOFLEET_DIR/held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "held-42 counted as waiting for a person while its agent is WORKING"
     echo "ok: a worktree whose agent is working is not waiting for a person"
 
@@ -2323,15 +2344,17 @@ print(json.dumps({"result": {"worktrees": [
     # which is what the old gate could not see, and why the drain hung.
     build_exited
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "held-42 with its agent idle did not count -- the terminal outlives the agent, so the drain waits forever"
     echo "ok: ...and the same terminal with an idle agent does count"
 
-    # "Could not tell" is not "idle": a listing that would not read leaves the
-    # worktree uncounted, because somebody may still be in there.
-    printf 'not json' >"$ORCA_PS"
+    # "Could not tell" is not "it has stopped": a state the driver cannot read
+    # leaves the worktree uncounted, because somebody may still be in there.
+    # Reached by taking the build's record away, which is what a driver with
+    # nothing to say about this worktree looks like.
+    rm -rf "$AUTOFLEET_DIR/builds"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "an agent-state listing that could not be read was treated as 'nobody is working'"
     echo "ok: ...and an unreadable listing is not an idle one"
 
@@ -2344,14 +2367,14 @@ print(json.dumps({"result": {"worktrees": [
     # independent review.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    printf 'not json' >"$ORCA_PS"
+    rm -rf "$AUTOFLEET_DIR/builds"
     # THE LOG, not stdout: `count_parked_owned` discards the predicate's stdout
     # (it wants the rc, not the reason), and `say` tees to the log regardless --
     # which is the channel an operator actually reads.
     : >"$AUTOFLEET_DIR/fleet.log"
     in_fleet count_parked_owned >/dev/null 2>&1
-    grep -q "could not read the agent states" "$AUTOFLEET_DIR/fleet.log" \
-      || fail "a runner that would not say what its agents are doing left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
+    grep -q "could not read the build's state" "$AUTOFLEET_DIR/fleet.log" \
+      || fail "a runner that would not say whether its build is running left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
     echo "ok: ...and says so rather than stalling in silence"
 
     # ...AND ON THE SCREEN, which is the channel #37 asks for. This function
@@ -2364,10 +2387,10 @@ print(json.dumps({"result": {"worktrees": [
     # wrong channel. armaatus/autofleet#71.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    printf 'not json' >"$ORCA_PS"
+    rm -rf "$AUTOFLEET_DIR/builds"
     # `2>&1 >/dev/null` in that ORDER: stderr onto the capture, then stdout away.
     onscreen="$(in_fleet count_parked_owned 2>&1 >/dev/null)"
-    grep -q "could not read the agent states" <<<"$onscreen" \
+    grep -q "could not read the build's state" <<<"$onscreen" \
       || fail "the warning about an unbounded drain goes to the log and nowhere a person watching the dispatcher can see it: [$onscreen]"
     echo "ok: ...on the operator's screen and not only in the log"
     # ...and STDOUT still carries nothing but the count, or the poll's next line
@@ -2388,12 +2411,12 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$AUTOFLEET_DIR"/held-42 "$AUTOFLEET_DIR"/git-blind-*
     : >"$AUTOFLEET_DIR/merge-held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "merge-held-42 counted as waiting for a person while its agent is making review fixes, which is exactly when that marker is written"
     echo "ok: a merged worktree with a working agent is not waiting for a person"
     build_exited
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "merge-held-42 with an idle agent did not count, so the drain waits forever"
     echo "ok: ...and does once the agent is idle"
     rm -f "$AUTOFLEET_DIR/merge-held-42"
@@ -2413,7 +2436,7 @@ print(json.dumps({"result": {"worktrees": [
     : >"$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "a refused removal was gated on a stale held- beside it, so the drain never ends"
     echo "ok: a refused removal counts whatever else is beside it"
 
@@ -2438,8 +2461,11 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-42"
     : >"$AUTOFLEET_DIR/git-blind-99"
+    # #99's build has stopped too, or the gate answers "could not tell" for it
+    # and this counts one worktree while asserting two.
+    build_state_for 99 "$WORK/wt99" 0
     in_fleet count_parked_owned >/dev/null 2>&1   # the pass that records them
-    out="$(in_fleet count_parked_owned 2>&1)"
+    out="$(in_fleet count_parked_owned 2>/dev/null)"
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever:: $out"
     echo "ok: ...and all five keep-markers count"
@@ -2460,11 +2486,11 @@ print(json.dumps({"result": {"worktrees": [
       build_running
       : >"$AUTOFLEET_DIR/$marker-42"
       in_fleet count_parked_owned >/dev/null 2>&1
-      [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
         || fail "$marker-42 counted as waiting for a person while its agent is WORKING, and the dispatcher would sign off on top of it"
       build_exited
       in_fleet count_parked_owned >/dev/null 2>&1
-      [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+      [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
         || fail "$marker-42 with an idle agent did not count, so the drain waits forever"
     done
     echo "ok: ...and both blind markers are gated on the agent, in each direction"
@@ -2494,7 +2520,7 @@ print(json.dumps({"result": {"worktrees": [
     build_running
     : >"$AUTOFLEET_DIR/git-blind-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "rewording the sentence took the agent gate off git-blind-; the dispatcher would sign off with an agent still writing"
     echo "ok: ...and rewording the reason a person reads does not switch the gate off"
     # ...AND REORDERING THE REASONS DOES NOT EITHER. The gate briefly keyed on
@@ -2519,7 +2545,7 @@ print(json.dumps({"result": {"worktrees": [
     : >"$AUTOFLEET_DIR/git-blind-42"
     : >"$AUTOFLEET_DIR/stuck-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "the gate asked whether stuck- is on disk rather than which reason this is, so a reason ahead of stuck- is counted with its agent mid-work"
     echo "ok: ...and neither does reordering them"
     sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="stuck merge-held held merge-blind git-blind"/' \
@@ -2545,11 +2571,10 @@ print(json.dumps({"result": {"worktrees": [
     # review, which called all three findings one crack.
     # `cmd_status` lists through `live_worktrees`, so the runner has to report
     # #42 as well as the fleet owning it.
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-  {"path": sys.argv[1], "isMainWorktree": False, "linkedIssue": 42},
-]}}))' "$WORK/wt" >"$ORCA_WORKTREES"
+    worktree_on_issue 42
+    # ...and a build for #42 that has STOPPED, or the four gated reasons answer
+    # "could not tell" and `status` says so instead of naming it.
+    build_exited
     for reason in stuck merge-held merge-blind held git-blind; do
       rm -f "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/merge-held-* \
             "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
@@ -3821,8 +3846,13 @@ JSON
     [ -d "$WORK/wt" ] \
       || fail "it removed the worktree on the pass that found the reason, with no notice: $out"
     grep -q "next pass" <<<"$out" || fail "it did not say what happens next: $out"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "it warned the board and left the agent working against a rig that is going"
+    # THE BUILD IS STOPPED ON THE WARNING PASS, so the poll of grace is a poll
+    # in which nothing new is written into a directory that is about to go. It
+    # was an interrupt typed at a session before armaatus/autofleet#151; the
+    # claim is the same one.
+    if kill -0 "$(cat "$AUTOFLEET_DIR/builds/42/pid" 2>/dev/null)" 2>/dev/null; then
+      fail "it warned the board and left the build writing into a rig that is going"
+    fi
     grep -q "worktree rm" "$ORCA_CALLS" && fail "it removed it anyway: $(cat "$ORCA_CALLS")"
     echo "ok: the pass that finds a reason warns, and removes nothing"
     ;;
