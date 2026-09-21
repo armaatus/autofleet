@@ -926,6 +926,19 @@ fleet_pr_payload() {
   bash .github/scripts/pr_payload.sh "$fleet_owner" "$fleet_repo_name" "$pr" >"$out"
 }
 
+# The Python that server/requirements.txt can actually be installed with.
+#
+# Not simply `python3`. This hook runs in whatever environment Orca hands it,
+# and that is not an interactive shell: creating a worktree from the Orca UI on
+# macOS resolves `python3` to Apple's Command Line Tools build (3.9.6), while the
+# same command typed into a terminal finds Homebrew's. The difference was
+# invisible until `requests` was pinned at 2.33.0, which declares
+# `requires-python >=3.10` -- pip then filters out every candidate and reports
+# "no matching distribution", two hundred lines long, naming neither Python nor
+# the reason.
+FLEET_PYTHON_MIN_MAJOR=3
+FLEET_PYTHON_MIN_MINOR=10
+
 # Sets fleet_python_reject to a one-line reason when it returns non-zero, so a
 # caller can say which interpreters it turned down and why, rather than
 # reporting "nothing is new enough" about one that will not start at all.
