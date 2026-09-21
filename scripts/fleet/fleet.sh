@@ -2616,7 +2616,7 @@ print(len(json.load(sys.stdin)))
   # post-PR half of the fleet should be able to run more of them at once than
   # the building half.
   local running; running="$(live_reviewers)"
-  local pr head draft marker rpid
+  local pr head draft marker rpid published lockpid
   while read -r pr head draft; do
     [ -n "$pr" ] || continue
     # A DRAFT IS NOT READY TO BE JUDGED. It is open, so its transcripts and
@@ -2627,11 +2627,12 @@ print(len(json.load(sys.stdin)))
     [ "$running" -ge "$AUTOFLEET_MAX" ] && break
 
     marker="$REVIEWING_DIR/$pr"
-    # The LOCK, claimed before the spawn and released by the loop above once the
-    # pid is gone. `fleet_lock_claim` refuses when a live process already holds
-    # it, which is what makes two dispatchers, or a dispatcher and a person,
-    # safe on one pull request.
-    fleet_lock_claim "$marker" "$head" || continue
+    # A LOCK THAT IS STILL THERE AFTER THE SWEEP ABOVE NAMES A LIVE LOOP.
+    # `live_reviewers` removed every marker whose pid is gone, so presence here
+    # is the answer. The claim itself is `after-pr.sh`'s -- it cannot be made
+    # here, because a lock has to name a pid and there is no pid until the fork
+    # (armaatus/autofleet#64).
+    [ -e "$marker" ] && continue
 
     # `<pr>.done` is this PR's head-shaped record of "there is nothing left to
     # do here": written when `after-pr.sh` finishes with it, so a PR waiting on
@@ -2644,30 +2645,44 @@ print(len(json.load(sys.stdin)))
       continue
     fi
 
-    # The whole post-PR loop for this PR, in one background process:
-    # arm the merge, review, at most one fix, re-review, park. `after-pr.sh`
-    # carries the reasoning and the ceiling; this decides only that there is a
-    # slot for it.
-    # `.done` ON EXIT 0 ONLY, which is the asymmetry that decides whether a
-    # pull request is ever looked at again. `after-pr.sh` exits 0 when it is
-    # FINISHED with this head -- approved, or parked with a reason on it -- and
-    # 5 when something went wrong that the next poll should retry. Writing the
-    # record on both would strand a PR on one `gh` outage; writing it on
-    # neither is the re-spawn loop armaatus/autofleet#42 exists to remove. What
-    # bounds the retry is the review ceiling, which is counted in a file of its
-    # own and is not refunded.
-    ( if "$REPO_ROOT/scripts/fleet/after-pr.sh" "$pr"; then
-        printf '%s\n' "$head" >"$REVIEWING_DIR/$pr.done"
-      fi
-      fleet_lock_release "$REVIEWING_DIR/$pr"
-    ) >>"$LOG" 2>&1 </dev/null &
+    # The whole post-PR loop for this PR, in one background process: arm the
+    # merge, review, at most one fix, re-review, park. `after-pr.sh` carries the
+    # reasoning and the ceilings; this decides only that there is a slot for it.
+    #
+    # EXEC'D DIRECTLY, NEVER WRAPPED IN A SUBSHELL, and the record-keeping that
+    # would have needed a wrapper is passed to it instead. `( ... ) &` forks a
+    # bash that keeps THIS script's argv, so `ps -o command=` on the pid the
+    # lock holds reads `bash ./scripts/fleet/fleet.sh run --auto` --
+    # `fleet_agent_alive` matches `after-pr|review|fix\.sh` and so answers 1,
+    # "dead or a recycled pid". `live_reviewers` then deletes a LIVE lock every
+    # poll, `fleet_lock_claim` finds no file, and a second loop starts beside
+    # the first: armaatus/autofleet#64 exactly, plus two concurrent fix sessions
+    # editing one worktree. `stop_reviewers` takes the same false branch, so
+    # `stop --now` would skip the kill and orphan an agent holding this
+    # machine's gh login -- the failure its own comment says it exists to
+    # prevent. Found by the local /code-review pass, which reproduced the `ps`
+    # output rather than reasoning about it.
+    AUTOFLEET_PR_MARKER="$marker" AUTOFLEET_PR_HEAD="$head" \
+      "$REPO_ROOT/scripts/fleet/after-pr.sh" "$pr" >>"$LOG" 2>&1 </dev/null &
     rpid=$!
-    # The marker holds the pid of the process the sweep above will reap, which
-    # is the subshell and not `after-pr.sh`: signalling the wrong one leaves the
-    # review running with nothing left to reap it.
-    fleet_lock_publish "$marker" "$rpid" "$head" \
-      || say "PR #$pr: could not write $marker; the review slot is not counting"
-    say "PR #$pr: working the post-PR loop at ${head:0:8} (pid $rpid)"
+    # BEST EFFORT, and the file is what is read back rather than the status.
+    # The child claims the same lock for itself, so this succeeds only in the
+    # window before it gets there -- and either way the marker ends up naming
+    # `$rpid`, because the child's `$$` IS `$rpid`. What must not happen is an
+    # unconditional write: a hand-run that won the window would have its claim
+    # overwritten with a pid that is about to stand down.
+    fleet_lock_publish "$marker" "$rpid" "$head"; published=$?
+    lockpid=""
+    read -r lockpid _ 2>/dev/null <"$marker" || true
+    if [ "${lockpid:-}" = "$rpid" ]; then
+      say "PR #$pr: working the post-PR loop at ${head:0:8} (pid $rpid)"
+    elif [ "$published" = 2 ]; then
+      say "PR #$pr: could not write $marker, so nothing here can stop a second"
+      say "  loop starting beside this one. Check that directory is writable."
+    else
+      say "PR #$pr: a post-PR loop is already in flight (pid ${lockpid:-unknown});"
+      say "  the one just spawned stands down."
+    fi
     running="$((running + 1))"
   done <<EOF
 $(printf '%s' "$listing" | python3 -c '

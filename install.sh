@@ -266,9 +266,16 @@ for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 # repository admin merging the enforcement layer by hand, with `merge-gate`
 # red, is the designed path and not an exception.
 set_branch_protection() {
+  # THE DEFAULT BRANCH, asked of GitHub. It was `symbolic-ref HEAD`, which is
+  # whatever branch the installer happens to run on -- and vendoring the payload
+  # on a branch so as to open a pull request for it is the natural way to do it.
+  # That protected a throwaway branch and left `main` with no required
+  # `merge-gate` context at all, so `gh pr merge --auto --squash` would merge
+  # without the gate ever being required. Found by the local /code-review pass.
   local branch
-  branch="$(git -C "$TARGET" symbolic-ref --quiet --short HEAD 2>/dev/null)" \
-    || branch=main
+  branch="$(GH_PAGER=cat gh repo view --json defaultBranchRef \
+              --jq .defaultBranchRef.name 2>/dev/null)" || branch=""
+  [ -n "$branch" ] && [ "$branch" != null ] || branch=main
   if $DRY; then
     echo "   branch protection on '$branch' (skipped: --dry-run)"
     return 0
@@ -285,6 +292,24 @@ set_branch_protection() {
     echo "   branch protection: gh could not say which repository this is; not set"
     return 0
   fi
+  # NEVER OVER AN EXISTING RULE. `PUT .../protection` is a full REPLACE, not a
+  # merge: a host that already required two approving reviews, a build context,
+  # push restrictions or a linear history would have all of it silently reset by
+  # installing a payload -- and `"required_approving_review_count": 0` and
+  # `"restrictions": null` below would write the human-approval requirement away.
+  # Every other host-owned artefact this installer touches is deliberately
+  # non-destructive: `ensure_ignored` appends only what is missing,
+  # `merge_plugin_entry` merges one key, `seed_one` never overwrites. This was
+  # the exception, with nothing warning about it. Found by the local
+  # /code-review pass.
+  if GH_PAGER=cat gh api "repos/$nwo/branches/$branch/protection" \
+       >/dev/null 2>&1; then
+    echo "   branch protection on '$branch': KEPT (yours) -- it already has rules,"
+    echo "                       and setting these would REPLACE them wholesale."
+    echo "                       docs/CONFIGURATION.md has what to add by hand."
+    return 0
+  fi
+
   # The contexts, as a JSON array built from the word list.
   local contexts
   contexts="$(REQUIRED="merge-gate ${AUTOFLEET_REQUIRED_CHECKS:-}" python3 -c '

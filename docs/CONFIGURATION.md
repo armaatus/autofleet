@@ -206,8 +206,17 @@ and takes the rest from `AUTOFLEET_REQUIRED_CHECKS`, a space-separated list:
 AUTOFLEET_REQUIRED_CHECKS="suite" ./install.sh /path/to/your/repo
 ```
 
-If the installer could not set them — it needs admin on the repository — it says
-so and prints nothing else fatal. To set them by hand:
+**It never writes over rules you already have.** `PUT .../protection` is a full
+replace rather than a merge, so a branch that already carries protection is left
+alone and the installer says so: adding a payload must not silently drop a
+human-approval requirement or a push restriction. It also asks GitHub which
+branch is the **default** rather than using the one it happens to run on —
+vendoring on a branch is the natural way to open a pull request for it, and
+protecting that branch would leave `main` with no required `merge-gate` at all.
+
+If the installer could not set them — it needs admin on the repository — or
+declined because rules already exist, it says so and prints nothing else fatal.
+To set or merge them by hand:
 
 ```bash
 gh api -X PUT "repos/<owner>/<repo>/branches/main/protection" --input - <<'JSON'

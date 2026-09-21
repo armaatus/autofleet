@@ -53,6 +53,50 @@ fi
 mkdir -p "$FLEET_REVIEWING" || {
   echo "after-pr.sh: cannot write $FLEET_REVIEWING" >&2; exit 2; }
 REVIEWS="$FLEET_REVIEWING/$pr.reviews"
+# ...and the fix session's own ceiling, beside the reviews'. The loop's SHAPE is
+# one fix, and that is not the same as a bound: a re-review that exits 8 is
+# refunded, so the next poll re-enters with one review spent, gets
+# `request-changes` again, and buys a SECOND full-budget fix session. A record
+# holds it the way the review ceiling is held. Found by the local /code-review
+# pass.
+FIXES="$FLEET_REVIEWING/$pr.fixes"
+
+# THE DISPATCHER'S BOOKKEEPING, done here rather than in a wrapper around this
+# script. `fleet.sh` has to exec this directly -- a `( ... ) &` subshell keeps
+# the dispatcher's own argv, and the liveness probe that reads the lock's pid
+# out of `ps` then calls a live loop dead and starts a second one beside it. So
+# the two things a wrapper would have done arrive as environment instead.
+#
+# `.done` ON EXIT 0 ONLY, which is the asymmetry that decides whether a pull
+# request is ever looked at again: 0 means FINISHED with this head -- approved,
+# or parked with a reason on it -- and anything else is a retry the next poll
+# should make. Writing it on both would strand a PR on one `gh` outage; writing
+# it on neither is the re-spawn loop armaatus/autofleet#42 exists to remove.
+# What bounds the retry is the review ceiling above, which is not refunded for
+# a reviewer that actually ran.
+LOCK="${AUTOFLEET_PR_MARKER:-}"
+LOCK_HEAD="${AUTOFLEET_PR_HEAD:-}"
+# THE CHILD CLAIMS ITS OWN LOCK, which is armaatus/autofleet#64's shape and the
+# only one that closes the window: the dispatcher cannot claim before it has a
+# pid to write, and it cannot have a pid before it has forked. Claiming here
+# makes the marker name THIS process from the first moment it exists, so a
+# second dispatcher -- or a person running this by hand -- loses the race
+# cleanly instead of running beside it. `fleet_lock_publish` from the parent
+# afterwards is a no-op when this got there first, and the fallback when it did
+# not.
+if [ -n "$LOCK" ] && ! fleet_lock_claim "$LOCK" "$LOCK_HEAD"; then
+  echo "after-pr.sh: PR #$pr already has a post-PR loop in flight; standing down." >&2
+  exit 0
+fi
+on_exit() {
+  local rc=$?
+  if [ "$rc" = 0 ] && [ -n "$LOCK" ] && [ -n "$LOCK_HEAD" ]; then
+    printf '%s\n' "$LOCK_HEAD" >"$LOCK.done" \
+      || echo "after-pr.sh: could not write $LOCK.done; this PR is re-examined every poll" >&2
+  fi
+  fleet_lock_release "$LOCK"
+}
+trap on_exit EXIT
 
 # THE MERGE IS QUEUED FIRST, not last.
 #
@@ -137,6 +181,18 @@ what the reviews found written into its Scope." "at the review ceiling"
      exit 5 ;;
 esac
 
+# ONE FIX SESSION, and the record is what says so rather than the shape of this
+# script. Written before the run, for the reason the review count is.
+fixes="$(cat "$FIXES" 2>/dev/null)"
+case "${fixes:-}" in ''|*[!0-9]*) fixes=0 ;; esac
+if [ "$fixes" -ge 1 ]; then
+  park "**autofleet: needs a human.** This pull request has had the one fix
+session the loop allows and its review still asks for changes. Both reviews are
+above." "the fix ceiling"
+  exit 0
+fi
+printf '%s\n' "$((fixes + 1))" >"$FIXES" \
+  || echo "after-pr.sh: could not write $FIXES; the fix cap is not counting" >&2
 ./scripts/fleet/fix.sh "$pr"; rc=$?
 case "$rc" in
   0) ;;

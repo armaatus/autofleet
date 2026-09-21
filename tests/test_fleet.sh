@@ -2006,6 +2006,51 @@ GHSTUB
     echo "ok: a resume is handed the same brief and counts as a run"
     ;;
 
+  post_pr_lock_alive)
+    # THE LOCK'S PID HAS TO BE ONE `fleet_agent_alive` CAN RECOGNISE, and for
+    # one commit it was not. `review_open_prs` wrapped the post-PR loop in a
+    # `( ... ) &` subshell, and a forked bash subshell keeps its PARENT's argv
+    # -- so `ps -o command=` on the pid the lock holds reads
+    # `bash ./scripts/fleet/fleet.sh run --auto`, which matches no
+    # `after-pr|review|fix\.sh`, and the probe answers 1: "dead, or a recycled
+    # pid". `live_reviewers` then deletes a LIVE lock every poll,
+    # `fleet_lock_claim` finds no file and claims, and a second loop starts
+    # beside the first -- armaatus/autofleet#64, plus two concurrent fix
+    # sessions editing one worktree. `stop_reviewers` takes the same false
+    # branch, so `stop --now` skips the kill and orphans an agent holding this
+    # machine's gh login.
+    #
+    # Nothing else in the suite sees it: every other phase either plants
+    # `.done` or stubs the loop away. Hard rule 3 -- the rule the spawn depends
+    # on gets an assertion of its own. Found by the local /code-review pass,
+    # which reproduced the `ps` output rather than reasoning about it.
+    make_fixture ok
+    backlog_all_claimed 1
+    # ...and NOT settled, so the loop actually starts. `backlog_all_claimed`
+    # plants `.done` for every PR it invents, which is what makes the budget
+    # phases measure an idle pass; this is the phase that wants the other state.
+    rm -f "$AUTOFLEET_DIR/reviewing/101.done"
+    # A loop that outlives the probe below and does nothing else.
+    cat >"$WORK/repo/scripts/fleet/after-pr.sh" <<'LOOPSTUB'
+#!/usr/bin/env bash
+sleep 20
+LOOPSTUB
+    chmod +x "$WORK/repo/scripts/fleet/after-pr.sh"
+
+    in_fleet review_open_prs >/dev/null 2>&1
+    marker="$AUTOFLEET_DIR/reviewing/101"
+    [ -e "$marker" ] || fail "no lock was published for PR #101 at all"
+    read -r lockpid _ 2>/dev/null <"$marker" || true
+    case "${lockpid:-}" in ''|*[!0-9]*) fail "the lock holds no pid: $(cat "$marker")" ;; esac
+    line="$(ps -o command= -p "$lockpid" 2>/dev/null)"
+    ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh && fleet_agent_alive "$lockpid" )
+    alive=$?
+    kill "$lockpid" 2>/dev/null
+    [ "$alive" = 0 ] \
+      || fail "the pid the lock holds is not one fleet_agent_alive recognises (rc $alive); ps says: $line"
+    echo "ok: the post-PR loop's lock names a pid the liveness probe can see"
+    ;;
+
   runner_stub)
     # THE acceptance for armaatus/autofleet#1, and the only assertion that keeps
     # holding once the move has been made: with a driver that is neither of the
