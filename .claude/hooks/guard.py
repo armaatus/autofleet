@@ -696,17 +696,38 @@ def check_bash(command, cwd=""):
             if sub_cmd[:2] == ["pr", "merge"]:
                 # `--auto` does not merge. It asks GitHub to merge later, once
                 # the required checks pass -- and `merge-gate` is one of those,
-                # so the conditions in it are what actually decide. That keeps
-                # separation of duties intact: the agent never approves and
-                # never merges; it queues a request that a rule you set either
-                # satisfies or does not.
+                # so the conditions in it are what actually decide. A PERSON
+                # arming auto-merge on a branch they opened is ordinary, and
+                # this must not argue about it.
+                #
+                # FROM A FLEET WORKTREE IT IS THE DISPATCHER'S, and that is the
+                # half armaatus/autofleet#152 added. `after-pr.sh` arms it the
+                # moment the pull request exists, FIRST, because GitHub refuses
+                # to queue auto-merge on a PR that is already mergeable -- so an
+                # agent that queued it too would either lose the race or make
+                # the dispatcher's call the erroring one. The agent's job ends
+                # at the open pull request; the queue is not part of it.
                 if "--auto" in rest and "--admin" not in rest:
-                    continue
+                    if not _fleet_owns_this_worktree():
+                        continue
+                    deny(
+                        "Blocked: this worktree was opened by the fleet, and the "
+                        "merge queue is\n"
+                        "the dispatcher's. It runs `gh pr merge --auto --squash` "
+                        "the moment the pull\n"
+                        "request exists -- first, because GitHub refuses to queue "
+                        "auto-merge on a PR\n"
+                        "that is already mergeable.\n"
+                        "\n"
+                        "Your job ends at an open pull request carrying "
+                        "`Closes #N`. Say so and stop."
+                    )
                 deny(
                     "Blocked: agents do not merge PRs on this repo (CLAUDE.md, "
                     '"Finishing a task").\n'
-                    "A human merges. Open the PR, put the /code-review findings in "
-                    "its body, and stop there."
+                    "A human merges. Open the pull request with its `## Plan` and "
+                    "its closing line,\n"
+                    "and stop there."
                 )
             # The REST spelling of the same thing.
             if sub_cmd[:1] == ["api"] and any(
@@ -1366,6 +1387,13 @@ def _stateful_checks():
                        "...but WAITING for them is the whole of what it should do")
                 expect(0, {"command": "gh pr comment 7 --body 'rebased'"},
                        "...and saying something on the pull request is not reviewing it")
+                # ...nor is the merge QUEUE the agent's, which it was until
+                # armaatus/autofleet#152. `after-pr.sh` arms it first, and a
+                # second `--auto` would either lose the race or make the
+                # dispatcher's call the erroring one.
+                expect(2, {"command": "gh pr merge 7 --auto --squash"},
+                       "a fleet worktree does not queue its own merge either",
+                       because="the merge queue is")
                 # The REST spelling. `gh pr merge` has had one of these since it
                 # was written; `gh pr review` did not, and `Bash(gh api:*)` is on
                 # the agent allowlist -- so this was the live way to forge the
