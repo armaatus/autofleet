@@ -774,8 +774,9 @@ def check_bash(command, cwd=""):
             #
             # The whole `addPullRequestReview*` family, plus the submit: a
             # PENDING review submitted later is a review too. `resolveReviewThread`
-            # -- the one mutation scripts/fleet/resolve-thread.sh sends -- is
-            # deliberately not in here.
+            # is deliberately NOT in here: whether every thread is resolved is
+            # `required_conversation_resolution`, which is branch protection and
+            # is GitHub's own to decide (armaatus/autofleet#152).
             # A GraphQL body this cannot READ is a GraphQL body it must not
             # allow. `gh api` treats a field value beginning with `@` as a
             # FILENAME -- `-F query=@/tmp/m.gql` -- so every mutation name below
@@ -787,8 +788,7 @@ def check_bash(command, cwd=""):
             #
             # The rule is the honest one: from a fleet worktree, a `gh api`
             # carrying an indirect field is refused outright, because nothing
-            # here can say what it does. Inline queries are unaffected, which is
-            # what scripts/fleet/resolve-thread.sh sends.
+            # here can say what it does. Inline queries are unaffected.
             # ON THE FLAG, not on the `@`. `gh api --input <file>` takes a
             # plain path with no `@` at all -- and this file already knew that,
             # because `--input` has been in API_FIELD_FLAGS since the stop rule
@@ -812,8 +812,8 @@ def check_bash(command, cwd=""):
                     "mutation out of its sight, which is how a review and a merge can be "
                     "forged.\n"
                     "\n"
-                    "Put the query on the command line instead, as "
-                    "scripts/fleet/resolve-thread.sh does."
+                    "Put the query on the command line instead, where this hook "
+                    "can read it."
                 )
             # The mutations that ARE the acts other rules refuse, by their third
             # name. `gh pr merge` and `gh api .../pulls/N/merge` have been
@@ -849,9 +849,9 @@ def check_bash(command, cwd=""):
                     "of\n"
                     "the latest-verdict list merge_gate reads -- so dismissing the one that "
                     "found\n"
-                    "something clears the changes-requested block AND the answer requirement "
-                    "at\n"
-                    "once. A verdict is not yours to clear: push a fix and the "
+                    "something clears the verdict this head was given. A verdict is not "
+                    "yours\n"
+                    "to clear: push a fix and the "
                     "dispatcher re-reviews\n"
                     "the head you pushed, which is the only thing that supersedes one."
                 )
@@ -867,11 +867,11 @@ def check_bash(command, cwd=""):
                     "is the\n"
                     "same act by a third name.\n"
                     "\n"
-                    "Resolving a thread is `resolveReviewThread`, which is allowed and is "
-                    "what\n"
-                    "./scripts/fleet/resolve-thread.sh sends.\n"
+                    "Resolving a thread is `resolveReviewThread`, which is allowed: "
+                    "whether every\n"
+                    "thread is resolved is branch protection, and GitHub decides it.\n"
                     "\n"
-                    "The dispatcher runs the reviewer for you:  "
+                    "The dispatcher runs the reviewer:  "
                     "./scripts/fleet/await-review.sh"
                 )
             if sub_cmd[:1] == ["api"] and any(
@@ -1308,7 +1308,7 @@ def _stateful_checks():
                "...nor arm an auto-merge, which outlives the stop")
         expect(2, {"command": "gh pr close 7"}, "...nor close a PR")
         expect(2, {"command": "gh issue close 7"}, "...nor close an issue")
-        expect(2, {"command": "gh workflow run claude-review.yml -f pr=7"},
+        expect(2, {"command": "gh workflow run merge-gate.yml -f pr=7"},
                "...nor start a workflow")
         expect(2, {"command": "gh run rerun 9"}, "...nor re-run one")
         expect(2, {"command": "gh --repo owner/repo pr create --title x"},
@@ -1427,7 +1427,7 @@ def _stateful_checks():
                        "...nor submitting one that was left pending",
                        because="third name")
                 expect(0, {"command": "gh api graphql -F id=x -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){clientMutationId} }'"},
-                       "...but resolving a thread is what resolve-thread.sh sends")
+                       "...but resolving a thread is not submitting a review")
                 # THE FOURTH SPELLING, and the one that made the other three
                 # decorative: `gh api` reads a field value beginning with `@` from
                 # a FILE, so the mutation name is never on the command line at

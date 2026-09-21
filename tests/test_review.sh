@@ -175,7 +175,18 @@ case "${1:-}" in
   # marker.
   grep -q -- '--approve' "$GH_POSTS" \
     || { cat "$GH_POSTS" >&2; fail "review.sh never tried --approve, so a repo that would accept it never gets one"; }
-  ok "nothing Critical or Important posts an approving verdict"
+  # ...AND NOTHING ELSE IS POSTED. There are no Suggestions here, so there is no
+  # comment to leave -- and the first shape of the split got exactly this wrong:
+  # with an empty Suggestions half the shell split matched neither side and the
+  # review body was posted a SECOND time as a comment, carrying a literal record
+  # separator into what merge_gate.py parses. The `nits` phase below asserts a
+  # comment IS posted when there are Suggestions, which alone would never have
+  # caught it.
+  grep -q 'pr comment' "$GH_POSTS" \
+    && { cat "$GH_POSTS" >&2; fail "a finding-free review posted a Suggestions comment as well; there were no Suggestions"; }
+  grep -q "$(printf '\036')" "$GH_POSTS" \
+    && { cat "$GH_POSTS" >&2; fail "the record separator reached a posted body"; }
+  ok "nothing Critical or Important posts an approving verdict, and nothing else"
   ;;
 # -------------------------------------------------------------------- changes
   changes)

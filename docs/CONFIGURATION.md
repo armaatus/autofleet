@@ -189,12 +189,22 @@ Everything else is **branch protection**, which `install.sh` sets through
 
 | rule | what it replaced |
 |---|---|
-| required status checks (`merge-gate`) | the gate re-reading the check rollup itself |
+| required status checks (`merge-gate`, plus `$AUTOFLEET_REQUIRED_CHECKS`) | the gate re-reading the check rollup itself |
 | `required_conversation_resolution` | ~400 lines of review-thread paging in the gate, which had a truncation bug that made a partial list read as a clean one |
 | `dismiss_stale_reviews` | the gate binding an approval to a head sha. It still does; this is the half that makes GitHub's own UI agree |
 
 `enforce_admins` is left **off** on purpose: a repository admin merging the
 enforcement layer by hand, with `merge-gate` red, is the designed path.
+
+**Your build check is not guessed.** A required context is the *job's* name
+inside a workflow file, which the installer cannot know — autofleet's own is
+`suite`, not `ci` — and a context no job ever produces makes every pull request
+wait forever on a check that never reports. So the installer sets `merge-gate`
+and takes the rest from `AUTOFLEET_REQUIRED_CHECKS`, a space-separated list:
+
+```bash
+AUTOFLEET_REQUIRED_CHECKS="suite" ./install.sh /path/to/your/repo
+```
 
 If the installer could not set them — it needs admin on the repository — it says
 so and prints nothing else fatal. To set them by hand:
@@ -202,7 +212,7 @@ so and prints nothing else fatal. To set them by hand:
 ```bash
 gh api -X PUT "repos/<owner>/<repo>/branches/main/protection" --input - <<'JSON'
 {
-  "required_status_checks": {"strict": false, "contexts": ["merge-gate"]},
+  "required_status_checks": {"strict": false, "contexts": ["merge-gate", "<your build job>"]},
   "enforce_admins": false,
   "required_pull_request_reviews": {"dismiss_stale_reviews": true,
                                     "required_approving_review_count": 0},

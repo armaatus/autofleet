@@ -232,8 +232,21 @@ for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 # a person merges, an approving review of this head -- and everything else that
 # used to be in its 3,162 lines is set here, once, on the default branch:
 #
-#   required status checks          `merge-gate` and `ci`, so `--auto` waits on
-#                                   a red build instead of merging into one.
+#   required status checks          so `--auto` waits on a red build instead of
+#                                   merging into one. `merge-gate` always, plus
+#                                   whatever $AUTOFLEET_REQUIRED_CHECKS names.
+#
+#                                   THE HOST'S BUILD CHECK IS NOT GUESSED. A
+#                                   required context is the JOB's name, which
+#                                   this installer cannot know -- autofleet's
+#                                   own is `suite`, not `ci`, because that is
+#                                   the job key inside `ci.yml` -- and setting a
+#                                   context no job produces makes every pull
+#                                   request wait forever on a check that never
+#                                   reports. Hard rule 2: a project detail
+#                                   arrives through configuration, never through
+#                                   a guess in the payload. The next-steps below
+#                                   say how to add it.
 #   required_conversation_resolution
 #                                   every review thread resolved. This was ~400
 #                                   lines of thread paging in the gate, and the
@@ -272,13 +285,25 @@ set_branch_protection() {
     echo "   branch protection: gh could not say which repository this is; not set"
     return 0
   fi
+  # The contexts, as a JSON array built from the word list.
+  local contexts
+  contexts="$(REQUIRED="merge-gate ${AUTOFLEET_REQUIRED_CHECKS:-}" python3 -c '
+import json, os
+# Deduplicated and ORDER-PRESERVING: `merge-gate` first whatever the host set,
+# and a host that names it again does not get it twice.
+seen, out = set(), []
+for name in os.environ["REQUIRED"].split():
+    if name not in seen:
+        seen.add(name); out.append(name)
+print(json.dumps(out))
+')" || contexts='["merge-gate"]'
   # A HEREDOC on stdin, not a stack of `-f` flags: `required_status_checks` is a
   # nested object with an array in it, and `gh api -f` can only write flat
   # strings. `--input -` takes the whole document.
   if GH_PAGER=cat gh api -X PUT "repos/$nwo/branches/$branch/protection" \
        --input - >/dev/null 2>&1 <<JSON
 {
-  "required_status_checks": {"strict": false, "contexts": ["merge-gate"]},
+  "required_status_checks": {"strict": false, "contexts": $contexts},
   "enforce_admins": false,
   "required_pull_request_reviews": {"dismiss_stale_reviews": true,
                                     "required_approving_review_count": 0},
@@ -287,7 +312,7 @@ set_branch_protection() {
 }
 JSON
   then
-    echo "   branch protection on '$branch' (merge-gate required, threads must"
+    echo "   branch protection on '$branch' ($contexts required, threads must"
     echo "                       resolve, approvals dismissed on push)"
   else
     echo "   branch protection on '$branch': NOT SET -- needs admin on $nwo."
@@ -419,11 +444,14 @@ Next, in the repo you just installed into:
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.
-  6. Check the branch rules this installer tried to set. It needs admin on the
-     repository, and it says so above if it could not: required checks,
-     conversation resolution, and dismissing an approval when the head moves are
-     branch protection, and merge_gate.py deliberately does not re-check them.
-     docs/CONFIGURATION.md has the gh api call to run by hand.
+  6. Add YOUR build check to the required contexts. This installer set
+     `merge-gate` and cannot guess the other one: a required context is the
+     JOB's name inside your workflow file, and a context no job produces makes
+     every PR wait forever on a check that never reports. Re-run the installer
+     with AUTOFLEET_REQUIRED_CHECKS="<your job name>", or edit the rule by hand
+     -- docs/CONFIGURATION.md has the gh api call. The other two rules,
+     conversation resolution and dismissing an approval when the head moves,
+     are set; merge_gate.py deliberately does not re-check any of the three.
   7. Write .autofleet/review.md -- YOUR project's correctness rules, the ones
      REVIEW.md cannot know. The file that must be written atomically, the header
      that may not appear in that directory, the address a test may not reach.

@@ -84,10 +84,14 @@ mkdir -p "$LOG_DIR" || { echo "review.sh: cannot write $LOG_DIR" >&2; exit 2; }
 log="$LOG_DIR/pr-$pr-${head:0:8}.log"
 
 payload="$(mktemp)"; raw_out="$(mktemp)"; raw_err="$(mktemp)"; answer_json="$(mktemp)"
-# One trap, one list, from here down. Every early exit below goes through it,
-# and a second `trap` later that forgot one of these names is how a temporary
+review_body_f="$(mktemp)"; nit_body_f="$(mktemp)"
+# ONE TRAP, ONE LIST, from here down -- and the list is a variable, so the two
+# later traps cannot forget a name the first one had. That is how a temporary
 # file survives a run.
-trap 'rm -f "$payload" "$raw_out" "$raw_err" "$answer_json"' EXIT
+SCRATCH="$payload $raw_out $raw_err $answer_json $review_body_f $nit_body_f"
+# shellcheck disable=SC2064 -- expanded NOW on purpose: the trap has to hold the
+# names even on an exit that happens before the next statement runs.
+trap "rm -f $SCRATCH" EXIT
 
 # ALREADY JUDGED? Asked of GitHub rather than of a marker file on this machine.
 #
@@ -124,10 +128,18 @@ fi
 # submitted against no policy is worse than no review, so the policy arrives in
 # the prompt where it cannot be skipped.
 pr_body="$(GH_PAGER=cat gh pr view "$pr" --json body --jq .body 2>/dev/null)"
+# WHICH ISSUE, THROUGH `issue_refs.closes` rather than a regex of this file's
+# own. GitHub acts on NINE closing keywords; a fourth parser that knew three of
+# them read `Fixed #12` as no issue at all -- and the gate, which uses the
+# module, had already accepted that body. That module exists because three
+# readers of the same two line-shapes drifted once (armaatus/autofleet#114), and
+# this was the fourth. Found by the local /mattpocock-skills:code-review pass.
 issue="$(printf '%s' "$pr_body" | python3 -c '
-import re, sys
-found = re.search(r"(?i)\b(?:closes|fixes|resolves)\s+#(\d+)", sys.stdin.read())
-print(found.group(1) if found else "")
+import sys
+sys.path.insert(0, ".github/scripts")
+from issue_refs import closes
+found = closes(sys.stdin.read())
+print(found[0] if found else "")
 ')"
 issue_body=""
 if [ -n "$issue" ]; then
@@ -238,7 +250,8 @@ set +m
 # The child dies with this script, and without this it did not: a dispatcher
 # that killed this pid left an orphaned agent holding the maintainer's own gh
 # credentials, reviewing a commit nobody will merge.
-trap 'fleet_signal_group TERM "$reviewer"; rm -f "$payload" "$raw_out" "$raw_err" "$answer_json"' EXIT INT TERM
+# shellcheck disable=SC2064
+trap "fleet_signal_group TERM $reviewer; rm -f $SCRATCH" EXIT INT TERM
 
 waited=0
 while kill -0 "$reviewer" 2>/dev/null; do
@@ -260,7 +273,8 @@ while kill -0 "$reviewer" 2>/dev/null; do
   waited=$((waited + 5))
 done
 wait "$reviewer"
-trap 'rm -f "$payload" "$raw_out" "$raw_err" "$answer_json"' EXIT
+# shellcheck disable=SC2064
+trap "rm -f $SCRATCH" EXIT
 
 # ------------------------------------------------------- reading the verdict
 #
@@ -323,7 +337,16 @@ fi
 # "a nit is answered, not fixed" becomes "a nit is posted, and that is all".
 # They are split HERE rather than by the reviewer, so a reviewer that mislabels
 # a section cannot move a finding across the line that decides a merge.
-bodies="$(python3 - "$answer_json" "$head" <<'SPLIT_BODIES'
+# TWO FILES, NOT TWO DOCUMENTS ON ONE STDOUT. The first shape wrote them either
+# side of a record separator and split on it in the shell -- and with NO
+# Suggestions the separator was the last thing written, so `$( )` stripped the
+# trailing newline, neither `${bodies%%...}` nor `${bodies#...}` matched, and
+# BOTH halves came back as the whole review body. Every finding-free approve
+# posted its own review a second time as a "Suggestions" comment, carrying a
+# literal record separator into the body `merge_gate.py` parses. Two files have
+# no boundary to get wrong. Found by the local /mattpocock-skills:code-review
+# pass, which also noted that no test would have failed.
+python3 - "$answer_json" "$head" "$review_body_f" "$nit_body_f" <<'SPLIT_BODIES'
 import json, sys
 answer = json.load(open(sys.argv[1]))
 head = sys.argv[2]
@@ -340,16 +363,14 @@ if nits:
     body += ["", "%d Suggestion(s) are in a comment below; they block nothing."
              % len(nits)]
 body += ["", "<!-- autofleet-verdict: %s %s -->" % (answer["verdict"], head)]
-# Two documents on one stdout, split by a record separator that cannot occur in
-# either: a temporary file per document is two more names to keep in the trap.
-sys.stdout.write("\n".join(body))
-sys.stdout.write("\n\x1e\n")
-sys.stdout.write(("## Suggestions\n\nThey block nothing; take the ones you "
-                  "agree with.\n\n" + "\n".join(nits)) if nits else "")
+open(sys.argv[3], "w").write("\n".join(body))
+# EMPTY when there are none, which is what the caller tests. Written either way
+# so a stale file from a previous run cannot be read as this run's Suggestions.
+open(sys.argv[4], "w").write(
+    ("## Suggestions\n\nThey block nothing; take the ones you agree with.\n\n"
+     + "\n".join(nits)) if nits else "")
 SPLIT_BODIES
-)"
-review_body="${bodies%%$'\n\x1e\n'*}"
-nit_body="${bodies#*$'\n\x1e\n'}"
+review_body="$(cat "$review_body_f")"
 verdict="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$answer_json")"
 
 # `--approve` / `--request-changes` FIRST, and `--comment` when GitHub refuses.
@@ -371,8 +392,8 @@ if ! GH_PAGER=cat gh pr review "$pr" "$state" --body "$review_body" 2>"$raw_err"
     echo "review.sh: could not post the review at all." >&2; exit 2; }
 fi
 
-if [ -n "$nit_body" ]; then
-  GH_PAGER=cat gh pr comment "$pr" --body "$nit_body" \
+if [ -s "$nit_body_f" ]; then
+  GH_PAGER=cat gh pr comment "$pr" --body "$(cat "$nit_body_f")" \
     || echo "review.sh: the Suggestions comment did not post; they block nothing." >&2
 fi
 

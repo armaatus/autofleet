@@ -47,10 +47,18 @@ command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {
   exit 6; }
 
 pr_body="$(GH_PAGER=cat gh pr view "$pr" --json body --jq .body 2>/dev/null)"
+# WHICH ISSUE, THROUGH `issue_refs.closes` rather than a regex of this file's
+# own. GitHub acts on NINE closing keywords; a fourth parser that knew three of
+# them read `Fixed #12` as no issue at all -- and the gate, which uses the
+# module, had already accepted that body. That module exists because three
+# readers of the same two line-shapes drifted once (armaatus/autofleet#114), and
+# this was the fourth. Found by the local /mattpocock-skills:code-review pass.
 issue="$(printf '%s' "$pr_body" | python3 -c '
-import re, sys
-found = re.search(r"(?i)\b(?:closes|fixes|resolves)\s+#(\d+)", sys.stdin.read())
-print(found.group(1) if found else "")
+import sys
+sys.path.insert(0, ".github/scripts")
+from issue_refs import closes
+found = closes(sys.stdin.read())
+print(found[0] if found else "")
 ')"
 [ -n "$issue" ] || {
   echo "fix.sh: PR #$pr does not say which issue it closes, so there is no" >&2
@@ -67,8 +75,15 @@ worktree="$(cat "$FLEET_OWNED/$issue" 2>/dev/null)"
   echo "  The fix has to run where the branch is; open one, or fix by hand." >&2
   exit 2; }
 
-before="$(git -C "$worktree" rev-parse HEAD 2>/dev/null)"
-[ -n "$before" ] || {
+# THE PULL REQUEST'S HEAD, at both ends of this. It was the worktree's local
+# `git rev-parse HEAD` here and `headRefOid` at the bottom, so a worktree that
+# was already ahead of the remote read as "the fix pushed something" when
+# nothing had been pushed -- which is exactly the case the exit below exists to
+# catch. Found by the local /mattpocock-skills:code-review pass.
+before="$(GH_PAGER=cat gh pr view "$pr" --json headRefOid --jq .headRefOid 2>/dev/null)"
+[ -n "$before" ] && [ "$before" != null ] || {
+  echo "fix.sh: could not read the head of PR #$pr." >&2; exit 2; }
+[ -d "$worktree/.git" ] || [ -f "$worktree/.git" ] || {
   echo "fix.sh: $worktree is not a git worktree." >&2; exit 2; }
 
 # THE FINDINGS, read back off the pull request rather than passed in.
@@ -139,7 +154,11 @@ $diff
    gets no further sessions.
 
 You may not review, approve or merge this pull request, and the guard hook will
-refuse all three. Do not edit the tracker. Do not open another pull request."
+refuse all three. Do not open another pull request.
+
+Edit an issue only where a finding above says the work invalidated one -- that is
+dimension 7 of the review policy and it is a finding like any other. Say which
+issue and why in the commit message."
 
 echo "==> fixing PR #$pr in $worktree"
 
