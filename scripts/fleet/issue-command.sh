@@ -9,7 +9,7 @@
 # will want.
 #
 # It prints the spec AND the marching orders, so this file is the single place
-# the opening brief is written. orca.yaml and agent-autostart.sh both only point
+# the opening brief is written. orca.yaml and the dispatcher both only point
 # at it -- neither restates the workflow, so neither can drift from it.
 #
 # THE BRIEF ARRIVES IN TWO STAGES, and both are in this file:
@@ -85,7 +85,7 @@ if [ -z "$ref" ] && runner_available 2>/dev/null; then
   # runtime would not say") and rc 2 ("there is no linked issue") onto the same
   # empty `$ref`, and the message below then reported the same thing for both --
   # which is design note 2, at the last callsite of it that had neither a branch
-  # nor an assertion. `agent-autostart.sh` got its `case` for exactly this.
+  # nor an assertion.
   #
   # Neither answer may kill the script: `set -e` is on and BOTH are ordinary
   # here, since the argument form is what the agent uses and this fallback is for
@@ -106,8 +106,8 @@ if [ -z "$ref" ] && runner_available 2>/dev/null; then
 fi
 
 # Accept a bare number or any .../issues/<n>[...] URL. lib.sh holds the parse,
-# because handoff.sh needs the same one and the copy that lived here carried a
-# BSD-sed defect that turned `/issues/42` into `4242` -- see fleet_issue_number.
+# because the copy that lived here carried a BSD-sed defect that turned
+# `/issues/42` into `4242` -- see fleet_issue_number.
 num="$(fleet_issue_number "$ref")" \
   || { echo "issue-command: could not resolve an issue from '${ref}'" >&2; exit 1; }
 
@@ -147,30 +147,6 @@ fi
 # from the issue body alone otherwise, and re-derives from the files every
 # decision the first attempt already made.
 #
-# PRINTED HERE rather than named in the brief, and the difference is the whole
-# of why it costs nothing. The brief is one text with a word budget
-# evals/lint.sh holds at 400, and stage 1 is at 394 of it; a sentence telling
-# every agent about a file that exists for one in twenty of them would be paid
-# for by all of them, in the prompt prefix of every request. An agent that HAS
-# one gets the note itself, and an agent that does not gets exactly what it got
-# before.
-#
-# Stage 1 only. An agent running `--after-pr` has the note in context already --
-# it is the thing that resumed it -- and reprinting it is the duplication the
-# two-stage split exists to stop.
-handoff="$(fleet_handoff_path "$REPO_ROOT" "$num")"
-if ! $after_pr && [ -f "$handoff" ]; then
-  # Before the `---` the brief opens with, so tests/test_brief.sh and
-  # evals/lint.sh go on measuring the brief rather than the brief plus whatever
-  # the last attempt wrote.
-  printf '\n## What the last attempt on this issue left\n\n'
-  printf 'It was interrupted, or it restarted. This is what it decided and why,\n'
-  printf 'and what is still open -- read it instead of working that out again.\n'
-  printf 'Keep it current: `./scripts/fleet/handoff.sh write %s`\n\n' "$num"
-  cat "$handoff"
-  printf '\n'
-fi
-
 # ONE brief, cut in two. `@@AFTER-PR@@` is the cut, `awk` prints the half that is
 # due, and the `sed` substitutes the placeholders for both halves at once so they
 # cannot come to mean different things in the part that arrives an hour later.
@@ -242,13 +218,16 @@ each is stated there, where the wait for them is.
 **The `researcher` subagent** (`.claude/agents/`) answers "where is this
 handled" with the answer rather than the files it read.
 
-**This context has to last** the build and the answers in one time-box:
-`gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a whole file,
-`researcher` before a wide search.
+**This run is bounded by turns and dollars**, and it has to cover the build and
+the answers: `gh pr diff --stat` before `gh pr diff`, `sed -n '120,180p'` not a
+whole file, `researcher` before a wide search.
 
-Interrupted, or `~/.autofleet/STOP` exists? Put the work down, and write where
-you got to first: `./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'`.
-The next attempt here reads it. Nothing can go out while STOP exists.
+**Commit as you go.** If this run stops at its limit, a second one starts in the
+same worktree from the branch and the pull request -- nothing else crosses, so
+uncommitted work is work nobody sees again.
+
+If `~/.autofleet/STOP` exists, stop: say where you got to and do nothing
+further. Nothing can go out while it exists.
 
 @@AFTER-PR@@
 
@@ -276,30 +255,6 @@ the PR cannot merge. The closing line is the one the PR template leaves as a
 placeholder -- fill it in. Then tell the board where the work is:
 
     ./scripts/fleet/board.sh in-review "#__ISSUE__: PR #<n>, waiting on review"
-
-**Then write the handoff, and understand what it is for now: this session ends
-here.** The dispatcher drops the conversation once the PR is up and hands the
-rest of this brief to a new one in the same worktree -- the build is done, and
-every file you read to do it would otherwise be re-billed on every turn of the
-answering work. Sessions were measured past 900,000 tokens that way.
-
-So the note is not a courtesy for an interrupted attempt any more. It is the
-only thing that crosses:
-
-    ./scripts/fleet/handoff.sh write __ISSUE__ --stdin <<'NOTE'
-
-The heredoc marker is shown because the bare form reads an empty stdin when it
-is run as one command, and an empty note is refused -- correctly, since it would
-otherwise destroy the round before it. The closing `NOTE` goes at column 0.
-
-The decisions you took and why, the files you touched, what the review said and
-how you answered it, and what is still open. NOT the plan, which is in the PR
-body, and not the diff. It is capped, and over the cap it refuses and names the
-cap rather than truncating. `issue-command.sh` prints it back at the top of the
-next session here, which is the one that answers the review.
-
-If the dispatcher asks you for it -- "write your handoff note now" -- that is a
-bounded turn before something takes the terminal away. Write it and stop.
 
 **If your issue's scope is `.github/workflows/`, `.github/scripts/`,
 `.claude/`, or the files in `.autofleet/` that set the rules -- `guard.json`,

@@ -50,13 +50,12 @@ args=()
 # The card is addressed by PATH, and $REPO_ROOT is bash's logical pwd -- it keeps
 # whatever symlinked prefix the agent's shell had. If that differs from the path
 # the runtime recorded for this worktree, every update from inside it fails. The
-# `agent-autostart.sh` derives its path the same way and has matched the
-# runtime's record in every worktree the fleet has opened -- but that is WEAKER
-# evidence here than it looks, and the independent review was right to say so:
-# that script is started by setup.sh from the runner's own hook, so its cwd is
-# the recorded path by construction and could not have disagreed. THIS script is
-# run by an agent, from whatever cwd the agent is in, which can carry a
-# symlinked prefix the runtime's record does not.
+# The dispatcher passes the path the RUNNER gave it back, so its own card
+# updates cannot disagree by construction. THIS script is run by an agent, from
+# whatever cwd the agent is in, which can carry a symlinked prefix the runtime's
+# record does not -- so the evidence that the two match is weaker here than
+# anywhere else the fleet sets a card, and that is why the refusal below is
+# loud rather than silent.
 #
 # So it is an assumption, written down rather than relied on quietly. What bounds
 # the cost is the refusal below: this fails loudly, naming the card as stale,

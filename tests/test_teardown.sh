@@ -162,55 +162,6 @@ cleanup() {
 trap cleanup EXIT
 
 case "${1:-}" in
-  watcher)
-    # archive.sh runs while Orca deletes the worktree underneath it, so a watcher
-    # still polling from that directory has to be stopped. It identifies the
-    # process before signalling, because a pidfile outlives a `kill -9` and a
-    # reboot -- and the number in it is then whatever the system reused it for.
-    make_fixture
-
-    # Stand in for the watcher: what archive.sh matches on is the command line,
-    # so the name is the whole fixture. No `exec`, or the command line becomes
-    # `sleep` and the process stops looking like a watcher.
-    printf '#!/usr/bin/env bash\nsleep 20\n' >"$FIXTURE/agent-autostart-stub"
-    chmod +x "$FIXTURE/agent-autostart-stub"
-    # stdout to /dev/null, or the stand-in (and the `sleep` inside it) holds
-    # this test's stdout open and ctest waits on the pipe long after the
-    # assertions are done.
-    "$FIXTURE/agent-autostart-stub" >/dev/null 2>&1 & watcher=$!
-    echo "$watcher" >"$FIXTURE/.autofleet/run/agent-autostart.pid"
-
-    # Docker is not required and may not be running; either way archive.sh gets
-    # to the watcher first, which is the point of where the block sits.
-    out="$(cd "$FIXTURE" && ./scripts/fleet/archive.sh 2>&1)"
-    for _ in $(seq 1 50); do kill -0 "$watcher" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$watcher" 2>/dev/null; then
-      pkill -P "$watcher" 2>/dev/null
-      kill -9 "$watcher" 2>/dev/null; wait "$watcher" 2>/dev/null
-      fail "left the watcher running while the worktree was removed; got: $out"
-    fi
-    # archive.sh signals the script, not the `sleep` it is blocked in. An
-    # orphaned child holds this test's stdout open and hangs ctest long after
-    # the assertions are done.
-    pkill -P "$watcher" 2>/dev/null
-    wait "$watcher" 2>/dev/null
-    grep -q "stopping the agent autostart watcher" <<<"$out" \
-      || fail "stopped it without saying so; got: $out"
-
-    # Now a stale pidfile naming a live process that is NOT a watcher. Signalling
-    # it would kill something of the user's that merely inherited the number.
-    sleep 20 >/dev/null 2>&1 & bystander=$!
-    echo "$bystander" >"$FIXTURE/.autofleet/run/agent-autostart.pid"
-    out="$(cd "$FIXTURE" && ./scripts/fleet/archive.sh 2>&1)"
-    alive=1
-    kill -0 "$bystander" 2>/dev/null && alive=0
-    kill "$bystander" 2>/dev/null; wait "$bystander" 2>/dev/null
-    [ "$alive" -eq 0 ] \
-      || fail "signalled a recycled pid -- an unrelated process of the user's; got: $out"
-    grep -q "stopping the agent autostart watcher" <<<"$out" \
-      && fail "claimed to stop a watcher that was not one: $out"
-    echo "PASS: the watcher is stopped, and a recycled pid is left alone"
-    ;;
 
   derives)
     make_fixture

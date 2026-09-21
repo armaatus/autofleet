@@ -1,22 +1,30 @@
 # Orca workspace configuration.
 #
-# Every worktree created from this repo self-provisions through autofleet's own
-# hooks: it derives its isolated identity, runs the project's setup hook, and
-# starts the watcher that submits the agent's opening prompt.
+# THE DISPATCHER PROVISIONS AND STARTS THE BUILD, not this file. `fleet.sh`'s
+# `launch` runs `scripts/fleet/setup.sh` in the new worktree and then starts one
+# `claude -p` in it, so a worktree the fleet opened is provisioned and building
+# whichever driver created it. That is armaatus/autofleet#151: a hook mechanism
+# only one runtime has cannot be where the fleet's own steps live.
+#
+# What is left here is for worktrees a PERSON opens or removes through the app.
 #
 # Orca will ask you to trust this file before it runs anything, and again after
 # each change -- these scripts execute on your machine.
 
 scripts:
-  # Runs once per new worktree. See scripts/fleet/setup.sh.
+  # Runs once per new worktree -- for one a person created here by hand. A
+  # worktree the fleet opened has already had this run by the dispatcher, and
+  # setup.sh is safe to run twice.
   setup: ./scripts/fleet/setup.sh
-  # Runs when a worktree is removed: stops the watcher and tears down whatever
-  # stack .autofleet/config named.
+  # Runs when a worktree is removed through the app: tears down whatever stack
+  # .autofleet/config named. `fleet.sh` runs it itself before a removal it
+  # asked for, so this is the path for a removal it did not.
   archive: ./scripts/fleet/archive.sh
 
-# Hold the agent's tab until setup finishes. Without this the agent can run the
-# tests before its rig is up, read the connection error as a code bug, and go
-# chasing it. The few seconds this costs buys away that whole failure mode.
+# Hold the agent's tab until setup finishes. Without this an agent a person
+# started can run the tests before its rig is up, read the connection error as a
+# code bug, and go chasing it. The few seconds this costs buys away that whole
+# failure mode.
 setupAgentStartupPolicy: wait-for-setup
 
 # The prompt an agent starts with when the workspace is created from a linked

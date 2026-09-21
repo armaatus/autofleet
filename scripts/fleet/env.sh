@@ -18,8 +18,8 @@ cd "$REPO_ROOT"
 fleet_derive_env "$REPO_ROOT" \
   || { echo "no sha1 tool (shasum/sha1sum/python3); cannot name this worktree's stack" >&2; exit 1; }
 
-# The hooks' own scratch space -- pidfiles, the autostart log, the review
-# markers guard.py reads. Created here so nothing later has to check.
+# The hooks' own scratch space -- the review markers guard.py reads, and what
+# the local review passes write. Created here so nothing later has to check.
 mkdir -p "$REPO_ROOT/.autofleet/run"
 
 # A private temp file per run, not a shared `.env.tmp`. Anything that reads .env

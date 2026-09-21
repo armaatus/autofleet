@@ -448,7 +448,14 @@ doc.setdefault("result", {}).setdefault("worktrees", []).append(
      "path": where + "-" + (issue or "x")})
 json.dump(doc, open(path, "w"))
 PYWT
+    # A REAL worktree at the path it reports, because the dispatcher provisions
+    # one: `launch` runs `setup.sh` inside it before starting the build, and a
+    # bare directory has no payload to run.
+    "${REAL_GIT:-git}" -C "$WORK_FOR_STUB/repo" worktree add -q --detach \
+      "$WORK_FOR_STUB/created" 2>/dev/null || mkdir -p "$WORK_FOR_STUB/created"
     echo "{\"result\":{\"worktree\":{\"path\":\"$WORK_FOR_STUB/created\"}}}"; exit 0 ;;
+  "terminal create") echo '{"result":{"terminal":{"handle":"t1"}}}'; exit 0 ;;
+  "terminal close")  echo '{"ok":true}'; exit 0 ;;
   "worktree ps")   cat "$ORCA_PS"; exit 0 ;;
   "terminal list") cat "$ORCA_TERMINALS"; exit 0 ;;
   "terminal send") echo '{"ok":true}'; exit 0 ;;
@@ -559,7 +566,60 @@ exit 0
 STUB
   chmod +x "$WORK/repo/scripts/fleet/reap.sh"
 
+  # A build that does nothing and says what it cost. `$BUILD_CALLS` records every
+  # invocation, so a phase can assert that a build was started without one ever
+  # running. `--output-format json` is what the dispatcher and `cost.sh` read,
+  # so the stub prints that object and nothing else on stdout.
+  cat >"$WORK/bin/build-stub" <<'BUILDSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BUILD_CALLS"
+[ -n "${BUILD_STUB_SLEEP:-}" ] && sleep "$BUILD_STUB_SLEEP"
+printf '{"subtype":"%s","num_turns":%s,"total_cost_usd":%s,"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":4}}\n' \
+  "${BUILD_STUB_SUBTYPE:-success}" "${BUILD_STUB_TURNS:-7}" "${BUILD_STUB_USD:-0.5}"
+exit "${BUILD_STUB_RC:-0}"
+BUILDSTUB
+  chmod +x "$WORK/bin/build-stub"
+
+  # THE DEFAULT DRIVER'S CALLS, in the vocabulary the assertions already speak.
+  #
+  # $REAL_GIT is exported for the fixture's OWN git calls, which go around this
+  # shim deliberately: a phase that counts how many times one pass read the
+  # worktree list must not also be counting the `git worktree list` this
+  # fixture ran while setting that pass up.
+  #
+  # The app-backed driver's fake CLI recorded `worktree create|list|rm` into
+  # $ORCA_CALLS, and every phase that asserts "the worktree was created through
+  # the driver" greps for those words. The headless driver calls `git worktree
+  # add|list|remove` instead, so this shim records the same three words for the
+  # same three events and execs the real git for everything else. The
+  # alternative was rewriting a hundred assertions to say `worktree add`, which
+  # would have changed what they LOOK like without changing what they mean.
+  REAL_GIT="$(command -v git)"; export REAL_GIT
+  cat >"$WORK/bin/git" <<GITSHIM
+#!/usr/bin/env bash
+args=("\$@")
+i=0
+while [ \$i -lt \${#args[@]} ]; do
+  case "\${args[\$i]}" in
+    -C) i=\$((i + 2)); continue ;;
+    -c) i=\$((i + 2)); continue ;;
+    *) break ;;
+  esac
+done
+if [ "\${args[\$i]:-}" = worktree ]; then
+  case "\${args[\$((i + 1))]:-}" in
+    add)    printf 'worktree create %s\\n' "\${args[*]}" >>"\$ORCA_CALLS" ;;
+    list)   printf 'worktree list %s\\n'   "\${args[*]}" >>"\$ORCA_CALLS" ;;
+    remove) printf 'worktree rm %s\\n'     "\${args[*]}" >>"\$ORCA_CALLS" ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+GITSHIM
+  chmod +x "$WORK/bin/git"
+
   ORCA_CALLS="$WORK/calls"; : >"$ORCA_CALLS"
+  BUILD_CALLS="$WORK/build-calls"; : >"$BUILD_CALLS"
+  export BUILD_CALLS
   REAP_CALLS="$WORK/reap-calls"; : >"$REAP_CALLS"
   ORCA_MODE="$WORK/mode"; printf '%s' "${1:-ok}" >"$ORCA_MODE"
   GH_CALLS="$WORK/gh-calls"; : >"$GH_CALLS"
@@ -586,77 +646,190 @@ STUB
   # cmd_run sleeps between passes; a test that reached one would otherwise sit
   # for a minute before failing.
   export AUTOFLEET_POLL=1
-  # NO HANDOFF TURN BY DEFAULT, so a phase that is about the time-box or the
-  # reaper measures the thing it names. Every path that ends a session now asks
-  # the agent for its handoff note first and defers the ending to a LATER poll
-  # (armaatus/autofleet#106) -- so at the shipped 120s, the first poll of those
-  # phases asks and returns, and every one of them read as "it did not stop the
-  # agent". The turn has phases of its own below, which set this back.
-  export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
+  # THE DEFAULT DRIVER IS THE DEFAULT DRIVER (armaatus/autofleet#151). This
+  # fixture used to drive every phase through the app-backed runner against a
+  # fake CLI, which meant the driver a host project actually gets was exercised
+  # by one phase. `headless` needs nothing but git, so the suite can drive the
+  # real thing -- real `git worktree add`, real link files, real pid files --
+  # and the phases that are ABOUT the app-backed driver say so by setting
+  # AUTOFLEET_RUNNER themselves. The fake CLI stays on PATH for them.
+  export AUTOFLEET_RUNNER=headless
+  export AUTOFLEET_WORKTREE_ROOT="$WORK/trees"
+  # The build command, so nothing in the suite can start a real agent. It
+  # writes the result JSON the dispatcher reads and exits, which is what a
+  # finished build looks like.
+  export AUTOFLEET_BUILD_CMD="$WORK/bin/build-stub"
   export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
   export AUTOFLEET_DIR="$WORK/fleet"
+  # ...and what the payload writes at runtime is ignored, exactly as install.sh
+  # arranges in a host repo. Without this the `.env` that `setup.sh` writes into
+  # every worktree is an untracked file, and every reap reads it as "this
+  # worktree holds uncommitted work" and keeps the worktree forever.
+  printf '.env\n.autofleet/run/\n' >"$WORK/repo/.gitignore"
+
+  # THE FIXTURE REPO IS A GIT REPO, WITH THE PAYLOAD IN IT, from the start.
+  #
+  # Two reasons, both new with armaatus/autofleet#151. The default driver's
+  # worktree listing is `git worktree list`, so a fixture whose repo git has
+  # never heard of answers "could not read the listing" -- a real answer, and
+  # not the one an empty fleet is supposed to give. And `launch` provisions the
+  # worktree it opens by running `setup.sh` INSIDE it, so a worktree checked out
+  # of a repo whose commit does not carry the payload has no setup.sh to run.
+  make_repo_git
+  : >"$WORK/planted"
   PATH="$WORK/bin:$PATH"
   export PATH
 }
 
 # A worktree the fleet would own: a git repo with one commit, and an owned-file
 # naming it.
+# A worktree the dispatcher owns, at the path every other helper here calls
+# `$WORK/wt`. A REAL one: `git worktree add` in the fixture repo, plus the link
+# file the headless driver keeps its issue mapping in.
+#
+# It used to be a standalone `git init` plus a line in $OWNED_DIR, because the
+# driver's worktree listing was fabricated JSON and nothing joined the two. The
+# listing is `git worktree list` now, so a worktree the fixture invents and git
+# does not know about is invisible to every phase that reads it.
 make_worktree() {
-  mkdir -p "$WORK/wt"
-  git -C "$WORK/wt" init -q -b work
-  git -C "$WORK/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  plant_worktree 42 wt
+  # ...and OWNED by the dispatcher, which is what `$OWNED_DIR` means. Every
+  # reaper and every watcher walks that directory; a worktree git knows about
+  # and the fleet does not is invisible to all of them.
   mkdir -p "$AUTOFLEET_DIR/worktrees"
   printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
 }
 
-# The agent Orca reports for the worktree, and the terminal the time-box would
-# interrupt. Written as files so the stub answers the same thing every call.
-agent_state() {
-  python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"path": sys.argv[1], "agents": [{"state": sys.argv[2]}]}]}}))
-' "$WORK/wt" "$1" >"$ORCA_PS"
-  python3 -c '
-import json, sys
-print(json.dumps({"result": {"terminals": [
-    {"handle": "t1", "worktreePath": sys.argv[1], "agentIdentity": "claude"}]}}))
-' "$WORK/wt" >"$ORCA_TERMINALS"
+# One real worktree: issue $1, at `$WORK/$2`, in repo `$WORK/${3:-repo}`.
+plant_worktree() {
+  local num="$1" suffix="$2" repo="$WORK/${3:-repo}" path="$WORK/$2"
+  [ -d "$repo/.git" ] || make_repo_git_at "$repo"
+  "$REAL_GIT" -C "$repo" worktree add -q -b "wt-$suffix" "$path" 2>/dev/null \
+    || "$REAL_GIT" -C "$repo" worktree add -q "$path" "wt-$suffix"
+  printf '%s\n' "$path" >>"$WORK/planted"
+  mkdir -p "$AUTOFLEET_DIR/headless/links"
+  [ "$num" = "-" ] \
+    || printf '%s\n' "$num" >"$AUTOFLEET_DIR/headless/links/$(printf '%s' "$path" | tr '/' '%')"
 }
 
-# A live worktree the dispatcher owns, linked to issue $1, at the path every
-# other helper here calls `$WORK/wt`. `live_worktrees` reads `linkedIssue`,
-# which is the field the foundation check keys on -- a fixture that set only
-# `path` would make every issue answer "-" and the check vacuously true.
+# A build in `$WORK/wt` that is running, or that has stopped with rc $1.
 #
-# Delegated rather than written out: two writers disagreed on the TYPE of
-# `linkedIssue` (a string here, an int there), and a fixture that differs from
-# the one every other phase uses can hide a real parsing bug. Found by the local
-# review.
+# These replaced `build_running|waiting`. The app-backed runner classified
+# a terminal into three states and `notice_stalled` was built on the third; a
+# `claude -p` run is running or it is not, and the files below are exactly what
+# `fleet_build_state_of` reads.
+build_state_for() {
+  local num="$1" path="$2" rc="${3:-}" dir="$AUTOFLEET_DIR/builds/$1"
+  mkdir -p "$dir" "$AUTOFLEET_DIR/builds/by-path"
+  printf '%s\n' "$path" >"$dir/worktree"
+  printf '%s\n' "$num" >"$AUTOFLEET_DIR/builds/by-path/$(printf '%s' "$path" | tr '/' '%')"
+  if [ -n "$rc" ]; then
+    printf '%s\n' "$rc" >"$dir/rc"; rm -f "$dir/pid"
+  else
+    rm -f "$dir/rc"
+    set -m
+    ( exec -a "build $dir" sleep 300 ) & BUILD_SLEEPER=$!
+    set +m
+    printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
+  fi
+}
+
+build_running() {
+  local dir; dir="$AUTOFLEET_DIR/builds/42"
+  mkdir -p "$dir" "$AUTOFLEET_DIR/builds/by-path"
+  rm -f "$dir/rc"
+  printf '%s\n' "$WORK/wt" >"$dir/worktree"
+  printf '%s\n' 42 >"$AUTOFLEET_DIR/builds/by-path/$(printf '%s' "$WORK/wt" | tr '/' '%')"
+  # A pid that is alive and IS ours to signal -- `stop_build_in` really does
+  # kill it, which is the whole of what the reaper's warning pass promises. It
+  # was `$$` for one round, and the first phase that reached a stop killed the
+  # test process itself: the phase exited silently with no failure message at
+  # all, which is a much worse way to fail than red.
+  #
+  # Its own process GROUP, because that is what the driver signals -- the build
+  # command is a wrapper seam, so the process holding the credentials is
+  # routinely a child of what was forked.
+  # ITS COMMAND LINE NAMES THE BUILD DIRECTORY, because that is what the driver
+  # identifies its own build by: a pid file outlives a `kill -9` and a reboot,
+  # and the number in it is then whatever the system reused it for. A fake build
+  # that did not look like one would pass the phases while the identity check
+  # rejected every real build, or the other way round.
+  set -m
+  ( exec -a "build $dir" sleep 300 ) & BUILD_SLEEPER=$!
+  set +m
+  printf '%s\n' "$BUILD_SLEEPER" >"$dir/pid"
+}
+build_exited() {
+  build_running
+  printf '%s\n' "${1:-0}" >"$AUTOFLEET_DIR/builds/42/rc"
+  rm -f "$AUTOFLEET_DIR/builds/42/pid"
+}
+# ...and a build the driver CANNOT DESCRIBE, which is a third answer and not the
+# same as "there is no build here". The dispatcher has a record that issue $1
+# ran in `$WORK/wt`, and the index that would let the driver answer about it is
+# gone -- a build directory half-swept, a fleet directory restored from a
+# backup. Read as "nothing is running" it would count the worktree as waiting
+# for a person and end a drain with an agent still in there; read as blind it is
+# left alone and said once.
+build_blind() {
+  local num="${1:-42}" dir="$AUTOFLEET_DIR/builds/${1:-42}"
+  mkdir -p "$dir"
+  printf '%s\n' "$WORK/wt" >"$dir/worktree"
+  rm -rf "$AUTOFLEET_DIR/builds/by-path"
+  rm -f "$dir/pid" "$dir/rc"
+}
+
+# ...and what that run said it cost, which `build_exited` alone does not write.
+build_result() {
+  mkdir -p "$AUTOFLEET_DIR/builds/42"
+  printf '{"subtype":"%s","num_turns":%s,"total_cost_usd":%s}\n' \
+    "${1:-success}" "${2:-7}" "${3:-0.5}" >"$AUTOFLEET_DIR/builds/42/result.json"
+}
+
+# THE APP-BACKED DRIVER, for the phases that are about IT rather than about the
+# dispatcher: how it relays a runtime's own words, how it retries a removal,
+# what it does when the CLI cannot be reached. Everything else runs on the
+# default driver, which is the point of armaatus/autofleet#151 -- the driver a
+# host project gets is the one the suite drives.
+use_orca_runner() { export AUTOFLEET_RUNNER=orca; }
+
+# A live worktree the dispatcher owns, linked to issue $1, at `$WORK/wt`.
 worktree_on_issue() { worktree_list "$1:wt"; }
 
-# The worktree listing Orca answers, from `issue:path-suffix` pairs -- `-` for a
+# The worktree listing, from `issue:path-suffix[:repo]` triples -- `-` for a
 # worktree linked to no issue, and a third field naming a repo other than the
-# fixture's. `worktree_on_issue` is the one-entry form and stays; this is what a
-# machine running two fleets looks like, which is the case #46 is about.
+# fixture's, which is what a machine running two fleets looks like (#46).
+#
+# It CREATES them now rather than describing them. The scope rule it exists to
+# exercise is `git worktree list`'s own -- a worktree of another repository is
+# simply not in this repository's listing -- so a fixture that only claimed a
+# different `repoPath` would be asserting against a filter that no longer
+# exists.
 worktree_list() {
-  local spec; spec="$(printf '%s\n' "$@")"
-  WORKTREE_SPEC="$spec" WORKTREE_WORK="$WORK" python3 -c '
-import json, os
-out = []
-for line in os.environ["WORKTREE_SPEC"].splitlines():
-    if not line.strip():
-        continue
-    parts = line.split(":")
-    num, suffix = parts[0], parts[1]
-    repo = parts[2] if len(parts) > 2 else "repo"
-    work = os.environ["WORKTREE_WORK"]
-    out.append({"path": work + "/" + suffix,
-                "linkedIssue": None if num == "-" else int(num),
-                "repoPath": work + "/" + repo,
-                "isMainWorktree": False, "isArchived": False})
-print(json.dumps({"result": {"worktrees": out}}))
-' >"$ORCA_WORKTREES"
+  local line num suffix repo
+  # Everything THIS HELPER planted before, gone: a phase calls it to state the
+  # whole listing, not to add to it.
+  #
+  # Only what it planted. A phase may have a worktree of its own for another
+  # purpose -- `older_checkout` makes one to stand in for a checkout branched
+  # before a fix -- and a reset that swept every worktree in the repo deleted it
+  # out from under the phase that was about to cd into it.
+  local existing
+  if [ -s "$WORK/planted" ]; then
+    while IFS= read -r existing; do
+      [ -n "$existing" ] || continue
+      "$REAL_GIT" -C "$WORK/repo" worktree remove --force "$existing" 2>/dev/null || true
+    done <"$WORK/planted"
+    : >"$WORK/planted"
+  fi
+  rm -rf "$AUTOFLEET_DIR/headless/links"
+  for line in "$@"; do
+    [ -n "$line" ] || continue
+    num="${line%%:*}"; line="${line#*:}"
+    suffix="${line%%:*}"
+    case "$line" in *:*) repo="${line#*:}" ;; *) repo="repo" ;; esac
+    plant_worktree "$num" "$suffix" "$repo"
+  done
 }
 
 # The two halves of what one `gh issue view N --json state,labels` would print.
@@ -668,10 +841,15 @@ issue_state()  { printf '%s' "$1" >"$GH_STATE"; }
 # so a worktree with no origin at all is the "could not tell" case rather than
 # the empty one -- which is why every test that expects a removal sets this up.
 add_origin() {
-  git init -q --bare "$WORK/origin.git"
-  git -C "$WORK/wt" remote add origin "$WORK/origin.git"
-  git -C "$WORK/wt" push -q origin work:main
-  git -C "$WORK/wt" push -q -u origin work
+  # THE BRANCH IS READ, not assumed. `make_worktree` used to `"$REAL_GIT" init` a
+  # standalone repo on a branch called `work`; it is a real `"$REAL_GIT" worktree add`
+  # now, on a branch named after the worktree, and a hardcoded `work:main` here
+  # pushed nothing and left every reap saying "git could not say what it holds".
+  local br; br="$("$REAL_GIT" -C "$WORK/wt" rev-parse --abbrev-ref HEAD)"
+  "$REAL_GIT" init -q --bare "$WORK/origin.git"
+  "$REAL_GIT" -C "$WORK/wt" remote add origin "$WORK/origin.git" 2>/dev/null || true
+  "$REAL_GIT" -C "$WORK/wt" push -q origin "$br:main"
+  "$REAL_GIT" -C "$WORK/wt" push -q -u origin "$br"
 }
 
 # The same thing for a worktree the run itself opened, whose path the phase does
@@ -681,13 +859,21 @@ add_origin() {
 # waited for one to land waited forever, for a reason that had nothing to do with
 # what it was testing.
 reapable_worktree_at() {
-  local path="$1" bare="$WORK/origin-$(basename "$path").git"
-  git init -q -b work "$path"
-  git -C "$path" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
-  git init -q --bare "$bare"
-  git -C "$path" remote add origin "$bare"
-  git -C "$path" push -q origin work:main
-  git -C "$path" push -q -u origin work
+  local path="$1" bare="$WORK/origin-$(basename "$path").git" br
+  # A REAL worktree of the fixture repo already, because the default driver
+  # created it with `git worktree add` -- so this only has to give it an
+  # upstream. `git init` over the top of one is what it used to do, and that
+  # leaves two gits disagreeing about the same directory.
+  br="$("$REAL_GIT" -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || br=""
+  if [ -z "$br" ]; then
+    "$REAL_GIT" init -q -b work "$path"
+    "$REAL_GIT" -C "$path" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    br=work
+  fi
+  "$REAL_GIT" init -q --bare "$bare"
+  "$REAL_GIT" -C "$path" remote add origin "$bare" 2>/dev/null || true
+  "$REAL_GIT" -C "$path" push -q origin "$br:main"
+  "$REAL_GIT" -C "$path" push -q -u origin "$br"
 }
 
 # Nothing this dispatcher may throw away: an untracked file, or a commit that is
@@ -707,40 +893,11 @@ quiet_issue() { issue_state OPEN; issue_labels "ready"; : >"$GH_MERGED"; }
 release_pass()      { in_fleet reap_abandoned 2>&1; }
 warn_then_release() { release_pass >/dev/null 2>&1; release_pass; }
 
-# An issue that is past its box with no PR open: the started marker is old, and
-# the PR listing is empty.
-make_overdue() { mkdir -p "$AUTOFLEET_DIR/started"; echo 0 >"$AUTOFLEET_DIR/started/42"; }
-
-# All three markers enforce_timebox owns, set the way the dispatcher sets them
-# -- by driving it through the polls that write each one. Setting them by hand
-# would assert against a state the code may never produce.
-BOX_MARKERS="unreachable box-labels human-step"
-# The order is forced: the exemption branch clears `unreachable-` and
-# `box-labels-` on its way past, so `human-step-` has to be armed before them.
-arm_box_markers() {
-  # No PR, and the label says the last step is a person's -> `human-step-`.
-  echo '[]' >"$GH_PRS"; issue_labels "ready,needs-human-step"
-  in_fleet enforce_timebox >/dev/null 2>&1
-  # A PR lookup that cannot answer -> `unreachable-`.
-  echo 'not json' >"$GH_PRS"
-  in_fleet enforce_timebox >/dev/null 2>&1
-  # It answers again, and now the LABEL lookup cannot -> `box-labels-`.
-  echo '[]' >"$GH_PRS"; issue_labels FAIL
-  in_fleet enforce_timebox >/dev/null 2>&1
-  local m
-  for m in $BOX_MARKERS; do
-    [ -e "$AUTOFLEET_DIR/$m-42" ] \
-      || fail "could not arm $m-42, so the assertion that follows would be vacuous"
-  done
-}
-assert_no_box_markers() {
-  local m
-  for m in $BOX_MARKERS; do
-    [ -e "$AUTOFLEET_DIR/$m-42" ] \
-      && fail "$m-42 survives $1, and it silences the next worktree for this issue"
-  done
-  return 0
-}
+# A build that has STOPPED without opening a pull request: the run's own exit
+# status and the result it printed. This replaced `make_overdue`, which aged the
+# `started/` marker so a wall clock would fire -- there is no wall clock, and
+# what the dispatcher reads is the exit.
+build_ran_out() { build_exited 1; build_result error_max_turns 400 25.0; }
 
 # fleet.sh returns instead of dispatching when it is sourced, so one function can
 # be exercised without starting a dispatcher.
@@ -794,15 +951,16 @@ in_fleet_keeping_cache() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh && "$@
 stub_runner() {
   STUB_DIR="$WORK/stub"
   mkdir -p "$STUB_DIR"
-  : >"$STUB_DIR/worktrees"; : >"$STUB_DIR/states"; : >"$STUB_DIR/terminals"
+  : >"$STUB_DIR/worktrees"
   STUB_CALLS="$STUB_DIR/calls"; : >"$STUB_CALLS"
   export STUB_DIR STUB_CALLS
   cat >"$WORK/repo/scripts/fleet/runner/stub.sh" <<'STUBDRIVER'
 #!/usr/bin/env bash
 # A runner backed by text files. Records every call it is asked to make.
 #
-# runner_agent_terminal is NOT here: lib.sh provides it over
-# runner_agent_terminals, and a copy would test the copy.
+# Nothing here is provided by lib.sh any more: `runner_agent_terminal` was the
+# one contract function with no runner in it, and it went with the terminal
+# listing it filtered (armaatus/autofleet#151).
 stub_say() { printf '%s\n' "$*" >>"$STUB_CALLS"; }
 
 runner_available()       { stub_say available; return 0; }
@@ -810,7 +968,7 @@ runner_dispatcher_hint() { echo "tmux new-session -s fleet"; }
 runner_set_deadline()    { stub_say "set deadline $1"; return 0; }
 
 runner_worktree_create() {
-  local name="$2" issue="$3" path="$STUB_DIR/wt-$3"
+  local repo="$1" name="$2" issue="$3" path="$STUB_DIR/wt-$3"
   stub_say "worktree create $name $issue"
   # A failure path, which this stub did not have -- so the contract's "the
   # runtime's own words on failure, on STDOUT" was asserted only against the
@@ -818,7 +976,15 @@ runner_worktree_create() {
   # stdout only, and a driver that answers on stderr reproduces "could not
   # create it:" followed by nothing. Found by the independent review.
   [ -e "$STUB_DIR/create-fails" ] && { echo "the stub refuses to create"; return 1; }
-  mkdir -p "$path"
+  # A REAL worktree, because the dispatcher provisions one now: `launch` runs
+  # `setup.sh` inside it before starting the build, and a bare directory has no
+  # payload to run. A driver whose worktrees are not checkouts of the repo it
+  # was handed is not a driver this fleet can use.
+  # $REAL_GIT, around the shim that records the default driver's git calls: this
+  # phase's closing assertion is that NOTHING reached the app's CLI, and it
+  # reads the same ledger the shim writes into.
+  "${REAL_GIT:-git}" -C "$repo" worktree add -q -b "$name" "$path" 2>/dev/null \
+    || { echo "the stub could not add a worktree"; return 1; }
   printf '%s\t%s\t%s\n' "$path" "$name" "$issue" >>"$STUB_DIR/worktrees"
   printf '%s\n' "$path"
 }
@@ -849,32 +1015,26 @@ runner_worktree_remove() {
   [ -d "$1" ] && return 1
   return 0
 }
-runner_agent_states()    { stub_say "agent states";    cat "$STUB_DIR/states"; }
-runner_agent_terminals() {
-  stub_say "agent terminals"
-  # Non-zero is "the listing could not be READ", which is not the same answer as
-  # an empty listing -- and every caller of it has to keep them apart.
-  [ -e "$STUB_DIR/term-blind" ] && return 1
-  cat "$STUB_DIR/terminals"
-}
-runner_terminal_draft() {
-  stub_say "terminal draft $1"
-  [ -s "$STUB_DIR/draft" ] || return 0
-  printf '%s %s\n' "$(wc -c <"$STUB_DIR/draft" | tr -d ' ')" "$(cat "$STUB_DIR/draft")"
-}
-runner_terminal_send() {
-  stub_say "terminal send $1"
-  # A driver that cannot type at all. The contract lets it fail the send, and
-  # the caller interrupts as it always did (armaatus/autofleet#106).
-  [ -e "$STUB_DIR/send-refuses" ] && return 1
+runner_build_start() {
+  stub_say "build start $1 $2"
+  # A driver that cannot start a build at all -- which fails the LAUNCH now,
+  # loudly, on the pass that tried it. The app-backed runner used to start the
+  # agent from its own hook, so a failure there left a provisioned worktree
+  # nobody was working in and nothing said so.
+  [ -e "$STUB_DIR/build-fails" ] && return 1
+  printf '%s\n' "$2" >"$STUB_DIR/building-$2"
   return 0
 }
-runner_terminal_enter() {
-  stub_say "terminal enter $1"
-  [ -e "$STUB_DIR/enter-refuses" ] && return 1
-  return 0
+runner_build_state() {
+  stub_say "build state $1"
+  # Non-zero is "there is no build here to describe", which is not the same
+  # answer as "it has stopped" -- and `notice_build_exit` has to keep them
+  # apart, or a running build is reported as having given up.
+  [ -e "$STUB_DIR/build-blind" ] && return 1
+  [ -e "$STUB_DIR/build-exited" ] && { echo "exited $(cat "$STUB_DIR/build-exited")"; return 0; }
+  echo running
 }
-runner_terminal_interrupt() { stub_say "terminal interrupt $1"; return 0; }
+runner_build_stop() { stub_say "build stop $1"; return 0; }
 STUBDRIVER
   export AUTOFLEET_RUNNER=stub
 }
@@ -923,10 +1083,19 @@ in_pass() { (cd "$WORK/repo" && . ./scripts/fleet/fleet.sh; IN_POLL=true; forget
 
 # The fixture repo under git, because "which fixes are not live in the running
 # dispatcher" is answered in commits and cannot be faked with a hash alone.
+make_repo_git_at() {
+  mkdir -p "$1"
+  "$REAL_GIT" -C "$1" init -q -b main
+  "$REAL_GIT" -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+}
+
 make_repo_git() {
-  git -C "$WORK/repo" init -q -b main
-  git -C "$WORK/repo" -c user.email=t@t -c user.name=t add -A
-  git -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q -m "the fleet as the dispatcher parsed it"
+  "$REAL_GIT" -C "$WORK/repo" init -q -b main
+  "$REAL_GIT" -C "$WORK/repo" -c user.email=t@t -c user.name=t add -A
+  # `--allow-empty`: `make_fixture` commits the repo now, so a phase that calls
+  # this to snapshot the payload may find nothing changed -- and a `commit` that
+  # exits 1 for that reason would fail the phase under `set -e`.
+  "$REAL_GIT" -C "$WORK/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "the fleet as the dispatcher parsed it"
 }
 
 # A commit that changes fleet.sh under a dispatcher that is already up. A
@@ -1153,18 +1322,22 @@ case "${1:-}" in
     # at source time, so through it this call can never be the first one. The
     # hooks that source lib.sh alone are where it can.
     make_fixture ok
+    use_orca_runner
     out="$( cd "$WORK/repo" && bash -c '
       set -uo pipefail
       REPO_ROOT="$PWD"
       . ./scripts/fleet/lib.sh
       runner_worktree_list >/dev/null; echo "list rc=$?"
-      runner_agent_states  >/dev/null; echo "states rc=$?"
+      runner_build_state /nowhere >/dev/null; echo "state rc=$?"
     ' 2>&1 )"
     grep -q "unbound variable" <<<"$out" \
       && fail "the driver died on a shell variable instead of answering: $out"
     grep -q "list rc=0" <<<"$out" \
       || fail "a driver call that resolved its own CLI still did not answer: $out"
-    grep -q "states rc=0" <<<"$out" \
+    # `state rc=1` rather than 0: there is no build in `/nowhere`, and "there is
+    # no build here to describe" is the answer. What is under test is that it
+    # ANSWERED at all rather than dying on an unbound variable four frames down.
+    grep -q "state rc=" <<<"$out" \
       || fail "a driver call that resolved its own CLI still did not answer: $out"
 
     # ...and the ONE function whose rc is not a plain yes/no. `orca_cli` answers
@@ -1260,6 +1433,7 @@ case "${1:-}" in
     # an unsent prompt forever. Every assertion below is about a refusal arriving
     # before anything is spent, carrying enough to act on.
     make_fixture ok
+    use_orca_runner
 
     # 1. THE DRIVER THAT DOES NOT EXIST. lib.sh names the FILE it looked for.
     #    "no runner driver for AUTOFLEET_RUNNER=nope" alone sends the reader to
@@ -1490,7 +1664,7 @@ runner_available() {
 runner_worktree_create() { printf 'worktree_create\n' >>"$DOWN_CALLS"; return 1; }
 runner_worktree_list()   { printf 'worktree_list\n'   >>"$DOWN_CALLS"; }
 runner_worktree_set()    { printf 'worktree_set\n'    >>"$DOWN_CALLS"; }
-runner_agent_states()    { printf 'agent_states\n'    >>"$DOWN_CALLS"; }
+runner_build_state()     { printf 'build_state\n'     >>"$DOWN_CALLS"; return 1; }
 runner_set_deadline()    { printf 'set_deadline\n'    >>"$DOWN_CALLS"; }
 DRIVER
     : >"$WORK/down-calls"
@@ -1617,159 +1791,281 @@ DRIVER
     [ "$((lines))" -le 3 ] \
       || fail "the refusal is $lines lines, over the three docs/RUNNERS.md allows a relay, and launch reprints it every pass: $refusal"
 
-    # 5. THE DOCUMENTED OPT-OUT STILL OUTRANKS THE REFUSAL. `fleet_require_runner`
-    #    is fatal, and moving it up to precede the first `runner_*` put it in
-    #    front of AUTOFLEET_AGENT_AUTOSTART=0 -- which then exited 1 on a repo
-    #    whose driver is missing, where it had always exited 0. A person who
-    #    turned the watcher off is not asking about drivers.
-    #
-    #    Asserted rather than commented because `evals/lint.sh` 4h pulls the
-    #    other way: it requires the guard to come BEFORE the first `runner_*`
-    #    and says nothing about what must come before the guard, so the next
-    #    author to satisfy 4h by moving the guard up re-breaks this with 4h
-    #    green -- a guard that silently stops guarding, on the file that failed
-    #    this way once. Raised by the independent review.
-    out="$( cd "$WORK/repo" && AUTOFLEET_RUNNER=nope AUTOFLEET_AGENT_AUTOSTART=0 \
-      ./scripts/fleet/agent-autostart.sh 2>&1 )"; rc=$?
-    [ "$rc" = 0 ] \
-      || fail "the documented opt-out exited $rc because the runner was missing, on a path that starts nothing and asks the runner for nothing: $out"
-    grep -q "agent autostart disabled" <<<"$out" \
-      || fail "the opt-out did not say it was disabled, so the one line proving it took that branch is gone: $out"
-
     echo "ok: a machine with no usable runner is told which file, what was tried and what to install, before anything is provisioned"
     ;;
-  runner_stub)
-    # THE acceptance for #1, and the only assertion that keeps holding once the
-    # move has been made: with a driver that is not Orca, a dispatcher, a
-    # worktree hook and the brief resolver all do their whole job, and the CLI
-    # is never touched. Every callsite that regressed out from behind the driver
-    # would show up here as a recorded `orca` call.
+  stop_now_stops_builds)
+    # WHAT `stop --now` DOES NOW. Its pair `drain_lets_agents_finish` survives on
+    # the same line in tests/run.sh; this is the half that changed shape.
+    # `stop_freezes_agents` asserted that the freeze reached a live session and
+    # that the guard still refused anything outward afterwards -- and there is no
+    # session to freeze, so the first half became "the build is killed". The
+    # second half did not change at all and is the escape hatch, so it is
+    # asserted against the real `.claude/hooks/guard.py` exactly as before.
+    # Named in the PR body rather than dropped; found by
+    # `/mattpocock-skills:code-review`.
+    make_fixture ok
+    make_worktree
+    build_running
+    pid="$(cat "$AUTOFLEET_DIR/builds/42/pid")"
+    kill -0 "$pid" 2>/dev/null \
+      || fail "the fixture build is not running, so this phase would assert nothing"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    grep -q "stopped the build for #42" <<<"$out" \
+      || fail "stop --now did not say it stopped the build it stopped: $out"
+    # REAPED before the check: the fake build is a job of this shell, so a
+    # killed one stays a zombie until it is waited on and `kill -0` goes on
+    # answering yes about a process that is already dead.
+    wait "$BUILD_SLEEPER" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null \
+      && { kill -9 "$pid" 2>/dev/null; fail "stop --now left the build running: $out"; }
+    echo "ok: stop --now stops the build it owns, and says which"
+
+    # ...and a fleet with no build running does not claim to have stopped one.
+    in_fleet cmd_resume >/dev/null 2>&1
+    rm -rf "$AUTOFLEET_DIR/builds"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    grep -q "stopped the build" <<<"$out" \
+      && fail "it reported a stop for a worktree with no build in it: $out"
+    grep -q "there were none" <<<"$out" \
+      || fail "it said nothing at all where there was nothing to stop: $out"
+    echo "ok: ...and says so plainly when there is nothing to stop"
+
+    # THE ESCAPE HATCH, unchanged by this issue and asserted against the real
+    # hook rather than a copy of its rule: a stopped fleet lets nothing out.
+    # Stopped again first -- the second half above resumed, and asserting a
+    # stopped fleet's refusals against a running one asserts nothing.
+    in_fleet cmd_stop --now >/dev/null 2>&1
+    [ "$(guard_says 'git push')" = 2 ] \
+      || fail "a stopped fleet allowed a push"
+    [ "$(guard_says 'gh pr create --fill')" = 2 ] \
+      || fail "a stopped fleet allowed a pull request"
+    in_fleet cmd_resume >/dev/null 2>&1
+    [ "$(guard_says 'git push')" = 0 ] \
+      || fail "the stop outlived the resume, so the fleet can never push again"
+    echo "ok: ...and the guard still refuses anything outward while it is stopped"
+    ;;
+
+  no_build_command)
+    # A MACHINE WITH NO AGENT CLI STILL RUNS EVERY FLEET COMMAND THAT DOES NOT
+    # BUILD. `runner_available` asked for the build command for one round, and
+    # `fleet.sh` probes the driver at SOURCE time and dies on a no -- so on a CI
+    # runner with no `claude` installed the reviewer, the validator, `cost` and
+    # the whole review pipeline stopped, none of which builds anything. Eleven
+    # `review_mode` phases went red in CI and green here, for the one reason
+    # that makes this class of bug ship: this machine has `claude`.
+    make_fixture ok
+    # PATH without the build command, and with the tools the driver really
+    # needs. `fleet_build_program` is what the check reads, so pointing
+    # AUTOFLEET_BUILD_CMD at something absent is the same arrangement without
+    # having to rebuild PATH.
+    out="$( cd "$WORK/repo" && AUTOFLEET_BUILD_CMD=definitely-not-installed \
+              ./scripts/fleet/fleet.sh status 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      || fail "a fleet command that builds nothing died because the build command is absent (rc $rc): $out"
+    grep -q "not on PATH" <<<"$out" \
+      && fail "the driver refused itself over a command it does not use: $out"
+    echo "ok: the driver is usable on a machine with no agent CLI installed"
+
+    # ...and a LAUNCH says so, out loud, on the pass that tried it -- rather
+    # than spawning a run that dies instantly and is resumed up to
+    # AUTOFLEET_BUILD_MAX_RUNS.
+    make_worktree
+    out="$( AUTOFLEET_BUILD_CMD=definitely-not-installed \
+            in_fleet start_build 42 "$WORK/wt" 2>&1 )"; rc=$?
+    [ "$rc" = 0 ] \
+      && fail "a build started with no build command on PATH: $out"
+    grep -q "definitely-not-installed" <<<"$out" \
+      || fail "it did not name the command it could not find: $out"
+    grep -q "AUTOFLEET_BUILD_CMD" <<<"$out" \
+      || fail "it did not name the knob that sets it, which is the only way to fix it: $out"
+    echo "ok: ...and a launch that cannot build says which command is missing"
+    ;;
+
+  build_command)
+    # THE SPEC'S CENTRAL ARTEFACT, and nothing asserted it. The issue names the
+    # flags exactly and its design notes say `--bare` must not be passed --
+    # which is the line that keeps `.claude/hooks/guard.py` running under a
+    # headless agent, so a build that lost it could merge its own pull request
+    # and push before its review was recorded, with every phase still green.
+    # Found by `/mattpocock-skills:code-review`.
+    make_fixture ok
+    line="$(in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42")"
+    for flag in --permission-mode --max-turns --max-budget-usd "--output-format json" \
+                --append-system-prompt-file; do
+      grep -qF -- "$flag" <<<"$line" \
+        || fail "the build command line no longer passes $flag: $line"
+    done
+    grep -qF -- "--bare" <<<"$line" \
+      && fail "the build command line passes --bare, which turns off every rule in guard.py: $line"
+    # The two long inputs are READ FROM FILES rather than carried inline, which
+    # is what makes the line safe to hand to a terminal: the prompt and the
+    # brief are multi-line text from a tracker, and a command line quoting them
+    # is one apostrophe away from running something else.
+    grep -qF -- "\$(cat '$AUTOFLEET_DIR/builds/42/prompt')" <<<"$line" \
+      || fail "the prompt is not read from its file: $line"
+    grep -qF -- "'$AUTOFLEET_DIR/builds/42/system.md'" <<<"$line" \
+      || fail "the brief is not read from its file: $line"
+    # ...and the knobs reach it, so moving one moves the build.
+    line="$( AUTOFLEET_BUILD_MAX_TURNS=7 AUTOFLEET_BUILD_MAX_BUDGET_USD=3.5 \
+             AUTOFLEET_BUILD_PERMISSION_MODE=plan \
+             in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    grep -qF -- "--max-turns 7" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_MAX_TURNS does not reach the command line: $line"
+    grep -qF -- "--max-budget-usd 3.5" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_MAX_BUDGET_USD does not reach the command line: $line"
+    grep -qF -- "--permission-mode plan" <<<"$line" \
+      || fail "AUTOFLEET_BUILD_PERMISSION_MODE does not reach the command line: $line"
+    # ...and it writes its own exit status last, which is what lets ONE state
+    # reader serve a background child and a command hosted in somebody else's
+    # terminal.
+    grep -qF -- "/rc'" <<<"$line" \
+      || fail "the command line no longer records its own exit status: $line"
+    echo "ok: the one build command line carries every flag the issue names, and not --bare"
+
+    # BOTH DRIVERS RUN IT, byte for byte. The claim "only where it runs differs"
+    # is only checkable by comparing what each hands to the shell.
+    headless="$( AUTOFLEET_RUNNER=headless in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    orca="$( AUTOFLEET_RUNNER=orca in_fleet fleet_build_command_line "$AUTOFLEET_DIR/builds/42" )"
+    [ "$headless" = "$orca" ] \
+      || fail "the two drivers would run different commands:\n  $headless\n  $orca"
+    echo "ok: ...and both drivers compose the identical line"
+    ;;
+
+  resume_brief)
+    # A RESUME IS THE AFTER-PR BRIEF. The issue: "Resume is a second `claude -p`
+    # in the same worktree whose prompt says which branch, which PR, and what is
+    # open." Nothing asserted that the second run is handed anything different
+    # from the first, so a resume that re-ran the opening brief -- starting the
+    # build again on a branch that already has a pull request -- would have been
+    # green. Found by `/mattpocock-skills:code-review`.
     make_fixture ok
     make_worktree
     add_origin
+    cat >"$WORK/bin/gh" <<'GHSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+case "$*" in
+  *"issue view 42"*) echo "the issue body" ;;
+  *) echo '[]' ;;
+esac
+GHSTUB
+    chmod +x "$WORK/bin/gh"
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
+      || fail "the opening build would not start"
+    grep -qF -- "issue-command.sh 42" "$GH_CALLS" 2>/dev/null \
+      || grep -q "issue-command.sh" "$AUTOFLEET_DIR/builds/42/prompt" \
+      || grep -q "Your brief is in the system prompt" "$AUTOFLEET_DIR/builds/42/prompt" \
+      || fail "the opening run was handed no brief at all: $(cat "$AUTOFLEET_DIR/builds/42/prompt")"
+    opening="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    in_fleet start_build 42 "$WORK/wt" after-pr >/dev/null 2>&1 \
+      || fail "the resume would not start"
+    resumed="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    [ "$opening" = "$resumed" ] \
+      && fail "a resume was handed the same brief as the opening run, so it starts the build again on a branch that already has a pull request"
+    grep -q "after-pr\|--after-pr\|pull request" <<<"$resumed" \
+      || fail "the resumed run's brief says nothing about the pull request it is answering: $resumed"
+    # ...and the run count moved, which is what AUTOFLEET_BUILD_MAX_RUNS reads.
+    [ "$(cat "$AUTOFLEET_DIR/builds/42/run-count")" = 2 ] \
+      || fail "the resume did not count as a run, so the bound on resumes never fires"
+    echo "ok: a resume is handed the after-PR brief and counts as a run"
+    ;;
+
+  runner_stub)
+    # THE acceptance for armaatus/autofleet#1, and the only assertion that keeps
+    # holding once the move has been made: with a driver that is neither of the
+    # two that ship, a dispatcher, a worktree hook and the brief resolver all do
+    # their whole job, and the app's CLI is never asked anything.
+    make_fixture ok
     stub_runner
-    # An `orca` ON PATH as well as the one the fixture exports: the claim is that
-    # nothing reaches for the CLI, not that nothing reaches for it by the one
+    make_repo_git
+    # An `orca` ON PATH as well as the one the fixture exports: the claim is
+    # that nothing reaches for the runtime, not that nothing reaches for the one
     # name a test happened to set. Both record into $ORCA_CALLS.
     cp "$WORK/bin/orca-stub" "$WORK/bin/orca"
 
     printf '%s\t%s\t%s\n' "$WORK/wt" work 42 >"$STUB_DIR/worktrees"
-    printf '%s\t%s\n' "$WORK/wt" waiting >"$STUB_DIR/states"
-    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
-    printf '%s\t%s\n' t2 "$WORK/repo" >>"$STUB_DIR/terminals"
     printf '42' >"$STUB_DIR/issue"
-    printf 'read the issue and get to work' >"$STUB_DIR/draft"
+    plant_worktree 42 wt
+    add_origin
+    mkdir -p "$AUTOFLEET_DIR/worktrees"
+    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
 
     [ "$(gate_count)" = 1 ] \
-      || fail "the dispatcher could not count its own worktrees through a non-Orca driver"
+      || fail "the dispatcher could not count its own worktrees through a third driver"
 
-    # The stall watcher: the agent state and the board, one poll of each.
+    # The build watcher: the state and the board, one poll of each.
     issue_labels "ready"
-    out="$(in_fleet notice_stalled 2>&1)"
-    grep -q "waiting for input" <<<"$out" \
-      || fail "the agent state never arrived through the driver: $out"
+    : >"$STUB_DIR/build-exited"; printf '1\n' >"$STUB_DIR/build-exited"
+    echo '[]' >"$GH_PRS"
+    out="$(in_fleet notice_build_exit 2>&1)"
+    grep -q "ran out" <<<"$out" \
+      || fail "the build state never arrived through the driver: $out"
     grep -q "worktree set" "$STUB_CALLS" \
       || fail "the board update did not go through the driver: $(cat "$STUB_CALLS")"
+    rm -f "$STUB_DIR/build-exited" "$AUTOFLEET_DIR/gaveup-42"
 
-    # The launch, and then the release: create, set, remove, sweep.
+    # "I could not tell" is not "it has stopped", through a driver that says so.
+    : >"$STUB_DIR/build-blind"
+    out="$(in_fleet notice_build_exit 2>&1)"
+    rm -f "$STUB_DIR/build-blind"
+    grep -q "would not say whether its build is running" <<<"$out" \
+      || fail "a state the driver could not read was not reported as one: $out"
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      && fail "a build whose state could not be read was recorded as having given up"
+
+    # The launch: create, provision, start the build, set the card.
     in_fleet launch 44 "a second issue" >/dev/null 2>&1 \
       || fail "launch failed against a driver that answers everything"
     grep -q "worktree create" "$STUB_CALLS" \
       || fail "the worktree was not created through the driver: $(cat "$STUB_CALLS")"
-    in_fleet interrupt_agent_in "$WORK/wt" >/dev/null 2>&1
-    grep -q "terminal interrupt t1" "$STUB_CALLS" \
-      || fail "the interrupt did not find this worktree's agent through the driver: $(cat "$STUB_CALLS")"
+    grep -q "build start" "$STUB_CALLS" \
+      || fail "the build was not started through the driver: $(cat "$STUB_CALLS")"
+
+    # ...and a driver that cannot start one FAILS THE LAUNCH, out loud. The
+    # app-backed runner used to start the agent from its own worktree hook, so
+    # a failure there left a fully provisioned worktree nobody was working in
+    # and the dispatcher never knew. armaatus/autofleet#151.
+    : >"$STUB_DIR/build-fails"
+    out="$(in_fleet launch 46 "a fourth issue" 2>&1)"; rc=$?
+    rm -f "$STUB_DIR/build-fails"
+    [ "$rc" = 0 ] \
+      && fail "a launch whose build would not start was reported as a launch: $out"
+    grep -q "no build running" <<<"$out" \
+      || fail "it did not say the worktree has no build in it: $out"
+
+    in_fleet stop_build_in "$WORK/wt" >/dev/null 2>&1
+    grep -q "build stop $WORK/wt" "$STUB_CALLS" \
+      || fail "the stop did not reach this worktree's build through the driver: $(cat "$STUB_CALLS")"
+
+    # Only #42 is under test here: the launches above own two more worktrees,
+    # and a reap that also had to judge them would be asserting about their
+    # fixtures rather than about the driver.
+    rm -f "$AUTOFLEET_DIR/worktrees/44" "$AUTOFLEET_DIR/worktrees/46"
     out="$(in_fleet reap_merged 2>&1)"
     [ -d "$WORK/wt" ] && fail "the merged worktree was not removed through the driver: $out"
     grep -q -- "--yes" "$REAP_CALLS" \
-      || fail "the stack of a worktree the driver really removed was never swept: $out"
+      || fail "the stack sweep did not run after a removal through the driver: $(cat "$REAP_CALLS")"
 
-    # ...and the two hooks that run INSIDE a worktree, which reach the runtime
-    # by a different path and were the other half of the grep.
-    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
-    # The stage-2 pointer, which is where the resolved number now lands in the
-    # opening brief: `Closes #42` moved to `--after-pr` with the rest of the
-    # post-PR contract (#49). What is asserted is unchanged -- the number came
-    # back through the driver rather than off an argument.
-    grep -q -- "--after-pr 42" <<<"$out" \
-      || fail "issue-command.sh could not resolve this worktree's issue through the driver: $out"
-    # ...and the flag with NO number, which is the form an agent in a fleet
-    # worktree actually types: the flag is read before the issue is resolved so
-    # this falls back through the driver exactly as the bare form does. The
-    # comment that says so was the only thing asserting it. Found by the local
-    # /code-review pass.
-    out="$( cd "$WORK/repo" && ./scripts/fleet/issue-command.sh --after-pr 2>&1 )" \
-      || fail "--after-pr with no number could not resolve this worktree's issue: $out"
-    grep -q "Closes #42" <<<"$out" \
-      || fail "--after-pr fell back to no issue at all, so the post-PR half of the brief has no number in it: $out"
-
-    # ...and its THREE-WAY read, which is the branch this change added and the
-    # one branch it did not assert. `|| true` mapped rc 1 ("the runtime would not
-    # say") and rc 2 ("there is no linked issue") onto one empty `$ref`, so the
-    # by-hand path reported the same thing for both. The stub answers 1 on
-    # demand, and `agent-autostart.sh`'s sibling branch is already driven through
-    # that same knob in both directions. Found by the independent review, whose
-    # point was that this PR had fixed the same class twice already.
+    # THE THREE-WAY ANSWER, on the one function that has it. A worktree with no
+    # linked issue and a runtime that would not say must not reach a person as
+    # the same sentence: they did for a year, and it cost three worktrees a
+    # night.
     : >"$STUB_DIR/blind"
-    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"; rc=$?
+    out="$( cd "$WORK/repo" && ./scripts/fleet/issue-command.sh 2>&1 )"; rc=$?
     rm -f "$STUB_DIR/blind"
-    [ "$rc" != 0 ] \
-      || fail "issue-command.sh claimed success with no issue resolved at all: $out"
+    [ "$rc" = 0 ] \
+      && fail "a runner that would not answer was read as an issue number: $out"
     grep -q "would not say" <<<"$out" \
-      || fail "a runner that could not answer was reported as a worktree with no linked issue, which is the conflation design note 2 is about: $out"
-    # ...and the other answer still reads as itself.
-    printf '' >"$STUB_DIR/issue"
-    out="$( cd "$WORK/repo" && GH_PAGER=cat ./scripts/fleet/issue-command.sh 2>&1 )"
-    printf '42' >"$STUB_DIR/issue"
+      || fail "a runtime that could not answer was reported as a worktree with no issue: $out"
+    : >"$STUB_DIR/issue"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/issue-command.sh 2>&1 )"
     grep -q "would not say" <<<"$out" \
-      && fail "a worktree that really has no linked issue was reported as a runner that would not answer: $out"
-    out="$( cd "$WORK/repo" && AGENT_AUTOSTART_POLL_SECONDS=0 \
-              ./scripts/fleet/agent-autostart.sh --once 2>&1 )"
-    grep -q "sent." <<<"$out" \
-      || fail "agent-autostart.sh could not read or submit the draft through the driver: $out"
-    grep -q "terminal enter t2" "$STUB_CALLS" \
-      || fail "the prompt was not submitted through the driver: $(cat "$STUB_CALLS")"
-    grep -q "set deadline 20" "$STUB_CALLS" \
-      || fail "the watcher's shorter deadline was not asked for through the contract, so only an Orca driver would honour it: $(cat "$STUB_CALLS")"
-
-    # A worktree path with a BACKSLASH in it. `awk -v` reinterprets what it
-    # assigns, so the comparison went false and the answer came back "there is no
-    # agent in that worktree" -- which is indistinguishable from the truth, and
-    # is `stop` never interrupting an agent plus a watcher that gives up with the
-    # prompt unsent. Found by the independent review.
-    weird="$STUB_DIR/we\\ird"
-    printf '%s\t%s\n' t3 "$weird" >>"$STUB_DIR/terminals"
-    [ "$(in_fleet runner_agent_terminal "$weird")" = t3 ] \
-      || fail "a worktree path with a backslash in it has no agent, as far as the fleet can tell"
-    # ...and the SAME filter in notice_stalled, which had the same defect and
-    # would otherwise be a fix with no assertion. A worktree whose agent is
-    # `waiting` is reported as not waiting, forever.
-    printf '%s\t%s\n' "$weird" waiting >>"$STUB_DIR/states"
-    mkdir -p "$weird"
-    printf '%s\n' "$weird" >"$AUTOFLEET_DIR/worktrees/43"
-    out="$(in_fleet notice_stalled 2>&1)"
-    rm -f "$AUTOFLEET_DIR/worktrees/43"
-    grep -q "#43 is waiting" <<<"$out" \
-      || fail "an agent waiting in a worktree whose path has a backslash was reported as not waiting: $out"
-
-    # Design note 2 of the issue, on the one function that has THREE answers:
-    # "could not tell" and "there is none" must not reach a person as the same
-    # sentence. They did for a year, and it cost three worktrees a night.
-    : >"$STUB_DIR/blind"
-    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
-    grep -q "would not say" <<<"$out" \
-      || fail "a runner that could not answer was reported as a worktree with no linked issue: $out"
-    rm -f "$STUB_DIR/blind"
-    printf '' >"$STUB_DIR/issue"
-    out="$( cd "$WORK/repo" && ./scripts/fleet/agent-autostart.sh --watch 2>&1 )"
-    grep -q "no linked issue" <<<"$out" \
-      || fail "a worktree that really has no linked issue stopped saying so: $out"
+      && fail "a worktree that really has no linked issue was reported as a runtime outage: $out"
     printf '42' >"$STUB_DIR/issue"
 
     # A removal nobody answered is NOT a refusal. The dispatcher parks a slot for
     # good on a refusal and retries on silence, so this is a worktree lost per
-    # runtime restart if the driver conflates them -- and `orca_cli` answering a
-    # failed resolve with 1, like every other call, is exactly how it did.
+    # runtime restart if the driver conflates them.
     mkdir -p "$STUB_DIR/wt-blind"
     printf '%s\n' "$STUB_DIR/wt-blind" >"$AUTOFLEET_DIR/worktrees/44"
     : >"$STUB_DIR/rm-blind"
@@ -1808,9 +2104,7 @@ DRIVER
     # $REPO_ROOT assumption acceptable rather than quiet: if the path the agent's
     # shell has does not match the one the runtime recorded, every update from
     # inside that worktree fails, and the answer to that is a card named as stale
-    # rather than a board update reported and not made. Nothing drove this branch
-    # -- the stub returned 0 unconditionally, so only board.sh:65 was ever
-    # reached. Hard rule 3. Found by the independent review.
+    # rather than a board update reported and not made.
     : >"$STUB_DIR/set-fails"
     out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
       && fail "a board update the runner REFUSED was reported as done, so the card is stale and nobody knows: $out"
@@ -1818,32 +2112,10 @@ DRIVER
     grep -q "the card was NOT updated" <<<"$out" \
       || fail "board.sh did not name the card as stale, which is the only thing bounding the cost of its path assumption: $out"
 
-    # Design note 2 again, on the callsite `stop --now` actually takes. An
-    # unreadable listing and a machine with no agents on it printed the same
-    # thing: "interrupting agents..." and then nothing. CLAUDE.md calls --now the
-    # form that "also freezes the agents", so this is the log an operator reads
-    # while three agents keep writing against a rig that is going down.
-    printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
-    : >"$STUB_DIR/term-blind"
-    out="$(in_fleet cmd_stop --now 2>&1)"
-    rm -f "$STUB_DIR/term-blind"
-    grep -q "not the same as there being none" <<<"$out" \
-      || fail "stop --now read a listing it could not read as 'there are no agents', so nobody was told none were interrupted: $out"
-    in_fleet cmd_resume >/dev/null 2>&1
-    # ...and the other way, so the message is not simply always printed: the same
-    # stop with a listing that answers says nothing of the sort, and interrupts.
-    out="$(in_fleet cmd_stop --now 2>&1)"
-    in_fleet cmd_resume >/dev/null 2>&1
-    rm -f "$AUTOFLEET_DIR/worktrees/42"
-    grep -q "not the same as there being none" <<<"$out" \
-      && fail "a listing that answered perfectly well was reported as unreadable: $out"
-    grep -q "interrupted #42" <<<"$out" \
-      || fail "stop --now did not interrupt the agent the listing names: $out"
-
-    # ...and the contract's STREAM, against a driver that is not Orca. `launch`
-    # captures stdout only, so a driver obeying docs/RUNNERS.md must answer
-    # there; `create_says` asserts this against the Orca CLI stub, which leaves
-    # the page's claim untested for everyone the page is written for.
+    # ...and the contract's STREAM, against a driver that is neither shipped
+    # one. `launch` captures stdout only, so a driver obeying docs/RUNNERS.md
+    # must answer there; `create_says` asserts this against the app CLI stub,
+    # which leaves the page's claim untested for everyone the page is for.
     : >"$STUB_DIR/create-fails"
     out="$(in_fleet launch 45 "a third issue" 2>/dev/null)"
     rm -f "$STUB_DIR/create-fails"
@@ -1858,7 +2130,7 @@ DRIVER
     # was never asked anything.
     [ -s "$ORCA_CALLS" ] \
       && fail "something outside scripts/fleet/runner/ still reaches for the orca CLI: $(cat "$ORCA_CALLS")"
-    echo "ok: dispatcher, reap and both worktree hooks run on a driver that is not Orca"
+    echo "ok: dispatcher, reap and both worktree hooks run on a third driver"
     ;;
   create_says)
     # `launch` printing "could not create it:" and then nothing is the same line
@@ -1867,6 +2139,7 @@ DRIVER
     # runtime's stderr for that line to be worth anything -- docs/RUNNERS.md says
     # so, and until the independent review said otherwise nothing asserted it.
     make_fixture create_fails
+    use_orca_runner
     out="$(in_fleet launch 44 "a second issue" 2>&1)"
     grep -q "could not create it" <<<"$out" \
       || fail "a refused worktree creation was not reported at all: $out"
@@ -1885,10 +2158,11 @@ DRIVER
     # iterates it because both walk OWNED_DIR. A slot held forever by a worktree
     # the fleet cannot see. Found by the independent review.
     make_fixture create_warns
+    use_orca_runner
     out="$(in_fleet launch 44 "a second issue" 2>&1)"
     grep -q "reported no path" <<<"$out" \
       && fail "a warning on stderr broke the JSON parse, so the fleet created a worktree it does not own and cannot reap: $out"
-    grep -q "#44 is running in" <<<"$out" \
+    grep -q "#44 is building in" <<<"$out" \
       || fail "the created worktree was not tracked: $out"
     [ -e "$AUTOFLEET_DIR/worktrees/44" ] \
       || fail "nothing owns the worktree that was just created, so no reap will ever look at it: $out"
@@ -1896,6 +2170,7 @@ DRIVER
     ;;
   card_says)
     make_fixture set_fails
+    use_orca_runner
     out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
     grep -qi "board update FAILED" <<<"$out" \
       || fail "a refused board update said nothing: $out"
@@ -1912,6 +2187,7 @@ DRIVER
     # fails against the `FLEET_RUN_CAPTURE_STDERR=1` form the separate `$err`
     # replaced.
     make_fixture set_noisy
+    use_orca_runner
     out="$(in_fleet card "/some/worktree" workspace-status in-progress comment "#42: building" 2>&1)"
     grep -q "the real reason: worktree is not registered" <<<"$out" \
       || fail "the runtime's reason was pushed past the three-line bound by its own stdout, which is what relaying stderr first prevents: $out"
@@ -1925,6 +2201,7 @@ DRIVER
     ;;
   remove_forces)
     make_fixture rm_needs_force
+    use_orca_runner
     make_worktree
     in_fleet remove_worktree "$WORK/wt" >/dev/null 2>&1 \
       || fail "remove_worktree gave up on a worktree --force would have removed"
@@ -2038,7 +2315,11 @@ DRIVER
     # Found by `/code-review`. armaatus/autofleet#71.
     : >"$AUTOFLEET_DIR/held-42"
     : >"$AUTOFLEET_DIR/held-99"
-    printf 'not json' >"$ORCA_PS"
+    # Neither has a build the driver can describe, which is the outage: "I could
+    # not tell" for both, so the farewell can name neither.
+    build_blind 42
+    mkdir -p "$AUTOFLEET_DIR/builds/99"
+    printf '%s\n' "$WORK/wt99" >"$AUTOFLEET_DIR/builds/99/worktree"
     out="$(in_fleet farewell_parked 2 2>&1)"
     grep -q "the runner would not say" <<<"$out" \
       || fail "the farewell announced 2 worktrees and named none, with nothing saying why: $out"
@@ -2047,12 +2328,8 @@ DRIVER
     echo "ok: a farewell that cannot name any of them says so instead of printing an empty header"
 
     # ...and the SHORTFALL: one nameable, and the poll had counted two.
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
-    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
-' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    build_state_for 42 "$WORK/wt" 0
+    build_state_for 99 "$WORK/wt99"
     out="$(in_fleet farewell_parked 2 2>&1)"
     grep -q -- "#42 --" <<<"$out" || fail "it did not name the one it could: $out"
     grep -q -- "#99 --" <<<"$out" \
@@ -2068,12 +2345,7 @@ print(json.dumps({"result": {"worktrees": [
 
     # ...and the other direction, which is an agent that FINISHED in between:
     # both name-able now, against a farewell line that counted one.
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
-    {"path": sys.argv[2], "agents": [{"state": "idle"}]}]}}))
-' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    build_state_for 99 "$WORK/wt99" 0
     out="$(in_fleet farewell_parked 1 2>&1)"
     grep -q -- "#99 --" <<<"$out" \
       || fail "the worktree whose agent went idle was not named: $out"
@@ -2188,12 +2460,10 @@ print(json.dumps({"result": {"worktrees": [
     # Found by `/mattpocock-skills:code-review`.
     : >"$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-99"
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-    {"path": sys.argv[1], "agents": [{"state": "idle"}]},
-    {"path": sys.argv[2], "agents": [{"state": "working"}]}]}}))
-' "$WORK/wt" "$WORK/wt99" >"$ORCA_PS"
+    # #42's build has stopped; #99's is still running, which is what makes the
+    # gate on `held-99` decide anything.
+    build_state_for 42 "$WORK/wt" 0
+    build_state_for 99 "$WORK/wt99"
     dispatcher_running
     in_fleet record_dispatcher
     out="$(in_fleet cmd_status 2>&1)"
@@ -2225,6 +2495,12 @@ print(json.dumps({"result": {"worktrees": [
     # #99 still mid-work and the dispatcher exited -- #36's failure, re-created
     # by the fix for #37. The `-lt 0` clamp turned it from a visible wrong answer
     # into a silent one. Found by the independent review.
+    # STDOUT ONLY on every count below, and the reason is the gate. A worktree
+    # whose build state cannot be read is NOT counted as waiting for a person,
+    # and it says so once on stderr -- which is the right behaviour and was
+    # never in this phase's way while the gate read a machine-wide agent
+    # listing that always answered. Folded into the count, that sentence made
+    # `= 0` compare a number against a paragraph.
     make_fixture ok
     mkdir -p "$AUTOFLEET_DIR/worktrees" "$AUTOFLEET_DIR"
     printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/42"
@@ -2233,10 +2509,10 @@ print(json.dumps({"result": {"worktrees": [
     : >"$AUTOFLEET_DIR/stuck-42"
     # TWO passes, because a marker must survive one before it counts -- the
     # first pass records it, the second counts it. See count_parked_owned.
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a marker counted on the pass it appeared; a transient one would end the drain with an agent still working"
     echo "ok: a marker does not count on the pass it appears"
-    out="$(in_fleet count_parked_owned 2>&1)"
+    out="$(in_fleet count_parked_owned 2>/dev/null)"
     [ "$out" = 1 ] \
       || fail "two markers on one worktree counted as $out parked; #99 is still in flight and the drain would exit: $out"
     echo "ok: a worktree with two keep-markers is one parked worktree"
@@ -2246,13 +2522,13 @@ print(json.dumps({"result": {"worktrees": [
     # every pass, and one transient `blocked` label would otherwise sign the
     # dispatcher off with an agent still writing.
     rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a marker that cleared still counted as a worktree waiting for a person"
     : >"$AUTOFLEET_DIR/held-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a transient held- counted on its first pass"
     rm -f "$AUTOFLEET_DIR/held-42"
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "a held- that came and went across two passes was counted"
     echo "ok: ...and a marker that comes and goes never counts"
 
@@ -2266,29 +2542,32 @@ print(json.dumps({"result": {"worktrees": [
     # The first version of this phase could not tell the two apart either:
     # `agent_state` writes $ORCA_PS and $ORCA_TERMINALS together, and the
     # terminal it writes is byte-identical whatever state is passed -- so
-    # `agent_state idle` passed the "a live agent is not waiting" assertion
+    # `build_exited` passed the "a live agent is not waiting" assertion
     # exactly as `working` did. The phase read as one thing and asserted
     # another. Found by the independent review.
-    agent_state working
+    build_running
     : >"$AUTOFLEET_DIR/held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "held-42 counted as waiting for a person while its agent is WORKING"
     echo "ok: a worktree whose agent is working is not waiting for a person"
 
     # ...and the SAME terminal, with the agent no longer working, does count --
     # which is what the old gate could not see, and why the drain hung.
-    agent_state idle
+    build_exited
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "held-42 with its agent idle did not count -- the terminal outlives the agent, so the drain waits forever"
     echo "ok: ...and the same terminal with an idle agent does count"
 
-    # "Could not tell" is not "idle": a listing that would not read leaves the
-    # worktree uncounted, because somebody may still be in there.
-    printf 'not json' >"$ORCA_PS"
+    # "Could not tell" is not "it has stopped": a state the driver cannot read
+    # leaves the worktree uncounted, because somebody may still be in there.
+    # Reached by taking the driver's INDEX away and leaving the record, which is
+    # the shape that is genuinely unanswerable -- no build recorded at all is a
+    # real answer, and one this phase asserts the other way below.
+    build_blind
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "an agent-state listing that could not be read was treated as 'nobody is working'"
     echo "ok: ...and an unreadable listing is not an idle one"
 
@@ -2301,14 +2580,14 @@ print(json.dumps({"result": {"worktrees": [
     # independent review.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    printf 'not json' >"$ORCA_PS"
+    build_blind
     # THE LOG, not stdout: `count_parked_owned` discards the predicate's stdout
     # (it wants the rc, not the reason), and `say` tees to the log regardless --
     # which is the channel an operator actually reads.
     : >"$AUTOFLEET_DIR/fleet.log"
     in_fleet count_parked_owned >/dev/null 2>&1
-    grep -q "could not read the agent states" "$AUTOFLEET_DIR/fleet.log" \
-      || fail "a runner that would not say what its agents are doing left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
+    grep -q "could not read the build's state" "$AUTOFLEET_DIR/fleet.log" \
+      || fail "a runner that would not say whether its build is running left the drain unbounded and said nothing: $(cat "$AUTOFLEET_DIR/fleet.log")"
     echo "ok: ...and says so rather than stalling in silence"
 
     # ...AND ON THE SCREEN, which is the channel #37 asks for. This function
@@ -2321,10 +2600,10 @@ print(json.dumps({"result": {"worktrees": [
     # wrong channel. armaatus/autofleet#71.
     rm -f "$AUTOFLEET_DIR/ps-blind-42"
     : >"$AUTOFLEET_DIR/held-42"
-    printf 'not json' >"$ORCA_PS"
+    build_blind
     # `2>&1 >/dev/null` in that ORDER: stderr onto the capture, then stdout away.
     onscreen="$(in_fleet count_parked_owned 2>&1 >/dev/null)"
-    grep -q "could not read the agent states" <<<"$onscreen" \
+    grep -q "could not read the build's state" <<<"$onscreen" \
       || fail "the warning about an unbounded drain goes to the log and nowhere a person watching the dispatcher can see it: [$onscreen]"
     echo "ok: ...on the operator's screen and not only in the log"
     # ...and STDOUT still carries nothing but the count, or the poll's next line
@@ -2333,7 +2612,7 @@ print(json.dumps({"result": {"worktrees": [
     n="$(in_fleet count_parked_owned 2>/dev/null)"
     case "$n" in ''|*[!0-9]*) fail "the count the poll reads is not a number: [$n]" ;; esac
     echo "ok: ...and the count the poll reads is still a bare number"
-    agent_state idle
+    build_exited
     rm -f "$AUTOFLEET_DIR/held-42" "$AUTOFLEET_DIR/ps-blind-42"
 
     # MERGE-HELD AND MERGE-BLIND ARE GATED TOO. They were reached only when a
@@ -2341,22 +2620,22 @@ print(json.dumps({"result": {"worktrees": [
     # agent check -- and `reap_merged`'s own comment says why that tree is dirty:
     # "auto-merge fires the moment the last check passes, so review fixes made
     # after it sit uncommitted here". That is an agent mid-work.
-    agent_state working
+    build_running
     rm -f "$AUTOFLEET_DIR"/held-42 "$AUTOFLEET_DIR"/git-blind-*
     : >"$AUTOFLEET_DIR/merge-held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "merge-held-42 counted as waiting for a person while its agent is making review fixes, which is exactly when that marker is written"
     echo "ok: a merged worktree with a working agent is not waiting for a person"
-    agent_state idle
+    build_exited
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "merge-held-42 with an idle agent did not count, so the drain waits forever"
     echo "ok: ...and does once the agent is idle"
     rm -f "$AUTOFLEET_DIR/merge-held-42"
     # ...and leave the listing readable and the agent idle, or every assertion
     # after this one tests a runner that cannot answer rather than its subject.
-    agent_state idle
+    build_exited
     rm -f "$AUTOFLEET_DIR/held-42"
 
     # CASE (a): `stuck-` plus a stale `held-`, which nothing could ever clear.
@@ -2366,11 +2645,11 @@ print(json.dumps({"result": {"worktrees": [
     # wrote `stuck-` without clearing it, after which both reaps return early.
     # `parked` 0, `owned` 1, the drain polls forever: #37 verbatim, in the PR
     # that closes #37. Found by the independent review.
-    agent_state working
+    build_running
     : >"$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
       || fail "a refused removal was gated on a stale held- beside it, so the drain never ends"
     echo "ok: a refused removal counts whatever else is beside it"
 
@@ -2387,7 +2666,7 @@ print(json.dumps({"result": {"worktrees": [
     # prove the gate is not consulted for a refused removal; the block below is
     # about the two reasons that ARE gated, so a working agent there would make
     # it assert the opposite of its own message.
-    agent_state idle
+    build_exited
 
     # ...and the two reap_abandoned keeps, which an earlier comment asserted did
     # not exist. Uncounted, `owned` never reaches 0 and the drain never ends --
@@ -2395,8 +2674,11 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$AUTOFLEET_DIR/merge-blind-42" "$AUTOFLEET_DIR/stuck-42"
     : >"$AUTOFLEET_DIR/held-42"
     : >"$AUTOFLEET_DIR/git-blind-99"
+    # #99's build has stopped too, or the gate answers "could not tell" for it
+    # and this counts one worktree while asserting two.
+    build_state_for 99 "$WORK/wt99" 0
     in_fleet count_parked_owned >/dev/null 2>&1   # the pass that records them
-    out="$(in_fleet count_parked_owned 2>&1)"
+    out="$(in_fleet count_parked_owned 2>/dev/null)"
     [ "$out" = 2 ] \
       || fail "held- and git-blind- are not counted as waiting for a person, so the drain waits on them forever:: $out"
     echo "ok: ...and all five keep-markers count"
@@ -2414,14 +2696,14 @@ print(json.dumps({"result": {"worktrees": [
       rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
             "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
             "$AUTOFLEET_DIR"/stuck-*
-      agent_state working
+      build_running
       : >"$AUTOFLEET_DIR/$marker-42"
       in_fleet count_parked_owned >/dev/null 2>&1
-      [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+      [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
         || fail "$marker-42 counted as waiting for a person while its agent is WORKING, and the dispatcher would sign off on top of it"
-      agent_state idle
+      build_exited
       in_fleet count_parked_owned >/dev/null 2>&1
-      [ "$(in_fleet count_parked_owned 2>&1)" = 1 ] \
+      [ "$(in_fleet count_parked_owned 2>/dev/null)" = 1 ] \
         || fail "$marker-42 with an idle agent did not count, so the drain waits forever"
     done
     echo "ok: ...and both blind markers are gated on the agent, in each direction"
@@ -2448,10 +2730,10 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
           "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
           "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
-    agent_state working
+    build_running
     : >"$AUTOFLEET_DIR/git-blind-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "rewording the sentence took the agent gate off git-blind-; the dispatcher would sign off with an agent still writing"
     echo "ok: ...and rewording the reason a person reads does not switch the gate off"
     # ...AND REORDERING THE REASONS DOES NOT EITHER. The gate briefly keyed on
@@ -2472,11 +2754,11 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$AUTOFLEET_DIR"/held-* "$AUTOFLEET_DIR"/git-blind-* \
           "$AUTOFLEET_DIR"/merge-held-* "$AUTOFLEET_DIR"/merge-blind-* \
           "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/parked-since-*
-    agent_state working
+    build_running
     : >"$AUTOFLEET_DIR/git-blind-42"
     : >"$AUTOFLEET_DIR/stuck-42"
     in_fleet count_parked_owned >/dev/null 2>&1
-    [ "$(in_fleet count_parked_owned 2>&1)" = 0 ] \
+    [ "$(in_fleet count_parked_owned 2>/dev/null)" = 0 ] \
       || fail "the gate asked whether stuck- is on disk rather than which reason this is, so a reason ahead of stuck- is counted with its agent mid-work"
     echo "ok: ...and neither does reordering them"
     sed -i.bak 's/^PARK_MARKERS=.*/PARK_MARKERS="stuck merge-held held merge-blind git-blind"/' \
@@ -2484,14 +2766,14 @@ print(json.dumps({"result": {"worktrees": [
     rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
     rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/stuck-* \
           "$AUTOFLEET_DIR"/parked-since-*
-    agent_state idle
+    build_exited
     # ...and put the fixture back, or every row after this one runs against a
     # fleet.sh this phase edited and an agent it left working.
     sed -i.bak "s/printf 'git will not say what is in there/printf 'git could not say what it holds/" \
       "$WORK/repo/scripts/fleet/fleet.sh"
     rm -f "$WORK/repo/scripts/fleet/fleet.sh.bak"
     rm -f "$AUTOFLEET_DIR"/git-blind-* "$AUTOFLEET_DIR"/parked-since-*
-    agent_state idle
+    build_exited
 
     # ...AND THE TWO PLACES THAT TELL A PERSON know the same five. Counting a
     # worktree as waiting for someone and then never naming it is worse than not
@@ -2502,11 +2784,10 @@ print(json.dumps({"result": {"worktrees": [
     # review, which called all three findings one crack.
     # `cmd_status` lists through `live_worktrees`, so the runner has to report
     # #42 as well as the fleet owning it.
-    python3 -c '
-import json, sys
-print(json.dumps({"result": {"worktrees": [
-  {"path": sys.argv[1], "isMainWorktree": False, "linkedIssue": 42},
-]}}))' "$WORK/wt" >"$ORCA_WORKTREES"
+    worktree_on_issue 42
+    # ...and a build for #42 that has STOPPED, or the four gated reasons answer
+    # "could not tell" and `status` says so instead of naming it.
+    build_exited
     for reason in stuck merge-held merge-blind held git-blind; do
       rm -f "$AUTOFLEET_DIR"/stuck-* "$AUTOFLEET_DIR"/merge-held-* \
             "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
@@ -2531,12 +2812,12 @@ print(json.dumps({"result": {"worktrees": [
           "$AUTOFLEET_DIR"/merge-blind-* "$AUTOFLEET_DIR"/held-* \
           "$AUTOFLEET_DIR"/git-blind-*
     : >"$AUTOFLEET_DIR/held-42"
-    agent_state working
+    build_running
     out="$(in_fleet cmd_status 2>&1)"
     grep -q "waiting for you" <<<"$out" \
       && fail "status called #42 'waiting for you' while its agent is working, and told a person to go and discard what is in there: $out"
     echo "ok: status does not call a worktree parked while its agent works"
-    agent_state idle
+    build_exited
     out="$(in_fleet cmd_status 2>&1)"
     grep -q "waiting for you" <<<"$out" \
       || fail "status stopped naming a genuinely parked worktree once the gate was shared: $out"
@@ -2598,6 +2879,11 @@ print(json.dumps({"result": {"worktrees": [
     # `rm_never_works` plus a merged PR reaches the park the way `remove_advice`
     # does.
     make_fixture rm_never_works
+    # THE REFUSAL HAS TO COME FROM A RUNTIME, so this phase runs on the
+    # app-backed driver: `git worktree remove --force` does not refuse, and a
+    # park that cannot be reached is a claim about the dispatcher that nothing
+    # would be asserting.
+    use_orca_runner
     make_worktree
     add_origin
     ( in_fleet cmd_run --auto >"$WORK/run.log" 2>&1 ) &
@@ -2637,6 +2923,7 @@ print(json.dumps({"result": {"worktrees": [
 
   remove_advice)
     make_fixture rm_never_works
+    use_orca_runner
     make_worktree
     # An upstream, because this phase drives `reap_merged` and therefore has to
     # get PAST the holds check to reach the removal it is about. It did not have
@@ -2659,6 +2946,7 @@ print(json.dumps({"result": {"worktrees": [
     ;;
   remove_keeps_stack)
     make_fixture rm_never_works
+    use_orca_runner
     make_worktree
     out="$(in_fleet remove_worktree "$WORK/wt" 2>&1)"
     grep -q -- "--run-hooks" "$ORCA_CALLS" \
@@ -2699,11 +2987,15 @@ print(json.dumps({"result": {"worktrees": [
     ;;
   merged_unknown_git)
     make_fixture ok
+    use_orca_runner
     make_worktree
     add_origin
     # HEAD still reads, so the branch and the merged-PR lookup both answer; the
     # index does not, so `git status` cannot say whether anything is uncommitted.
-    printf 'not an index' >"$WORK/wt/.git/index"
+    # THE WORKTREE'S OWN GIT DIR, resolved rather than assumed: `$WORK/wt` is a
+    # real `git worktree add` now, so `.git` in it is a FILE pointing at
+    # `<repo>/.git/worktrees/<name>` and `.git/index` is not a path at all.
+    printf 'not an index' >"$("$REAL_GIT" -C "$WORK/wt" rev-parse --absolute-git-dir)/index"
     out="$(in_fleet reap_merged 2>&1)"
     grep -q "worktree rm" "$ORCA_CALLS" \
       && fail "it removed a worktree on a git that never answered: $(cat "$ORCA_CALLS")"
@@ -2716,6 +3008,7 @@ print(json.dumps({"result": {"worktrees": [
     ;;
   merged_cli_silent)
     make_fixture rm_hangs
+    use_orca_runner
     make_worktree
     add_origin
     # The dispatcher's own deadline, shortened so the phase fits its 60s timeout.
@@ -2738,6 +3031,7 @@ print(json.dumps({"result": {"worktrees": [
     ;;
   remove_scoped_sweep)
     make_fixture rm_needs_force
+    use_orca_runner
     make_worktree
     # The name the stack was really created under, which after a directory rename
     # is NOT the one the path derives -- archive.sh removed both, so must this.
@@ -2752,6 +3046,7 @@ print(json.dumps({"result": {"worktrees": [
     ;;
   merged_keeps_owned)
     make_fixture rm_never_works
+    use_orca_runner
     make_worktree
     add_origin
     out="$(in_fleet reap_merged 2>&1)"
@@ -2765,593 +3060,6 @@ print(json.dumps({"result": {"worktrees": [
     grep -q "could not remove it" <<<"$again" \
       && fail "it says so again every poll, and retries the removal with it: $again"
     echo "ok: a refused removal keeps its issue owned, and is said once"
-    ;;
-  stall_expected)
-    make_fixture ok
-    make_worktree
-    agent_state waiting
-    issue_labels "ready,needs-human-step"
-    out="$(in_fleet notice_stalled 2>&1)"
-    grep -q "nothing should be asking" <<<"$out" \
-      && fail "a correct refusal to act alone was called a stall: $out"
-    grep -qi "as expected" <<<"$out" \
-      || fail "it did not say the wait was the expected one: $out"
-    echo "ok: an issue whose last step is yours is reported as waiting for you"
-    ;;
-  stall_reports)
-    make_fixture ok
-    make_worktree
-    agent_state waiting
-    issue_labels "ready"
-    out="$(in_fleet notice_stalled 2>&1)"
-    grep -q "nothing should be asking" <<<"$out" \
-      || fail "an ordinary agent sitting at a prompt was not reported: $out"
-    echo "ok: an ordinary waiting agent is still a stall"
-    ;;
-  timebox_waits)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state waiting
-    issue_labels "ready,needs-human-step"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "the time-box interrupted an agent that was correctly waiting: $out"
-    grep -q "issue comment" "$GH_CALLS" \
-      && fail "it told the issue the fleet gave up on work that is waiting on a person"
-    grep -q "needs-human-step" <<<"$out" \
-      || fail "the log does not say why it was left alone: $out"
-    grep -q "waiting for you" "$ORCA_CALLS" \
-      || fail "nothing reached the board, and one line in fleet.log is not the status surface"
-    [ -e "$AUTOFLEET_DIR/started/42" ] \
-      || fail "the timer was disarmed for good, so removing the label leaves the agent uncapped"
-    # Once per exemption, not once per poll: the dispatcher polls every minute.
-    again="$(in_fleet enforce_timebox 2>&1)"
-    grep -q "needs-human-step" <<<"$again" \
-      && fail "it says so again every poll: $again"
-    echo "ok: the time-box exempts an issue whose last step is yours"
-    ;;
-  handoff_turn)
-    # armaatus/autofleet#106. Every path that ends a session used to interrupt
-    # first and ask nothing, so three hours of work left nothing behind and the
-    # next attempt re-derived it from the files. The note needs a TURN.
-    #
-    # Across polls, not inside one: the first pass asks and DEFERS, so this
-    # phase drives two. A version that slept the grace inside the pass stopped
-    # the whole dispatcher for two minutes per issue.
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state working
-    issue_labels "ready"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "it interrupted the agent in the same pass it asked for the note: $out"
-    grep -q "handoff.sh write 42" "$ORCA_CALLS" \
-      || fail "it did not ask for a handoff note at all: $out"
-    grep -q "asked for a handoff note" <<<"$out" \
-      || fail "it asked without saying so: $out"
-    grep -q "with no PR -- stopping it" <<<"$out" \
-      && fail "it announced the stop a pass before it stopped anything: $out"
-    echo "ok: the time-box asks for the handoff note and leaves the agent a pass to write it"
-
-    # ...and the note ARRIVING is what releases it -- the mtime moving, not the
-    # file existing, which is why the fixture writes it after the ask.
-    mkdir -p "$WORK/wt/.autofleet/run"
-    printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "the note was written and the agent was still not stopped: $out"
-    grep -q "handoff note written" <<<"$out" \
-      || fail "it stopped the agent without noticing the note it asked for: $out"
-    echo "ok: ...and stops it once the note is written"
-    ;;
-
-  handoff_order_stub)
-    # armaatus/autofleet#106's acceptance, on a driver that is NOT Orca: the ask
-    # goes through `runner_terminal_send` + `_enter` and lands BEFORE
-    # `runner_terminal_interrupt`, because an interrupt cancels the turn the
-    # note would have been written in.
-    make_fixture ok
-    make_worktree
-    make_overdue
-    stub_runner
-    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
-    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
-    issue_labels "ready"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
-    out="$(in_fleet enforce_timebox 2>&1)"
-    # Same-pass send-enter-interrupt would still pass the order check below, and
-    # is #106's own bug: the interrupt cancels the turn the note is written in.
-    grep -q "^terminal interrupt" "$STUB_CALLS" \
-      && fail "it interrupted in the pass that asked, leaving no turn to write in: $out"
-    mkdir -p "$WORK/wt/.autofleet/run"
-    printf 'what this attempt decided\n' >"$WORK/wt/.autofleet/run/handoff-42.md"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    send_at="$(grep -n "^terminal send t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
-    enter_at="$(grep -n "^terminal enter t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
-    int_at="$(grep -n "^terminal interrupt t1" "$STUB_CALLS" | head -1 | cut -d: -f1)"
-    [ -n "$send_at" ] && [ -n "$enter_at" ] \
-      || fail "the handoff request never went through the driver: $(cat "$STUB_CALLS")"
-    [ -n "$int_at" ] || fail "the agent was never interrupted: $out"
-    [ "$send_at" -lt "$enter_at" ] && [ "$enter_at" -lt "$int_at" ] \
-      || fail "the request did not land before the interrupt: $(cat "$STUB_CALLS")"
-    [ -s "$ORCA_CALLS" ] \
-      && fail "a call went to the CLI instead of the driver: $(cat "$ORCA_CALLS")"
-    echo "ok: the handoff request is sent and submitted before the interrupt, through the driver"
-    ;;
-
-  handoff_send_refused)
-    # A driver that cannot send still gets the interrupt, IN THE SAME PASS: the
-    # grace is for an agent that was asked, and this one was not. The second
-    # poll is quiet because the time-box CLOSES on that pass (its `started`
-    # marker goes); the `send-refused-` throttle is what the context reset,
-    # which has no such exit, relies on -- `context_reset_send_refused`.
-    make_fixture ok
-    make_worktree
-    make_overdue
-    stub_runner
-    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
-    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
-    : >"$STUB_DIR/send-refuses"
-    issue_labels "ready"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q "^terminal interrupt t1" "$STUB_CALLS" \
-      || fail "a refused send left the agent running: $out / $(cat "$STUB_CALLS")"
-    grep -q "^terminal enter" "$STUB_CALLS" \
-      && fail "it submitted after a send that failed, which submits the agent's own half-typed text"
-    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
-      || fail "the refused send was not said exactly once: $out"
-    [ -e "$AUTOFLEET_DIR/handoff-asked-42" ] \
-      && fail "a request that never went out left a marker that defers the next attempt"
-    echo "ok: a driver that refuses the send still gets the interrupt, in the same pass"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q "would not type into" <<<"$out" \
-      && fail "it says so again on the next poll: $out"
-    echo "ok: ...and the time-box closes, so it is not said again next poll"
-    ;;
-
-  context_reset_send_refused)
-    # The other caller that meets a driver which cannot type, and the one with
-    # no exit of its own: the reset retries every poll until the clear lands, so
-    # a send that is always refused said so -- three lines -- on every poll for
-    # as long as the PR stayed open. Found by the self-review of #106's PR.
-    make_fixture ok
-    make_worktree
-    stub_runner
-    printf '%s\t%s\n' "$WORK/wt" working >"$STUB_DIR/states"
-    printf '%s\t%s\n' t1 "$WORK/wt" >"$STUB_DIR/terminals"
-    : >"$STUB_DIR/send-refuses"
-    issue_labels "ready"
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=120
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    [ "$(grep -c "would not type into" <<<"$out")" = 1 ] \
-      || fail "a refused send was not said exactly once on the first poll: $out"
-    grep -q "^terminal enter" "$STUB_CALLS" \
-      && fail "it submitted after a send that failed"
-    echo "ok: a driver that refuses the send is said once on the first poll"
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    [ -z "$out" ] || fail "it says something again on the next poll: $out"
-    echo "ok: ...and nothing on the next one"
-    # ...but it is still RETRIED. The contract cannot tell a driver that never
-    # types from a send that timed out once, and giving up the reset for good on
-    # one timeout costs every review round the whole build context.
-    rm -f "$STUB_DIR/send-refuses"
-    : >"$STUB_CALLS"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=0
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q "^terminal enter t1" "$STUB_CALLS" \
-      || fail "a send that recovered was never retried: $(cat "$STUB_CALLS")"
-    grep -q "starting the answering work in a clean context" <<<"$out" \
-      || fail "the reset that finally landed left no line in the log: $out"
-    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
-      || fail "the reset did not complete once the driver typed again"
-    [ -e "$AUTOFLEET_DIR/send-refused-42" ] \
-      && fail "a send that landed left the refusal marker, silencing the next one"
-    echo "ok: ...and retried, so a send that recovers still resets the context"
-
-    # A refused SUBMIT is said every poll: the text was typed, each retry adds
-    # a copy to the composer, and a throttled line would hide the pile-up.
-    rm -f "$AUTOFLEET_DIR/context-reset-42"
-    : >"$STUB_DIR/enter-refuses"
-    in_fleet reset_context_for_answering >/dev/null 2>&1
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q "would not submit it" <<<"$out" \
-      || fail "a submit refused on every poll went quiet after the first: $out"
-    echo "ok: a refused submit is said on every poll it happens"
-    ;;
-
-  handoff_expires)
-    # The grace is a CEILING, not a wait. An agent that ignores the request, or
-    # is already wedged, must not hold its slot for ever -- the note is worth a
-    # bounded turn and nothing more.
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state working
-    issue_labels "ready"
-    export AUTOFLEET_HANDOFF_GRACE_SECONDS=1
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q "handoff.sh write 42" "$ORCA_CALLS" || fail "it did not ask: $out"
-    sleep 2
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "a grace that expired did not stop the agent: $out"
-    grep -q "no handoff note" <<<"$out" \
-      || fail "it went on without saying the note never came: $out"
-    echo "ok: a grace that expires stops the agent anyway, and says the note never came"
-
-    # The marker does not outlive the grace it was granted for, or the next
-    # worktree on this issue inherits a turn somebody else spent.
-    [ -e "$AUTOFLEET_DIR/handoff-asked-42" ] \
-      && fail "the request marker outlived its own grace"
-    echo "ok: ...and the request marker is cleared either way"
-    ;;
-
-  context_reset)
-    # THE PULL REQUEST IS THE SEAM. Sessions were measured past 900,000 tokens,
-    # most of it a build nobody was still reading, re-billed on every turn of
-    # the answering work. Once the PR is open the build is done.
-    make_fixture ok
-    make_worktree
-    agent_state working
-    issue_labels "ready"
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      || fail "the build context was never dropped: $out"
-    grep -q -- "issue-command.sh --after-pr 42" "$ORCA_CALLS" \
-      || fail "it dropped the context and sent no answering brief, which strands the worktree: $out"
-    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
-      || fail "nothing recorded that this issue has been reset: $out"
-    echo "ok: an open PR ends the build session and starts the answering one"
-
-    # ...ONCE. A second reset drops the answering context this one created,
-    # which is the same worktree losing the findings it was sent to answer.
-    : >"$ORCA_CALLS"
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "it cleared the answering context it had just created: $out"
-    echo "ok: ...and not a second time"
-    ;;
-
-  context_reset_off)
-    make_fixture ok
-    make_worktree
-    agent_state working
-    issue_labels "ready"
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-
-    # `off` keeps the one-session shape, for a host that wants it.
-    export AUTOFLEET_CONTEXT_RESET=off
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "AUTOFLEET_CONTEXT_RESET=off still dropped the conversation: $out"
-    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
-      && fail "it marked an issue it did not reset, so turning the knob back on does nothing"
-    echo "ok: AUTOFLEET_CONTEXT_RESET=off leaves the session alone"
-
-    # An EMPTY clear command is the same decision reached the other way, and it
-    # has to SAY so: an unrecognised command typed at an agent is a turn spent
-    # on a syntax error, and the answering brief then arrives with the whole
-    # build still in front of it.
-    export AUTOFLEET_CONTEXT_RESET=on
-    export AUTOFLEET_AGENT_CLEAR_CMD=""
-    out="$(in_fleet reset_context_for_answering 2>&1)"
-    grep -q -- "--text" "$ORCA_CALLS" \
-      && fail "an empty clear command still typed something at the agent: $out"
-    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
-      || fail "an empty clear command turned the reset off silently: $out"
-    echo "ok: ...and an empty AUTOFLEET_AGENT_CLEAR_CMD turns it off out loud"
-
-    # ...and a value that is neither is refused rather than read as `off`.
-    unset AUTOFLEET_AGENT_CLEAR_CMD
-    cfg_out="$( (cd "$WORK/repo" \
-      && AUTOFLEET_CONTEXT_RESET=true bash -c '. ./scripts/fleet/config.sh') 2>&1 )"
-    cfg_rc=$?
-    [ "$cfg_rc" = 2 ] \
-      || fail "AUTOFLEET_CONTEXT_RESET=true was accepted (rc=$cfg_rc): $cfg_out"
-    grep -q "must be 'on' or 'off'" <<<"$cfg_out" \
-      || fail "it was refused without saying why: $cfg_out"
-    echo "ok: ...and a value that is neither is refused, not read as off"
-    ;;
-
-  timebox_stops)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state working
-    issue_labels "ready"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "an ordinary overrun was not stopped: $out"
-    grep -q "issue comment" "$GH_CALLS" \
-      || fail "an ordinary overrun left nothing on the issue: $out"
-    echo "ok: an ordinary overrun is still stopped"
-    ;;
-
-  cost_knobs)
-    # THE THREE KNOBS THIS BRANCH ADDED, REFUSED WHEN THEY ARE NOT NUMBERS.
-    #
-    # config.sh validates every other numeric knob and says in its own comments
-    # why: a non-number makes `[ N -ge X ]` return 2, bash reads 2 as false, and
-    # the check the knob exists for never fires. Silently. These three are the
-    # ones where that failure is worst, because each one IS a cap:
-    #
-    #   SELF_REVIEW_MAX=three  -> `[ "$round" -gt "three" ]` is false forever,
-    #                             so the sixteen-round grind is back and nothing
-    #                             says so.
-    #   ANSWER_TIMEBOX=x       -> the answering session is unbounded again.
-    #   CONTEXT_RECYCLE=x      -> the recycle silently never runs.
-    #
-    # THROUGH THE CONFIG FILE as well as the environment, which is the route
-    # that matters: `.autofleet/config` is sourced LAST so it can override the
-    # defaults, and a check that only ever saw the defaults was decorative for
-    # every real user of it. That is the bug the REVIEW_MAX_TRIES phase in
-    # test_review_mode.sh records, and it is why both routes are driven here.
-    make_fixture ok
-    hostcfg="$WORK/hostcfg"
-    for knob in AUTOFLEET_SELF_REVIEW_MAX AUTOFLEET_ANSWER_TIMEBOX AUTOFLEET_CONTEXT_RECYCLE; do
-      for bad in three 2x -1; do
-        out="$( (cd "$WORK/repo" && env "$knob=$bad" \
-          bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
-        [ "$rc" = 2 ] \
-          || fail "$knob='$bad' was accepted (rc=$rc): $out"
-        grep -q "$knob must be" <<<"$out" \
-          || fail "$knob='$bad' failed without naming the knob: $out"
-      done
-      printf '%s=three\n' "$knob" >"$hostcfg"
-      out="$( (cd "$WORK/repo" && env -u "$knob" AUTOFLEET_CONFIG="$hostcfg" \
-        bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
-      [ "$rc" = 2 ] \
-        || fail "a config file setting $knob=three was accepted (rc=$rc): $out"
-    done
-    echo "ok: each new cap is refused when it is not a whole number, by both routes"
-
-    # ...and the legal values are accepted. A floor of 1 for the two that are
-    # counts of something that must happen at least once; 0 for the recycle,
-    # where 0 IS the documented off switch and refusing it would make the
-    # default unsettable.
-    for good in "AUTOFLEET_SELF_REVIEW_MAX=1" "AUTOFLEET_ANSWER_TIMEBOX=60" \
-                "AUTOFLEET_CONTEXT_RECYCLE=0" "AUTOFLEET_CONTEXT_RECYCLE=2700"; do
-      out="$( (cd "$WORK/repo" && env "$good" \
-        bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
-      [ "$rc" = 0 ] || fail "$good was refused (rc=$rc): $out"
-    done
-    echo "ok: ...while legal values pass, including the recycle's documented 0 for off"
-
-    # A ZERO SELF-REVIEW CAP IS NOT A LEGAL OFF SWITCH, for the reason the
-    # REVIEW_MAX_TRIES floor exists: it does not mean "no cap", it means the
-    # first round is already over it, so no self-review ever runs and the push
-    # gate opens on findings nothing produced.
-    out="$( (cd "$WORK/repo" && AUTOFLEET_SELF_REVIEW_MAX=0 \
-      bash -c '. ./scripts/fleet/config.sh') 2>&1 )"; rc=$?
-    [ "$rc" = 2 ] || fail "AUTOFLEET_SELF_REVIEW_MAX=0 was accepted (rc=$rc): $out"
-    echo "ok: ...and a zero self-review cap is refused, not read as 'off'"
-    ;;
-
-  context_recycle)
-    # THE BUILD SESSION IS THE SINGLE BIGGEST LINE IN AN ISSUE'S BILL, and the
-    # reason is not the number of turns. Measured on issue #71: the build ran
-    # 285 turns at 229,052 cache-read tokens PER TURN -- 65M, 31.9% of the whole
-    # issue -- against issue #106's build at 61 turns and 96,061 a turn. Same
-    # kind of work; 2.4x the context on every single turn, because one session
-    # accumulates everything it has read and pays for all of it again each turn.
-    #
-    # `reset_context_for_answering` already proves the remedy works. It fires
-    # ONCE, at the pull request, and everything before that is one window that
-    # only grows.
-    #
-    # OFF BY DEFAULT, and this phase asserts that first. A recycle costs the
-    # agent everything not in a 300-word handoff note, so a badly chosen
-    # interval makes the work worse AND more expensive by making it redo things.
-    # It is a knob to measure with, not a default to inflict.
-    make_fixture ok
-    make_worktree
-    agent_state working
-    issue_labels "ready"
-    echo '[]' >"$GH_PRS"
-
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "the build context was recycled with the knob unset: $out"
-    echo "ok: off by default -- an unset knob recycles nothing"
-
-    # ...and on, but well inside the interval, still nothing.
-    export AUTOFLEET_CONTEXT_RECYCLE=3600
-    : >"$ORCA_CALLS"
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "a build well inside the recycle interval was cleared: $out"
-    echo "ok: ...and inside the interval it leaves the session alone"
-
-    # Past it: the note is asked for, the conversation dropped, and the SAME
-    # brief re-sent. All three, in that order -- a clear with no brief after it
-    # strands the worktree with an agent that has nothing to do, which is the
-    # failure reset_context_for_answering's own comments warn about.
-    #
-    # THE AGENT ANSWERS, which is what makes this the happy path rather than the
-    # expiry one below: the recycle only drops a session whose handoff note
-    # actually MOVED, so a fixture that never writes one is testing the refusal.
-    NOTE="$WORK/wt/.autofleet/run/handoff-42.md"
-    mkdir -p "$(dirname "$NOTE")"
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    : >"$ORCA_CALLS"
-    # First pass asks for the note and declines to clear; the agent then writes
-    # it, and the second pass is the one that recycles.
-    in_fleet enforce_context_recycle >/dev/null 2>&1
-    printf 'what this session decided\n' >"$NOTE"
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    : >"$ORCA_CALLS"
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      || fail "a build past the recycle interval was not cleared: $out"
-    grep -q -- "issue-command.sh 42" "$ORCA_CALLS" \
-      || fail "it cleared the context and sent no brief, stranding the worktree: $out"
-    echo "ok: past the interval the session is recycled and re-briefed"
-
-    # ...and the clock restarts, so the next poll does not clear it again.
-    : >"$ORCA_CALLS"
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "it recycled the session it had just recycled: $out"
-    echo "ok: ...and the interval restarts, so the next poll leaves it alone"
-
-    # AN OPEN PULL REQUEST ENDS THIS. Past the PR the answering session is the
-    # one running, `reset_context_for_answering` owns that boundary, and a
-    # recycle here would drop the answering context that function just built --
-    # the same worktree losing the findings it was sent to answer.
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-    : >"$ORCA_CALLS"
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "it recycled a session that is answering a review, not building: $out"
-    echo "ok: an open PR ends the build recycle -- the answering half is not its business"
-
-    # AN ISSUE THE TIME-BOX GAVE UP ON IS FINISHED WITH. enforce_timebox
-    # interrupts the agent and comments "the fleet will not start this issue
-    # again on its own", but it leaves the worktree OWNED -- reap_abandoned
-    # keeps it while it holds commits. A recycle that did not ask would re-brief
-    # that agent every interval forever, restarting work the fleet announced it
-    # had stopped and that only `fleet.sh retry` may hand back.
-    echo '[]' >"$GH_PRS"
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    : >"$AUTOFLEET_DIR/gaveup-42"
-    : >"$ORCA_CALLS"
-    out="$(in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "it re-briefed an issue the time-box had given up on: $out"
-    echo "ok: an issue the time-box gave up on is not recycled back to life"
-    rm -f "$AUTOFLEET_DIR/gaveup-42"
-
-    # THE NOTE HAS TO HAVE MOVED. handoff_turn returns 0 for three different
-    # things -- the note was written, the grace expired without one, and there
-    # was nobody to ask -- and only the first is a reason to drop a build that
-    # is still going. With the grace at zero it never even asks, and clearing
-    # then resumes from whatever stale note is on disk, redoing committed work.
-    # No note at all, and the grace at zero so handoff_turn never even asks --
-    # its "go ahead" here means "I did not try", which is not "the agent
-    # answered".
-    rm -f "$NOTE"
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    : >"$ORCA_CALLS"
-    out="$(AUTOFLEET_HANDOFF_GRACE_SECONDS=0 in_fleet enforce_context_recycle 2>&1)"
-    grep -q -- "/clear" "$ORCA_CALLS" \
-      && fail "it cleared a live build with no fresh handoff note: $out"
-    grep -q "no fresh handoff note" <<<"$out" \
-      || fail "it declined to recycle without saying why: $out"
-    echo "ok: no fresh note means the build context is kept, not dropped"
-
-    # ...and an empty clear command says so ONCE, rather than turning the knob
-    # off in silence for the whole build.
-    echo 0 >"$AUTOFLEET_DIR/recycled-42"
-    out="$(AUTOFLEET_AGENT_CLEAR_CMD= in_fleet enforce_context_recycle 2>&1)"
-    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
-      || fail "an empty clear command turned the recycle off silently: $out"
-    out="$(AUTOFLEET_AGENT_CLEAR_CMD= in_fleet enforce_context_recycle 2>&1)"
-    grep -q "AUTOFLEET_AGENT_CLEAR_CMD is empty" <<<"$out" \
-      && fail "it said so again on the next poll, once a minute for the run"
-    echo "ok: ...and an empty clear command is said once, not every poll"
-
-    # The call site, for the same hard rule 3 reason answer_timebox asserts it.
-    grep -qE '^ +enforce_context_recycle$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
-      || fail "nothing in the poll loop calls enforce_context_recycle"
-    echo "ok: ...and the poll loop actually calls it"
-    ;;
-
-  answer_timebox)
-    # THE OTHER HALF OF THE SESSION, which had no clock at all.
-    #
-    # `enforce_timebox` deletes the started marker the moment a pull request is
-    # open -- "a PR being up means it got where it was going" -- so from that
-    # point nothing bounds the agent. Measured on issue #71: the build hit its
-    # three-hour box and stopped, and the answering session that followed ran
-    # 4h49m and 262 turns with nothing to stop it, at 165,000 cache-read tokens
-    # a turn. It is the second most expensive session in the whole issue.
-    #
-    # The build's box cannot simply be left armed: the two phases are different
-    # lengths of work and the answering one starts hours later. It gets its own,
-    # off the marker `reset_context_for_answering` already writes.
-    make_fixture ok
-    make_worktree
-    agent_state working
-    issue_labels "ready"
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-
-    # ITS OWN CLOCK, NOT THE CONTEXT RESET'S. Keying this on `context-reset-*`
-    # meant a host that set AUTOFLEET_CONTEXT_RESET=off -- documented and
-    # supported -- got no answering clock either, and the 4h49m hole reopened
-    # with nothing saying so. Two unrelated features sharing one marker, the
-    # coupling invisible from both ends. So the reset is explicitly OFF here,
-    # and the box must still arm.
-    export AUTOFLEET_CONTEXT_RESET=off
-    out="$(in_fleet enforce_answer_timebox 2>&1)"
-    [ -s "$AUTOFLEET_DIR/answer-since-42" ] \
-      || fail "no answering clock was started for an open PR: $out"
-    [ -e "$AUTOFLEET_DIR/context-reset-42" ] \
-      && fail "the phase is measuring the context reset's marker, not the box's own"
-    echo "ok: the clock starts at the PR, with the context reset turned off"
-
-    # Inside the box, nothing happens.
-    : >"$ORCA_CALLS"; : >"$GH_CALLS"
-    out="$(in_fleet enforce_answer_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "an answering session well inside its box was stopped: $out"
-    echo "ok: an answering session inside its box is left alone"
-
-    # ...and past it, the same treatment the build gets: a turn to write the
-    # handoff note, an interrupt, and a comment saying so where a person looks.
-    echo 0 >"$AUTOFLEET_DIR/answer-since-42"
-    : >"$ORCA_CALLS"; : >"$GH_CALLS"
-    out="$(in_fleet enforce_answer_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "an answering session past its box was not stopped: $out"
-    grep -q "issue comment" "$GH_CALLS" \
-      || fail "it stopped the agent and left nothing on the issue saying why: $out"
-    echo "ok: an answering session past its box is stopped, and says so on the issue"
-
-    # AND THE DURATION IS NOT "0h". The issue comment is the only durable record
-    # of why an agent was stopped, read by somebody who was not there, and
-    # `$((n / 3600))h` truncates: a documented, validated AUTOFLEET_ANSWER_TIMEBOX
-    # of 1800 announced "stopped work on this after 0 hours". A clumsy number
-    # there is survivable; a wrong one is not.
-    grep -q "after 0 hours\|after 0h" "$GH_CALLS" \
-      && fail "the issue comment says the agent was stopped after 0 hours"
-    echo "ok: ...and the duration in that comment is a real one"
-
-    # ONCE. This runs every poll, and an interrupt plus a comment once a minute
-    # for the life of the pull request is the failure mode every other
-    # once-per-event marker in this file exists to prevent.
-    : >"$ORCA_CALLS"; : >"$GH_CALLS"
-    out="$(in_fleet enforce_answer_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "it stopped the same answering session a second time: $out"
-    echo "ok: ...and not again on the next poll"
-
-    # THE CALL SITE, not just the function. Every assertion above drives
-    # `enforce_answer_timebox` directly, so deleting the one line in the poll
-    # loop that runs it leaves all of them green while the answering session
-    # goes back to being unbounded -- which is hard rule 3's shape exactly, and
-    # is how `foundation_launch_held` two phases down came to exist.
-    grep -qE '^ +enforce_answer_timebox$' "$REPO_ROOT/scripts/fleet/fleet.sh" \
-      || fail "nothing in the poll loop calls enforce_answer_timebox"
-    echo "ok: ...and the poll loop actually calls it"
-
-    # ...AND THE SAY-ONCE MARKER DOES NOT OUTLIVE THE WORKTREE. It is the whole
-    # of what stops a second interrupt, so left behind it silences the box for
-    # the NEXT worktree on this issue -- which is the bug `enforce_timebox`
-    # records against `unreachable-` in its own comments, arriving again through
-    # a marker added later than the list that clears them.
-    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
-      || fail "the fixture never armed answer-box-42, so this asserts nothing"
-    in_fleet clear_issue_markers 42 >/dev/null 2>&1
-    [ -e "$AUTOFLEET_DIR/answer-box-42" ] \
-      && fail "answer-box-42 survives clear_issue_markers: the next worktree on this issue gets no box"
-    echo "ok: ...and its say-once marker is cleared with the rest"
     ;;
   foundation_holds)
     # CLAUDE.md: "a foundation issue lands alone." The dispatcher enforced only
@@ -4027,6 +3735,7 @@ JSON
     # the only honest answer. `live_worktrees` already refuses to guess from
     # this shape; this is the same refusal one question later.
     make_fixture ok
+    use_orca_runner
     # A list that comes back in a shape nothing can read, which is what the
     # dispatcher actually sees when the CLI half-answers -- the stub's
     # `worktree list` succeeds in every mode, so making the CLI "fail" would not
@@ -4139,175 +3848,89 @@ JSON
       || fail "the run never terminated, so the declined issue stayed in the queue: $out"
     echo "ok: an explicitly named issue whose last step is yours is declined and dropped"
     ;;
-  timebox_rearms)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state waiting
-    issue_labels "ready,needs-human-step"
-    in_fleet enforce_timebox >/dev/null 2>&1
-    # The maintainer takes the label off to hand the worktree back to an agent.
-    issue_labels "ready"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "the box stayed disarmed after the label came off, so the agent runs uncapped: $out"
-    echo "ok: removing the label re-arms the time-box"
-    ;;
-  labels_unknown)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state waiting
-    issue_labels FAIL
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "an agent was stopped on a lookup that failed, not on an answer: $out"
-    [ -e "$AUTOFLEET_DIR/started/42" ] \
-      || fail "the timer was disarmed by a failed lookup, so the box never fires again"
-    grep -q "could not read its labels" <<<"$out" \
-      || fail "the outage was not reported: $out"
-    out="$(in_fleet notice_stalled 2>&1)"
-    grep -q "nothing should be asking" <<<"$out" \
-      && fail "a failed lookup was frozen as a stall, which is the noise this change removes: $out"
-    [ -e "$AUTOFLEET_DIR/stalled-42" ] \
-      && fail "the once-per-stall marker was written on a non-answer, so it is never re-evaluated"
-    echo "ok: a label lookup that failed stops nothing and decides nothing"
-    ;;
-  outage_once)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    # `working`, not `waiting`: the ordinary state of a grinding overrun, and
-    # the one that sends notice_stalled down its clearing branch.
-    agent_state working
-    issue_labels FAIL
-    out="$(in_poll enforce_timebox notice_stalled 2>&1)"
-    grep -q "could not read its labels" <<<"$out" \
-      || fail "the outage was not reported at all: $out"
-    again="$(in_poll enforce_timebox notice_stalled 2>&1)"
-    grep -q "could not read its labels" <<<"$again" \
-      && fail "it says so every poll: one watcher cleared the other watcher marker: $again"
-    echo "ok: an unreadable label is reported once, not once a minute"
-    ;;
   one_lookup)
     make_fixture ok
     make_worktree
     add_origin
-    make_overdue
-    agent_state waiting
+    build_ran_out
     issue_labels "ready,needs-human-step"
     : >"$GH_MERGED"
-    # All THREE watchers, in one process, which is what a poll is. reap_abandoned
-    # asks the same question as the other two, so a third round-trip is exactly
-    # the drift the shared answer exists to stop.
-    in_poll reap_abandoned enforce_timebox notice_stalled >/dev/null 2>&1
+    # BOTH watchers, in one process, which is what a poll is. They ask the same
+    # question about the same issue, so a second round-trip is exactly the drift
+    # the shared answer exists to stop. It was three watchers before
+    # armaatus/autofleet#151 and the claim is unchanged.
+    in_poll reap_abandoned notice_build_exit >/dev/null 2>&1
     n="$(grep -c -- "--json state,labels" "$GH_CALLS")"
     [ "$n" = 1 ] \
       || fail "asked GitHub $n times for one issue's state and labels in one poll"
     echo "ok: one poll asks for an issue's state and labels once"
     ;;
-  timebox_clears)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state working
-    arm_box_markers
-    # A PR opens: the time-box is done with this worktree.
-    echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
-    in_fleet enforce_timebox >/dev/null 2>&1
-    assert_no_box_markers "the PR-opened exit"
-    echo "ok: the time-box leaves nothing behind when it lets an issue go"
-    ;;
-  stop_clears)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state working
-    arm_box_markers
-    # Nothing exempts it any more, so this pass takes the stop.
-    echo '[]' >"$GH_PRS"; issue_labels "ready"
-    out="$(in_fleet enforce_timebox 2>&1)"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "it did not reach the stop, so this asserts nothing: $out"
-    assert_no_box_markers "the stop"
-    echo "ok: the stop leaves nothing behind either"
-    ;;
   own_clears)
     make_fixture ok
     make_worktree
-    make_overdue
-    agent_state working
+    add_origin
+    build_ran_out
     # Everything a previous worktree for this issue leaves standing, armed by
-    # driving the dispatcher through the poll that writes each one. `stalled-`
-    # and `stall-labels-` are alternatives -- notice_stalled clears one when it
-    # writes the other -- so they need two arrangements, not one.
-    arm_box_markers
-    agent_state waiting; issue_labels "ready"
-    in_fleet notice_stalled >/dev/null 2>&1
-    for m in $BOX_MARKERS stalled; do
-      [ -e "$AUTOFLEET_DIR/$m-42" ] \
-        || fail "could not arm $m-42, so the assertion that follows would be vacuous"
+    # driving the dispatcher through the passes that write each one rather than
+    # by touching the files: a marker set by hand asserts against a state the
+    # code may never produce.
+    quiet_issue
+    in_fleet notice_build_exit >/dev/null 2>&1
+    issue_labels FAIL
+    in_fleet reap_abandoned >/dev/null 2>&1
+    armed=""
+    for m in build-done exit-blind queue-labels unreachable human-step held stuck warned parked-since; do
+      [ -e "$AUTOFLEET_DIR/$m-42" ] && armed="$armed $m"
     done
-    # `live_worktrees` skips an ARCHIVED worktree, so `in_flight` reads free and
+    [ -n "$armed" ] \
+      || fail "no per-issue marker was armed at all, so the assertion that follows would be vacuous"
+    # `live_worktrees` can stop listing a worktree while its markers stand, so
     # the dispatcher opens a SECOND worktree for an issue whose markers are all
     # still set. Each of them throttles a message to once, so the new worktree
-    # inherits silence: a standing `stalled-42` makes notice_stalled say nothing
-    # at all for an agent that is genuinely stuck.
+    # inherits silence: a standing marker makes the dispatcher say nothing at
+    # all about a worktree that is genuinely stuck.
     in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
-    for m in $BOX_MARKERS stalled; do
+    for m in $armed; do
       [ -e "$AUTOFLEET_DIR/$m-42" ] \
         && fail "$m-42 survived into a fresh worktree, which is silenced by it"
     done
-    # ...and the other half of that pair.
-    issue_labels FAIL
-    in_fleet notice_stalled >/dev/null 2>&1
-    [ -e "$AUTOFLEET_DIR/stall-labels-42" ] \
-      || fail "could not arm stall-labels-42, so the assertion that follows would be vacuous"
-    in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
-    [ -e "$AUTOFLEET_DIR/stall-labels-42" ] \
-      && fail "stall-labels-42 survived into a fresh worktree, which is silenced by it"
     echo "ok: a fresh worktree starts with nothing already said on its behalf"
     ;;
-  own_records_run)
+  own_outlives_release)
     make_fixture ok
-    # The half of the ownership record that has to OUTLIVE the worktree. The
-    # owned registry is what is running, and `disown_issue` empties it the moment
-    # a worktree is released -- so a cost report built on it alone goes blank
-    # exactly when a run finishes, which is when somebody asks what it cost.
+    # WHAT AN ISSUE COST HAS TO OUTLIVE ITS WORKTREE. The owned registry is what
+    # is RUNNING, and `disown_issue` empties it the moment a worktree is
+    # released -- so a cost report built on it alone goes blank exactly when a
+    # run finishes, which is when somebody asks what it cost.
+    #
+    # A second registry under `$AUTOFLEET_DIR/ran/` used to carry that, because
+    # the report found an issue's cost by slugging every path it had run in into
+    # the agent CLI's transcript root. The build directory is keyed on the ISSUE
+    # and outlives everything, so the registry became a store nothing read and
+    # went with the slug (armaatus/autofleet#151). This is the claim that
+    # survived it.
     in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
-    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
-      || fail "own did not record #42's worktree path under ran/"
+    mkdir -p "$AUTOFLEET_DIR/builds/42"
+    printf '{"num_turns":9,"total_cost_usd":1.25}\n' >"$AUTOFLEET_DIR/builds/42/result.json"
     in_fleet disown_issue 42 >/dev/null 2>&1
     [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
       && fail "disown_issue left the OWNED entry behind; the fixture proves nothing"
-    [ "$(cat "$AUTOFLEET_DIR/ran/42" 2>/dev/null)" = "$WORK/wt" ] \
-      || fail "releasing the worktree also erased the record that #42 ever ran"
-    # ...and a SECOND attempt, as `fleet.sh retry 42` opens: appended, not
-    # replaced. Truncating throws away the abandoned attempt, which is exactly
-    # the "did it cost more than the one that landed" comparison the report is
-    # for. Re-owning the SAME path must not duplicate the line.
-    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
-    in_fleet own 42 "$WORK/wt2" >/dev/null 2>&1
-    [ "$(cat "$AUTOFLEET_DIR/ran/42")" = "$(printf '%s\n%s' "$WORK/wt" "$WORK/wt2")" ] \
-      || fail "a second worktree for #42 did not append cleanly; ran/42 holds:
-$(cat "$AUTOFLEET_DIR/ran/42")"
-    echo "ok: every worktree an issue has had survives its release, once each"
-    ;;
-  one_card)
-    make_fixture ok
-    make_worktree
-    make_overdue
-    agent_state waiting
-    issue_labels "ready,needs-human-step"
-    in_poll enforce_timebox notice_stalled >/dev/null 2>&1
-    n="$(grep -c "waiting for you" "$ORCA_CALLS")"
-    [ "$n" = 1 ] \
-      || fail "put $n near-duplicate comments on the board in one poll"
-    grep -q "past the time-box" "$ORCA_CALLS" \
-      || fail "the comment that survived does not say it is past the box: $(cat "$ORCA_CALLS")"
-    grep -q "not a stall" "$ORCA_CALLS" \
-      || fail "the comment that survived does not say it is not a stall: $(cat "$ORCA_CALLS")"
-    echo "ok: one poll leaves one board comment, and it says both things"
+    out="$( cd "$WORK/repo" && ./scripts/fleet/cost.sh 42 2>&1 )"
+    grep -q "1.25" <<<"$out" \
+      || fail "releasing the worktree erased what #42 cost: $out"
+    echo "ok: what an issue spent survives the release of the worktree it spent it in"
+
+    # ...and `own` still clears the per-issue markers, which is the other half of
+    # what it is for: a fresh worktree must start with nothing already said on
+    # its behalf, or it inherits the previous attempt's silence.
+    : >"$AUTOFLEET_DIR/held-42"
+    : >"$AUTOFLEET_DIR/build-done-42"
+    in_fleet own 42 "$WORK/wt" >/dev/null 2>&1
+    for m in held build-done; do
+      [ -e "$AUTOFLEET_DIR/$m-42" ] \
+        && fail "$m-42 survived into a fresh worktree, which is silenced by it"
+    done
+    echo "ok: ...and a fresh worktree starts with nothing already said on its behalf"
     ;;
   abandon_blocked)
     make_fixture ok
@@ -4397,7 +4020,7 @@ $(cat "$AUTOFLEET_DIR/ran/42")"
     make_worktree
     add_origin
     quiet_issue
-    agent_state working
+    build_running
     out="$(release_pass)"
     [ -d "$WORK/wt" ] || fail "it removed the worktree of an agent that is still working: $out"
     [ -e "$AUTOFLEET_DIR/worktrees/42" ] \
@@ -4406,33 +4029,17 @@ $(cat "$AUTOFLEET_DIR/ran/42")"
     [ -n "$out" ] && fail "it had nothing to say and said it anyway: $out"
     echo "ok: an ordinary in-flight worktree is left alone"
     ;;
-  abandon_timebox)
-    make_fixture ok
-    make_worktree
-    add_origin
-    make_overdue
-    quiet_issue
-    agent_state working
-    in_fleet enforce_timebox >/dev/null 2>&1
-    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
-      || fail "the box stopped the agent without recording it, so nothing else can act on it"
-    out="$(warn_then_release)"
-    [ -d "$WORK/wt" ] && fail "#44's case again: three hours, nothing produced, slot held: $out"
-    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
-      || fail "the record died with the worktree, so the queue hands the issue straight back"
-    echo "ok: a timed-out worktree holding nothing is released, and the record outlives it"
-    ;;
   gaveup_not_restarted)
     make_fixture ok
     make_worktree
     add_origin
-    make_overdue
     quiet_issue
-    agent_state working
+    build_ran_out
     cat >"$GH_ISSUES" <<'JSON'
-[{"number":42,"title":"the one that ground for three hours","body":"","labels":[{"name":"ready"}]}]
+[{"number":42,"title":"the one that ran out of turns","body":"","labels":[{"name":"ready"}]}]
 JSON
-    in_fleet enforce_timebox >/dev/null 2>&1
+    echo '[]' >"$GH_PRS"
+    in_fleet notice_build_exit >/dev/null 2>&1
     # --max-prs 1 bounds this either way: if the decline stops working the run
     # opens its one worktree and stops, and the assertion below fires -- rather
     # than the test hanging, which is a much worse way to fail.
@@ -4449,10 +4056,9 @@ JSON
     make_fixture ok
     make_worktree
     add_origin
-    make_overdue
     quiet_issue
-    agent_state working
-    in_fleet enforce_timebox >/dev/null 2>&1
+    build_ran_out
+    in_fleet notice_build_exit >/dev/null 2>&1
     [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
       || fail "could not arm gaveup-42, so the assertion that follows would be vacuous"
     out="$(in_fleet cmd_retry 42 2>&1)"
@@ -4467,13 +4073,18 @@ JSON
     add_origin
     quiet_issue
     issue_labels "blocked"
-    agent_state working
+    build_running
     out="$(release_pass)"
     [ -d "$WORK/wt" ] \
       || fail "it removed the worktree on the pass that found the reason, with no notice: $out"
     grep -q "next pass" <<<"$out" || fail "it did not say what happens next: $out"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      || fail "it warned the board and left the agent working against a rig that is going"
+    # THE BUILD IS STOPPED ON THE WARNING PASS, so the poll of grace is a poll
+    # in which nothing new is written into a directory that is about to go. It
+    # was an interrupt typed at a session before armaatus/autofleet#151; the
+    # claim is the same one.
+    if kill -0 "$(cat "$AUTOFLEET_DIR/builds/42/pid" 2>/dev/null)" 2>/dev/null; then
+      fail "it warned the board and left the build writing into a rig that is going"
+    fi
     grep -q "worktree rm" "$ORCA_CALLS" && fail "it removed it anyway: $(cat "$ORCA_CALLS")"
     echo "ok: the pass that finds a reason warns, and removes nothing"
     ;;
@@ -4513,10 +4124,9 @@ JSON
     make_fixture ok
     make_worktree
     add_origin
-    make_overdue
     quiet_issue
-    agent_state working
-    in_fleet enforce_timebox >/dev/null 2>&1
+    build_ran_out
+    in_fleet notice_build_exit >/dev/null 2>&1
     [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
       || fail "could not arm gaveup-42, so the assertion that follows would be vacuous"
     # A person picks it up by hand and its PR lands.
@@ -4542,7 +4152,7 @@ JSON
     make_worktree
     add_origin
     quiet_issue
-    agent_state working
+    build_running
     # 1. It goes blocked, and the first pass warns.
     issue_labels "blocked"
     release_pass >/dev/null 2>&1
@@ -4571,7 +4181,7 @@ JSON
     make_worktree
     add_origin
     quiet_issue
-    agent_state working
+    build_running
     # 1. Blocked, and warned.
     issue_labels "blocked"
     release_pass >/dev/null 2>&1
@@ -4978,7 +4588,7 @@ JSON
     # either. That direction is the milder half -- the dispatcher re-says a line
     # it already said -- but it is still a write, and still `status`'s to leave
     # alone.
-    agent_state idle
+    build_exited
     : >"$AUTOFLEET_DIR/ps-blind-42"
     before="$(state_bytes)"
     out="$(in_fleet_keeping_cache cmd_status 2>&1)"
@@ -5026,7 +4636,7 @@ JSON
     # leaves a bare directory: `reap_merged` gives up at `rev-parse` on it and
     # the worktree is owned forever, for a reason that is the fixture rather than
     # the code. Its path is the one the log just named.
-    launched="$(sed -n 's/^.*is running in //p' "$WORK/run.log" | head -1)"
+    launched="$(sed -n 's/^.*is building in //p' "$WORK/run.log" | head -1)"
     [ -n "$launched" ] || fail "could not tell where the run opened its worktree: $(cat "$WORK/run.log")"
     reapable_worktree_at "$launched"
     echo '[{"number":9,"body":"Closes #148"}]' >"$GH_PRS"
@@ -5062,10 +4672,9 @@ JSON
     make_fixture ok
     make_worktree
     add_origin
-    # Past its time-box, and kept only because its PR is open -- which is the
-    # state every worktree in a real drain is in.
-    make_overdue
-    agent_state working
+    # Its build has stopped and it is kept only because its PR is open -- which
+    # is the state every worktree in a real drain is in.
+    build_ran_out
     issue_state OPEN; issue_labels "ready"
     echo '[{"number":9,"body":"Closes #42"}]' >"$GH_PRS"
     : >"$GH_MERGED"
@@ -5087,9 +4696,9 @@ JSON
       || fail "it exited for some other reason than the work landing: $(cat "$WORK/run.log")"
     [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
       && fail "the time-box gave the worktree up; that is the three-hours-each ending #183 is about: $(cat "$WORK/run.log")"
-    grep -q -- "--interrupt" "$ORCA_CALLS" \
-      && fail "a drain interrupted an agent, which is --now's job and not this one"
-    echo "ok: a drain ends when the work in flight lands, not at the time-box"
+    grep -q "build stop" "$WORK/build-calls" \
+      && fail "a drain stopped a build, which is --now's job and not this one"
+    echo "ok: a drain ends when the work in flight lands, not at a deadline"
     ;;
   drain_after_stop)
     make_fixture ok
@@ -5138,17 +4747,6 @@ JSON
     [ "$(guard_says 'gh pr create --fill')" = 0 ] \
       || fail "a drain still blocks opening the PR, and a merged PR is what releases the worktree it is waiting on: $out"
     echo "ok: a drain lets the work in flight finish"
-    ;;
-  stop_freezes_agents)
-    make_fixture ok
-    out="$(in_fleet cmd_stop --now 2>&1)"
-    [ "$(guard_says 'git push')" = 2 ] \
-      || fail "a hard stop no longer stops a push: $out"
-    [ "$(guard_says 'gh pr create --fill')" = 2 ] \
-      || fail "a hard stop no longer stops a PR: $out"
-    [ "$(guard_says 'ctest --test-dir build')" = 0 ] \
-      || fail "it froze the machine rather than what leaves it; reading, building and testing stay open: $out"
-    echo "ok: --now still stops every outward effect"
     ;;
   drain_launches_nothing)
     make_fixture ok
@@ -5210,7 +4808,13 @@ JSON
     n="$(gate_count 2>&1)"
     [ "$n" = 1 ] \
       || fail "counted $n live worktree(s); another repo's worktree is taking a slot from MAX_WORKTREES"
-    grep -q -- "--repo path:$WORK/repo" "$ORCA_CALLS" \
+    # SCOPED TO THE REPOSITORY, which the default driver gets from `git
+    # worktree list` itself: another repo's worktrees are not in this repo's
+    # listing, so the whole class of bug armaatus/autofleet#31 is about cannot
+    # be reached by it. Asserted on the listing it ran, not on a selector it
+    # passed -- the app-backed driver's `--repo path:` is the same claim in its
+    # own vocabulary, and `create_scoped` pins that one.
+    grep -q "worktree list -C $WORK/repo" "$ORCA_CALLS" \
       || fail "it asked for every worktree on the machine, not this repo's: $(cat "$ORCA_CALLS")"
     # The same list answers `in_flight`, which matches on an issue NUMBER, so an
     # unrelated repo's #7 must not answer for ours. 0 = in flight, 1 = free.
@@ -5255,6 +4859,7 @@ JSON
 
   selector_git_unusable)
     make_fixture ok
+    use_orca_runner
     # "git answered, but unusably." git before 2.31 does not know
     # `--path-format`: it echoes the unrecognised argument back as a flag and
     # still exits 0, so the answer is one git could not give. `dirname` then
@@ -5289,6 +4894,7 @@ GITSTUB
 
   selector_relative_common)
     make_fixture ok
+    use_orca_runner
     # THE RULE, not one way to break it. `--repo path:` needs an ABSOLUTE root,
     # and the guard used to be a denylist -- empty, or a leading dash -- which
     # reaches the fallback only because the local `dirname` happens to refuse
@@ -5321,6 +4927,7 @@ GITSTUB
 
   create_scoped)
     make_fixture ok
+    use_orca_runner
     make_repo_git
     older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
     # The OTHER selector callsite. `worktree create` carried a raw
@@ -5341,13 +4948,11 @@ GITSTUB
     dispatcher_running
     in_fleet record_dispatcher
     older_checkout "$(git -C "$WORK/repo" rev-parse HEAD)"
-    # `--repo path:` names a repository ROOT. `fleet.sh status` is run from
-    # wherever you are -- CLAUDE.md points agents in a fleet worktree at it --
-    # so a selector built from the CALLER's checkout is a worktree path, which
-    # the CLI refuses with repo_not_found. The listing then fails, and a failed
-    # listing makes `in_flight` answer "could not tell" for every issue, so
-    # `status` offers work that is already running.
-    printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
+    # THE LISTING IS THE REPOSITORY'S, not the caller's. `fleet.sh status` is
+    # run from wherever you are -- CLAUDE.md points agents in a fleet worktree
+    # at it -- and a listing built from the CALLER's checkout answers for that
+    # worktree alone. `in_flight` then reads "could not tell" for every issue,
+    # and `status` offers work that is already running.
     worktree_list "42:wt"
     out="$(in_fleet_at "$WORK/wt2" cmd_status 2>&1)"
     grep -q "#42" <<<"$out" \
@@ -5525,13 +5130,22 @@ JSON
     # answers 2, the next-up loop reads 2 as "not running", and every `ready`
     # issue printed as startable beside a dispatcher that would start none of
     # them. Found by the local review.
+    # A FULL PAGE IS NO LONGER A REFUSAL (armaatus/autofleet#151 folds
+    # armaatus/autofleet#122). It used to blank the listing, so `in_flight`
+    # answered 2 for every issue and `status` printed every `ready` issue as
+    # startable beside a dispatcher that would start none of them. The page is
+    # used now, so the claims here are the opposite ones: the queue it prints is
+    # the real one, and every issue on that page reads as claimed.
     make_fixture ok
     backlog_all_claimed 100
     out="$(in_fleet cmd_status 2>&1)"
     grep -q "could not be read" <<<"$out" \
-      || fail "status printed a full startable queue without saying the fleet cannot tell: $out"
-    echo "ok: status says so when the open-PR listing could not be read"
-    # ...and says nothing when it could.
+      && fail "status still refuses a listing at the page limit, which is the stop #151 removed: $out"
+    grep -qE "^ +1 " <<<"$out" \
+      && fail "an issue whose PR is on the page it read was still offered as startable: $out"
+    echo "ok: status reads a full page rather than refusing it"
+    # ...and the same is true well under the limit, so this is not a property of
+    # the number 100.
     make_fixture ok
     backlog_all_claimed 3
     out="$(in_fleet cmd_status 2>&1)"
@@ -5672,25 +5286,27 @@ JSON
     # THE OTHER ROW OF docs/WORKFLOW.md's table. The section claims the `budget_`
     # phases assert its numbers; without this one it asserted the idle row and
     # the launch row and left the busy figure to drift. Three owned worktrees,
-    # three open PRs, review mode `github`: the two shared listings, one
-    # merged-PR check per worktree, one issue lookup per worktree. Found by the
-    # local review.
+    # three open PRs, review mode `github`: the two shared listings, and four
+    # calls per worktree. Found by the local review.
+    #
+    # THE NUMBER WAS 8 AND IS 14, and the difference is the fixture rather than
+    # the code. All three owned issues used to name ONE directory, so the three
+    # per-worktree calls that key on the branch collapsed into one answer. A
+    # real fleet has three branches, and always paid this.
     make_fixture ok
     backlog_all_claimed 10
     : >"$GH_MERGED"
-    worktree_list 1:wt 2:wt 3:wt
+    # THREE WORKTREES MEANS THREE PATHS. The listing was fabricated text before
+    # armaatus/autofleet#151 and three rows could name one directory; it is
+    # `git worktree list` now, and one directory is one worktree however many
+    # issues claim it.
+    worktree_list 1:wt1 2:wt2 3:wt3
     mkdir -p "$AUTOFLEET_DIR/worktrees"
-    # A REAL git repo, because `reap_merged` reads the branch name off it before
-    # it asks GitHub anything -- point the owned files at a bare directory and
-    # the merged-PR check this phase counts never happens at all.
-    make_worktree
-    rm -f "$AUTOFLEET_DIR/worktrees/42"
     for n in 1 2 3; do
-      printf '%s\n' "$WORK/wt" >"$AUTOFLEET_DIR/worktrees/$n"
-      # The build context already dropped for each, which is the steady state a
-      # full fleet spends its time-box in -- and what makes the prefetch's
-      # `live < MAX_WORKTREES` half do anything at all.
-      : >"$AUTOFLEET_DIR/context-reset-$n"
+      printf '%s\n' "$WORK/wt$n" >"$AUTOFLEET_DIR/worktrees/$n"
+      # Each build has finished, which is the steady state a full fleet spends
+      # most of its life in.
+      build_state_for "$n" "$WORK/wt$n" 0
     done
     # A TOTAL, the way budget_idle_pass asserts the idle row -- `>= 3` of each
     # kind would have let the 8 drift, which is the one thing this phase exists
@@ -5721,14 +5337,14 @@ JSON
     # while this reads $GH_CALLS.
     n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
-    [ "$n" = 8 ] \
-      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 8: $(cat "$GH_CALLS")"
+    [ "$n" = 14 ] \
+      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 14: $(cat "$GH_CALLS")"
     # ...and a whole number of passes, which a count taken mid-pass would not be.
     # Belt to the pass line's braces, and the thing that would say so if the
     # signal were ever emitted before the last call of a pass rather than after.
-    [ $(( n % 8 )) = 0 ] \
-      || fail "the count was taken mid-pass ($n is not a whole number of 8s): $(cat "$GH_CALLS")"
-    echo "ok: a full fleet of three worktrees costs 8 gh calls a pass"
+    [ $(( n % 14 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 14s): $(cat "$GH_CALLS")"
+    echo "ok: a full fleet of three worktrees costs 14 gh calls a pass"
     ;;
 
   budget_list_mode_no_listing)
@@ -5744,7 +5360,7 @@ JSON
     # a minute for a whole time-box. Found by the local review.
     make_fixture ok
     : >"$GH_MERGED"
-    worktree_list 1:wt 2:wt 3:wt
+    worktree_list 1:wt1 2:wt2 3:wt3
     start_dispatcher 42
     i=0
     while [ "$i" -lt 200 ] && [ "$(grep -c "^worktree list" "$ORCA_CALLS" || true)" -lt 2 ]; do
@@ -5839,17 +5455,20 @@ JSON
     ;;
 
   budget_pr_list_truncated)
-    # A FULL PAGE is not an answer. At `--limit 100` we cannot tell an absent PR
-    # from one on page two, and this listing is the single authority the launch
-    # loop reads -- so a truncated page read as complete makes every issue whose
-    # PR fell past the boundary look free, and the fleet opens a second worktree
-    # for each. "Could not tell" instead, which starts nothing.
+    # A FULL PAGE IS USED, which is armaatus/autofleet#122 folded into
+    # armaatus/autofleet#151. It used to answer "could not tell" for every issue
+    # -- the safe direction, at the price of the whole dispatcher: nothing
+    # launched, nothing was time-boxed, and the run loop polled forever on a
+    # repository whose only sin was 100 open pull requests. What it can still
+    # get wrong is bounded: an issue whose PR is past the page boundary reads as
+    # free and gets a second worktree, which `reap_merged`'s `Closes #N` sweep
+    # finds within a pass.
     make_fixture ok
     backlog_all_claimed 100
     out="$(in_pass 'in_flight 2; echo "rc=$?"' 2>&1)"
-    grep -q "rc=2" <<<"$out" \
-      || fail "a PR listing at the page limit was read as complete, so an issue past the boundary reads as free: $out"
-    echo "ok: an open-PR listing at its page limit answers 'could not tell', not 'no PR'"
+    grep -q "rc=0" <<<"$out" \
+      || fail "a PR listing at the page limit was refused, which is the stop that made a busy repository unusable: $out"
+    echo "ok: an open-PR listing at its page limit is read rather than refused"
     # One short of the limit is a whole listing and still answers.
     make_fixture ok
     backlog_all_claimed 99

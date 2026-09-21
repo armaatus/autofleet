@@ -23,16 +23,15 @@ echo "==> deriving isolated worktree environment"
 ./scripts/fleet/env.sh
 set -a; . ./.env; set +a
 
-# BEFORE anything expensive, and before the watcher.
+# BEFORE anything expensive.
 #
-# `fleet.sh` and `agent-autostart.sh` both probe; this hook ran earliest of the
-# three and probed last, which is the worst order available -- the runner holds
-# the agent's tab until this returns (`setupAgentStartupPolicy: wait-for-setup`),
-# so a runtime that is not answering surfaced as: submodules initialised,
-# containers built, a watcher started, and then an agent tab that never receives
-# a prompt, with the only explanation in a log nobody opens. The driver has
-# already said what it tried and what to install; this adds the consequence.
-# armaatus/autofleet#13.
+# `fleet.sh` and `board.sh` both probe; this hook ran earliest of the three and
+# probed last, which is the worst order available -- the dispatcher waits for
+# this to return before it starts a build, so a runtime that is not answering
+# surfaced as: submodules initialised, containers built, and then a worktree
+# nothing runs in, with the only explanation in a log nobody opens. The driver
+# has already said what it tried and what to install; this adds the
+# consequence. armaatus/autofleet#13.
 #
 # AFTER env.sh, not before it, and that order is the finding rather than a
 # convenience. env.sh is milliseconds and it is where a machine that is missing
@@ -96,16 +95,11 @@ else
   echo "==> no project setup hook ($AUTOFLEET_SETUP_HOOK); nothing project-specific to provision"
 fi
 
-# Detached, and last: the runner holds the agent's tab until this script
-# returns, so the draft this watches for cannot exist yet. `nohup` with HUP
-# ignored because the watcher has to outlive the hook that started it -- that is
-# the whole point of it.
-if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" != "0" ]; then
-  ( trap "" HUP
-    nohup ./scripts/fleet/agent-autostart.sh --watch \
-      >>"$REPO_ROOT/.autofleet/run/agent-autostart.log" 2>&1 & ) &
-  echo "==> watching for the agent's issue prompt to submit it"
-fi
+# THE AGENT IS NOT STARTED HERE. It used to be: the runtime opened a tab with
+# the brief drafted in it and a watcher this hook spawned pressed Return. The
+# dispatcher starts the build itself now (`fleet.sh`'s `start_build`), which is
+# what makes a build that will not start fail the launch out loud instead of
+# leaving a provisioned worktree sitting on an unsent prompt.
 
 echo
 echo "worktree ready."

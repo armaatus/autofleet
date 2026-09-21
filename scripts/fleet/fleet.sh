@@ -118,17 +118,12 @@ STATE_DIR="$FLEET_DIR"
 STOP_FILE="$FLEET_STOP"
 DRAIN_FILE="$FLEET_DRAIN"
 OWNED_DIR="$FLEET_OWNED"
+# WHEN THIS ATTEMPT STARTED, which is no longer a deadline and is still worth
+# recording: `status` prints it, and it is the one thing that says whether a
+# build that has been running since Tuesday is progress or a wedge. The
+# wall-clock time-box that used to read it is gone -- turns and dollars bound a
+# run now -- so nothing ACTS on this number.
 STARTED_DIR="$STATE_DIR/started"
-# What the fleet HAS run, as opposed to what it is running. From lib.sh, because
-# cost.sh reads the same path and two spellings of it is one chance for the
-# reader to look where the writer never wrote.
-#
-# It gets the same exception `gaveup-` gets, and for the same reason: a record of
-# what happened is not state about what is happening, and a restart is not a
-# decision about an issue. It grows by one short file per issue the fleet ever
-# starts -- bounded by the backlog rather than by the clock, unlike the two
-# stores #72 capped, which grew per review and per log line. Nothing evicts it.
-RAN_DIR="$FLEET_RAN"
 # The `Closes #N` and `Blocked by #N` patterns, shared with merge_gate.py so the
 # dispatcher, the gate and GitHub cannot read the same body three ways. It sits
 # under .github/scripts/ because merge-gate.yml sparse-checks out that directory
@@ -242,15 +237,16 @@ PIDFILE="$STATE_DIR/fleet.pid"
 # .autofleet/config moves it.
 MAX_WORKTREES="${AUTOFLEET_MAX:-3}"
 POLL_SECONDS="${AUTOFLEET_POLL:-60}"
-# Long enough for a real issue including a full test run and both local review
-# passes; short enough that an overnight run does not spend the night on the one
-# task that was never going to work.
-TIMEBOX_SECONDS="${AUTOFLEET_TIMEBOX:-10800}"
-# The answering half, timed separately -- see `enforce_answer_timebox` for why
-# the build's box cannot just be left armed. Defaults to the build's, because
-# "the same box, starting when the answering starts" is the claim, and a second
-# number nobody set is a second number nobody tuned.
-ANSWER_TIMEBOX_SECONDS="${AUTOFLEET_ANSWER_TIMEBOX:-$TIMEBOX_SECONDS}"
+# WHAT AN ISSUE MAY SPEND, which is turns and dollars now rather than hours.
+# The wall-clock boxes are gone with the sessions they policed: a `claude -p`
+# run ends at whichever of these it reaches, so nothing has to be interrupted
+# and the dispatcher reads an exit instead of enforcing one.
+BUILD_MAX_TURNS="${AUTOFLEET_BUILD_MAX_TURNS:-400}"
+BUILD_MAX_BUDGET_USD="${AUTOFLEET_BUILD_MAX_BUDGET_USD:-25}"
+# How many runs one worktree gets before the fleet stops resuming it. See
+# `build_exited`: without a bound, a run that ends the instant it starts is an
+# infinite resume loop that spends the account one session at a time.
+BUILD_MAX_RUNS="${AUTOFLEET_BUILD_MAX_RUNS:-3}"
 FOUNDATION_LABEL="${AUTOFLEET_FOUNDATION_LABEL:-foundation}"
 # The human's thumb on the queue -- see "What it picks" above. Read in exactly one
 # place that can change what STARTS (`ready_issues`, where it only sorts), plus
@@ -385,7 +381,7 @@ runner_available || die "the $AUTOFLEET_RUNNER runner is not usable here, so the
 # directories first. `fleet.sh status` on a machine whose app is not running was
 # making three directories under ~/.autofleet and then declining to do
 # anything. Found by the self-review.
-mkdir -p "$OWNED_DIR" "$STARTED_DIR" "$RAN_DIR"
+mkdir -p "$OWNED_DIR" "$STARTED_DIR"
 
 # The runner's board is the status surface: `in-progress` while it builds,
 # `in-review` once the PR is up (the agent sets that itself), `completed` on
@@ -419,332 +415,43 @@ card() {
   return 0
 }
 
-# Type one prompt at the agent in a worktree and submit it.
+# Stop the build in one worktree, if there is one running.
 #
-# The same two primitives agent-autostart.sh uses to submit a drafted prompt,
-# in the order that matters: `send` types into the composer, `enter` submits
-# whatever is in it. A `send` that fails must NOT be followed by an `enter` --
-# that submits whatever the agent had half-typed itself.
+# WHAT THIS REPLACED is the whole reason armaatus/autofleet#151 exists. There
+# used to be five functions here -- type at the agent, ask it for a handoff
+# note, reset its context when the PR opened, recycle its context every 45
+# minutes, interrupt it -- and every one of them existed because an interactive
+# session cannot be allowed to end. A `claude -p` build ends by itself, and the
+# branch and the PR are the state, so there is nothing to ask it to write down
+# and nothing to clear.
 #
-# Silent about a worktree with no agent, because two of the three callers run
-# against every owned worktree on every poll and most of them have no agent at
-# that moment. A listing that could not be READ is said once, the way
-# `interrupt_agent_in` says it, because that is the difference between "nobody
-# is in there" and "somebody is and we could not reach them".
+# Both callers are about to take something away from the build -- `reap_abandoned`
+# its whole directory, `cmd_stop --now` the rest of its run -- and a build still
+# writing into a directory that is being removed is how a worktree removal
+# fails halfway. The driver signals the process GROUP: the build command is a
+# wrapper seam, so the process holding the credentials is routinely a child of
+# what was forked.
 #
-# The third argument, when given, is a marker that makes a REFUSED send said
-# once rather than once a poll (armaatus/autofleet#106). The contract cannot
-# tell "this driver never types" from "this send timed out", so a caller that
-# retries every poll must keep retrying -- a one-off timeout on the poll a PR
-# opened is not a reason to give up its context reset for good -- and only the
-# line is throttled. A send that lands clears it, so the next refusal is news.
-# The marker is per ISSUE, not per caller: a refusal said by one caller stays
-# unsaid for another until some send lands in between.
-#
-# A refused SUBMIT is never throttled. The text was typed, so every retry adds
-# another copy to the agent's composer, and a log that fell silent after the
-# first poll would hide exactly that pile-up.
-say_to_agent_in() {
-  local path="$1" text="$2" refused_marker="${3:-}" handle
-  if ! handle="$(runner_agent_terminal "$path")"; then
-    say "  the runner would not say whether an agent is in $path -- nothing was sent"
-    return 1
-  fi
-  [ -n "$handle" ] || return 1
-  runner_terminal_send "$handle" "$text" || {
-    [ -n "$refused_marker" ] && [ -e "$refused_marker" ] \
-      || say "  the runner would not type into $path -- nothing was sent"
-    [ -z "$refused_marker" ] || : >"$refused_marker"
-    return 1
-  }
-  [ -z "$refused_marker" ] || rm -f "$refused_marker"
-  runner_terminal_enter "$handle" || {
-    say "  the runner typed into $path but would not submit it"
-    return 1
-  }
-  return 0
-}
-
-# Ask the agent to write its handoff note, and let it, WITHOUT holding the poll.
-#
-# armaatus/autofleet#106: the note exists, and every path that ended a session
-# interrupted first and asked nothing, so an interrupted attempt wrote nothing
-# down. A note needs a turn to be written in, and this is the turn.
-#
-# ACROSS POLLS, NOT INSIDE ONE. The first version slept up to the grace right
-# here, which is a dispatcher that stops answering for two minutes per issue --
-# with three worktrees, six minutes in which no review is collected and no
-# time-box fires. The fleet already has the shape for "asked, waiting on an
-# answer": a marker, and a decision made on the next pass. So this asks once,
-# writes down when it asked and what the note's timestamp was, and answers
-# "not yet" until either the timestamp moves or the grace runs out.
-#
-# 0 = go ahead: the note was written, the grace is spent, there is no agent to
-#     ask, or asking is turned off.
-# 1 = wait: the request has just gone out, or it is still standing.
-#
-# So every caller reads as `handoff_turn ... || continue` -- the action it was
-# about to take happens on a later poll, which is safe for all three of them:
-# the time-box keeps its `started` marker, the reaper's warning pass is a pass
-# of notice by design, and an unreset context costs one more poll of build
-# tokens rather than a lost session.
-handoff_turn() {
-  local num="$1" path="$2" marker="$STATE_DIR/handoff-asked-$num"
-  local asked_at before now note
-  [ "${AUTOFLEET_HANDOFF_GRACE_SECONDS:-0}" -gt 0 ] || return 0
-  note="$(fleet_handoff_path "$path" "$num")"
-  now="$(date +%s)"
-  # `fleet_mtime`, NOT a local `stat -f %m || stat -c %Y`. That chain was written
-  # here and is wrong on GNU, where `-f` is `--file-system` and SUCCEEDS against
-  # a mount point -- so the fallback never runs, every call returns the same
-  # filesystem field, and the timestamp never appears to move. lib.sh already
-  # had the portable spelling, which validates each answer rather than trusting
-  # the end of an `||` chain.
-
-  if [ -e "$marker" ]; then
-    asked_at=""; before=""
-    read -r asked_at before 2>/dev/null <"$marker" || true
-    case "${asked_at:-}" in ''|*[!0-9]*) asked_at=0 ;; esac
-    # WRITTEN is the mtime MOVING, not the file existing: a note left by an
-    # earlier attempt in this worktree is already there, and reading it as this
-    # agent's answer is how a stale note gets treated as a fresh one.
-    if [ "$(fleet_mtime "$note")" != "${before:-}" ]; then
-      rm -f "$marker"
-      say "#$num: handoff note written -- $(( now - asked_at ))s after it was asked for"
-      return 0
-    fi
-    [ $(( now - asked_at )) -ge "$AUTOFLEET_HANDOFF_GRACE_SECONDS" ] || return 1
-    rm -f "$marker"
-    say "#$num: no handoff note ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s after asking -- going on without one"
-    return 0
-  fi
-
-  # Nobody to ask is not a wait. The agent may have exited already, which is
-  # exactly when the caller wants to get on with it.
-  say_to_agent_in "$path" \
-    "Write your handoff note now: ./scripts/fleet/handoff.sh write $num --stdin. You have ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s, and this session ends after it -- what is not in the note does not survive." \
-    "$STATE_DIR/send-refused-$num" \
-    || return 0
-  printf '%s %s\n' "$now" "$(fleet_mtime "$note")" >"$marker"
-  say "#$num: asked for a handoff note; giving it ${AUTOFLEET_HANDOFF_GRACE_SECONDS}s"
-  return 1
-}
-
-# THE PULL REQUEST IS THE SEAM. Once it is open the build is done, and every
-# file the build read is still in the agent's context -- paid for again on every
-# turn of the answering work, which needs none of it.
-#
-# So: ask for the note, drop the conversation, hand over the answering half of
-# the brief. Once per issue, marked, because the second one would drop the
-# answering context this just created.
-#
-# NOT KEYED TO THE REVIEW ARRIVING, deliberately. The agent is inside
-# `await-review.sh` at that moment -- a blocking call -- and text typed at a
-# running turn lands after it, so the reset would arrive in the middle of the
-# answer rather than before it. The PR appearing is the same boundary one step
-# earlier, and the agent is between turns there.
-reset_context_for_answering() {
-  [ "${AUTOFLEET_CONTEXT_RESET:-on}" = on ] || return 0
-  local f num path
-  for f in "$OWNED_DIR"/*; do
-    [ -e "$f" ] || continue
-    num="$(basename "$f")"
-    [ -e "$STATE_DIR/context-reset-$num" ] && continue
-    path="$(owned_path "$num")"
-    [ -d "$path" ] || continue
-    # "Could not tell" is not "yes", the same way enforce_timebox reads it: this
-    # branch ends a session, and a lookup that failed is no basis for that.
-    has_open_pr "$num" || continue
-    # EMPTY IS THE OFF SWITCH, and it is said rather than skipped silently: a
-    # host on a CLI with no clear command has turned the reset off, and the
-    # place to find that out is the log of the first issue it would have hit.
-    if [ -z "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ]; then
-      : >"$STATE_DIR/context-reset-$num"
-      say "#$num: AUTOFLEET_AGENT_CLEAR_CMD is empty, so the build context stays for the answering work"
-      continue
-    fi
-    handoff_turn "$num" "$path" || continue
-    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
-    # Said once the clear LANDED, not before it: the attempt is retried every
-    # poll while a driver refuses, and a line ahead of it repeated each time.
-    say "#$num: PR is open -- starting the answering work in a clean context"
-    # The marker goes down BEFORE the second prompt: a clear that landed and an
-    # answering brief that did not is recoverable by hand, and is much better
-    # than clearing the same agent again on the next poll because the marker
-    # waited for both.
-    : >"$STATE_DIR/context-reset-$num"
-    say_to_agent_in "$path" \
-      "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr $num\` and follow everything it prints. You are the same worktree and a new session: what the build decided is in its handoff note, which that command prints, and nothing else from it survives." \
-      || say "#$num: the conversation was dropped but the answering brief did not arrive -- send it by hand"
-    card "$path" comment "#$num: PR open; answering in a clean context"
-  done
-}
-
-# ...AND THE SAME MOVE, ON A TIMER, BEFORE THE PULL REQUEST EXISTS.
-#
-# The function above fires once, at the PR. Everything before it is one window
-# that only grows, and that window is the single biggest line in an issue's
-# bill. Measured: issue #71's build ran 285 turns at 229,052 cache-read tokens
-# PER TURN -- 65M, 31.9% of a 207M issue -- against issue #106's build at 61
-# turns and 96,061 a turn. Comparable work. The difference is not how many
-# turns; it is that every turn re-sends everything the session has read, so a
-# long build pays for its whole history on every turn of it.
-#
-# OFF BY DEFAULT, and that is a considered position rather than timidity. A
-# recycle costs the agent everything not in a 300-word handoff note, so an
-# interval chosen badly makes the work worse AND dearer by making it redo what
-# it forgot. The mechanism is proven -- it is the one above -- but the right
-# interval is a measurement nobody has taken. Turn it on, run an issue, compare
-# `fleet.sh cost`, then argue for a default.
-enforce_context_recycle() {
-  local every f num path last now note_at
-  every="${AUTOFLEET_CONTEXT_RECYCLE:-0}"
-  case "$every" in (''|*[!0-9]*) return 0 ;; esac
-  [ "$every" -gt 0 ] || return 0
-  # The clear command is the same seam the answering reset uses, and an empty
-  # one is the same off switch -- but it has to be SAID here rather than left to
-  # that function to say. It only speaks once a pull request is open, which is
-  # hours into a build or never: a build that times out without a PR never
-  # reaches it at all. So a host that turned this knob on, on a CLI with no
-  # clear command, got silence for the whole build and no saving, which is the
-  # exact failure `reset_context_for_answering`'s own comment says must not
-  # happen -- "the place to find that out is the log of the first issue it would
-  # have hit". Once per dispatcher, not once per poll. Found by the local
-  # /code-review pass.
-  if [ -z "${AUTOFLEET_AGENT_CLEAR_CMD:-}" ]; then
-    [ -e "$STATE_DIR/recycle-noclear" ] && return 0
-    : >"$STATE_DIR/recycle-noclear"
-    say "AUTOFLEET_CONTEXT_RECYCLE is set, but AUTOFLEET_AGENT_CLEAR_CMD is empty, so no build context is recycled"
-    return 0
-  fi
-  now="$(date +%s)"
-  for f in "$OWNED_DIR"/*; do
-    [ -e "$f" ] || continue
-    num="$(basename "$f")"
-    path="$(owned_path "$num")"
-    [ -d "$path" ] || continue
-    # AN ISSUE THE TIME-BOX GAVE UP ON IS NOT RECYCLED -- it is finished with.
-    #
-    # `enforce_timebox` interrupts the agent, writes `gaveup-`, and comments on
-    # the issue that "the fleet will not start this issue again on its own".
-    # What it does NOT do is drop `OWNED_DIR/$num`: `reap_abandoned` keeps the
-    # worktree owned for as long as it holds commits or uncommitted work. So a
-    # loop over owned worktrees that did not ask would, every interval forever,
-    # clear that agent and send it the opening brief again -- restarting work
-    # the fleet announced it had stopped, which only `fleet.sh retry` is
-    # supposed to hand back. With a 3h box and a 1h recycle the two fire on the
-    # same pass, and the re-brief lands directly behind the interrupt. Found by
-    # the local /code-review pass.
-    gave_up_on "$num" && continue
-    # THE PULL REQUEST ENDS THIS. Past it the answering session is the one
-    # running, `reset_context_for_answering` owns that boundary, and a recycle
-    # here would drop the answering context that function just built -- the same
-    # worktree losing the findings it was sent to answer. "Could not tell" is
-    # not "no PR", the same reading every other branch in this file gives it.
-    # A `case` on the status, not `has_open_pr && continue` followed by a test of
-    # `$?`. That form does work -- the compound carries the failing status
-    # through -- but it reads as though `$?` were the function's, and the next
-    # person to add a line between the two gets a silent wrong answer on the
-    # branch that matters least often. It is the spelling `enforce_timebox`
-    # uses, which is the caller that has to tell all three statuses apart;
-    # `reset_context_for_answering` uses the two-way `|| continue` because it
-    # genuinely only needs "yes" from "anything else".
-    has_open_pr "$num"; case $? in
-      0) continue ;;
-      2) continue ;;
-    esac
-    last=""
-    read -r last 2>/dev/null <"$STATE_DIR/recycled-$num" || true
-    case "${last:-}" in
-      # No marker, or one this poll is racing: start the clock rather than
-      # reading a missing number as infinitely overdue and clearing a session
-      # that has just begun.
-      ''|*[!0-9]*) printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
-                   continue ;;
-    esac
-    [ $((now - last)) -ge "$every" ] || continue
-    # The note first, then the clear, then the brief -- the order
-    # `reset_context_for_answering` uses and for its reasons: what is not in the
-    # note does not survive, and a clear with no brief after it strands the
-    # worktree with an agent that has nothing to do.
-    # THE NOTE HAS TO ACTUALLY EXIST, and `handoff_turn` returning 0 does not
-    # say that it does. It says "stop waiting", and it says that in three
-    # cases: the note was written, the grace expired without one, and there was
-    # nobody to ask. The last two are fine for
-    # `reset_context_for_answering` -- the build is over there, and what is lost
-    # is context nothing needs again -- and they are not fine here, where the
-    # build CONTINUES from whatever the note says.
-    #
-    # The expiry case is not hypothetical. The agent spends much of its build
-    # inside `self-review.sh`, which blocks for up to two 1200s passes; the
-    # request queues behind that turn, the grace runs out, the clear lands, and
-    # the new session resumes from an hour-old note and redoes work that is
-    # already committed. So: compare the mtime ourselves, and on anything but a
-    # note that MOVED, restart the clock and try again next interval. Losing an
-    # interval costs tokens; clearing a session whose note is stale costs the
-    # work. Found by the local /code-review pass.
-    # AGAINST THE START OF THIS INTERVAL, not across the `handoff_turn` call.
-    # That call only WAITS -- the agent writes the note between polls, never
-    # during it -- so an mtime compared either side of it is always equal, and
-    # the first draft of this check refused every recycle including the ones it
-    # was meant to allow. What makes a note this interval's is that it is newer
-    # than the moment the interval began.
-    handoff_turn "$num" "$path" || continue
-    note_at="$(fleet_mtime "$(fleet_handoff_path "$path" "$num")")"
-    case "${note_at:-}" in (''|*[!0-9]*) note_at=0 ;; esac
-    if [ "$note_at" -le "$last" ]; then
-      printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
-      say "#$num: no fresh handoff note, so the build context is kept -- recycling again in $(fleet_duration "$every")"
-      continue
-    fi
-    say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" "$STATE_DIR/send-refused-$num" || continue
-    # The clock restarts on the clear that LANDED, not on the attempt: a driver
-    # refusing the send is retried next poll, and a marker written ahead of it
-    # would skip a whole interval each time.
-    printf '%s\n' "$now" >"$STATE_DIR/recycled-$num" 2>/dev/null || true
-    say "#$num: recycling the build context after $(fleet_duration "$every") -- the handoff note is what carries over"
-    say_to_agent_in "$path" \
-      "Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $num\` and follow everything it prints. You are the same worktree and a new session, part-way through this issue: your handoff note is what the last session decided and how far it got, and nothing else from it survives. Read the note before you start work again." \
-      || say "#$num: the conversation was dropped but the brief did not arrive -- send it by hand"
-    card "$path" comment "#$num: build context recycled; carrying on from the handoff note"
-  done
-}
-
-# Interrupt the agent in one worktree, if it has one. Both callers are about to
-# take something away from it -- the time-box the rest of its hours, the release
-# its whole directory -- and an agent that is not told keeps working against a rig
-# that is going or already gone. `cmd_stop` spells this out for itself instead: it
-# reports each interrupt it managed, which needs the exit code this swallows.
-#
-# A listing that could not be READ is said, once per call, rather than read as
-# "there is no agent there". All three callers -- `cmd_stop`, `enforce_timebox`
-# and `reap_abandoned` -- are about to take something away from that agent, and
-# the two answers are opposite instructions to whoever is watching the log: one
-# means nobody was working in there, the other means somebody is still working
-# against a rig that is going. Design note 2, on the sibling of the `--all` path.
-# Found by the independent review.
-interrupt_agent_in() {
-  local handle
-  if ! handle="$(runner_agent_terminal "$1")"; then
-    say "  the runner would not say whether an agent is in $1 -- none was interrupted"
-    return 0
-  fi
-  [ -n "$handle" ] || return 0
-  runner_terminal_interrupt "$handle"
+# Silent and always 0. A worktree with no build running is the ordinary case on
+# most polls, and a caller that had to tell "no build" from "could not tell"
+# would be the `*_blind` distinction all over again -- except there is no
+# runtime here to be blind to. `runner_build_state` is where that distinction
+# lives, and it is the one the dispatcher reads.
+stop_build_in() {
+  runner_build_stop "$1"
   return 0
 }
 
 # --------------------------------------------------------------- the state ---
 own() {
   printf '%s\n' "$2" >"$OWNED_DIR/$1"; date +%s >"$STARTED_DIR/$1"
-  # ...and the copy that OUTLIVES the worktree, for `cost.sh`. See RAN_DIR.
-  #
-  # APPENDED, not replaced, and only if new. `fleet.sh retry 44` opens a SECOND
-  # worktree for the same issue at a different path, and truncating here threw
-  # the first attempt away -- which is "did the abandoned attempt cost more than
-  # the one that landed", the question the report exists to answer. Found by
-  # `/code-review`.
-  grep -qxF "$2" "$RAN_DIR/$1" 2>/dev/null || printf '%s\n' "$2" >>"$RAN_DIR/$1"
+  # THERE IS NO SECOND REGISTRY any more. `$FLEET_DIR/ran` held every path an
+  # issue had ever run in, because `cost.sh` found what an issue spent by
+  # slugging those paths into the agent CLI's transcript root and the record had
+  # to outlive the worktree. The report reads `$FLEET_DIR/builds/<issue>/` now,
+  # which is keyed on the issue and outlives everything, so the registry became
+  # a store nothing read -- with three comments across two files still claiming
+  # the report was built on it. Found by `/mattpocock-skills:code-review`.
   clear_issue_markers "$1"
 }
 owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
@@ -769,15 +476,11 @@ owned_path()   { cat "$OWNED_DIR/$1" 2>/dev/null; }
 # the old name on disk with nothing left that clears it. The glob also keeps a
 # runner's name from having to appear here at all (hard rule 4).
 clear_issue_markers() {
-  rm -f "$STATE_DIR/stalled-$1" "$STATE_DIR/stall-labels-$1" \
-        "$STATE_DIR/box-labels-$1" "$STATE_DIR/queue-labels-$1" \
+  rm -f "$STATE_DIR/queue-labels-$1" \
         "$STATE_DIR/unreachable-$1" "$STATE_DIR/human-step-$1" \
         "$STATE_DIR/held-$1" "$STATE_DIR/stuck-$1" \
         "$STATE_DIR/warned-$1" "$STATE_DIR/parked-since-$1" \
-        "$STATE_DIR/send-refused-$1" \
-        "$STATE_DIR/handoff-asked-$1" "$STATE_DIR/context-reset-$1" \
-        "$STATE_DIR/answer-box-$1" "$STATE_DIR/recycled-$1" \
-        "$STATE_DIR/answer-since-$1"
+        "$STATE_DIR/build-done-$1" "$STATE_DIR/exit-blind-$1"
   # ...and the two park reasons the names above do not already cover. The
   # `*-blind-` glob below takes `git-blind-` and `merge-blind-`.
   rm -f "$STATE_DIR/merge-held-$1"
@@ -793,18 +496,12 @@ clear_issue_markers() {
 # exception is load-bearing rather than an oversight. It records that this
 # dispatcher stopped an agent at the time-box, and reap_abandoned then RELEASES
 # that worktree -- which calls disown_issue. Clearing the record there would put
-# the issue straight back at the front of a queue that has just spent three hours
-# on it, once per cycle forever. It outlives the worktree on purpose, and only
+# the issue straight back at the front of a queue that has just spent a whole
+# budget on it, once per cycle forever. It outlives the worktree on purpose, and only
 # `fleet.sh retry N` clears it -- not a restart, because a crash and a reboot are
 # not decisions about an issue.
 gave_up_on()     { [ -e "$STATE_DIR/gaveup-$1" ]; }
 gave_up_issues() { ls "$STATE_DIR" 2>/dev/null | sed -n 's/^gaveup-//p'; }
-
-# The subset enforce_timebox owns, for its two exits.
-forget_box_markers() {
-  rm -f "$STATE_DIR/unreachable-$1" "$STATE_DIR/box-labels-$1" \
-        "$STATE_DIR/human-step-$1"
-}
 
 disown_issue() {
   rm -f "$OWNED_DIR/$1" "$STARTED_DIR/$1"
@@ -987,7 +684,7 @@ how_to_release() {
 # Only `count_parked_owned`, which runs in the poll body, passes `say`. Found by
 # the independent review.
 parked_for_person() {
-  local n="$1" voice="${2:-quiet}" marker reason listing state
+  local n="$1" voice="${2:-quiet}" marker reason state
   marker="$(parked_marker "$n")" || return 1
   reason="$(why_parked "$n" "$marker")" || return 1
   # EVERY reason that means "there is something in there" is gated, not just the
@@ -1024,7 +721,19 @@ parked_for_person() {
   # here. armaatus/autofleet#71, and found by `/mattpocock-skills:code-review`.
   case "$marker" in
     merge-held|held|merge-blind|git-blind)
-      if ! listing="$(runner_agent_states)"; then
+      # A RUNNING BUILD IS AN AGENT AT WORK, and this is the one question that
+      # replaced the machine-wide agent-state listing. The old one asked a
+      # runtime to classify a terminal -- `working`, `waiting`, idle -- and the
+      # classification is what `notice_stalled` was built on. `claude -p` has
+      # exactly two states and neither of them is ambiguous.
+      # NO BUILD RECORDED IS NOT "COULD NOT TELL". A worktree the dispatcher
+      # never started a build in -- one a restart inherited, one whose build
+      # directory was swept -- has nothing running in it, which is a real
+      # answer and the one that lets a drain end. Read as blind it never counted
+      # as parked, `owned` never reached 0, and the drain polled forever. Found
+      # by the local `/code-review` pass.
+      state="$(runner_build_state "$(owned_path "$n")")" || state="none"
+      if [ "$state" = none ] && [ -e "$(fleet_build_dir "$n")/worktree" ]; then
         # SAID, once per pass. Taking the safe direction silently is #37's own
         # complaint -- "nothing says the drain has become unbounded". One
         # unreadable `worktree ps` is a hiccup; a persistent one means this
@@ -1038,7 +747,7 @@ parked_for_person() {
         # `$(count_parked_owned)` substitution. See say_err.
         if [ "$voice" = say ] && [ ! -e "$STATE_DIR/ps-blind-$n" ]; then
           : >"$STATE_DIR/ps-blind-$n"
-          say_err "  could not read the agent states, so whether #$n is still being"
+          say_err "  could not read the build's state, so whether #$n is still being"
           say_err "  worked in cannot be answered -- it is NOT counted as waiting for"
           say_err "  you, and a drain will not end while that stays true"
         fi
@@ -1048,8 +757,7 @@ parked_for_person() {
       # dispatcher re-say a line it already said -- but it is still a write, so
       # it is the poll's to make too.
       if [ "$voice" = say ]; then rm -f "$STATE_DIR/ps-blind-$n"; fi
-      state="$(printf '%s' "$listing" | fleet_state_for_path "$(owned_path "$n")")"
-      case "$state" in working) return 1 ;; esac ;;
+      case "$state" in running) return 1 ;; esac ;;
   esac
   printf '%s\n' "$reason"
 }
@@ -1540,22 +1248,11 @@ open_pr_listing() {
   # EMPTY IS NOT AN ANSWER from `gh` itself: an empty list comes back as `[]`,
   # so a zero-length body is a `gh` that printed nothing, which the parsers
   # below would each read as "no PR". Caught here, once, rather than five times.
-  # AND NEITHER IS A FULL PAGE. At the limit we cannot tell an absent PR from
-  # one on the next page, and this listing is now the single authority the
-  # launch loop reads -- so a repository with 100 open PRs would have every
-  # issue whose PR sits past the page boundary read as free, and the duplicate
-  # worktree this function's header is about would arrive on the first poll
-  # rather than in a one-poll window. `review_open_prs` refuses a listing at its
-  # own limit for exactly this (`prs_answered=no`); so does this one, into
-  # "could not tell" rather than into a wrong answer. It is a hard stop when a
-  # host really does keep 100 PRs open, and a wider one than "nothing launches":
-  # `enforce_timebox` stops no runaway agent, `reset_context_for_answering` hands
-  # nothing over, and `count_startable`'s non-zero keeps `cmd_run` polling
-  # forever. That is still the SAFE direction -- guessing opens a duplicate
-  # worktree per issue past the boundary -- and armaatus/autofleet#122, filed
-  # for it, owns removing the cliff. NOT armaatus/autofleet#31, which this
-  # comment cited first and which is closed and about `live_worktrees` seeing
-  # another repository's worktrees. Found by the local review.
+  # A FULL PAGE IS A DIFFERENT QUESTION, and it is answered below rather than
+  # here: at the limit an absent PR cannot be told from one on page two, and
+  # this listing is the single authority the launch loop reads. It used to be
+  # refused outright; see the `case` below for why it is used instead, and what
+  # that costs. armaatus/autofleet#151, folding armaatus/autofleet#122.
   # THE COUNT AND THE PARSE ARE ONE THING. What the probe below prints is
   # `row_count`, and it carries a third state in the empty string: "the body was
   # not a listing at all". The `case` below reads all three.
@@ -1587,30 +1284,40 @@ print(len(loaded) if isinstance(loaded, list) else -1)
   fi
   case "$row_count" in
     ''|*[!0-9]*) listing="" ;;
-    # A FULL PAGE, and the cliff it is: at the limit nothing distinguishes an
-    # absent PR from one on page two, so `in_flight` answers 2 for every issue,
-    # nothing launches, nothing is time-boxed, no build context is reset, and
-    # `count_startable`'s non-zero keeps the run loop polling for work it will
-    # never start. All of that in total silence, which is the worst property a
-    # stop can have -- so it is SAID, through `hold_say_into`, which re-says on
-    # staleness: once per $AUTOFLEET_HOLD_RESAY (an hour by default) rather than
-    # once a minute. Said only from inside a poll, because
-    # `cmd_status` reaches this function too and does not write to the log.
+    # SAID through `hold_say_into`, which re-says on staleness: once per
+    # $AUTOFLEET_HOLD_RESAY (an hour by default) rather than once a minute. Said
+    # only from inside a poll, because `cmd_status` reaches this function too
+    # and does not write to the log.
+    # A FULL PAGE IS NO LONGER A REASON TO WAIT, which is the half of
+    # armaatus/autofleet#122 that armaatus/autofleet#151 folds in.
+    #
+    # It used to blank the listing: at the limit nothing distinguishes an absent
+    # PR from one on page two, so the safe direction was to answer "could not
+    # tell" everywhere. The cost of that safety was the whole dispatcher --
+    # nothing launched, nothing was time-boxed, and `count_startable`'s non-zero
+    # kept the run loop polling for work it would never start, on a repository
+    # whose only sin was 100 open pull requests.
+    #
+    # THE ONE PAGE IS KEPT AND USED. What it can still get wrong is bounded and
+    # nothing like as bad as the stop was: an issue whose PR sits past the page
+    # boundary reads as free, and the fleet opens a second worktree for it. The
+    # `Closes #N` sweep in `reap_merged` finds that within a pass, and the page
+    # is ordered newest-first, so the PRs a live fleet cares about are the ones
+    # on it. Said, through `hold_say_into`, so a host that really does keep 100
+    # PRs open learns why a duplicate can appear rather than discovering it.
+    #
+    # ...ONTO STDERR, and that redirection is load-bearing rather than tidy.
+    # This function's STDOUT IS THE ANSWER: `has_open_pr` and `count_startable`
+    # both take it through `$(...)`, so a `say` here goes into the listing
+    # rather than to the operator. `say` tees to $LOG either way, so the line
+    # still lands where an overnight run is read. Found by the local review's
+    # phase for it, which measured silence.
     "$pr_page")
-       listing=""
-       # ...ONTO STDERR, and that redirection is load-bearing rather than
-       # tidy. This function's STDOUT IS THE ANSWER: `has_open_pr` and
-       # `count_startable` both take it through `$(...)`, so a `say` here goes
-       # into the listing rather than to the operator -- silently swallowed on
-       # this path, because the caller discards what it captured, and it would
-       # be a corrupted listing on any path that succeeded. `say` tees to $LOG
-       # either way, so the line still lands where an overnight run is read.
-       # Found by the local review's phase for it, which measured silence.
        poll_cache_open && hold_say_into "$PR_PAGE_FULL_SAID" "$pr_page" \
          "$pr_page open pull requests is this listing's page limit, so a PR on the next page" \
-         "cannot be told from one that does not exist. Nothing will launch, nothing will be" \
-         "time-boxed and the run loop will not exit until the count drops. See docs/WORKFLOW.md," \
-         "\"What one poll costs\"; armaatus/autofleet#122 is where paging belongs." >&2 ;;
+         "cannot be told from one that does not exist. The page is used anyway: the fleet may" \
+         "open a second worktree for an issue whose PR is past the boundary, and reap_merged" \
+         "finds that within a pass. See docs/WORKFLOW.md, \"What one poll costs\"." >&2 ;;
   esac
   # ...and DROPPED the moment a whole listing comes back, so a wedge that clears
   # and recurs inside $AUTOFLEET_HOLD_RESAY is announced again rather than
@@ -1924,11 +1631,10 @@ foundation_in_flight() {
 # rather than cached at launch, because a label is often what a person adds AFTER
 # seeing the card.
 #
-# One answer per issue per POLL, though. reap_abandoned, enforce_timebox and
-# notice_stalled all ask about the same issue in the same pass -- an issue stuck
-# long enough to overrun is often also the one sitting at a prompt, and the one a
-# maintainer has just blocked -- and three calls for one answer is the pattern
-# count_startable exists to avoid. State and labels come back together for that
+# One answer per issue per POLL, though. `reap_abandoned` and
+# `notice_build_exit` both ask about the same issue in the same pass -- an issue stuck
+# long enough to overrun is often also the one a maintainer has just blocked --
+# and two calls for one answer is the pattern count_startable exists to avoid. State and labels come back together for that
 # same reason: they are one `gh issue view`, not two. The cache lives for one
 # pass, so a label a person adds is still seen on the next one.
 poll_issue() {
@@ -1996,47 +1702,51 @@ count_startable() {
   # The pass's one listing, not a fourth copy of it. It carries `number` as well
   # as `body`, which this block does not read and does not have to.
   #
-  # IT GOES OUT AS ONE ARGV STRING below, and that is a lower ceiling than the
-  # 100 rows `open_pr_listing` guards: the kernel caps a SINGLE argument
+  # IT GOES IN ON STDIN, and that swap is armaatus/autofleet#122's other half.
+  # It used to go out as ONE ARGV STRING, which is a lower ceiling than the 100
+  # rows `open_pr_listing` pages at: the kernel caps a single argument
   # (`MAX_ARG_STRLEN`, 128 KiB on Linux) and these rows carry full PR bodies, so
-  # what runs out first is bytes, not rows -- well under 100 of them on either
-  # platform, and a different number on each. Over it `execve` fails with
-  # `Argument list too long`: non-zero under `pipefail`, rc 1, and `cmd_run`
-  # polls forever. The `python3` below is also the one listing parse with no
-  # `2>/dev/null`, so bash says so on stderr once a poll while it lasts.
-  #
-  # NOT a one-line move to stdin: stdin here is already `$ready`. The swap is to
-  # trade which listing goes where -- the bodies onto stdin, `$ready`, which has
-  # none, onto argv -- and it belongs with the paging work in
-  # armaatus/autofleet#122, not here. docs/WORKFLOW.md carries the numbers.
-  # Found by the local review.
+  # what ran out first was bytes -- well under 100 rows, and a different number
+  # on each platform. Over it `execve` failed with `Argument list too long` and
+  # `cmd_run` polled forever. `$ready` has no bodies and goes onto argv in its
+  # place; the trade is exact and it removes the cliff rather than guarding it.
   prs="$(open_pr_listing)" || return 1
   ready="$(ready_issues)" || return 1
   # An issue the fleet gave up on is one it will decline every pass, so counting
   # it is the run loop polling forever for work that never starts.
   gaveup="$(gave_up_issues)"
-  printf '%s\n' "$ready" | PYTHONPATH="$ISSUE_REFS" python3 -c '
+  # BOUNDED BY $MAX_WORKTREES, not by the backlog. The only two readers are the
+  # run loop's exit test ("is there anything left to start") and the status
+  # screen's queue line, and neither is improved by a number that counts 63
+  # issues the fleet cannot begin this decade. What it costs to count them is
+  # not the arithmetic -- it is that every one of those issues is read as a
+  # reason to keep polling, so `cmd_run --until` never returns early on a repo
+  # with a long backlog.
+  printf '%s\n' "$prs" | PYTHONPATH="$ISSUE_REFS" python3 -c '
 import json, sys
 from issue_refs import closes
 running = {line.split("\t")[0] for line in sys.argv[1].splitlines() if line.strip()}
 gave_up = {n for n in sys.argv[3].split() if n}
+cap = int(sys.argv[4])
 # One parse per BODY, not one over all of them joined: a keyword may be the last
 # word of one body and `#12` the first token of the next, and `\s+` would span
 # the join -- claiming an issue nobody is working on and hiding it from the
 # count. One parse per issue would be the other way round; this is neither.
 claimed = set()
-for p in json.loads(sys.argv[2]):
+for p in json.loads(sys.stdin.read()):
     claimed.update(closes(p.get("body")))
 n = 0
-for line in sys.stdin:
+for line in sys.argv[2].splitlines():
     if not line.strip():
         continue
     issue = line.split("\t")[0]
     if issue in running or issue in gave_up or int(issue) in claimed:
         continue
     n += 1
+    if n >= cap:
+        break
 print(n)
-' "$live" "$prs" "$gaveup"
+' "$live" "$ready" "$gaveup" "$MAX_WORKTREES"
 }
 
 # --------------------------------------------------------------- the launch ---
@@ -2045,75 +1755,120 @@ slug() {
     | tr -cs 'a-z0-9' '-' | sed 's/^-*//;s/-*$//' | cut -c1-48
 }
 
-# The note the last attempt on this issue left, if the worktree that holds it is
-# still standing.
+# ------------------------------------------------------------- the build ---
+# THE BRIEF IS A FILE NOW, not a prompt typed into a composer.
 #
-# READ OUT OF $RAN_DIR, not $OWNED_DIR, and that is the whole of whether this
-# branch can fire at all. `launch` evaluates `agent_brief` BEFORE `own`, so
-# ownership at this moment is the PREVIOUS attempt's, and `disown_issue` has
-# usually already cleared it. $RAN_DIR is the record that OUTLIVES the worktree
-# -- `own` appends each path an issue has run in, and nothing clears it.
+# `issue-command.sh` prints what an agent on this issue has to know, and it
+# always did; what changed is where it lands. It used to be the agent's FIRST
+# TURN -- the dispatcher drafted "run this command", a watcher pressed Return,
+# the agent shelled out and read the output. That is one turn, one tool call and
+# one copy of the brief in the transcript before any work starts, on every
+# session and on every recycle.
 #
-# It is still a NARROW case, and saying so is better than implying otherwise:
-# the queue excludes every issue with a live worktree, so the old worktree has
-# to be one the runner no longer lists while its directory is still on disk --
-# which is the state `remove_advice` exists for, a removal that got half way.
-# When the old worktree is still live the issue is never queued at all, and when
-# it is gone the note went with it. `cmd_retry` names the same note on the path
-# a person is certainly on. Both found by the local review, which showed this
-# branch could not carry the claim alone.
+# Here it goes into `--append-system-prompt-file`, so it is in the system prompt
+# from the first token: cached, never re-read, and impossible to lose to a
+# `/clear`. The handoff note went with the recycle it existed to survive, and
+# `handoff_note_for` with it -- the branch and the pull request are what a
+# second run reads now, and both outlive any session.
 #
-# THE LAST RECORDED PATH that still has a note, which is NOT quite "the newest
-# attempt" and the difference is worth naming: `own` appends a path only when it
-# is absent, so an issue that ran in A, then B, then A again leaves `A,B` and
-# this returns B while A is the newer attempt. It needs a REUSED worktree path
-# to happen at all, and both notes are that issue's, so the cost is reading the
-# older of two -- not worth an mtime sort and its own failure modes here. Said
-# rather than implied: the first comment promised "newest first", which the
-# record cannot give. Found by the independent review.
-#
-# A path whose directory is gone is skipped rather than reported: the note died
-# with that worktree, which is what it is for.
-#
-# ABSOLUTE, and printed rather than assumed, because the attempt that reads the
-# prompt below IS starting somewhere else: `.autofleet/run/` is per worktree, so
-# a relative path would name the new worktree's empty one. A path that is wrong
-# is worse than none -- the agent reads nothing, finds nothing, and has been
-# told there was something.
-handoff_note_for() {
-  local line note
-  [ -f "$RAN_DIR/$1" ] || return 0
-  # `tail -r` is BSD and `tac` is GNU; neither is on both. The loop keeps the
-  # last match instead of reversing the file, which needs neither.
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    [ -d "$line" ] || continue
-    if [ -f "$(fleet_handoff_path "$line" "$1")" ]; then note="$line"; fi
-  done <"$RAN_DIR/$1"
-  [ -n "${note:-}" ] || return 0
-  fleet_handoff_path "$note" "$1"
+# IT MUST DEGRADE. `gh` can be rate-limited, logged out, or offline at exactly
+# the moment a worktree opens. A build that started with an EMPTY brief would
+# look like a build and produce nothing, so the fallback is the old prompt: go
+# and run the command yourself. One turn, and it works.
+build_brief() {
+  local num="$1" after="${2:-}" out
+  out="$(mktemp)"
+  if [ -n "$after" ]; then
+    GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr "$num" >"$out" 2>/dev/null
+  else
+    GH_PAGER=cat ./scripts/fleet/issue-command.sh "$num" >"$out" 2>/dev/null
+  fi
+  if [ -s "$out" ]; then
+    cat "$out"; rm -f "$out"; return 0
+  fi
+  rm -f "$out"
+  return 1
 }
 
-agent_brief() {
-  # `${note:+...}` rather than a second heredoc: an issue with no note has to get
-  # BYTE-FOR-BYTE the prompt it got before armaatus/autofleet#55, and two
-  # heredocs is where the two drift apart.
-  local note; note="$(handoff_note_for "$1")"
-  cat <<BRIEF
-Run \`GH_PAGER=cat ./scripts/fleet/issue-command.sh $1\` first and follow
-everything it prints, including anything it points you at. You were started by
-the fleet dispatcher: work autonomously to a pull request that is waiting only on
-GitHub's auto-merge, and do not stop to ask for confirmation on anything this
-repo's working agreement already decides.
-${note:+
-An earlier attempt on this issue left a handoff note at
-  $note
-Read it before you start: it is what that attempt decided and why, and what it
-left open. It belongs to that worktree and is not in this one.
-}
+# The standing instructions, which are the FLEET's and not the issue's.
+#
+# Separate from the brief above because they are true of every build on every
+# issue, and because they must still be said when the brief could not be
+# fetched. A run that does not know it may not stop to ask is a run that stops
+# to ask, and there is nobody there.
+build_preamble() {
+  cat <<PREAMBLE
+You were started by the autofleet dispatcher as a non-interactive run. There is
+no person watching and nothing you print is read until you stop, so work
+autonomously to a pull request that is waiting only on GitHub's auto-merge, and
+do not stop to ask for confirmation on anything this repository's working
+agreement already decides. If a question is genuinely open, write it in the pull
+request body and carry on with the rest of the scope.
+
+This run ends when it reaches its turn or budget limit, whichever comes first.
+It is not interrupted and it is not asked to hand anything over: the BRANCH and
+the PULL REQUEST are the state, so anything you have not committed is what a
+second run cannot see. Commit as you go.
+
 If \`$STOP_FILE\` appears at any point, stop: say where you got to and do nothing
 further. Nothing can leave this worktree while it exists.
-BRIEF
+PREAMBLE
+}
+
+# Write the two files the build command reads, and start it.
+#
+# `$1` issue, `$2` worktree, `$3` empty for the opening run or `after-pr` for a
+# resume. Both go through here, and that is the point: a resume differs from a
+# first run in ONE input, the brief, and in nothing else. The old resume was a
+# `/clear` plus a re-send plus a handoff note plus a grace period plus four
+# markers, because it had to put a live session back the way it found it.
+start_build() {
+  local num="$1" path="$2" after="${3:-}" dir runs
+  # THE BUILD COMMAND IS CHECKED HERE, and this is the only place that knows a
+  # build is about to happen. The driver's `runner_available` asked for it once
+  # and stopped every fleet command on a machine with no agent CLI -- the
+  # reviewer, the validator, `cost`, none of which builds anything. Asked here
+  # it costs one `command -v` per launch and fails the launch out loud instead
+  # of spawning a run that dies instantly and is resumed up to
+  # AUTOFLEET_BUILD_MAX_RUNS. Found by the suite in CI.
+  local prog; prog="$(fleet_build_program)"
+  command -v "$prog" >/dev/null 2>&1 || {
+    say "  the build command is '$prog', which is not on PATH (AUTOFLEET_BUILD_CMD)"
+    return 1; }
+  dir="$(fleet_build_dir "$num")"
+  mkdir -p "$dir" || { say "  could not make the build directory $dir"; return 1; }
+
+  if build_brief "$num" "$after" >"$dir/system.md.new" && [ -s "$dir/system.md.new" ]; then
+    { build_preamble; printf '\n'; cat "$dir/system.md.new"; } >"$dir/system.md"
+    printf 'Your brief is in the system prompt: the issue, and the instructions that follow it. Implement it end to end.\n' >"$dir/prompt"
+  else
+    say "  could not read the brief for #$num -- the build will fetch it itself"
+    build_preamble >"$dir/system.md"
+    if [ -n "$after" ]; then
+      printf 'Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh --after-pr %s` first and follow everything it prints.\n' "$num" >"$dir/prompt"
+    else
+      printf 'Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh %s` first and follow everything it prints.\n' "$num" >"$dir/prompt"
+    fi
+  fi
+  rm -f "$dir/system.md.new"
+
+  # COUNTED, and bounded by AUTOFLEET_BUILD_MAX_RUNS in `build_exited`. A run
+  # that ends the instant it starts -- a bad model name, an expired token -- is
+  # otherwise an infinite resume loop that spends the account one session at a
+  # time with the log saying "resuming" forever.
+  # `run-count`, and NOT `runs`, which is the DIRECTORY `fleet_build_started`
+  # keeps each finished run's result in. One name for both made `launch`'s reset
+  # write a file where a directory had to go, and the next build refused to
+  # start with `mkdir: .../runs: File exists` -- a worktree opened, provisioned
+  # and left with nothing running in it.
+  runs="$(cat "$dir/run-count" 2>/dev/null || echo 0)"
+  printf '%s\n' "$((runs + 1))" >"$dir/run-count"
+  # The marker the build's own exit is reported through, cleared here so a
+  # second run is reported as its own.
+  rm -f "$STATE_DIR/build-done-$num" "$STATE_DIR/build-blind-$num" "$STATE_DIR/exit-blind-$num"
+
+  runner_build_start "$path" "$num" || { say "  the runner would not start the build"; return 1; }
+  return 0
 }
 
 launch() {
@@ -2132,8 +1887,7 @@ launch() {
 
   say "opening a worktree for #$num -- $title"
   local out; out="$(mktemp)"
-  runner_worktree_create "$REPO_ROOT" "$name" "$num" claude \
-    "$(agent_brief "$num")" "starting #$num" >"$out"
+  runner_worktree_create "$REPO_ROOT" "$name" "$num" >"$out"
   if [ $? != 0 ]; then
     say "  could not create it:"
     sed 's/^/    /' "$out" | tee -a "$LOG"
@@ -2145,14 +1899,70 @@ launch() {
   rm -f "$out"
   [ -n "$path" ] || { say "  created, but the runner reported no path; not tracking it"; return 1; }
   own "$num" "$path"
+  # A FRESH RUN COUNT, here rather than in `start_build`: `own` is what says
+  # this worktree is a new attempt, and a `fleet.sh retry` that inherited the
+  # previous attempt's count would give the new one one run and then stop.
+  rm -f "$(fleet_build_dir "$num")/run-count"
   # The announcement is stale once the fleet has actually MOVED, and this is
   # where it has: a `launch` that FAILED moved nothing and must not re-arm the
   # line, which is what clearing this at the top of the function did. See
   # foundation_in_flight for why it is cleared here rather than on its no-hold
   # path. Found by the independent review.
   rm -f "$FOUNDATION_HOLD_SAID"
-  card "$path" workspace-status in-progress comment "#$num: building"
-  say "  #$num is running in $path"
+  card "$path" workspace-status in-progress comment "#$num: provisioning"
+
+  # THE WORKTREE PROVISIONS ITSELF FROM HERE, not from a runtime hook.
+  #
+  # `setup.sh` derives the worktree's isolated identity, writes its `.env`,
+  # updates submodules and runs the project's own setup hook. The app-backed
+  # runner used to call it through `orca.yaml`, which meant it did not happen at
+  # all for a driver with no hook mechanism -- and a build whose rig is not up
+  # reads the connection error as a code bug and goes chasing it, which is the
+  # failure `setupAgentStartupPolicy: wait-for-setup` was there to prevent.
+  # Running it HERE gives every driver the same guarantee, in the one place that
+  # knows the build has not started yet.
+  #
+  # Fatal to the launch. Everything it provisions is for the build that is about
+  # to start, and a worktree that failed to provision is one where every test
+  # run fails for a reason that has nothing to do with the issue.
+  # BOUNDED, like the teardown hook it mirrors: a project setup hook that never
+  # returns held the whole poll loop, and `remove_worktree` already runs
+  # `archive.sh` through the watchdog for exactly that reason. Found by the
+  # local `/code-review` pass, which noticed the same PR guarding one side and
+  # not the other.
+  local setup_out; setup_out="$(mktemp)"
+  FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "${AUTOFLEET_SETUP_DEADLINE:-900}" \
+    "$setup_out" env -C "$path" ./scripts/fleet/setup.sh
+  if [ $? != 0 ]; then
+    say "  #$num: its worktree would not provision:"
+    sed -n '1,10p' "$setup_out" | sed 's/^/    /' | tee -a "$LOG"
+    rm -f "$setup_out"
+    card "$path" comment "#$num: the worktree would not provision -- needs you"
+    # THE SLOT GOES BACK. `own` ran above, and a `launch` that returns 1 after
+    # it left the issue owned with no build in it -- held for the life of the
+    # dispatcher, counted against AUTOFLEET_MAX, with nothing that retries or
+    # releases it. Found by the local `/code-review` pass.
+    disown_issue "$num"
+    return 1
+  fi
+  rm -f "$setup_out"
+  card "$path" comment "#$num: building"
+  # THE BUILD IS STARTED BY THE DISPATCHER, not by the runtime's own hooks. The
+  # app-backed runner used to start an agent from a worktree-creation hook and
+  # the dispatcher never saw it happen; when the hook failed, a fully
+  # provisioned worktree sat on an unsent prompt and only a person noticed.
+  # Here a build that will not start fails the launch, loudly, on the pass that
+  # tried it.
+  if ! start_build "$num" "$path"; then
+    say "  #$num has a worktree at $path but no build running"
+    card "$path" comment "#$num: worktree opened, but the build would not start"
+    # ...and the same release. The worktree stays -- whatever provisioning did
+    # is in it and a person may want to look -- but the ISSUE is not owned by a
+    # dispatcher that has nothing running for it.
+    disown_issue "$num"
+    return 1
+  fi
+  say "  #$num is building in $path"
 }
 
 # -------------------------------------------------------------- the review ---
@@ -3433,25 +3243,36 @@ for p in prs:
 # database of an orphan somebody is still looking at; `--only` narrows reap.sh's
 # stale set and can never widen it.
 #
-# The autostart watcher is the hook's other half, and it does not survive
-# dropping --run-hooks by itself: its pidfile lives INSIDE the worktree, so it is
-# read before the removal and signalled after one that worked. A watcher left
-# behind polls the runtime for a directory that is gone, forever.
-#
 # Returns 0 when the worktree is gone, 2 when the runner never answered, and 1
 # when it answered and refused. The caller acts on the difference: a refusal is a
 # decision about THIS worktree and is not worth retrying, while a deadline is the
 # runtime restarting and says nothing about the worktree at all.
 remove_worktree() {
-  local path="$1" out watcher projects env_project rc
+  local path="$1" out projects env_project rc
   # The deadline the removal gets, LOCAL rather than a constant beside the other
   # tunables: armaatus/rommsync-nx exercises this function by extracting it with
   # `sed` and sourcing it alone, so anything it reads from the file around it
   # arrives empty -- and an empty deadline is not 180, it is zero.
   local deadline="${AUTOFLEET_RM_DEADLINE:-180}"
-  # Pure reads, before anything can be destroyed. All three live INSIDE the
-  # worktree and the sweep below needs them after it is gone.
-  watcher="$(fleet_read_autostart_watcher "$path")"
+  # THE WORKTREE'S OWN TEARDOWN, before anything is destroyed and from INSIDE
+  # it -- the project's teardown hook and whatever stack `.autofleet/config`
+  # named. The app-backed runner used to run this through `orca.yaml`'s archive
+  # hook; a driver with no hook mechanism ran it never, and a host project's
+  # containers would have outlived every worktree the fleet released.
+  #
+  # Never fatal, and bounded: this is teardown, and a hook that hangs must not
+  # take the removal with it. `finish_removal` sweeps the stack by name
+  # afterwards for whatever this did not reach.
+  if [ -x "$path/scripts/fleet/archive.sh" ]; then
+    # BOUNDED, as the paragraph above claims. Run inline it was not: a project
+    # teardown hook that never returns held the whole poll loop, and the sweep
+    # in `finish_removal` two screens down already goes through the watchdog for
+    # exactly that reason. Found by the local `/code-review` pass.
+    fleet_run_with_deadline "$deadline" /dev/null \
+      env -C "$path" ./scripts/fleet/archive.sh || true
+  fi
+  # Pure reads, before anything can be destroyed. Both live INSIDE the worktree
+  # and the sweep below needs them after it is gone.
   # Both names archive.sh would have used. The derived one is what setup.sh
   # would have called this worktree; the one in .env is what its stack was
   # actually created under, and after a directory rename the two disagree with
@@ -3473,7 +3294,7 @@ remove_worktree() {
     # it -- describes a world that no longer exists. Only on rc 0: a refusal and
     # a runner that never answered both leave the worktree standing.
     forget_worktree_answers
-    finish_removal "$path" "$watcher" "$projects"
+    finish_removal "$path" "$projects"
     return 0
   fi
   if [ "$rc" = 2 ]; then
@@ -3501,7 +3322,9 @@ remove_worktree() {
 }
 
 # What --run-hooks used to do, run only once the worktree is established to be
-# gone: stop its autostart watcher, and take down the stack it left behind.
+# gone: take down the stack it left behind. It used to stop the autostart
+# watcher too -- the process that pressed Return on a drafted prompt -- and
+# there is no such process now.
 # Named for the moment rather than for the hook, because it is no longer a hook
 # and no longer runs inside the worktree it is tearing down.
 #
@@ -3509,8 +3332,7 @@ remove_worktree() {
 # that is down or a sweep that half-finished is a stack to collect later, not a
 # removal to report as failed.
 finish_removal() {
-  local path="$1" watcher="$2" projects="$3" name out rc only=""
-  fleet_stop_autostart_watcher "$watcher" || true
+  local path="$1" projects="$2" name out rc only=""
   # Scoped to the names read off this worktree before it went, so releasing ONE
   # worktree does not also delete the database of an orphan somebody is still
   # looking at. Unscoped only when neither name could be read at all -- an
@@ -3792,9 +3614,9 @@ reap_abandoned() {
     else
       asked=0
     fi
-    # enforce_timebox's own record, so this one still answers through a GitHub
+    # `build_exited`'s own record, so this one still answers through a GitHub
     # outage -- and so a lookup that failed above cannot be read as "no reason".
-    [ -n "$reason" ] || ! gave_up_on "$num" || reason="the time-box stopped its agent with no PR"
+    [ -n "$reason" ] || ! gave_up_on "$num" || reason="its build ran out with no PR"
     # No reason today, so everything a previous poll decided goes with it. The
     # reason is re-derived from a live lookup every pass and can genuinely come
     # and go: unblock.yml re-writes `blocked` on every merged PR, so an issue can
@@ -3857,38 +3679,28 @@ reap_abandoned() {
     # The warning pass. One poll of notice, then the pair is asked again above --
     # so an agent that commits, or writes its plan to a file, keeps its worktree.
     if [ ! -e "$STATE_DIR/warned-$num" ]; then
-      # ITS TURN TO WRITE THE NOTE, before the terminal goes
-      # (armaatus/autofleet#106), and BEFORE `warned-` goes down.
+      # THE WARNING PASS STILL EXISTS, and what it is for changed. It used to
+      # buy the agent a turn to write a handoff note before its terminal went
+      # (armaatus/autofleet#106); there is no note now, because the branch is
+      # the note. What it still buys is the thing that always mattered more: one
+      # more poll in which a commit can land, which is what the `holds` check
+      # above reads on the next pass.
       #
-      # THE ORDER IS THE WHOLE OF IT. Marked first, this branch was not taken
-      # again: the next poll saw `warned-`, fell through to the release, and the
-      # worktree went with the note still unwritten -- at the shipped 60s poll
-      # and 120s grace, every time. The agent was asked for a note and then had
-      # the directory it writes into deleted.
-      #
-      # So the marker is the record that the WARNING was given, and the warning
-      # is not given until the turn is over. `continue` while the turn stands,
-      # which is what keeps this branch reachable next poll.
-      if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
-        handoff_turn "$num" "$path" || continue
-      fi
+      # The build is stopped HERE rather than at the removal, so the poll of
+      # grace is a poll in which nothing new is being written into a directory
+      # that is about to go.
       : >"$STATE_DIR/warned-$num"
       say "#$num: $reason, and the worktree holds nothing -- releasing it next pass unless something lands in it"
-      # ...unless the time-box, earlier in this same pass, already interrupted it
-      # and said so on the board. Scoped to the poll: this is about not saying one
-      # thing twice in one minute, not about never saying it again.
-      if [ ! -e "$POLL_CACHE/interrupted-$num" ]; then
-        interrupt_agent_in "$path"
-        card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
-      fi
+      stop_build_in "$path"
+      card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
       continue
     fi
 
     say "#$num: $reason, and the worktree still holds nothing -- releasing the slot"
-    # Interrupted again before the removal: an agent that ignored the warning
-    # would otherwise keep writing into a directory being deleted, and lose its
-    # rig with it the moment the removal lands (#163).
-    interrupt_agent_in "$path"
+    # Stopped again before the removal: a build that somehow restarted would
+    # otherwise keep writing into a directory being deleted, and lose its rig
+    # with it the moment the removal lands (#163).
+    stop_build_in "$path"
     # The comment and no status. `completed` is reap_merged's word for work that
     # landed, and this worktree is being released precisely because it did not.
     # Phrased as what it is about to do, not as done: if the removal refuses, this
@@ -3920,260 +3732,181 @@ prune_gaveup() {
   done
 }
 
-# ---------------------------------------------------------- stalled agents ---
-# An agent sitting at a confirmation prompt is not working, and nothing said so.
-# #23 stopped inside two minutes on a `git submodule add` the auto-mode
-# classifier wanted confirmed, while the board still read `in-progress` and the
-# time-box had three hours to run. So when one asks, say so once, on the card and
-# in a notification, and let a person decide. The alternative is a worktree that
-# looks busy for three hours.
+# -------------------------------------------------------- the build's exit ---
+# THREE WATCHERS BECAME ONE, and the reason is the whole of
+# armaatus/autofleet#151.
 #
-# "In auto mode nothing should be asking" was the premise, and it is false for an
-# issue whose last step is outward and the maintainer's: #142 stopped before
-# `git tag` and `gh release create` exactly as its issue told it to, and was
-# reported at 10:19:20 as a stall for it. Both of these still reach a person --
-# what changes is which signal they are. A stall means something is wrong; this
-# one means the work is done as far as an agent may take it.
-notice_stalled() {
-  local f num path state listing rc
-  # ONE listing per poll, matched against every owned worktree -- not one CLI
-  # round-trip per worktree, which is three 30-second-deadline calls a minute
-  # for an answer that arrives in a single response.
-  listing="$(runner_agent_states 2>/dev/null)" || return 0
-  for f in "$OWNED_DIR"/*; do
-    [ -e "$f" ] || continue
-    num="$(basename "$f")"; path="$(cat "$f")"
-    [ -d "$path" ] || continue
-    # lib.sh's helper rather than an awk here: this lookup and
-    # runner_agent_terminal's are the same one with the columns swapped, and they
-    # had the same `awk -v` defect, fixed in both at once. The reason lives on
-    # the helper now, in one place.
-    state="$(printf '%s' "$listing" | fleet_state_for_path "$path")"
-    [ "$state" = "waiting" ] || {
-      rm -f "$STATE_DIR/stalled-$num" "$STATE_DIR/stall-labels-$num"; continue; }
-    # Once per stall, not once per poll -- and checked before the lookup, so a
-    # settled stall costs no `gh` call at all.
-    [ -e "$STATE_DIR/stalled-$num" ] && continue
-    # The third answer, and it must not be frozen behind the stall marker: a
-    # single `gh` blip would otherwise record a #142-style false stall and never
-    # re-evaluate it, which is the exact noise this change exists to remove.
-    # `stall-labels-` throttles it instead.
-    #
-    # Each watcher owns its own once-per-outage marker and clears only that one.
-    # The branch above drops `stall-labels-` whenever the agent stops being
-    # `waiting`, which is the ordinary state of a grinding overrun -- so a marker
-    # shared with enforce_timebox would be deleted seconds after that function
-    # set it, restoring the line-a-minute the split exists to prevent. Distinct
-    # from `unreachable-` for the same reason: that one means the PR lookup
-    # failed, not this one.
-    #
-    # The single exception is `$POLL_CACHE/carded-`, which enforce_timebox writes
-    # and this function only reads, and which the next pass empties anyway.
-    issue_needs_human_step "$num"; rc=$?
-    if [ "$rc" = 2 ]; then
-      [ -e "$STATE_DIR/stall-labels-$num" ] && continue
-      : >"$STATE_DIR/stall-labels-$num"
-      say "#$num is waiting for input, and its labels could not be read -- asking again next poll"
-      continue
-    fi
-    rm -f "$STATE_DIR/stall-labels-$num"
-    : >"$STATE_DIR/stalled-$num"
-    if [ "$rc" = 0 ]; then
-      say "#$num is waiting for you, as expected -- its last step is yours to take"
-      # ...unless enforce_timebox, which runs first in this same pass, already
-      # said it. Only for this pass: the board is not a log, but a stall that
-      # starts later is news no earlier comment covered.
-      [ -e "$POLL_CACHE/carded-$num" ] \
-        || card "$path" comment "#$num: waiting for you -- as expected, not a stall"
-      notify "#$num is waiting for you" "Its last step is yours to take."
-    else
-      say "#$num is waiting for input -- in auto mode nothing should be asking"
-      card "$path" comment "#$num: waiting for input -- needs you"
-      notify "#$num needs you" "It is sitting at a prompt, not working."
-    fi
-  done
-}
-
-# ------------------------------------------------------------- the time-box ---
-# An agent that cannot get green will grind. On expiry it is interrupted and the
-# issue gets a comment saying so.
+# `notice_stalled` existed because an interactive agent that sits at a
+# confirmation prompt is indistinguishable from one that is working -- 44 lines
+# of "waiting for input" in one fleet.log. `enforce_timebox` and
+# `enforce_answer_timebox` existed because a session that is never allowed to
+# end has to be stopped by a wall clock, enforced by typing at it. A `claude -p`
+# run cannot sit at a prompt (there is nobody to answer), and it ends by itself
+# at `--max-turns` or `--max-budget-usd`. So the dispatcher's whole job here is
+# to notice that it ended and say which way.
 #
-# What becomes of the worktree is reap_abandoned's call on the next pass, and it
-# turns on what is IN it. One holding uncommitted work, or commits that are not
-# on main, is left standing: a stuck task is exactly the one worth looking at and
-# its diff is the evidence. One holding nothing is released, because there is
-# nothing to look at and a slot is one of three -- #44 ground for three hours,
-# produced nothing hard rule 1 allows, and then held its slot until it was
-# removed by hand.
-#
-# Either way the fleet does not start that issue again: `gaveup-` outlives the
-# worktree deliberately, since releasing the slot would otherwise hand it straight
-# back to the same three hours. `fleet.sh retry N` is how it comes back.
-enforce_timebox() {
-  local f num path started now
-  now="$(date +%s)"
-  for f in "$STARTED_DIR"/*; do
-    [ -e "$f" ] || continue
-    num="$(basename "$f")"; started="$(cat "$f")"
-    path="$(owned_path "$num")"
-    [ -d "$path" ] || continue
-    [ $((now - started)) -ge "$TIMEBOX_SECONDS" ] || continue
-    # A PR being up means it got where it was going; the review loop has its own
-    # cap and is not this timer's business. "Could not tell" is not "no PR":
-    # this branch interrupts an agent and comments on its issue, and a lookup
-    # that failed is no basis for either. The started marker stays, so the next
-    # pass asks again -- an agent is only ever stopped on an answer.
-    has_open_pr "$num"; case $? in
-      # Every marker this function owns, not only the ones it happened to set on
-      # the way here.
-      0) rm -f "$f"; forget_box_markers "$num"; continue ;;
-      # Once per outage, not once per poll, the same way notice_stalled does it:
-      # the dispatcher polls every POLL_SECONDS, and an hour of GitHub being
-      # unreachable would otherwise bury the log a person scans overnight under
-      # a line a minute for every issue past its box.
-      2) [ -e "$STATE_DIR/unreachable-$num" ] && continue
-         : >"$STATE_DIR/unreachable-$num"
-         say "#$num: timed out, but could not tell whether a PR is open -- leaving it for the next pass"
-         continue ;;
-    esac
-    # An agent that stopped because the next step is not its to take has not
-    # overrun: the box exists to stop work that will not get green, and a
-    # decision only the maintainer can make is not that. #44 -- hardware, which
-    # hard rule 1 forbids before the v1 gate -- was stopped at three hours for
-    # correctly producing nothing.
-    #
-    # The started marker is KEPT. Deleting it would disarm the box for good, and
-    # the label is exactly the thing a person takes off again to hand the issue
-    # back to an agent -- which would then run uncapped forever. Said once, by
-    # its own marker, rather than once a minute for as long as the label is on.
-    issue_needs_human_step "$num"; case $? in
-      # Not an exit -- the issue stays owned and past its box -- so it clears
-      # only what this poll just proved stale, and keeps `human-step-` because
-      # that is the marker it is about to write.
-      0) rm -f "$STATE_DIR/box-labels-$num" "$STATE_DIR/unreachable-$num"
-         [ -e "$STATE_DIR/human-step-$num" ] && continue
-         : >"$STATE_DIR/human-step-$num"
-         say "#$num: past the time-box, but it is labelled $HUMAN_STEP_LABEL -- leaving it to wait for you"
-         # On the board too. An agent that finished its part and exited is not
-         # `waiting`, so notice_stalled never speaks for it, and this worktree
-         # keeps a slot until a person looks at it -- one line in fleet.log is
-         # not where WORKFLOW.md says status lives.
-         card "$path" comment "#$num: waiting for you -- as expected, not a stall; past the time-box"
-         # For notice_stalled, which runs later in THIS pass and would otherwise
-         # repeat it. Scoped to the poll, not to the exemption: a stall that
-         # begins hours from now is news, and has to reach the board.
-         : >"$POLL_CACHE/carded-$num"
-         continue ;;
-      2) [ -e "$STATE_DIR/box-labels-$num" ] && continue
-         : >"$STATE_DIR/box-labels-$num"
-         say "#$num: timed out, but could not read its labels -- leaving it for the next pass"
-         continue ;;
-    esac
-    # The other exit, and it owes the same tidiness. `unreachable-` is the one
-    # this path used to drop: a PR lookup that failed on an earlier poll, then
-    # answered on this one, left its marker standing for the next worktree on
-    # the same issue to inherit and be silenced by.
-    forget_box_markers "$num"
-
-    # ITS TURN TO WRITE THE NOTE FIRST (armaatus/autofleet#106). This path takes
-    # the rest of an agent's hours away and asked nothing before it, so three
-    # hours of work left nothing behind and `fleet.sh retry` started from the
-    # files. The grace is spent before the interrupt, which is why it is bounded
-    # and why the wait ends the moment the note's timestamp moves.
-    #
-    # Worth spending here even though the worktree may be released below: it is
-    # kept whenever it holds uncommitted work or unmerged commits, which is
-    # exactly the case where the note has something to say.
-    # ...and the `continue` above is why this line is HERE and not before the
-    # turn: said first, it printed once a poll for the whole of the grace, which
-    # is the "once per event" rule this function keeps everywhere else.
-    handoff_turn "$num" "$path" || continue
-    say "#$num: $((TIMEBOX_SECONDS / 3600))h with no PR -- stopping it; the worktree goes if it holds nothing"
-    interrupt_agent_in "$path"
-    # For reap_abandoned, which runs later in THIS pass and would otherwise
-    # interrupt the same agent and card the same worktree a second time. Scoped
-    # to the poll, like `carded-`: it still gets its own warning next pass.
-    : >"$POLL_CACHE/interrupted-$num"
-    card "$path" comment "#$num: timed out after $((TIMEBOX_SECONDS / 3600))h -- needs you"
-    GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $((TIMEBOX_SECONDS / 3600)) hours with no pull request opened. Its worktree at \`$path\` is kept if it holds uncommitted work or commits that are not on \`main\`, and released otherwise so the slot is free. The fleet will not start this issue again on its own; \`./scripts/fleet/fleet.sh retry $num\` hands it back." >/dev/null 2>&1 || true
-    notify "#$num gave up" "$((TIMEBOX_SECONDS / 3600))h with no PR. Not starting it again."
-    # Read by reap_abandoned on the next pass, and by the queue for as long as it
-    # stands. Outlives the worktree on purpose -- see clear_issue_markers, which
-    # deliberately does not clear it, and cmd_retry, which does.
-    : >"$STATE_DIR/gaveup-$num"
-    rm -f "$f"
-  done
-}
-
-# THE OTHER HALF OF THE SESSION. `enforce_timebox` above deletes its marker the
-# moment a pull request is open -- "a PR being up means it got where it was
-# going" -- and that sentence is true of the BUILD and of nothing after it. From
-# the PR onwards the agent answered findings, pushed, waited and answered again
-# with no clock on any of it.
-#
-# Measured on issue #71: the build hit its three-hour box and was stopped. The
-# answering session that followed ran 4 hours 49 minutes and 262 turns at
-# 165,000 cache-read tokens a turn -- 43M tokens, the second most expensive
-# session in an issue that cost 207M. Nothing was wrong with it. Nothing was
-# watching it either.
-#
-# A SEPARATE CLOCK RATHER THAN LEAVING THE BUILD'S ARMED, because the two are
-# different work of different lengths and the second starts hours after the
-# first. Its start is the moment `reset_context_for_answering` dropped the build
-# conversation, which is exactly when the answering session began.
-#
-# What it does at the deadline is what the build's box does, for the same
-# reason: a turn to write the handoff note, then the interrupt, then a line
-# where a person looks. What it does NOT do is release the worktree -- there is
-# an open pull request on it, and the findings on that PR are the thing a person
-# is about to read.
-enforce_answer_timebox() {
-  local f num path started now marker
-  now="$(date +%s)"
-  # OWNED WORKTREES, AND ITS OWN MARKER -- not `context-reset-*`.
-  #
-  # Keying this on the reset marker was wrong in a way nothing would have said
-  # out loud: that marker is only ever written by `reset_context_for_answering`,
-  # which returns at the top when `AUTOFLEET_CONTEXT_RESET` is not `on`. So a
-  # host that turned the context reset off -- a documented, supported choice --
-  # got no answering clock either, and the 4h49m hole reopened silently with the
-  # knob's own row saying nothing about it. Two unrelated features, one marker,
-  # and the coupling invisible from either end. Found by the local
-  # `/code-review` pass.
+# The wall clock is gone with them, and that is a deliberate loss rather than an
+# oversight: a build that is cheap and slow was never the problem -- #71 spent
+# 65M tokens inside one three-hour box and the box is what let it. Turns and
+# dollars bound the thing that actually costs.
+notice_build_exit() {
+  local f num path state
   for f in "$OWNED_DIR"/*; do
     [ -e "$f" ] || continue
     num="$(basename "$f")"
-    # Said once per answering session, not once per poll. An interrupt and an
-    # issue comment every minute for the life of a pull request is the failure
-    # every other once-per-event marker in this file exists to prevent.
-    [ -e "$STATE_DIR/answer-box-$num" ] && continue
     path="$(owned_path "$num")"
-    [ -d "$path" ] || continue
-    # The clock starts at the pull request, which is the boundary the answering
-    # work begins at whether or not the context was reset there. "Could not
-    # tell" is not "yes", the same reading every other branch here gives it.
-    has_open_pr "$num"; case $? in
-      1|2) continue ;;
-    esac
-    marker="$STATE_DIR/answer-since-$num"
-    started=""
-    read -r started 2>/dev/null <"$marker" || true
-    # No marker yet, or one this poll is racing: this is the first pass that has
-    # seen the PR, so start the clock rather than reading a missing number as
-    # "infinitely overdue" and stopping an agent that has only just got here.
-    case "${started:-}" in
-      ''|*[!0-9]*) printf '%s\n' "$now" >"$marker" 2>/dev/null || true; continue ;;
-    esac
-    [ $((now - started)) -ge "$ANSWER_TIMEBOX_SECONDS" ] || continue
-    handoff_turn "$num" "$path" || continue
-    : >"$STATE_DIR/answer-box-$num"
-    say "#$num: $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") answering with no merge -- stopping it; the PR and its worktree stay"
-    interrupt_agent_in "$path"
-    : >"$POLL_CACHE/interrupted-$num"
-    card "$path" comment "#$num: answering timed out after $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") -- needs you"
-    GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $(fleet_duration "$ANSWER_TIMEBOX_SECONDS") of answering review findings. The pull request is open and its worktree at \`$path\` is kept -- nothing is released, because the findings on that pull request are what needs reading. Its handoff note says where the answering got to." >/dev/null 2>&1 || true
-    notify "#$num answering gave up" "$(fleet_duration "$ANSWER_TIMEBOX_SECONDS") since the PR opened. The PR is left for you."
+    [ -n "$path" ] && [ -d "$path" ] || continue
+    # "I could not tell" is not "it has stopped", and acting on the confusion
+    # here would report a running build as having given up and comment on its
+    # issue saying so. Said once per worktree, then left alone.
+    if ! state="$(runner_build_state "$path")"; then
+      [ -e "$STATE_DIR/build-blind-$num" ] && continue
+      : >"$STATE_DIR/build-blind-$num"
+      say "#$num: the runner would not say whether its build is running -- leaving it"
+      continue
+    fi
+    rm -f "$STATE_DIR/build-blind-$num"
+    case "$state" in running) continue ;; esac
+    build_exited "$num" "$path" "$state"
   done
+}
+
+# What one finished run cost, in the words the log prints.
+#
+# From the result JSON the build wrote, which is `--output-format json`'s one
+# object: `total_cost_usd`, `num_turns`, `subtype`. Reading a file beats the
+# transcript grep `cost.sh` used to do -- one file per run rather than a walk of
+# every session directory on the machine -- and it is the SAME source, so the
+# dispatcher's line and the cost report cannot disagree.
+#
+# IT MUST DEGRADE. `AUTOFLEET_BUILD_CMD` is a wrapper seam, and a wrapper need
+# not honour the flag. Output that does not parse gets the words "an unreadable
+# result", not a crash and not a zero -- a cost report that silently says $0 is
+# worse than one that says it could not tell.
+build_summary() {
+  python3 - "$(fleet_build_dir "$1")/result.json" <<'PY' 2>/dev/null || echo "an unreadable result"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+if isinstance(doc, list):
+    doc = doc[-1] if doc else {}
+if not isinstance(doc, dict):
+    raise SystemExit(1)
+turns = doc.get("num_turns")
+cost = doc.get("total_cost_usd")
+why = doc.get("subtype") or ("an error" if doc.get("is_error") else "success")
+bits = [f"{turns} turns" if turns is not None else "an unknown number of turns"]
+bits.append(f"${cost:.2f}" if isinstance(cost, (int, float)) else "an unknown amount")
+print(f"{why} after {bits[0]} and {bits[1]}")
+PY
+}
+
+# Did the run stop because it hit a limit, rather than because it was done?
+#
+# The subtype is the answer when there is one; the exit status is the fallback,
+# because a wrapper seam need not produce parseable output and "it exited
+# non-zero" is still a real answer. `success` is the only value read as done, so
+# an unrecognised subtype from a future version is treated as a limit -- which
+# resumes a run that was finished, costing one short session, rather than
+# abandoning a PR mid-answer, which costs the issue.
+build_ran_out() {
+  local dir; dir="$(fleet_build_dir "$1")"
+  local sub
+  sub="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d=d[-1] if isinstance(d,list) and d else d; print(d.get("subtype") or "")' "$dir/result.json" 2>/dev/null)" || sub=""
+  case "$sub" in
+    success) return 1 ;;
+    "")      [ "$(cat "$dir/rc" 2>/dev/null || echo 1)" = 0 ] && return 1 ;;
+  esac
+  return 0
+}
+
+# One build has stopped. Decide what that means for its issue.
+#
+# Four answers, and the order matters:
+#
+#   done        the issue is closed or its PR merged -- `reap_merged` owns the
+#               worktree from here, and saying anything else would race it.
+#   resume      a pull request is open and the run stopped at a limit. The
+#               branch and the PR ARE the state, so the resume is simply a
+#               second `claude -p` in the same worktree whose brief is the
+#               after-PR contract. This is what replaced the context reset, the
+#               handoff note and the recycle: nothing has to be carried across,
+#               because nothing was in the session that is not in git.
+#   ran out     no pull request. The run is over, the worktree STAYS -- its diff
+#               is the evidence and a stuck issue is exactly the one worth
+#               looking at -- and `gaveup-` keeps the fleet from handing the
+#               same issue the same budget again. `fleet.sh retry N` is how it
+#               comes back.
+#   finished    it exited cleanly with a PR open, which means it saw the review
+#               loop through. Said once; nothing else to do.
+#
+# AUTOFLEET_BUILD_MAX_RUNS bounds the resume. Without it a run that ends at its
+# budget the moment it starts -- a bad model name, an expired token -- is an
+# infinite loop that spends the whole account, one session at a time, with the
+# log saying "resuming" forever.
+build_exited() {
+  local num="$1" path="$2" state="$3" dir runs
+  dir="$(fleet_build_dir "$num")"
+
+  issue_is_done "$num" && return 0
+
+  # CAPTURED BEFORE ANYTHING ELSE RUNS. `has_open_pr` answers in its exit
+  # status, and `$?` is overwritten by the next command -- including a `case`,
+  # which is how the first draft of this read every answer as 0.
+  local pr_open; has_open_pr "$num"; pr_open=$?
+  if [ "$pr_open" = 2 ]; then
+    # Could not read the PR listing. Nothing is decided on a blind answer.
+    [ -e "$STATE_DIR/exit-blind-$num" ] && return 0
+    : >"$STATE_DIR/exit-blind-$num"
+    say "#$num: its build has stopped, but the open-PR listing could not be read -- deciding nothing"
+    return 0
+  fi
+  rm -f "$STATE_DIR/exit-blind-$num"
+
+  if [ "$pr_open" = 0 ] && ! build_ran_out "$num"; then
+    [ -e "$STATE_DIR/build-done-$num" ] && return 0
+    : >"$STATE_DIR/build-done-$num"
+    say "#$num: its build finished -- $(build_summary "$num") ($state)"
+    card "$path" comment "#$num: the build finished; its pull request is open"
+    return 0
+  fi
+
+  if [ "$pr_open" = 0 ]; then
+    runs="$(cat "$dir/run-count" 2>/dev/null || echo 1)"
+    if [ "$runs" -ge "$BUILD_MAX_RUNS" ]; then
+      # SAID ONCE. `notice_build_exit` re-enters this function on every poll for
+      # every owned worktree whose state is `exited`, and that state never
+      # changes by itself -- so an unguarded branch here posts the same issue
+      # comment and the same notification once a minute for as long as the
+      # dispatcher runs. Both terminal branches had the guard their two
+      # neighbours already had; neither had its own. Found by both local review
+      # passes, which rated the one below Critical because `reap_abandoned`
+      # never disowns a worktree that holds anything -- so there it is unbounded
+      # rather than merely repeated.
+      gave_up_on "$num" && return 0
+      : >"$STATE_DIR/gaveup-$num"
+      say "#$num: its build stopped again -- $(build_summary "$num") -- after $runs runs, which is AUTOFLEET_BUILD_MAX_RUNS"
+      card "$path" comment "#$num: out of runs with its pull request open -- needs you"
+      # WHAT THE WORKTREE ACTUALLY GETS, rather than a promise this line cannot
+      # keep: `gaveup-` above makes `reap_abandoned` release the worktree once
+      # it holds nothing, and a pushed branch usually holds nothing. The
+      # previous wording said "nothing is released", which was false on exactly
+      # this path. Found by `/mattpocock-skills:code-review`.
+      GH_PAGER=cat gh issue comment "$num" --body "The fleet stopped work on this after $runs runs of its build agent. The pull request is open and is what needs reading; its worktree at \`$path\` is kept while it holds anything uncommitted, and released once it does not." >/dev/null 2>&1 || true
+      notify "#$num is out of runs" "Its PR is open and left for you."
+      return 0
+    fi
+    say "#$num: its build stopped at a limit -- $(build_summary "$num") -- resuming in the same worktree (run $((runs + 1)))"
+    start_build "$num" "$path" after-pr || say "#$num: could not start the resume"
+    return 0
+  fi
+
+  gave_up_on "$num" && return 0
+  : >"$STATE_DIR/gaveup-$num"
+  say "#$num: its build ran out -- $(build_summary "$num") -- and opened no pull request"
+  card "$path" comment "#$num: ran out before opening a pull request -- needs you"
+  GH_PAGER=cat gh issue comment "$num" --body "The fleet's build agent stopped on this without opening a pull request: $(build_summary "$num"). Its worktree at \`$path\` is kept, so whatever it did get to is still there. \`./scripts/fleet/fleet.sh retry $num\` starts it again." >/dev/null 2>&1 || true
+  notify "#$num ran out" "No pull request. Its worktree is kept."
+  return 0
 }
 
 # ------------------------------------------------------- the running code ---
@@ -4263,7 +3996,7 @@ release_dispatcher_files() {
 # behind, the OS wraps round and hands that number to somebody else, and a check
 # that asked `kill -0` alone would from then on refuse to start the fleet at all
 # -- forever, on the strength of a stranger's process. lib.sh's
-# fleet_stop_autostart_watcher takes the same precaution for the same reason,
+# The watcher stop this replaced took the same precaution for the same reason,
 # before it SIGNALS a pid it did not watch die.
 #
 # `run` as well as the file name, because only `fleet.sh run` is a dispatcher.
@@ -4310,10 +4043,10 @@ restart_advice() {
   else
     echo "    ./scripts/fleet/fleet.sh run --auto   # from the MAIN worktree"
   fi
-  echo "  AUTOFLEET_MAX, _POLL, _TIMEBOX and _ANSWER_TIMEBOX are read at start"
-  echo "  too, so they change only across a restart. docs/WORKFLOW.md,"
-  echo "  'Restart it'. AUTOFLEET_CONTEXT_RECYCLE is not: it is re-read every"
-  echo "  poll, so turning it on takes effect without one."
+  echo "  AUTOFLEET_MAX and _POLL are read at start too, so they change only"
+  echo "  across a restart. docs/WORKFLOW.md, 'Restart it'. The three build"
+  echo "  knobs -- AUTOFLEET_BUILD_MAX_TURNS, _MAX_BUDGET_USD and _MAX_RUNS --"
+  echo "  are read per launch, so moving one takes effect on the next build."
 }
 
 # The refusal `fleet.sh run` prints when a dispatcher is already up, and how to
@@ -4739,59 +4472,47 @@ cmd_stop() {
       date '+stopped at %Y-%m-%d %H:%M:%S' >"$STOP_FILE"
       echo "stop set: $STOP_FILE (and the drain, $DRAIN_FILE)"
       echo "  no new worktrees, and no agent can push, open a PR or comment."
-      # --now reaches the agents the fleet started. --all reaches every agent
-      # Orca knows about, including sessions a person opened by hand -- which is
-      # a bigger hammer than a fleet stop, so it has to be asked for by name.
-      echo "  interrupting agents..."
-      local handle path
+      # --now stops the builds this fleet owns. --all stops every build this
+      # machine has a record of, including ones whose worktree the fleet has
+      # already disowned -- a bigger hammer, so it has to be asked for by name.
+      #
+      # THIS KILLS THE RUN, where the interactive stop froze a session and left
+      # it sitting there. That is a real difference and it is the right one: a
+      # frozen session was still holding its context, still costing nothing but
+      # still there to be resumed by hand, and the thing a person reaches for
+      # `--now` to prevent is spending. What survives is what was committed,
+      # which is what survives a build ending at its budget too.
+      echo "  stopping builds..."
+      local path dir stopped=0
       if [ "$mode" = "--all" ]; then
-        # The listing's rc is READ, not piped away. A runtime that would not
-        # answer prints the same "interrupting agents..." followed by nothing as
-        # a machine with no agents on it -- and `--all` is the hammer somebody
-        # reaches for when they need every agent stopped NOW. The one case where
-        # a false "there were none" is worst. Found by the independent review.
-        local listing
-        if listing="$(runner_agent_terminals)"; then
-          printf '%s\n' "$listing" | cut -f1 | while read -r handle; do
-            [ -n "$handle" ] || continue
-            runner_terminal_interrupt "$handle" && echo "    interrupted $handle"
-          done
-        else
-          echo "    the runner would not list its agents -- NONE were interrupted,"
-          echo "    which is not the same as there being none. Stop them by hand."
-        fi
+        for dir in "$FLEET_BUILDS"/*; do
+          [ -d "$dir" ] || continue
+          path="$(cat "$dir/worktree" 2>/dev/null)" || continue
+          [ -n "$path" ] || continue
+          runner_build_stop "$path"
+          echo "    stopped the build in $path"
+          stopped=$((stopped + 1))
+        done
       else
-        # The rc is read HERE TOO, and this is the branch `stop --now` actually
-        # takes -- CLAUDE.md describes `--now` as the form that "also freezes the
-        # agents". `runner_agent_terminal` is non-zero ONLY when the listing
-        # could not be read; empty output means there is genuinely no agent in
-        # that worktree, which is a real answer. Collapsing the two printed
-        # "interrupting agents..." and then nothing: byte-for-byte what a machine
-        # with no agents on it prints, while three agents kept writing against a
-        # rig that was going down. Design note 2 of #1, on the third and last
-        # callsite of it. Found by the independent review.
-        #
-        # Said ONCE, after the loop, rather than per worktree: one unreadable
-        # listing is one fact about the runtime, and repeating it per owned issue
-        # buries the interrupts that did land above it.
-        local unreadable=0
         for f in "$OWNED_DIR"/*; do
           [ -e "$f" ] || continue
           path="$(cat "$f")"
-          if ! handle="$(runner_agent_terminal "$path")"; then
-            unreadable=1
-            continue
-          fi
-          [ -n "$handle" ] || continue
-          runner_terminal_interrupt "$handle" && echo "    interrupted #$(basename "$f")"
+          [ -n "$path" ] || continue
+          # ASKED FIRST, so the line is about what happened. It printed "stopped
+          # the build" for every owned worktree whether or not one was running,
+          # which on an idle fleet is a screen of stops that did not occur.
+          # Found by the local `/code-review` pass.
+          [ "$(runner_build_state "$path" 2>/dev/null)" = running ] || continue
+          stop_build_in "$path"
+          echo "    stopped the build for #$(basename "$f")"
+          stopped=$((stopped + 1))
         done
-        if [ "$unreadable" = 1 ]; then
-          echo "    the runner would not list its agents -- some or NONE were"
-          echo "    interrupted, which is not the same as there being none."
-          echo "    Stop them by hand; --all reads the same listing and would"
-          echo "    not do better."
-        fi
       fi
+      # SAID WHEN THERE WERE NONE, rather than printing "stopping builds..."
+      # followed by silence. The interactive stop had to distinguish "no agents"
+      # from "could not read the listing"; a pid file has no third answer, so
+      # the honest line here is simply the count.
+      [ "$stopped" = 0 ] && echo "    there were none."
       # ...and the local reviewers, which are children of the dispatcher rather
       # than agents in a worktree, so the terminal interrupts above do not reach
       # them. Before the dispatcher is killed: after it, nothing is left that
@@ -4802,7 +4523,7 @@ cmd_stop() {
       # worktree once its PR merges, and killing it strands them.
       #
       # dispatcher_alive before the signal, which is the whole of lib.sh's
-      # fleet_stop_autostart_watcher in one line: this is the only place the
+      # The watcher stop this replaced, in one line: this is the only place the
       # fleet SIGNALS a pid it read out of a file, and a pidfile a `kill -9`
       # left behind names whoever the OS has since given that number to.
       local held; held="$(cat "$PIDFILE" 2>/dev/null)"
@@ -4863,7 +4584,7 @@ cmd_resume() {
 # decisions about an issue.
 cmd_retry() {
   [ "$#" -gt 0 ] || die "usage: fleet.sh retry ISSUE [ISSUE...]"
-  local n note
+  local n log
   for n in "$@"; do
     case "$n" in ''|*[!0-9]*) die "not an issue number: $n" ;; esac
   done
@@ -4871,18 +4592,20 @@ cmd_retry() {
     if [ -e "$STATE_DIR/gaveup-$n" ]; then
       rm -f "$STATE_DIR/gaveup-$n"
       echo "#$n is startable again."
-      # ...and where the attempt that was stopped wrote down what it decided.
+      # ...and where the attempt that was stopped left its log.
       #
       # SAID HERE because this is the command a person actually runs, and the
-      # one place in the retry path that is certain to be reached. When
-      # `agent_brief` can name the same note, and when it cannot, is argued at
-      # `handoff_note_for` and stated once there.
+      # one place in the retry path that is certain to be reached. It replaced
+      # the handoff note, which a resumed session needed and a second
+      # `claude -p` does not: the branch and the pull request are the state, and
+      # the only thing a person wants at this moment is what the last run said
+      # before it stopped.
       # `if`, not `[ -n ... ] && echo`: that AND-list is the last command in
-      # this branch, so with no note it makes `cmd_retry` itself return 1 --
+      # this branch, so with no log it makes `cmd_retry` itself return 1 --
       # a command that did exactly what was asked reporting failure. Caught by
-      # the phase that asserts the no-note case.
-      note="$(handoff_note_for "$n")"
-      if [ -n "$note" ]; then echo "  its last attempt left a note at $note"; fi
+      # the phase that asserts the no-log case.
+      log="$(fleet_build_dir "$n")/build.log"
+      if [ -s "$log" ]; then echo "  its last attempt's log is at $log"; fi
     else
       echo "#$n was not one this dispatcher gave up on; nothing to clear."
     fi
@@ -5121,7 +4844,7 @@ while that one is up."
   # leaving a live dispatcher reported as idle, with nothing to check its code
   # against. That is the silence this whole file's staleness report exists to end.
   trap 'release_dispatcher_files' EXIT
-  say "fleet up: max $MAX_WORKTREES worktrees, polling every ${POLL_SECONDS}s, ${TIMEBOX_SECONDS}s per issue"
+  say "fleet up: max $MAX_WORKTREES worktrees, polling every ${POLL_SECONDS}s, ${BUILD_MAX_TURNS} turns and \$${BUILD_MAX_BUDGET_USD} per run"
   $auto && say "mode: auto -- most-unblocking first, until the backlog is empty or you stop it" \
         || say "mode: list -- ${wanted[*]}"
   [ -n "$deadline" ] && say "stopping at $(date -r "$deadline" '+%Y-%m-%d %H:%M')"
@@ -5164,33 +4887,27 @@ while that one is up."
     IN_POLL=true
     #
     # The order below is load-bearing in three places. reap_merged first,
-    # because a worktree whose PR merged is its business and reap_abandoned only
-    # ever looks at what is left owned. enforce_timebox before notice_stalled,
-    # because the
-    # first writes `$POLL_CACHE/carded-` and the second reads it to avoid
-    # repeating a board comment it has already made. And reap_abandoned LAST of
-    # the four: it is the one that removes a worktree, and running it earlier
-    # took the "waiting for you, as expected" notification away from the very
-    # worktrees it exists to release -- the watchers would have found nothing
-    # there to speak about.
+    # because a worktree whose PR merged is its business and the two watchers
+    # under it only ever look at what is left owned. review_open_prs before
+    # notice_build_exit, because a build that has stopped with its PR open is
+    # resumed into the findings that pass collected -- resuming first would
+    # start a run with nothing yet to answer. And reap_abandoned LAST: it is the
+    # one that removes a worktree, and running it earlier took the "waiting for
+    # you, as expected" notification away from the very worktrees it exists to
+    # release.
+    #
+    # THREE WATCHERS LEFT THIS LIST with armaatus/autofleet#151 -- the context
+    # reset, the two time-boxes and the stall detector. They are one function
+    # now, `notice_build_exit`, and it does not act on a clock: `claude -p` ends
+    # by itself, so the dispatcher reads an exit instead of enforcing one.
     reap_merged
     # After reap_merged, because a PR that just merged needs no review, and
     # before the rest because it is the only one of these that UNBLOCKS a
-    # worktree rather than reclaiming one: an agent sitting in await-review.sh
-    # is waiting on exactly this, and every pass it waits is a pass of its
-    # time-box spent.
+    # worktree rather than reclaiming one: a build sitting in await-review.sh is
+    # waiting on exactly this, and every pass it waits is a pass of its budget
+    # spent.
     review_open_prs
-    # After review_open_prs and before the timers: this ends the build session
-    # of every worktree whose PR is up, and the answering session it starts is
-    # the one the reviewer's findings arrive into.
-    reset_context_for_answering
-    enforce_timebox
-    # Immediately after, and for the same reason it runs before notice_stalled:
-    # both interrupt an agent, and the one with a deadline behind it should get
-    # there first so the other does not card the same worktree twice.
-    enforce_answer_timebox
-    enforce_context_recycle
-    notice_stalled
+    notice_build_exit
     reap_abandoned
     prune_gaveup
 
@@ -5499,12 +5216,12 @@ usage: fleet.sh <command>
   run --auto --until 08:00           ...and stop then
   run --auto --for 6h --max-prs 5    ...or after that long, or that many
   status                             what is running, and what is next
-  stop [--now]                       drain (or interrupt the agents too)
+  stop [--now]                       drain (or stop the builds too)
   resume                             clear the stop
-  retry 44                           hand back an issue the time-box gave up on
+  retry 44                           hand back an issue the fleet gave up on
   cost [--json] [44 ...]             what each issue's worktree spent, in tokens
 
-Run it in a terminal the runner opens, so it is as visible as the work it starts:
+How to start it so it outlives the shell you type it in:
   $(runner_dispatcher_hint)
 USAGE
     exit 2 ;;

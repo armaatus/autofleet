@@ -210,13 +210,13 @@ case "${1:-}" in
     "lines of CLAUDE.md" "$limit" "$((limit + 1))"
   ok "...and a second row, measured in lines rather than words, fails the same way"
 
-  # ...and the same contract on the OTHER side of the table. Three rows are
+  # ...and the same contract on the OTHER side of the table. Two rows are
   # measured by a phase that runs a script, and no fixture can drive those over
   # their ceiling without first making the real thing longer -- so what is
   # asserted is the message those phases would print, which they all build with
   # `ceiling_over` and nothing else. Without this the four-part rule held for
   # half the table. Found by the local /code-review pass.
-  for row in handoff testrun round; do
+  for row in testrun round; do
     msg="$(ceiling_over "$row" 9999)" \
       || fail "ceiling_over could not build a failure for the \`$row\` row"
     says_all_four "the \`$row\` row's failure" "$msg" \

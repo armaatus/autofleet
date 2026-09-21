@@ -145,27 +145,27 @@ last paragraph says how**.
 | | per pass (`--auto`) | scales with | costs |
 |---|---|---|---|
 | **GitHub API calls** | 2 shared listings, plus 2 per owned worktree; a launch adds none | worktrees, not the backlog | rate limit |
-| **Runner CLI calls** | 1 `worktree list`, plus 1 `worktree ps` per stall check and per parked-dirty worktree, plus 3 per launch and 2 per release | worktrees | nothing |
-| **Model invocations** | 1 per launch; a handoff turn and an answering brief typed into a live agent, once per owned worktree per issue; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
+| **Runner calls** | 1 worktree listing, plus 1 build-state read per owned worktree, plus 2 per launch and 2 per release | worktrees | nothing |
+| **Model invocations** | 1 per launch; 1 more per owned worktree whose build stopped at a limit with its pull request open, bounded by `AUTOFLEET_BUILD_MAX_RUNS`; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
 
 Only the third row spends anything. **No model runs inside `cmd_run`'s own
 process** — its body is shell and `gh` from end to end — but it is what decides
 when one runs somewhere else, in two different ways, and only the first is a new
 session:
 
-*Sessions it spawns*, three of them rather than the two an older reading of this
-counted: `worktree create --agent claude` is the work itself, `review.sh` is the
-local reviewer, and `validate.sh` — spawned by `start_validator` from inside
-`review_open_prs`' own loop — is the third.
+*Sessions it spawns*, three kinds: `start_build` is the work itself — one
+`claude -p` per run — `review.sh` is the local reviewer, and `validate.sh`,
+spawned by `start_validator` from inside `review_open_prs`' own loop, is the
+third.
 
-*Turns it types into a session already running*, which is the half easily missed
-because it goes out over the runner CLI and so looks free in the row above it.
-`reset_context_for_answering` asks a worktree agent for its handoff note and
-then hands it the `--after-pr` brief, which is the opening turn of a fresh
-session; `enforce_timebox`'s give-up path and `reap_abandoned` reach the same
-seam. Each of those is a model turn, priced in the third row and not the second.
-Bounded by the work rather than by the clock: once per owned worktree per issue,
-not once per poll.
+**There is no fourth kind any more**, and that is what armaatus/autofleet#151
+changed here. The dispatcher used to type turns into a session that was already
+running: a handoff note before it cleared the conversation, the `--after-pr`
+brief after, and the same again at each time-box and each recycle. Each was a
+model turn that went out over the runner CLI and so looked free in the row
+above. A run ends by itself now, and a resume is an ordinary new session —
+counted in the third row like the other two, and bounded by
+`AUTOFLEET_BUILD_MAX_RUNS` rather than by a clock.
 
 Every other call a pass makes is an API or a CLI query and costs no tokens at
 all. All three spawned sessions are marker-guarded, so none is a spawn per PR
@@ -182,8 +182,12 @@ issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`*
 whether the backlog holds ten issues or fifty. A launch adds no `gh` call at
 all, because the title and labels the card needs come out of the `ready` listing
 the pass already has. A **full** fleet of three worktrees on
-`AUTOFLEET_REVIEW_MODE=github` is **8 `gh` calls**: the two shared listings, one
-merged-PR check per worktree, and one issue lookup per worktree.
+`AUTOFLEET_REVIEW_MODE=github` is **14 `gh` calls**: the two shared listings,
+and per worktree a merged-PR check, an issue-state lookup, a merged-PR sweep for
+`Closes #N`, and a state-and-labels lookup. It was published as 8 until
+armaatus/autofleet#151, and 8 was measured on a fixture whose three owned issues
+all named ONE directory — so the three per-worktree calls that depend on the
+branch collapsed into one. A real fleet has three branches and always paid this.
 `AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
 spawns and two more per validator, and up to `AUTOFLEET_MAX` model agents **on
 top of** the worktree agents — six concurrent sessions at the defaults, which is
@@ -216,18 +220,22 @@ rather than in it. `count_startable` already answers the same question for the
 whole queue in one parse, so the launch loop could read that set instead; it is
 work for a day when the cost being measured is wall-clock rather than money.
 
-**100 open pull requests is a cliff.** `gh pr list` is asked for 100 rows, and a
-listing that comes back with exactly 100 might have a 101st on the next page — so
-nothing in it can be trusted to mean "no PR closes this issue". The dispatcher
-refuses it rather than guessing, which is right (guessing opens a duplicate
-worktree for every issue past the boundary) and total: while it holds, nothing
-launches, nothing is time-boxed, no build context is reset for the answering
-work, and the run loop keeps polling because it cannot tell whether the backlog
-is empty. It says so in `fleet.log` once per outage rather than once a minute.
-The way out is to close or merge PRs until the count drops; paging past the
-limit is armaatus/autofleet#122, filed for it — not armaatus/autofleet#31, which
-earlier drafts of this paragraph cited and which is closed and about worktree
-scoping.
+**100 open pull requests used to be a cliff.** `gh pr list` is asked for 100
+rows, and a listing that comes back with exactly 100 might have a 101st on the
+next page — so nothing in it can be trusted to mean "no PR closes this issue".
+The dispatcher refused it rather than guessing, which was right about the risk
+and catastrophic about the remedy: while it held, nothing launched, nothing was
+time-boxed, and the run loop polled forever on a repository whose only sin was a
+hundred open pull requests.
+
+**The page is used now** (armaatus/autofleet#151, folding
+armaatus/autofleet#122). What that can get wrong is bounded: an issue whose PR
+sits past the page boundary reads as free and gets a second worktree, which
+`reap_merged`'s `Closes #N` sweep finds within a pass. The page is ordered
+newest-first, so the pull requests a live fleet cares about are the ones on it.
+It says so in `fleet.log` once per outage rather than once a minute, so a host
+that really does keep 100 PRs open learns why a duplicate can appear rather than
+discovering it.
 
 **It is not the first cliff, and the row count is not what decides.**
 `count_startable` hands that same listing — every row with its full `body` — to
@@ -434,7 +442,7 @@ hold the fleet down — but warns and names the pid. `stop --now` signals it
 anyway, because it promises the dispatcher is down when it returns.
 
 **The settings work the same way.** `AUTOFLEET_MAX` (how many worktrees run
-at once, default 3), `AUTOFLEET_POLL` and `AUTOFLEET_TIMEBOX` are read
+at once, default 3), `AUTOFLEET_POLL` and `AUTOFLEET_BUILD_MAX_TURNS` are read
 once at start, so putting one in front of `fleet.sh status` changes nothing. The
 cap changes across a restart and only there:
 
@@ -617,10 +625,9 @@ the review checks that section against the diff.
 
 `/implement` is a skill from the mattpocock plugin, and it ships
 `disable-model-invocation: true` — an agent will not reach for it on its own, and
-no other skill can call it. What makes it reachable here is that
-`agent-autostart.sh` delivers the brief as a **typed prompt**, not as an
-instruction to a model. That is worth knowing before anyone tries to move the
-brief somewhere a model merely reads it.
+no other skill can call it. It is reachable because the brief arrives as the
+run's **prompt**, not as something a model merely reads. That is worth knowing
+before anyone moves the brief somewhere else.
 
 **The brief arrives in two stages, and the second one is fetched, not pushed.**
 [`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`
@@ -631,8 +638,8 @@ validations. Whole,
 the brief was 1,521 words of which 1,272 were that second half, and all of it
 arrived before the agent had opened a file and then rode in the prompt prefix of
 every request it made for the rest of the session (armaatus/autofleet#49). Both
-stages are still written in that one file, so `orca.yaml` and
-`agent-autostart.sh` cannot drift from it, and `evals/lint.sh` asserts that the two together still name every
+stages are still written in that one file, so nothing that delivers the brief
+can drift from it, and `evals/lint.sh` asserts that the two together still name every
 script in the loop — an instruction that fell out of both halves is a rule
 nobody enforces.
 
@@ -1438,8 +1445,8 @@ rather than passing the flag, for the reason in Stage 6.
 |---|---|---|
 | `fleet.sh run` opens nothing | the stop file is set | `./scripts/fleet/fleet.sh resume` |
 | `fleet.sh status` shows no next issue | everything `ready` is already in flight | merge something, or file work |
-| ...and `status` lists the issue you want under "gave up on" | the time-box stopped it, and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
-| Worktree provisioned, agent idle, nothing in the composer | Orca drafts the issue prompt instead of sending it | `./scripts/fleet/agent-autostart.sh` — `setup.sh` starts the `--watch` form |
+| ...and `status` lists the issue you want under "gave up on" | its build ran out of turns or budget, and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
+| Worktree provisioned, nothing building in it | the build command would not start — a bad `AUTOFLEET_BUILD_CMD`, or no credentials | the launch says so in `fleet.log`; the run's own words are in `$AUTOFLEET_DIR/builds/<n>/build.log` |
 | Every hook says "this worktree has no linked issue" | the `orca` CLI on `PATH` cannot find `Orca.app` | nothing — the hooks probe it and fall back. If it persists: `sudo chmod -h 755 /usr/local/bin/orca` |
 | `git push` refused, "nothing leaves one of those unreviewed" | the local review is not recorded for this commit | `./scripts/fleet/self-review.sh` — it runs both passes and records the marker |
 | `await-review.sh` times out | the review job never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | `gh run list`; check `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret |

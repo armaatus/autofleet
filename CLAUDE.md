@@ -11,7 +11,7 @@ that apply it — both self-reviews and the reviewer — run in their own proces
 and read it there. The validator reads its own brief instead. `evals/lint.sh`
 asserts each enforced rule is stated in full in exactly one of those three — not that the others link to it,
 which is on you — and holds what is read *before the first edit* — this file,
-the opening brief, and the room it leaves for your issue and a handoff note —
+the opening brief, and the room it leaves for your issue —
 under a word ceiling. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
 page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
@@ -31,7 +31,10 @@ seam, [README.md](README.md) for what this is.
 3. **A guard that silently stops guarding is worse than no guard.** Every rule in
    `.claude/hooks/guard.py` has a row in its `--selftest`, and `evals/lint.sh`
    asserts the wiring. A rule with no assertion is not shipped.
-4. **The Orca dependency is named, not hidden.** Everything Orca-specific lives
+4. **The Orca dependency is named, not hidden, and is not the default.** A
+   build is one `claude -p` in a plain `git worktree`, which is what
+   `runner/headless.sh` does and what CI runs; `runner/orca.sh` runs the
+   identical command in a terminal on a machine that has the app. Everything Orca-specific lives
    in `scripts/fleet/runner/`, behind the `runner_*` contract in
    [docs/RUNNERS.md](docs/RUNNERS.md). Code outside it that shells out to `orca`
    is a bug, not debt. `evals/lint.sh` check 4c runs the grep that says so — a
@@ -62,7 +65,7 @@ python3 .github/scripts/merge_gate.py --selftest
 ./scripts/fleet/fleet.sh run --auto   # the dispatcher
 ./scripts/fleet/fleet.sh status
 ./scripts/fleet/fleet.sh cost         # what each issue's worktree spent
-./scripts/fleet/stop.sh               # drain (--now also freezes the agents)
+./scripts/fleet/stop.sh               # drain (--now also stops the builds)
 ./scripts/fleet/reap.sh               # stacks whose worktree is gone
 ```
 
@@ -70,10 +73,6 @@ There is no service to stand up and no port to hold: `.autofleet/config` sets no
 compose file, so teardown skips docker entirely. That is deliberate — autofleet
 is the case where every project-specific seam is empty, which is the cheapest
 place to notice one has been wired backwards.
-
-The `orca` wrapper on `PATH` may be unusable (a macOS install has shipped its
-symlink `0700 root:wheel`). `scripts/fleet/runner/orca.sh` probes for a working
-CLI and falls back to `/Applications/Orca.app/Contents/Resources/bin/orca`.
 
 ## Code
 
@@ -188,7 +187,7 @@ part of the work, not in a note to yourself.
 | Path | What |
 |---|---|
 | `scripts/fleet/` | The dispatcher and the worktree lifecycle. Vendored into host repos. |
-| `scripts/fleet/runner/` | The runner drivers. `orca.sh` is the only one that ships. |
+| `scripts/fleet/runner/` | The runner drivers. `headless.sh` is the default; `orca.sh` runs the identical build in a terminal. |
 | `.github/workflows/` | `merge-gate`, `unblock`, `claude-review`, `agent-config`. Vendored. |
 | `.github/scripts/` | The gate's decision (`merge_gate.py`) and the PR query. Vendored. |
 | `.claude/` | Hooks and subagents — what blocks and what steers. Vendored. |

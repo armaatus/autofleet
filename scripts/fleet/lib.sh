@@ -8,36 +8,6 @@
 # because everything under it reads them.
 . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
-# The agent autostart watcher, which outlives setup.sh and is the one thing a
-# worktree removal has to stop that is not a container. Two callers with opposite
-# timing: archive.sh runs INSIDE the worktree and reads the pidfile as it goes,
-# while fleet.sh has to read it before a removal it may not get and signal only
-# after one it did -- so reading and stopping are separate.
-#
-# The identity check is why this is shared rather than copied: a pidfile outlives
-# a `kill -9` and a reboot, and signalling a recycled pid means signalling an
-# unrelated process of the user's. One copy of that reasoning, not two.
-#
-# Non-zero means nothing was signalled, so a caller can report only a real stop.
-fleet_read_autostart_watcher() {
-  cat "$1/.autofleet/run/agent-autostart.pid" 2>/dev/null || true
-}
-fleet_stop_autostart_watcher() {
-  local pid="${1:-}"
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  # `grep` without `-q`: every caller of this sources lib.sh under `pipefail`
-  # (fleet.sh, issue-command.sh), and `-q` exits on the first match, so `ps` can
-  # write into a closed pipe and the pipeline is 141 for a probe that MATCHED.
-  # `|| return 1` then reads that as "this pid is not the watcher", the watcher
-  # is never signalled, and `|| true` at the callsite hides it. CLAUDE.md carries
-  # the rule. Found by the independent review, which also pointed out that the
-  # sourced file is the one the detector could not see.
-  ps -o command= -p "$pid" 2>/dev/null | grep 'agent-autostart' >/dev/null || return 1
-  kill "$pid" 2>/dev/null || true
-  return 0
-}
-
 # A worktree's identity -- its compose project name and its port offset -- is a
 # pure function of its absolute path. env.sh writes the result to .env when the
 # worktree is created; teardown recomputes it instead of reading .env back.
@@ -120,7 +90,7 @@ fleet_ports() {
 # optimisation: a child that has already exited is a zombie until bash reaps it,
 # and `kill -0` succeeds on a zombie. With a one-second sleep every call
 # therefore cost a full second even when the command answered instantly.
-# setup.sh makes dozens of these, and `agent-autostart.sh --watch` alone makes
+# setup.sh makes dozens of these, and one worktree provisioning alone makes
 # two per poll -- which is what turned a test of it into a 21-second one, close
 # enough to its 60s ctest timeout to go red on a loaded machine.
 #
@@ -197,39 +167,6 @@ fleet_kill_group() {
   fleet_signal_group KILL "$1"
 }
 
-# One row out of a `path`-keyed TSV, by path: the $2 column of the first line
-# whose $1 column equals $3, reading the table on stdin.
-#
-# ONE copy of it, because the same lookup exists twice -- the agent terminal in a
-# worktree, and that worktree's agent state -- and it had the SAME BUG in both,
-# fixed in both at once. `awk -v` REINTERPRETS what it assigns, so a worktree
-# path containing a backslash arrived as `/Users/joe/mydir` when it was
-# `/Users/joe/my\dir`, the comparison went false, and the caller was told there
-# is no agent there. That is `stop` never interrupting an agent, and
-# `agent-autostart.sh` giving up after two minutes with the prompt unsent -- both
-# silent, because "no agent in that worktree" is indistinguishable from the
-# truth. The python these replaced took the path as `sys.argv` and were immune;
-# `ENVIRON[]` is awk's equivalent.
-#
-# The COLUMN numbers still go through `-v`, and that is safe: they are integers
-# this file writes. Only the path is attacker-shaped. Merging the two copies was
-# the independent review's suggestion, so the next such lookup cannot
-# reintroduce it.
-# `fleet_field_for_path <match-column> <print-column> <path>`. The two callers
-# pass `2 1` and `1 2` -- opposite orders over the same helper, because their
-# listings put the path in different columns -- and bare integers carry no clue
-# which is which, so swapping them is silent and the answer becomes "there is
-# nothing there". The two wrappers below are what the callers use; this stays
-# private to them. Found by the independent review.
-fleet_field_for_path() {
-  AUTOFLEET_AWK_PATH="$3" awk -F'\t' -v k="$1" -v v="$2" \
-    '$k == ENVIRON["AUTOFLEET_AWK_PATH"] { print $v; exit }'
-}
-# `handle<TAB>path` -- match column 2, print column 1.
-fleet_handle_for_path() { fleet_field_for_path 2 1 "$1"; }
-# `path<TAB>state` -- match column 1, print column 2.
-fleet_state_for_path()  { fleet_field_for_path 1 2 "$1"; }
-
 # An issue number out of a bare number or any `.../issues/<n>[...]` URL. Empty
 # on stdout and rc 1 for anything that is neither, including the empty string,
 # so a caller with a fallback can take it and a caller without one can refuse.
@@ -265,29 +202,199 @@ fleet_issue_number() {
   printf '%s' "$num"
 }
 
-# Where a worktree keeps the note one attempt at an issue leaves the next.
+# ------------------------------------------------------- the build, one place
 #
-# The ROOT is a parameter and not $REPO_ROOT, because the dispatcher is the one
-# caller that asks about a tree other than its own: `.autofleet/run/` is per
-# worktree, so fleet.sh has to name the worktree that HOLDS the note, not the
-# one it is standing in. The other two callers pass their own root and get the
-# path they would have spelled by hand -- which is what this exists to stop them
-# spelling three different ways.
-fleet_handoff_path() { printf '%s/.autofleet/run/handoff-%s.md' "$1" "$2"; }
+# THE BUILD COMMAND IS THE FLEET'S, NOT A DRIVER'S. Both drivers run the
+# identical `claude -p`; the only difference is WHERE it runs -- headless in the
+# background of the dispatcher, app-backed in a terminal the maintainer can
+# watch. That is the whole of armaatus/autofleet#151's "both drivers run the
+# identical build command", and it is enforceable only because the line is
+# composed here and the drivers do not get to assemble their own.
+#
+# The generated line reads its two long inputs from FILES rather than carrying
+# them inline, which is what makes it safe to hand to a terminal: the prompt and
+# the brief are multi-line text from a tracker, and a command line quoting them
+# is a command line one apostrophe away from running something else.
+FLEET_BUILDS="${AUTOFLEET_DIR:-$HOME/.autofleet}/builds"
+fleet_build_dir() { printf '%s/%s\n' "$FLEET_BUILDS" "$1"; }
 
-# The one contract function with no runner in it: the agent terminal in ONE
-# worktree, filtered out of the machine-wide listing the driver does provide.
-# Defined HERE, above the driver source, so a driver whose runtime can answer it
-# directly still wins by defining its own -- and so that every driver does not
-# ship the same filter. The stub driver in tests/test_fleet.sh carried a
-# verbatim copy of it until the independent review said so.
+# ...and the same directory found from the WORKTREE instead of from the issue.
 #
-# Non-zero only when the listing could not be read; no output means there is no
-# agent there, which is a real answer.
-runner_agent_terminal() {
-  local list
-  list="$(runner_agent_terminals)" || return 1
-  printf '%s\n' "$list" | fleet_handle_for_path "$1"
+# A reverse index rather than a scan, and one that both drivers write through
+# `fleet_build_started`: `runner_build_state` is asked per owned worktree on
+# every poll, and a driver that had to walk every build directory to answer it
+# would be the per-worktree call the contract's one-listing rule exists to
+# prevent. `/` folds to `%` because `%` cannot appear in a path component git
+# would accept as a branch name, and unlike a hash the directory is readable
+# when something has gone wrong.
+fleet_build_key() {
+  # RESOLVED, for the reason `headless_link_file` gives: a path written under
+  # one spelling and read under another is an index that answers about nothing.
+  local path="$1" dir base
+  dir="$(dirname "$path")"; base="$(basename "$path")"
+  if dir="$(cd "$dir" 2>/dev/null && pwd -P)"; then path="$dir/$base"; fi
+  printf '%s' "$path" | tr '/' '%'
+}
+fleet_build_dir_for_path() {
+  local issue
+  issue="$(cat "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")" 2>/dev/null)" || return 1
+  [ -n "$issue" ] || return 1
+  fleet_build_dir "$issue"
+}
+
+# The build command itself, so `runner_available` can look for the right thing.
+# A seam, like AUTOFLEET_REVIEW_CMD: point it at a wrapper, a different account,
+# or an `ssh` to the machine that holds the subscription.
+fleet_build_cmd() { printf '%s\n' "${AUTOFLEET_BUILD_CMD:-claude}"; }
+# ...and the PROGRAM in it, which is what `command -v` can answer about.
+# AUTOFLEET_BUILD_CMD is advertised as a wrapper seam and
+# docs/CONFIGURATION.md offers "an `ssh` to the machine that holds the
+# subscription" as a value -- so the availability probe asked `command -v` about
+# a whole command line and always said no. Found by
+# `/mattpocock-skills:code-review`.
+fleet_build_program() { set -- $(fleet_build_cmd); printf '%s\n' "${1:-claude}"; }
+
+# `'` inside a single-quoted shell word, the only way there is: close, escape,
+# reopen. Not `printf %q`, whose output is bash's own dialect and is read by a
+# terminal that may be running something else.
+fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# The one command line, for the build directory $1.
+#
+# `--max-turns` and `--max-budget-usd` are the time-box now. The old one
+# interrupted a live session with a turn that asked it to stop, which needed a
+# session that could be typed into; these end the process. The run stops, the
+# worktree STAYS, and the dispatcher reports what it ran out of -- so a build
+# that was nearly done is resumed rather than redone (armaatus/autofleet#41).
+#
+# THE PERMISSION MODE IS A KNOB, and its default is not the one
+# armaatus/autofleet#151 asked for. The issue says `--permission-mode
+# acceptEdits`, and `acceptEdits` auto-accepts FILE EDITS ONLY: every Bash
+# command that is not on the settings allow-list still asks, and in `-p` there
+# is nobody to ask, so it is denied. A build that can edit files and cannot run
+# `git commit`, `git push` or the test command is not a build. Found by the
+# local `/code-review` pass, which read the flag against
+# `.claude/settings.json`'s own `defaultMode`.
+#
+# `auto` is that default -- Claude Code deciding per call -- and it is what this
+# repository already sets for its own sessions. A host that wants the issue's
+# literal flag sets AUTOFLEET_BUILD_PERMISSION_MODE=acceptEdits and gets a build
+# that edits and never commits, which is its choice to make.
+#
+# NOT `--bare`, in any mode: the guard hook still runs, which is what keeps a
+# headless agent from merging its own PR or pushing before its review is
+# recorded. A driver that passed `--bare` would disable every rule in
+# .claude/hooks/guard.py and nothing else would notice.
+#
+# WHICH STREAM GOES WHERE IS THE WHOLE OF WHY THE APP-BACKED DRIVER EXISTS.
+# `--output-format json` prints ONE object, at exit. Sending that to the
+# terminal and the running commentary to a file left the tab blank for the whole
+# of a build -- which is the one Acceptance bullet that driver survives to
+# satisfy, and three comments in this tree claimed the opposite. Found by
+# `/mattpocock-skills:code-review`.
+#
+# So they are swapped: `2>&1 1>result` sends STDOUT to the result file and
+# STDERR down the pipe, where `tee -a` puts it in `build.log` and on whatever is
+# watching. `claude -p` writes its progress and its warnings to stderr, so the
+# tab shows the build as it happens and the headless driver, which discards the
+# pipe, still gets the same log. The order matters and is not tidy-able: `1>`
+# after `2>&1` redirects only stdout, because the `2>&1` already copied the
+# pipe.
+#
+# `set -o pipefail` keeps the exit status the BUILD's rather than `tee`'s --
+# without it every build would look like it succeeded.
+#
+# THE LINE WRITES ITS OWN EXIT STATUS, last, and that is what makes one state
+# reader serve both drivers. A background child has a pid the dispatcher can
+# signal; a command hosted in somebody else's terminal does not, and a state
+# answer that depended on one would be a second implementation per driver of the
+# one question the dispatcher asks every poll.
+fleet_build_command_line() {
+  local dir="$1"
+  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode %s --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>&1 1>%s | tee -a %s; printf "%%s\\n" "$?" >%s\n' \
+    "$(fleet_build_cmd)" \
+    "$(fleet_sq "$dir/prompt")" \
+    "${AUTOFLEET_BUILD_PERMISSION_MODE}" \
+    "${AUTOFLEET_BUILD_MAX_TURNS}" \
+    "${AUTOFLEET_BUILD_MAX_BUDGET_USD}" \
+    "$(fleet_sq "$dir/system.md")" \
+    "$(fleet_sq "$dir/result.json")" \
+    "$(fleet_sq "$dir/build.log")" \
+    "$(fleet_sq "$dir/rc")"
+}
+
+# Everything a driver has to do BEFORE it starts the line, in one place so the
+# two cannot drift: clear the previous run's verdict, and write the index that
+# makes this worktree findable from a path.
+#
+# The removals are not tidiness. `runner_build_state` reads `rc`, so an `rc`
+# left over from the previous run makes a build that has only just started
+# report as already finished -- and `build_exited` would then resume it, once a
+# poll, forever.
+fleet_build_started() {
+  local dir="$1" path="$2" issue="$3" n
+  mkdir -p "$dir/runs" "$FLEET_BUILDS/by-path" || return 1
+  # THE PREVIOUS RUN'S RESULT IS KEPT, not overwritten, and that is the whole of
+  # how `cost.sh` can report what an issue cost rather than what its last run
+  # cost. An issue gets up to AUTOFLEET_BUILD_MAX_RUNS of these, and "did the
+  # resume cost more than the build" is exactly the question the report exists
+  # to answer.
+  #
+  # MOVED rather than parsed here. A finished result is one JSON object and the
+  # reader knows its shape; summarising it at write time would put a second
+  # parser in a second file, which is the drift `cost.sh`'s header is about.
+  if [ -s "$dir/result.json" ]; then
+    n=0
+    while [ -e "$dir/runs/$n.json" ]; do n=$((n + 1)); done
+    mv "$dir/result.json" "$dir/runs/$n.json" 2>/dev/null || true
+  fi
+  rm -f "$dir/rc" "$dir/result.json" "$dir/pid"
+  printf '%s\n' "$path" >"$dir/worktree"
+  printf '%s\n' "$issue" >"$FLEET_BUILDS/by-path/$(fleet_build_key "$path")"
+}
+
+# ...and the index entry, dropped when the worktree goes. A path is reusable --
+# `fleet.sh retry` opens a worktree at a name a previous attempt used -- and a
+# stale entry would answer the NEXT worktree's state question with the previous
+# issue's build.
+fleet_build_forget_path() {
+  rm -f "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")"
+}
+
+# `running`, or `exited <rc>`. Non-zero when there is no build here to describe
+# -- which is a different answer from "not running", and conflating the two is
+# how a dispatcher waits out its whole budget and then reports that nothing
+# arrived.
+#
+# THE EXIT STATUS FIRST, then the pid. `rc` is written by the command line
+# itself, so it is the one answer that is true whoever is hosting the build; a
+# pid is consulted only when no `rc` has been written yet, and only the headless
+# driver writes one. That order matters in the killed case: a build the
+# dispatcher killed never reaches the line that writes `rc`, so on files alone
+# it would read as running forever, and the pid is what makes it honest. A
+# terminal-hosted build has no pid to give and falls through to the last branch,
+# which is correct for it -- nothing outside that terminal can kill the command
+# without the terminal noticing.
+#
+# (The header said "the pid is consulted FIRST", which is the opposite of the
+# code beneath it. Found by `/mattpocock-skills:code-review`.)
+fleet_build_state_of() {
+  local dir pid rc
+  dir="$(fleet_build_dir_for_path "$1")" || return 1
+  [ -d "$dir" ] || return 1
+  rc="$(cat "$dir/rc" 2>/dev/null)"
+  if [ -n "$rc" ]; then printf 'exited %s\n' "$rc"; return 0; fi
+  pid="$(cat "$dir/pid" 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    kill -0 "$pid" 2>/dev/null && { printf 'running\n'; return 0; }
+    printf 'exited ?\n'; return 0
+  fi
+  # No rc and no pid: the line has been handed to a terminal and has not
+  # finished. There is nothing here that can be checked, and saying "running" is
+  # the honest reading -- `build_exited` acts only on an exit, so the cost of
+  # being wrong is a worktree that is noticed one poll later by the reaper.
+  [ -f "$dir/worktree" ] || return 1
+  printf 'running\n'
 }
 
 # The runner driver: everything about creating a worktree, opening a terminal
@@ -475,9 +582,9 @@ else
   #   exempting it by name was the tell that the line was drawn in the wrong
   #   place. Found by the local review.
   #
-  # So: say it once at source time, finish sourcing, and let the four scripts
+  # So: say it once at source time, finish sourcing, and let the three scripts
   # that call `fleet_require_runner` stop on it -- the dispatcher, the setup
-  # hook, the board and the autostart watcher. A fifth NAMES a `runner_*` and is
+  # hook and the board. A fourth NAMES a `runner_*` and is
   # deliberately unguarded: `issue-command.sh` prints an agent's brief, which
   # needs no runtime, and asks `runner_available` only behind an `&&` that rc
   # 127 makes false. docs/RUNNERS.md carries the reason. `evals/lint.sh` check 4h
@@ -552,16 +659,13 @@ FLEET_OWNED="$FLEET_DIR/worktrees"
 # nobody holds. `fleet.sh`'s REVIEWING_DIR is this, and the comment naming what
 # is in it is there, next to the four consumers that walk it.
 FLEET_REVIEWING="$FLEET_DIR/reviewing"
-# ...and what it HAS run, which is a different question. `own()` writes an
-# issue's worktree path here and `disown_issue` does NOT take it away, so the
-# record outlives the worktree -- `cost.sh` is built on it, and on $FLEET_OWNED
-# alone that report emptied itself exactly when a run finished.
-#
-# HERE, beside the others, for the reason stated above them: the writer is
-# fleet.sh and the reader is cost.sh, and two spellings of one path is one
-# chance for the reader to look somewhere the writer never wrote. Found by the
-# standards review, which pointed at this very paragraph as the rule it broke.
-FLEET_RAN="$FLEET_DIR/ran"
+# ...and what it HAS run, which is a different question and is answered
+# somewhere else now. `$FLEET_DIR/ran` held every path an issue had run in,
+# because `cost.sh` found what an issue spent by slugging those paths into the
+# agent CLI's transcript root. The report reads `$FLEET_BUILDS/<issue>/`
+# instead -- keyed on the issue, outliving every worktree -- so the registry and
+# the three comments that claimed the report was built on it are gone with the
+# slug. armaatus/autofleet#151.
 
 # Which reviewer this repository runs, normalised -- `local` or `github`.
 #

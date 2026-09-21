@@ -34,20 +34,22 @@ precedence is **environment beats this file beats the defaults** — a one-off
 outright (`AUTOFLEET_MAX=1`) if you want this file to win over the environment
 too.
 
-One knob is `=` rather than `:=`, and it says why at its own default:
-`AUTOFLEET_TRANSCRIPT_DIR`, where **empty is the off switch**. `:=` substitutes
-on unset *or null*, which would hand an explicitly emptied value straight back
-the default and make the documented way to turn the cost report off do nothing.
+Some knobs use `=` rather than `:=`, and each says why at its own default:
+where **empty is the off switch**, `:=` would substitute on unset *or null* and
+hand an explicitly emptied value straight back the default.
 
 ### The dispatcher
 
 | Knob | Default | What it costs to change |
 |---|---|---|
 | `AUTOFLEET_MAX` | `3` | The ceiling is not machine capacity, it is how many streams one person can review properly. Raising it makes the review queue the bottleneck. |
-| `AUTOFLEET_POLL` | `60` | How often the dispatcher re-reads the world, in seconds. Lower burns API quota; higher delays every handoff. |
-| `AUTOFLEET_TIMEBOX` | `10800` | How long one issue may hold a worktree **before its pull request is open**. Long enough for a full test run and both review rounds; short enough that an overnight run does not spend the night on the one task that was never going to work. The box is disarmed the moment a PR appears — the build got where it was going — which is why the row below exists. |
-| `AUTOFLEET_CONTEXT_RECYCLE` | `0` (off) | Seconds between context recycles **inside the build**, before the pull request exists. `AUTOFLEET_CONTEXT_RESET` does this once, at the PR; everything before that is one window that only grows, and it is the single biggest line in an issue's bill. Measured: issue #71's build ran 285 turns at **229,052 cache-read tokens per turn** — 65M, 31.9% of a 207M issue — against issue #106's build at 61 turns and 96,061 a turn, for comparable work. The cost is not the turn count; it is that every turn re-sends everything the session has read. At each interval the agent is asked for a handoff note, its conversation is dropped, and the same brief is re-sent. **Off by default on purpose:** a recycle costs the agent everything not in a 300-word note, so an interval chosen badly makes the work worse *and* dearer by making it redo what it forgot. The mechanism is the proven one; the right interval is a measurement nobody has taken. Turn it on, run an issue, compare `fleet.sh cost`, then argue for a default. Needs `AUTOFLEET_AGENT_CLEAR_CMD`, and stops at the pull request — the answering half is `AUTOFLEET_ANSWER_TIMEBOX`'s business, not this one's. |
-| `AUTOFLEET_ANSWER_TIMEBOX` | `$AUTOFLEET_TIMEBOX` | The same box for the **answering** half, starting when `reset_context_for_answering` drops the build conversation. That half had no clock at all: measured on issue #71, the build hit its three-hour box and stopped, and the answering session that followed ran **4h49m and 262 turns** at 165,000 cache-read tokens a turn — 43M tokens, the second most expensive session in an issue that cost 207M. At the deadline the agent gets a turn to write its handoff note and is then interrupted, and the issue gets a comment saying so. **The worktree is not released**: there is an open pull request on it, and the findings on that PR are what a person is about to read. |
+| `AUTOFLEET_POLL` | `60` | How often the dispatcher re-reads the world, in seconds. Lower burns API quota; higher delays every reap and every resume. |
+| `AUTOFLEET_BUILD_CMD` | `claude` | What a build is. A wrapper seam, like `AUTOFLEET_REVIEW_CMD`: point it at a different model, a different account, or an `ssh` to the machine that holds the subscription. A wrapper need not honour `--output-format json`, and one that does not gets a cost report with no figures in it and a line on stderr saying so, rather than a crash. |
+| `AUTOFLEET_BUILD_MAX_TURNS` | `400` | **What bounds a build, together with the row below.** There used to be two wall clocks here — one for the build and one for the answering half — because an interactive session runs until something stops it, and stopping it meant interrupting a live terminal with a turn that asked it to stop. A `claude -p` run ends by itself at whichever of these two it reaches, and the dispatcher reads the exit instead of enforcing one. Hours were never what cost anything: issue #71 spent 65M tokens *inside* its three-hour box. **Must be a positive whole number** — it reaches the build command as a flag, and a non-number is a build that dies the instant it starts, once per launch, forever. |
+| `AUTOFLEET_BUILD_MAX_BUDGET_USD` | `25` | The other half. Two numbers rather than one because they fail differently: a build that reads whole files burns dollars at a low turn count, and one that greps in a loop burns turns cheaply. When a run ends at either, the worktree **stays** — its diff is the evidence — the dispatcher logs what it ran out of, and `gaveup-<n>` keeps the fleet from handing the same issue the same budget again. `./scripts/fleet/fleet.sh retry N` is how it comes back. |
+| `AUTOFLEET_BUILD_PERMISSION_MODE` | `auto` | **What the build may do without asking, and the one default here that departs from what armaatus/autofleet#151 asked for.** The issue names `--permission-mode acceptEdits`; that mode auto-accepts *file edits only*, so every Bash call not on the settings allow-list still asks — and under `-p` there is nobody to ask, so it is denied. A build that edits files and cannot run `git commit`, `git push` or the test command is not a build. `auto` is Claude Code's own per-call decision and is what `.claude/settings.json` already sets for this repository's sessions. Set it to `acceptEdits` for the issue's literal flag, and get a build that edits and never commits. Whatever the value, `--bare` is never passed: the guard hook has to run, and it is what keeps a headless agent from merging its own pull request. |
+| `AUTOFLEET_BUILD_MAX_RUNS` | `3` | How many runs one worktree gets. A run that stopped at a limit **with its pull request open** is resumed: a second `claude -p` in the same worktree, whose brief is the after-PR contract. Nothing is carried across, because the branch and the PR are the state. Without a bound, a run that ends the instant it starts — a bad model name, an expired token — is an infinite resume loop that spends the account one session at a time with the log saying "resuming". **Must be a positive whole number**; `1` means a build is never resumed. |
+| `AUTOFLEET_WORKTREE_ROOT` | `$AUTOFLEET_DIR/trees` | Where the headless driver creates worktrees. Empty is the default, which is the answer for every host that does not care; a host that keeps its checkouts on another volume sets this. |
 | `AUTOFLEET_RM_DEADLINE` | `180` | How long a worktree removal may take before it is reported as refused. |
 
 ### The labels
@@ -276,7 +278,7 @@ so.
 | Knob | Default | Notes |
 |---|---|---|
 | `AUTOFLEET_SELF_REVIEW_CMD` | `$AUTOFLEET_REVIEW_CMD` | What runs each pass, with `-p`, a fixed tool allowlist and a `--disallowed-tools` deny list. The deny list is the half that binds: `--allowed-tools` is **additive** — it grants on top of `.claude/settings.json`, which permits `Write`/`Edit` under `.claude/agents/` by design — so the absence of a tool from the grant is not a ceiling. Defaults to the independent reviewer's command, so a host that has set nothing — and a host that has set only `AUTOFLEET_REVIEW_CMD` — still works. |
-| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent out of the agent's `AUTOFLEET_TIMEBOX`, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". **Must be a positive whole number**, for the reason the `MAX_TRIES` row gives: a non-number makes `[ N -ge X ]` return 2, the deadline test false, and a wedged pass then holds the worktree until the time-box expires. A bad value is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included. |
+| `AUTOFLEET_SELF_REVIEW_TIMEOUT` | `1200` | Seconds **one** pass may run before it is killed. Lower than the independent reviewer's `1800` because there are two of them and they are spent inside the build's own run, not out of the dispatcher's poll. A pass killed here is reported as a **failure**, never as "no findings". **Must be a positive whole number**, for the reason the `MAX_TRIES` row gives: a non-number makes `[ N -ge X ]` return 2, the deadline test false, and a wedged pass then holds the worktree until the build runs out of turns. A bad value is refused, and because this file is sourced the refusal ends every fleet command that reads it, `stop.sh` included. |
 | `AUTOFLEET_SELF_REVIEW_MAX_TURNS` | `80` | Each pass's turn budget, passed as `--max-turns`. The same number the independent reviewer and `claude-review.yml` get: both passes fan out into sub-agents of their own. Validated the same way as the timeout above. |
 | `AUTOFLEET_SELF_REVIEW_MAX` | `2` | How many times **one branch** may run the two passes. The row above bounds one pass; this bounds the number of them, and it was the hole: `AUTOFLEET_REVIEW_MAX` and `AUTOFLEET_VALIDATE_MAX` bound everything *after* the pull request exists, and nothing bounded what came before. Measured on this repository, PR #126 ran **sixteen** rounds and PR #129 eight — each round two fresh full-budget agents re-reading the whole branch diff, and 36% of one issue's 207M tokens. It ground because the loop has nothing to converge on: a pass can always find one more Suggestion, the remedy for a finding is a commit, a commit moves the head, and the push marker is keyed on the head. Past the cap no pass is started and the **last round's findings are re-recorded for the current head**, so the push gate still opens — a cap that only refused would strand the agent short of the independent reviewer. Only rounds that produced findings are counted; a pass killed at its deadline is refunded. |
 
@@ -309,52 +311,30 @@ so.
 > `review.sh`; `self-review.sh` is deliberately a second consumer of the same
 > shape rather than a third convention, so one fix covers both.
 
-### The handoff note
+### What replaced the handoff note
 
-One session covers the plan, the implementation, both self-review passes, the
-push, the PR, the review and up to two validations, inside one `AUTOFLEET_TIMEBOX` and
-one context window. When the dispatcher interrupts that worktree, or
-`./scripts/fleet/fleet.sh retry N` hands the issue back, the next attempt used
-to begin from the issue body alone and re-derive from the files every decision
-the first one made. `scripts/fleet/handoff.sh` is the note that carries those
-decisions across, and the opening brief asks for it in both halves — when the
-work is put down, and at the push and after every review round:
+A build used to be one interactive session covering the plan, the
+implementation, both self-review passes, the push, the PR, the review and up to
+two validations. It could not be allowed to *end*, so five subsystems existed to
+keep it usable: a note it wrote before being cleared and a cap on that note's
+length, a decision about whether to clear it at the pull request, the command
+that cleared it, how long it got to write the note, and how often to do the
+whole dance mid-build. `AUTOFLEET_HANDOFF_MAX_WORDS`, `AUTOFLEET_CONTEXT_RESET`,
+`AUTOFLEET_AGENT_CLEAR_CMD`, `AUTOFLEET_HANDOFF_GRACE_SECONDS` and
+`AUTOFLEET_CONTEXT_RECYCLE` are all gone with it.
 
-```bash
-./scripts/fleet/handoff.sh write 42 --stdin <<'NOTE'
-...
-NOTE
-./scripts/fleet/handoff.sh          # print this worktree's note
-```
+**The branch and the pull request are the state now.** A run ends at
+`AUTOFLEET_BUILD_MAX_TURNS` or `AUTOFLEET_BUILD_MAX_BUDGET_USD`; if its PR is
+open, the dispatcher starts a second `claude -p` in the same worktree with the
+after-PR brief, and that run reads the branch, the PR and the review. Nothing
+has to be written down, so nothing can be written down badly — which was the
+note's real cost: a recycle threw away everything not in 300 words, and an
+interval chosen badly made the work worse *and* dearer by making it redo what it
+forgot.
 
-It holds the decisions taken and why, the files touched, what each review round
-said and how it was answered, and what is still open — not the plan, which is in
-the PR body, and not the diff.
-
-Two things read it back. `issue-command.sh` prints it **between the issue's
-spec and the brief** in the next session **in that worktree** — which is the
-case it is for and the one that always works; the `resumed` test phase asserts
-that ordering, so a session gets the spec, then what the last attempt left, then
-its marching orders. `./scripts/fleet/fleet.sh retry N` names it by absolute path when
-you hand the issue back, so a second worktree opened alongside a first one still
-standing can be pointed at it. The dispatcher's own opening prompt names it too,
-in a narrower state than either — `handoff_note_for` in `scripts/fleet/fleet.sh`
-is where that is argued, and `retry` is the line to read.
-
-**It lives at `.autofleet/run/handoff-<issue>.md`, and it dies with the
-worktree.** That directory is gitignored and per worktree: the note survives a
-session restart *inside* the worktree, which is the case it exists for, and it
-goes when the worktree is reaped. It is not durable storage and nothing backs it
-up. That is deliberate rather than unfinished — a note that outlived its
-worktree would be read by an attempt working from a different tree, telling it
-which files were touched in a tree it cannot see.
-
-| Knob | Default | Notes |
-|---|---|---|
-| `AUTOFLEET_HANDOFF_MAX_WORDS` | `300` | How long the note may be. Over it the script **refuses and changes nothing** rather than truncating: a note cut off at the sentence that said what is still open reads exactly like one where nothing was. Unbounded, the note grows into a second spec the next attempt reads in full before its first edit, which is the cost it exists to remove. `0` turns the cap off. **Must be a whole number**: a value that is not is refused, and because this file is sourced the refusal ends every fleet command that reads it — a non-number would otherwise make the comparison error out, the cap never fire, and the guard be absent with nothing on screen saying so. |
-| `AUTOFLEET_CONTEXT_RESET` | `on` | **A session per phase, not per issue.** One agent session used to span the build, the PR, the wait, the answer and the validation, so every file read while building stayed in context and was re-billed on every turn afterwards — sessions were measured past 900,000 tokens, most of it a build nobody was still reading. The pull request is the seam: once it is open the build is done, and what the answering work needs is the review, the diff and what the build decided. So the dispatcher asks for the handoff note, drops the conversation, and hands the answering half of the brief to a session that starts from the note. `off` keeps the one-session shape, which is what a host wants when its agent CLI has no way to drop a conversation from the terminal — the same thing as setting `AUTOFLEET_AGENT_CLEAR_CMD` empty, said twice because a host should not have to discover the equivalence. **Must be `on` or `off`**: anything else fails in the safe direction (no reset) and would do it silently, so it is refused instead — a host that wrote `true` would go on paying for 900k contexts with no way to find out. |
-| `AUTOFLEET_AGENT_CLEAR_CMD` | `/clear` | What drops the conversation, typed into the agent's terminal like any other prompt. `/clear` is Claude Code's; a host on another CLI puts its own here. **Empty turns the reset off, and says so in the log** rather than resetting nothing quietly: an unrecognised command typed at an agent is a turn spent on a syntax error, and the next thing to arrive is the answering brief, which the agent would then answer with its whole build still in front of it — the one-session shape plus a wasted turn, which is worse than either. Note the default uses `=` and not `:=`, alone with `AUTOFLEET_COST_ROOT`: empty is a *setting* here, and `:=` handed it back the default. |
-| `AUTOFLEET_HANDOFF_GRACE_SECONDS` | `120` | How long an agent gets to write its handoff note before the thing that asked for it takes the terminal away. Three callers, all ending a session: the context reset above, the time-box, and the reaper's warning pass. Before this they interrupted first and asked nothing, so an interrupted attempt wrote nothing down — the half of the handoff note's purpose that its mere existence did not deliver, because a note needs a *turn* to be written in. It is spent **across polls, not inside one**: the dispatcher asks, records when it asked, and decides on a later pass. A version that slept the grace inside the pass stopped the whole dispatcher for two minutes per issue — with three worktrees, six minutes in which no review is collected and no time-box fires. It is a ceiling, not a wait: the moment the note's timestamp *moves*, the caller goes on. `0` does not ask at all, which is the behaviour before this knob existed. **Must be a whole number of seconds.** |
+The one thing a host has to do about this is **commit as it goes**, which the
+opening brief says in those words. Uncommitted work is what a second run cannot
+see.
 
 ### What the fleet keeps
 
@@ -444,7 +424,7 @@ the point: these numbers are only useful compared across runs.
 
 | Knob | Default | Notes |
 |---|---|---|
-| `AUTOFLEET_TRANSCRIPT_DIR` | `~/.claude/projects` | Where the agent CLI writes one JSONL per session, under `<root>/<cwd-slug>/<session-id>.jsonl`. Set it **empty** to turn the report off — one explanatory line, exit 0. |
+| — | — | **Nothing to configure.** The report reads `$AUTOFLEET_DIR/builds/<issue>/`, which the fleet already owns. |
 
 It moves the **path**, not the format. `cost.sh` reads a fixed entry shape
 (`type: assistant`, `message.usage`, the four token keys) and a fixed slug rule,
@@ -554,11 +534,17 @@ see, and `lint.sh` runs that selftest before trusting the scan.
 
 It does **not** cover the worktree agent. That process is started by the runtime,
 not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
-Orca driver the agent's terminal is a child of the Orca app, not of the
-dispatcher — `printenv` inside a fleet-opened worktree shows no `AUTOFLEET_*` at
-all, and the process tree runs `Orca Helper → login → zsh → bash → claude` with
-`fleet.sh` nowhere in it. The `runner_*` contract in [RUNNERS.md](RUNNERS.md) has
-no environment parameter, and this knob did not add one.
+Orca driver the build's terminal is a child of the Orca app, not of the
+dispatcher — the process tree runs `Orca Helper → login → zsh → bash → claude`
+with `fleet.sh` nowhere in it, so nothing the dispatcher exports reaches it.
+
+**On the default driver it does reach it, and that is only half of what #130
+asked for.** The headless build is a `bash -c` child of `fleet.sh`, so it
+inherits the dispatcher's whole environment — which is the structural half of
+the fold #151's Scope claims. The other half is not done: `fleet_headroom_env`
+is still called only by the reviewer, the self-review and the validator, never
+before a build starts, so this knob still does not reach the build on either
+driver. What changed is that it now *could*.
 
 To cover the worktree agent, wrap `claude` on the machine instead. This is
 durable and global to your user, which is why it is a person's step and not the
@@ -585,8 +571,10 @@ So:
 - **Want the worktree agent covered?** Use `wrap`, and leave `AUTOFLEET_HEADROOM`
   at `0`. `headroom doctor` is then the thing that tells you the proxy is down.
 - **Want the probe, the degrade and the `status` row?** Use the knob, and leave
-  `claude` unwrapped. The worktree agent pays full price; #130 is the issue that
-  would close that gap properly.
+  `claude` unwrapped. The build pays full price: nothing calls
+  `fleet_headroom_env` before `runner_build_start`, on either driver. #151 made
+  that wiring possible on the headless path and did not do it; #153's scope is
+  where the knob is measured and kept or dropped.
 - Setting both is the "two mechanisms for one behaviour" outcome this seam was
   written to avoid.
 
@@ -703,9 +691,9 @@ and a port nothing can re-derive is a port nothing can release.
 
 ### The rest
 
-`AUTOFLEET_RUNNER` (`orca`) — see [RUNNERS.md](RUNNERS.md). A name with no
+`AUTOFLEET_RUNNER` (`headless`) — see [RUNNERS.md](RUNNERS.md). A name with no
 `scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
-the file it looked for and the drivers that do ship — and stops the four scripts
+the file it looked for and the drivers that do ship — and stops the three scripts
 that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
 caught before a worktree is opened rather than by an agent sitting on a prompt
 that never sends.
@@ -801,8 +789,7 @@ So every one of those limits is a row in the **ceilings table at the top of
 
 The rows are `claude-md` and `reading` and `brief` — the text an agent reads
 before its first edit — `spec`, the room `reading` leaves for the issue body it
-is handed, `handoff`, the note a resumed session is handed ahead of the brief,
-and `testrun` and `round`, which bound what a green test run and one clean
+is handed, and `testrun` and `round`, which bound what a green test run and one clean
 review round print back. `spec` is the one that is not a limit on autofleet's
 own text: an issue body is the maintainer's, and the row is the allowance the
 payload leaves for one. **No figure is written here, or in any comment.**

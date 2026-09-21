@@ -4,8 +4,11 @@ A **runner** is whatever creates a worktree, opens a terminal in it, and can be
 asked what it is doing. `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` is the
 driver, sourced by `lib.sh`.
 
-Today there is exactly one that ships: `orca`. No code outside
-`scripts/fleet/runner/` calls its CLI, and
+Two ship. **`headless` is the default**: a plain `git worktree` and one
+`claude -p`, needing `git`, `gh` and the build command and nothing else, and it
+is what CI runs. `orca` is the desk path — it creates the worktree through the
+app and runs the *identical* build command in a terminal tab, so a maintainer
+can watch it. No code outside `scripts/fleet/runner/` calls the app's CLI, and
 
 ```sh
 grep -rni 'orca' scripts/fleet --include='*.sh' \
@@ -78,8 +81,7 @@ The tab-separated shapes assume **paths contain no literal tab**. One would shif
 every column and the fleet would read a branch name as an issue number — the JSON
 these replaced was immune to that, and this is the honest cost of the seam. A tab
 in a worktree path is legal on unix and vanishingly rare; a backslash is not
-rare, and the drivers handle it (see `runner_agent_terminal`). Raised by the
-independent review.
+rare. Raised by the independent review.
 
 Where a function relays **the runtime's own words** on failure, it relays **at
 most the first three lines**. That bound is the driver's, not the caller's: the
@@ -111,10 +113,10 @@ second pass costs another `--version` timeout per candidate, and this is the
 first call `setup.sh` makes while the runner holds the agent's tab.
 
 **Every caller that reaches for the runtime probes before it spends anything.**
-`fleet.sh` (at source time), `setup.sh`, `board.sh` and `agent-autostart.sh` all
-call it; `setup.sh` is fatal on a no, because everything it provisions is for an
-agent the runner is supposed to start. `setup.sh` probes *after* `env.sh` and before
-the submodules, the project hook and the watcher — env.sh is milliseconds and is
+`fleet.sh` (at source time), `setup.sh` and `board.sh` all call it; `setup.sh` is
+fatal on a no, because everything it provisions is for a build the dispatcher is
+about to start in that worktree. `setup.sh` probes *after* `env.sh` and before
+the submodules and the project hook — env.sh is milliseconds and is
 where a machine missing its basic tools says so, and a probe in front of it
 answers a missing `shasum` with "is the runtime running?", which is the wrong
 machine named confidently.
@@ -136,13 +138,13 @@ one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
 drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
 it neither returns nor exits, because most of what it defines has nothing to do
 with a runner and the scripts that source it mostly call no `runner_*` at all
-(`cost`, and the whole review and validation pipeline). **Four** — `fleet.sh`,
-`setup.sh`, `board.sh`, `agent-autostart.sh` — call `fleet_require_runner`
+(`cost`, and the whole review and validation pipeline). **Three** — `fleet.sh`,
+`setup.sh`, `board.sh` — call `fleet_require_runner`
 before their first `runner_*`, which adds the consequence and stops; without it
 that first call is `command not found`, and rc 127 through a `|| die` reports
 the consequence as the cause.
 
-`issue-command.sh` is the fifth script that names a `runner_*` and is
+`issue-command.sh` is the fourth script that names a `runner_*` and is
 deliberately **not** guarded: it prints an agent's brief, which needs no
 runtime, and asks `runner_available` only behind
 `if [ -z "$ref" ] && runner_available 2>/dev/null` to decide whether it can
@@ -188,31 +190,31 @@ reader checking it. The truth is three cases:
   is convention rather than load-bearing — but **relaying at all is not
   optional here**.
 
-Two things the rule deliberately does not cover. A message about the CALLER
-being malformed is not a runtime failure and goes to stderr on either function —
-`runner_worktree_set`'s rc 2 for a bad pair list is the one that exists.  And
-`runner_terminal_send`, `_enter` and `_interrupt` produce no failure words at
-all: their rc is the whole answer, and every caller supplies its own sentence.
+One thing the rule deliberately does not cover: a message about the CALLER being
+malformed is not a runtime failure and goes to stderr — `runner_worktree_set`'s
+rc 2 for a bad pair list is the one that exists. `runner_build_stop` produces no
+failure words at all, because it has no failure: see below.
 
 `runner_dispatcher_hint` is the one human-facing string that is runner-specific;
 `fleet.sh`'s usage prints it rather than hardcoding a command line that is wrong
 for every other driver.
 
 `runner_set_deadline` exists so a caller that needs a shorter one can ask
-**without knowing which driver it has**. `agent-autostart.sh` is that caller: it
-polls every three seconds, and a watcher that can block for thirty of them
-inside one poll has stopped watching. A driver with no deadline to set may do
+**without knowing which driver it has**. A driver with no deadline to set may do
 nothing, but it must DEFINE the function — a missing one is `command not found`
-on a script that does not set `-e`, which is a silently un-shortened watcher.
-`evals/lint.sh` fails a driver that omits any function the fleet calls, so this
-is checked rather than trusted. Creating a worktree is exempt by
-convention — nobody polls a create, and a short deadline on a call that
-legitimately takes minutes is a failed launch rather than a shorter wait.
+on a script that does not set `-e`. `evals/lint.sh` fails a driver that omits
+any function the fleet calls, so this is checked rather than trusted. Creating a
+worktree is exempt by convention — nobody polls a create, and a short deadline
+on a call that legitimately takes minutes is a failed launch rather than a
+shorter wait. **The build is exempt too, and for a stronger reason**: it runs
+for hours and no call in this contract waits on it. `runner_build_start` returns
+once the build is up and `runner_build_state` answers from files, so neither can
+block whatever a deadline says.
 
 ### Worktrees
 
 ```sh
-runner_worktree_create <repo> <name> <issue> <agent> <prompt> <comment>
+runner_worktree_create <repo> <name> <issue>
 runner_worktree_list      # `path<TAB>branch<TAB>issue` lines
 runner_worktree_issue     # THIS worktree's linked issue
 runner_worktree_set <path> <key> <value> [<key> <value> ...]
@@ -291,84 +293,95 @@ runner_worktree_remove <path> [<deadline>]
   removal is not a call anyone polls. Same exemption as create, for the same
   reason.
 
-### Agents and terminals
+### The build
 
 ```sh
-runner_agent_states       # `path<TAB>state` lines
-runner_agent_terminals    # `handle<TAB>worktree-path` lines
-runner_terminal_draft <handle>
-runner_terminal_send <handle> <text>
-runner_terminal_enter <handle>
-runner_terminal_interrupt <handle>
+runner_build_start <path> <issue>
+runner_build_state <path>
+runner_build_stop <path>
 ```
 
-- **`runner_agent_states`** is non-zero when the listing could not be read; a
-  worktree with no agent is simply absent, which is a real answer. It is ONE
-  listing for the whole machine, not one call per worktree: the dispatcher matches it against every owned worktree each
-  poll, and three deadline-length calls a minute for an answer that arrives in a
-  single response is the shape this replaced.
-- **`runner_agent_terminals`** is non-zero when the listing could not be read;
-  an empty list means there are none, which the caller has to be able to tell
-  apart. It lists only live agent tabs — not the shell and log tabs beside them,
-  and not handles whose terminal is already gone. The
-  worktree path is on every line because it is what keeps three parallel
-  worktrees from sending into each other's agents.
-- **`runner_terminal_draft`** is the composer text an agent has NOT sent, as
-  `<length> <text with newlines flattened>`, or nothing at all when there is no
-  draft. Non-zero means the read failed. It is whole rather than truncated: the
-  caller reads the text back to decide whether the runtime drafted a real prompt
-  or only the issue URL, and the length is what makes a paste caught half way
-  through comparable to the same paste once it has landed.
-- **`runner_terminal_send`** types without submitting; **`runner_terminal_enter`**
-  submits. They are separate because `agent-autostart.sh` appends to a draft
-  before pressing Return, and a driver that only had "send this text" could not
-  express it.
+**The build command is not a driver's.** `lib.sh`'s `fleet_build_command_line`
+composes one `claude -p` line and both drivers run exactly it; a driver decides
+only WHERE it runs. The headless driver forks it into the background of the
+dispatcher, the app-backed one hands it to a terminal tab so a person can watch
+it, and neither is allowed to assemble its own flags — a second copy of that
+line is how "both drivers do the same thing" stops being true without anything
+going red.
 
-One more belongs to the contract but **not** to a driver:
+- **`runner_build_start`** reads `prompt` and `system.md` out of
+  `$(fleet_build_dir <issue>)`, which the dispatcher wrote, and returns as soon
+  as the build is running rather than waiting for it. A build that is **already
+  running is success, not an error**: the dispatcher calls this to make sure one
+  is up, and two `claude -p` in one worktree is two agents editing one tree. It
+  must call `fleet_build_started` before it starts anything — that is what
+  clears the previous run's verdict and writes the path index `runner_build_state`
+  reads, and a driver that skips it reports a build that has just started as
+  already finished.
+- **`runner_build_state`** prints `running` or `exited <rc>`, and is non-zero
+  when there is no build here to describe. That third answer is not decoration:
+  "I could not tell" and "it has stopped" lead the dispatcher to opposite
+  actions, and conflating them comments on an issue to say a running build gave
+  up. `fleet_build_state_of` in `lib.sh` answers it for both drivers from the
+  files the command line itself writes, so a driver that has nothing to add
+  delegates to it.
+- **`runner_build_stop`** ends the build in one worktree. Silent, idempotent and
+  always 0: every caller reaches it on a path where the worktree is going away
+  regardless, and a driver that reported "there was none" would be describing
+  the ordinary case. It must stop **the whole process group** where it forked
+  one — `AUTOFLEET_BUILD_CMD` is a wrapper seam, so the process holding the
+  credentials is routinely a child of what was forked, and signalling the direct
+  child leaves a full-budget run nobody is counting.
 
-```sh
-runner_agent_terminal <path>   # provided by lib.sh
-```
+**Six functions left this contract** with armaatus/autofleet#151:
+`runner_agent_states`, `runner_agent_terminals`, `runner_agent_terminal`,
+`runner_terminal_draft`, `runner_terminal_send`, `runner_terminal_enter` and
+`runner_terminal_interrupt`. Every one of them existed to drive an interactive
+session — read whether a tab was working or waiting, type a prompt into a
+composer, press Return, interrupt it — and a `claude -p` run has none of those
+questions. A driver is no longer required to have a terminal at all.
 
-The agent terminal in ONE worktree. `lib.sh` defines it as a filter over
-`runner_agent_terminals`, above the line that sources the driver, so a runtime
-that can answer it directly still wins by defining its own — and no driver has
-to ship the filter. Every driver shipping its own copy is how a duplicate of it
-ended up in the test stub.
+Nothing in this contract is provided by `lib.sh` any more.
+`runner_agent_terminal` was — a filter over a driver's machine-wide terminal
+listing, defined above the line that sources the driver so that a runtime which
+could answer it directly still won — and it went with the listing it filtered.
 
 ## Writing a second driver
 
 `tests/test_fleet.sh runner_stub` is the worked example and the regression
 guard: it defines the whole contract over a handful of text files, points
 `AUTOFLEET_RUNNER` at them, and then drives the dispatcher, the reap,
-`issue-command.sh`, `agent-autostart.sh` and `board.sh` through it — asserting at
+`issue-command.sh` and `board.sh` through it — asserting at
 the end that the `orca` CLI was never asked anything, with an `orca` planted on
 `PATH` that records anything reaching for it. A driver that satisfies that phase
 satisfies the fleet.
 
-A plain-`git worktree` + tmux driver satisfies all of it, and would drop the
-macOS-only dependency entirely. Two things it would have to answer that Orca
-answers for free, and that no amount of shell moves away:
+`scripts/fleet/runner/headless.sh` is the second driver, and it is the default.
+It needs `git`, `gh` and the build command and nothing else, so the fleet runs
+on any machine rather than on one desk. The one thing it has to answer that the
+app-backed driver gets for free:
 
-- **A linked issue.** Orca records the issue on the worktree, which is what
-  `runner_worktree_issue` reads and the only durable statement that a draft is
-  expected in that tab. A git-worktree driver has to keep that mapping itself.
-- **A drafted prompt.** `agent-autostart.sh` exists because Orca puts the
-  resolved spec into the agent's composer WITHOUT submitting it. A driver that
-  simply launches the agent with the prompt has nothing for that script to do,
-  and `runner_terminal_draft` returning nothing is the honest answer — the
-  watcher then says "the agent came up with an empty composer" and stops, which
-  is correct.
+- **A linked issue.** Orca records the issue on the worktree object. Git has
+  nowhere to put it, so the headless driver keeps the mapping itself — one file
+  per worktree under `$AUTOFLEET_DIR/headless/links/`, named by the path with
+  `/` folded to `%`. Not `git config --worktree`, which needs
+  `extensions.worktreeConfig` and would be this driver turning a repository-wide
+  flag on in somebody else's repo; and not a file inside the worktree, because
+  `self-review.sh` refuses a dirty tree.
 
 ## What autofleet still assumes about the runtime
 
 Named here rather than left to be discovered:
 
-- The agent runs in a terminal the runner can list, read and interrupt. A runner
-  that starts agents some other way has to fake a handle for them.
 - One worktree, one directory on this machine, at a path the dispatcher can
   `stat`. `runner_worktree_remove` is judged on that directory being gone.
-- `orca.yaml` is where a worktree's setup, archive and issue-command hooks are
-  wired. That file is Orca's, and a second runner needs its own equivalent —
-  the scripts those hooks point at (`setup.sh`, `archive.sh`,
-  `issue-command.sh`) are runner-agnostic and would be reused as they are.
+- The build is a command that ENDS. `fleet_build_command_line` bounds it with
+  `--max-turns` and `--max-budget-usd`; a runtime whose agent cannot be given a
+  budget has nothing to stop it, and the dispatcher no longer carries a wall
+  clock to stop it with.
+- The worktree's setup and archive hooks are wired somewhere. `orca.yaml` is
+  where the app-backed driver does it; the headless driver has no hook
+  mechanism at all, and `setup.sh` runs from `runner_worktree_create`'s caller
+  rather than from the runtime. The scripts themselves (`setup.sh`,
+  `archive.sh`, `issue-command.sh`) are runner-agnostic and are reused as they
+  are.

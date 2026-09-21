@@ -10,7 +10,7 @@
 # session. Both read the whole diff and the files around it, and they did it at
 # the worst possible moment: immediately before the phase that has to survive
 # longest -- the push, the pull request, and up to three review rounds, all
-# inside one AUTOFLEET_TIMEBOX and one context window. The findings are a page.
+# inside one build run and one context window. The findings are a page.
 # Everything the passes read to produce them is not, and none of it is needed
 # afterwards. armaatus/autofleet#51.
 #
@@ -481,7 +481,7 @@ if [ "$round" -gt "$AUTOFLEET_SELF_REVIEW_MAX" ]; then
   # THE PUSH GATE STILL HAS TO OPEN, and this is the half of the cap that is
   # easy to get wrong. Refusing outright writes no marker for the new head,
   # `guard.py` then refuses the push, and the agent burns the rest of its
-  # AUTOFLEET_TIMEBOX unable to reach the independent reviewer -- which is the
+  # build run unable to reach the independent reviewer -- which is the
   # phase that exists to judge exactly the findings this cap stopped chasing.
   # So the cap stops the READING, not the pull request.
   #

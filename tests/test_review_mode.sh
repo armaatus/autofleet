@@ -2962,7 +2962,7 @@ $bad"
   # appeared.
   #
   # NOT on a worktree the fleet opened, and the first version of this comment
-  # claimed otherwise: `env.sh` and `agent-autostart.sh` both `mkdir -p
+  # claimed otherwise: `env.sh` and `setup.sh` both `mkdir -p
   # .autofleet/run`, and `setup.sh` runs `env.sh`, so a fleet-provisioned
   # worktree had the directory before any agent reached this script. What it
   # breaks is every other way in -- a fresh clone, a worktree made by hand, a
