@@ -50,7 +50,7 @@ args=()
 # The card is addressed by PATH, and $REPO_ROOT is bash's logical pwd -- it keeps
 # whatever symlinked prefix the agent's shell had. If that differs from the path
 # the runtime recorded for this worktree, every update from inside it fails. The
-# `agent-autostart.sh` derives its path the same way and has matched the
+# The dispatcher derives its path the same way and has matched the
 # runtime's record in every worktree the fleet has opened -- but that is WEAKER
 # evidence here than it looks, and the independent review was right to say so:
 # that script is started by setup.sh from the runner's own hook, so its cwd is

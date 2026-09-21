@@ -25,7 +25,7 @@ set -a; . ./.env; set +a
 
 # BEFORE anything expensive, and before the watcher.
 #
-# `fleet.sh` and `agent-autostart.sh` both probe; this hook ran earliest of the
+# `fleet.sh` and `board.sh` both probe; this hook ran earliest of the
 # three and probed last, which is the worst order available -- the runner holds
 # the agent's tab until this returns (`setupAgentStartupPolicy: wait-for-setup`),
 # so a runtime that is not answering surfaced as: submodules initialised,

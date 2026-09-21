@@ -103,7 +103,7 @@ def starts_a_model_call(line):
 
     COMMAND POSITION, not "appears on the line", and that is the difference
     between a call site and a mention: `fleet.sh` passes
-    `"$AUTOFLEET_AGENT_CLEAR_CMD"` as an ARGUMENT -- keystrokes for a terminal,
+    `"$SOME_COMMAND"` as an ARGUMENT -- text for another process,
     not a model -- and a check that read the whole line would demand the
     dispatcher export a base URL for it.
     """
@@ -149,7 +149,7 @@ _CASES = [
     ('else "$AUTOFLEET_REVIEW_CMD" -p x', True),
     ('sleep 1 & "$AUTOFLEET_REVIEW_CMD" -p x', True),
     # ...and the mentions, which are not call sites.
-    ('  say_to_agent_in "$path" "$AUTOFLEET_AGENT_CLEAR_CMD" || continue', False),
+    ('  send_to "$path" "$SOME_COMMAND" || continue', False),
     ('command -v "$AUTOFLEET_REVIEW_CMD" >/dev/null 2>&1 || {', False),
     ('# "$AUTOFLEET_REVIEW_CMD" -p "$prompt"', False),
     ('echo "runs it ($AUTOFLEET_REVIEW_CMD)"', False),

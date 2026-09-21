@@ -442,7 +442,7 @@ hold the fleet down — but warns and names the pid. `stop --now` signals it
 anyway, because it promises the dispatcher is down when it returns.
 
 **The settings work the same way.** `AUTOFLEET_MAX` (how many worktrees run
-at once, default 3), `AUTOFLEET_POLL` and `AUTOFLEET_TIMEBOX` are read
+at once, default 3), `AUTOFLEET_POLL` and `AUTOFLEET_BUILD_MAX_TURNS` are read
 once at start, so putting one in front of `fleet.sh status` changes nothing. The
 cap changes across a restart and only there:
 

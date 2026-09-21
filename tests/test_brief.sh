@@ -126,7 +126,7 @@ case "${1:-}" in
     # `disable-model-invocation: true`, so an agent will not reach for it on its
     # own and a brief that merely described the work would get a hand-rolled
     # build with no tdd behind it. What makes it reachable at all is that
-    # `agent-autostart.sh` delivers this text as a TYPED prompt rather than as an
+    # The brief is the run's PROMPT rather than something a model merely reads,
     # instruction to a model.
     has "stage 1" "$out" \
       '/implement' '/mattpocock-skills:tdd' \
