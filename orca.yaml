@@ -36,17 +36,23 @@ setupAgentStartupPolicy: wait-for-setup
 # issue-command.sh, which resolves the issue to its body, labels and milestone --
 # the sole channel design intent travels through.
 #
-# THIS HAS NEVER BEEN OBSERVED TO TAKE EFFECT, and the evidence is in the code
-# #151 deleted. `agent-autostart.sh` did not write the prompt: it read the
-# composer draft, matched it against `^https?://.../(issues|pull)/([0-9]+)/?$`
-# and APPENDED the run-instruction. A draft rendered from this block would not
-# have matched that anchored pattern and the watcher would have sent nothing --
-# so every agent that ever started here started from a bare URL that the
-# watcher completed. The app's own delivery log agrees: 48 bytes, the length of
-# the URL alone, for every worktree back to #69. Keep the block -- it costs
-# nothing and it is the documented seam -- but do NOT treat it as the thing
-# that gets the spec in front of an agent. `scripts/fleet/setup.sh`'s closing
-# stanza prints the same command for a person to run, and that one is tested
+# THIS HAS NEVER BEEN OBSERVED TO TAKE EFFECT, and what the block is for is
+# narrower than it looks. Until #151 the dispatcher did not rely on it at all:
+# `fleet.sh`'s `agent_brief` composed the opening prompt and the runtime was
+# handed it as `--prompt`, so every worktree the fleet opened got its brief
+# from the dispatcher and this block was never consulted. The one creation
+# path that WOULD consult it is the one left here -- a person opening a
+# workspace through the app -- and the only observation of that path is
+# against it: the workspace opened from a paired device on 2026-09-21 had 48
+# bytes delivered to its agent tab, the length of the bare issue URL, where a
+# draft rendered from this block is about ten times that.
+#
+# One observation is not proof the key is ignored -- it may not apply to that
+# creation path, or may travel by a channel the app's delivery log does not
+# record. It IS enough not to rely on it. Keep the block: it costs nothing, it
+# is the documented seam, and if it does render it renders the right thing.
+# But `scripts/fleet/setup.sh`'s closing stanza is what actually puts the
+# command in front of a person, and unlike this block it has a test
 # (`tests/test_env.sh unstarted`). armaatus/autofleet#156.
 issueCommand: |
   Run `GH_PAGER=cat ./scripts/fleet/issue-command.sh {{issue}}` first and follow

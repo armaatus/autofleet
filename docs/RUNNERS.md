@@ -385,3 +385,12 @@ Named here rather than left to be discovered:
   rather than from the runtime. The scripts themselves (`setup.sh`,
   `archive.sh`, `issue-command.sh`) are runner-agnostic and are reused as they
   are.
+- ...with one thing a driver author has to know about `setup.sh`. It closes by
+  naming the command that starts an agent, because a worktree a PERSON opened
+  has nothing behind it that will (#156). `launch` sets
+  `AUTOFLEET_DISPATCHER_LAUNCH` on the call it makes itself, which suppresses
+  that stanza. A driver that ALSO wires `setup.sh` into its runtime's
+  worktree-creation hook — which is what `orca.yaml` does — gets a second,
+  unmarked run of it per dispatcher launch, and that run prints the stanza in a
+  worktree a build is about to start in. The wording is conditional so it stays
+  true there; a runtime that can set the variable on its own hook should.

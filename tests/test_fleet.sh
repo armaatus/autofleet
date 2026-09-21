@@ -1970,6 +1970,43 @@ GHSTUB
     echo "ok: a resume is handed the after-PR brief and counts as a run"
     ;;
 
+  launch_marks_setup)
+    # THE MARKER HAS ONE WRITER, and nothing else asserted it. `setup.sh` closes
+    # by naming the command that starts an agent, for a worktree that has no
+    # dispatcher behind it, and stays quiet when AUTOFLEET_DISPATCHER_LAUNCH
+    # says one does. `launch` is the only place that sets it -- one word between
+    # `env -C "$path"` and the script path -- and `tests/test_env.sh unstarted`
+    # sets it by hand, so dropping that word would leave the whole suite green
+    # while every dispatcher-opened worktree on the default driver was told to
+    # start an agent that `start_build` is starting three lines later. CLAUDE.md
+    # hard rule 3 is about exactly this shape. Found by the local /code-review
+    # pass. armaatus/autofleet#156.
+    make_fixture ok
+    stub_runner
+
+    # A RECORDER IN PLACE OF THE HOOK, because `launch` captures setup output to
+    # a temp file and prints it only when setup FAILED -- so on the path under
+    # test there is nothing to grep. What the environment looked like is the
+    # question anyway; the stanza's own wording is `test_env.sh`'s.
+    cat >"$WORK/repo/scripts/fleet/setup.sh" <<'REC'
+#!/usr/bin/env bash
+printf 'marker=[%s]\n' "${AUTOFLEET_DISPATCHER_LAUNCH:-}" >"$SETUP_RECORD"
+exit 0
+REC
+    chmod +x "$WORK/repo/scripts/fleet/setup.sh"
+    make_repo_git
+    add_origin
+
+    export SETUP_RECORD="$WORK/setup-env"
+    in_fleet launch 44 "an issue the dispatcher opened" >/dev/null 2>&1 \
+      || fail "launch failed against a driver that answers everything"
+    [ -s "$SETUP_RECORD" ] \
+      || fail "launch never ran the worktree's setup hook at all"
+    grep -q "marker=\[1\]" "$SETUP_RECORD" \
+      || fail "launch ran setup.sh without AUTOFLEET_DISPATCHER_LAUNCH, so the worktree it is about to build was told to start its own agent: $(cat "$SETUP_RECORD")"
+    echo "PASS: a dispatcher launch tells its setup hook that a build is coming"
+    ;;
+
   runner_stub)
     # THE acceptance for armaatus/autofleet#1, and the only assertion that keeps
     # holding once the move has been made: with a driver that is neither of the

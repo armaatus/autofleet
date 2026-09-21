@@ -361,8 +361,11 @@ DENIED='Write,Edit,NotebookEdit'
 # `<owner>/<n>-<slug>`, so the number is in front of us; a branch that is not
 # shaped that way simply gets no line, which is what the pass had before.
 # Found by the local /mattpocock-skills:code-review pass.
+# ONE SPELLING of this, in lib.sh, since setup.sh grew a second one that was
+# looser and printed a confident wrong number for a branch like `2fa-support`.
+# armaatus/autofleet#156.
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
-issue_n="$(printf '%s\n' "${branch##*/}" | sed -n 's/^\([0-9][0-9]*\)-.*/\1/p')"
+issue_n="$(fleet_issue_from_branch "$branch")" || issue_n=""
 issue_line=""
 [ -n "$issue_n" ] \
   && issue_line="The diff claims to close issue #$issue_n; \`gh issue view $issue_n\` is its Scope and

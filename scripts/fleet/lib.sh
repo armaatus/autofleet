@@ -202,6 +202,35 @@ fleet_issue_number() {
   printf '%s' "$num"
 }
 
+# The issue number a FLEET-NAMED BRANCH carries, or nothing. `launch` names a
+# worktree `slug "$num-$title"` and the runtime prefixes its owner, so the
+# number is in front of anyone holding the branch.
+#
+# STRICT, and that is the whole reason this is a function rather than two
+# spellings. `case $ref in [0-9]*)` reads as "starts with a digit" and accepts a
+# person's `2fa-support`, yielding a confident `2` -- a caller printing that
+# sends its reader to somebody else's issue with nothing to notice.
+# `self-review.sh` had the strict spelling and `setup.sh` grew the loose one;
+# one place now. armaatus/autofleet#156.
+#
+# THE SECOND `case` IS THE ONE THAT REJECTS, and it is not redundant with the
+# first. `[0-9]*-*` still matches `2fa-support` -- `[0-9]` takes the `2`, the
+# first `*` takes `fa`, and the rest lines up -- leaving `${head%%-*}` as
+# `2fa`. All the shape test does is insist a separator exists; the all-digits
+# test below is what makes the answer a number. Deleting it as duplication
+# restores the exact defect this function was extracted to remove. Found by the
+# local /code-review pass.
+fleet_issue_from_branch() {
+  local ref="${1:-}" head
+  head="${ref##*/}"
+  case "$head" in
+    [0-9]*-*) head="${head%%-*}" ;;
+    *)        return 1 ;;
+  esac
+  case "$head" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$head"
+}
+
 # ------------------------------------------------------- the build, one place
 #
 # THE BUILD COMMAND IS THE FLEET'S, NOT A DRIVER'S. Both drivers run the

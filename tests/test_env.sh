@@ -299,27 +299,54 @@ case "${1:-}" in
     make_fixture
     cd "$FIXTURE" || fail "could not enter the fixture"
 
+    # A REAL REPO ON A REAL BRANCH, because the issue number in the printed
+    # command comes from `git rev-parse --abbrev-ref HEAD`. A bare mktemp -d
+    # makes that fail for every case, so only the no-number arm would ever run
+    # and the arm that prints a number would be covered by nothing. Found by
+    # the local /mattpocock-skills:code-review Standards pass.
+    # GIT'S OWN WORDS on a failure, not ours alone: a $TMPDIR git will not init
+    # in, a hostile `init.templateDir`, a `core.hooksPath` that errors -- all of
+    # them reach a person here as "could not make the fixture a repo" and no
+    # reason, in a suite that relays the tool everywhere else.
+    git_out="$(git init -q . 2>&1)" || fail "could not make the fixture a repo: $git_out"
+    git_out="$(git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x 2>&1)" \
+      || fail "could not commit in the fixture: $git_out"
+
+    run_setup() {
+      local out; out="$(git checkout -q -B "$1" 2>&1)" \
+        || fail "could not name the branch $1: $out"
+      AUTOFLEET_RUNNER=headless "$BASH" ./scripts/fleet/setup.sh 2>&1
+    }
+
     # The headless runner asks for git and gh and nothing else, so the probe
     # setup.sh runs before any of this passes on a bare machine.
-    out="$(AUTOFLEET_RUNNER=headless "$BASH" ./scripts/fleet/setup.sh 2>&1)" \
+    out="$(run_setup armaatus/156-a-slug)" \
       || fail "setup.sh did not provision the fixture at all: $out"
-
     grep -q "worktree ready" <<<"$out" || fail "setup.sh never finished: $out"
     # The three things a person stranded here needs: that nothing is running,
     # what to run, and the number to run it on.
-    grep -qi "not started" <<<"$out" \
-      || fail "a worktree with no dispatcher behind it was not told its agent is unstarted: $out"
-    grep -q "issue-command.sh" <<<"$out" \
-      || fail "setup.sh said the agent is unstarted without naming the command that starts it: $out"
+    grep -q "not started by this hook" <<<"$out" \
+      || fail "a provisioned worktree was not told its agent is unstarted: $out"
+    grep -q "issue-command.sh 156" <<<"$out" \
+      || fail "the command named no issue, or the wrong one: $out"
+
+    # A BRANCH A PERSON NAMED, and the sharp case rather than a shapeless one:
+    # `2fa-support` starts with a digit, so a `[0-9]*` guard yields a confident
+    # `2` and sends its reader to somebody else's issue. A placeholder they
+    # will obviously replace is the only honest answer here.
+    out="$(run_setup 2fa-support)" || fail "setup.sh failed on a person's branch: $out"
+    grep -q "issue-command.sh <issue>" <<<"$out" \
+      || fail "a branch carrying no issue number did not get a placeholder: $out"
 
     # ...and the dispatcher, which starts the build itself, must not print any
     # of it. A build that is already running told to run issue-command.sh by
     # hand is the same confusion pointed the other way.
+    git checkout -q -B armaatus/156-a-slug
     out="$(AUTOFLEET_RUNNER=headless AUTOFLEET_DISPATCHER_LAUNCH=1 "$BASH" ./scripts/fleet/setup.sh 2>&1)" \
       || fail "setup.sh failed under the dispatcher: $out"
-    grep -qi "not started" <<<"$out" \
+    grep -q "not started by this hook" <<<"$out" \
       && fail "the dispatcher's own launch was told to start the agent by hand: $out"
-    echo "PASS: a worktree nothing opened is told so, and told what starts its agent"
+    echo "PASS: a provisioned worktree is told what starts its agent, with the right number or none"
     ;;
 
   *)

@@ -124,22 +124,41 @@ fleet_ports | sed 's/^/  port        /'
 # configured answers a different question -- `headless` is the default
 # everywhere, including in a worktree a person opened by hand -- and asking the
 # app whether it drafted anything makes this hook's output depend on a runtime
-# the headless path does not have. `launch` sets the variable in the one place
-# that knows a build is about to be started.
+# the headless path does not have. `launch` sets the variable when it calls
+# this hook itself, which is every launch on the default driver.
+#
+# IT DOES NOT REACH EVERY DISPATCHER LAUNCH, and the wording below is what
+# covers the gap rather than a claim that it does. On the app-backed driver
+# this hook has a SECOND caller: `orca.yaml` registers it as the worktree
+# creation hook, so a worktree `launch` opened runs it once from the app --
+# with no marker, since the app composes that environment -- and once from
+# `launch`. Asserting "no dispatcher opened this worktree" there would be
+# false, and false in the app's own setup output. So the line states the
+# condition instead of asserting the answer: true whoever is reading it, and a
+# person whose worktree really has nothing behind it still gets the command.
+# Found by the local /mattpocock-skills:code-review Standards pass.
 if [ -z "${AUTOFLEET_DISPATCHER_LAUNCH:-}" ]; then
-  # A dispatcher-opened branch begins with its issue number, and a person's
-  # does not. A PLACEHOLDER rather than a guess: the number is the one part of
-  # this line a reader cannot check, and a wrong one sends them to somebody
-  # else's issue with no sign anything is off.
-  issue="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || issue=""
-  issue="${issue##*/}"
-  case "$issue" in
-    [0-9]*) issue="${issue%%-*}" ;;
-    *)      issue="<issue>" ;;
-  esac
-  echo "  agent       NOT started -- no dispatcher opened this worktree."
-  echo "              Start it here, in the agent's tab:"
+  # `fleet_issue_from_branch` is strict about the shape and answers nothing for
+  # a branch a person named. A PLACEHOLDER rather than a guess: the number is
+  # the one part of this line a reader cannot check, and a wrong one sends them
+  # to somebody else's issue with no sign anything is off.
+  issue="$(fleet_issue_from_branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)")" \
+    || issue="<issue>"
+  # ASK BEFORE STARTING ONE, and that line is not politeness. On the app-backed
+  # driver this hook also runs from the app's creation of a worktree `launch`
+  # opened, where the branch IS `<n>-<slug>` and the number below resolves to a
+  # live issue -- so the reader is one Return away from a second `claude -p` on
+  # a branch `start_build` is already committing to. Nothing readable from here
+  # tells the two apart: at this point in a launch the fleet has not yet owned
+  # the worktree or made its build directory. `fleet.sh status` can, and it is
+  # the one question whose answer settles it. Found by the local /code-review
+  # pass.
+  echo "  agent       not started by this hook."
+  echo "              If no dispatcher opened this worktree, nothing will submit"
+  echo "              a prompt in it -- \`./scripts/fleet/fleet.sh status\` says"
+  echo "              whether the fleet already has one here. If it does not,"
+  echo "              start it yourself, in the agent's tab:"
   echo "                GH_PAGER=cat ./scripts/fleet/issue-command.sh $issue"
-  echo "              and follow what it prints. Nothing else will submit one."
+  echo "              and follow what it prints."
 fi
 exit 0
