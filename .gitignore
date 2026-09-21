@@ -2,8 +2,8 @@
 .env
 .env.tmp*
 
-# The hooks' scratch space: pidfiles, the autostart log, the review markers
-# guard.py reads. Per worktree, never shared, never committed.
+# The hooks' scratch space: the review markers guard.py reads. Per worktree,
+# never shared, never committed.
 .autofleet/run/
 
 # What the local review passes write for record-review.sh. The findings belong

@@ -661,6 +661,12 @@ GITSHIM
   export AUTOFLEET_BUILD_CMD="$WORK/bin/build-stub"
   export ORCA_CLI_COMMAND="$WORK/bin/orca-stub"
   export AUTOFLEET_DIR="$WORK/fleet"
+  # ...and what the payload writes at runtime is ignored, exactly as install.sh
+  # arranges in a host repo. Without this the `.env` that `setup.sh` writes into
+  # every worktree is an untracked file, and every reap reads it as "this
+  # worktree holds uncommitted work" and keeps the worktree forever.
+  printf '.env\n.autofleet/run/\n' >"$WORK/repo/.gitignore"
+
   # THE FIXTURE REPO IS A GIT REPO, WITH THE PAYLOAD IN IT, from the start.
   #
   # Two reasons, both new with armaatus/autofleet#151. The default driver's
@@ -833,13 +839,21 @@ add_origin() {
 # waited for one to land waited forever, for a reason that had nothing to do with
 # what it was testing.
 reapable_worktree_at() {
-  local path="$1" bare="$WORK/origin-$(basename "$path").git"
-  "$REAL_GIT" init -q -b work "$path"
-  "$REAL_GIT" -C "$path" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  local path="$1" bare="$WORK/origin-$(basename "$path").git" br
+  # A REAL worktree of the fixture repo already, because the default driver
+  # created it with `git worktree add` -- so this only has to give it an
+  # upstream. `git init` over the top of one is what it used to do, and that
+  # leaves two gits disagreeing about the same directory.
+  br="$("$REAL_GIT" -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)" || br=""
+  if [ -z "$br" ]; then
+    "$REAL_GIT" init -q -b work "$path"
+    "$REAL_GIT" -C "$path" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    br=work
+  fi
   "$REAL_GIT" init -q --bare "$bare"
-  "$REAL_GIT" -C "$path" remote add origin "$bare"
-  "$REAL_GIT" -C "$path" push -q origin work:main
-  "$REAL_GIT" -C "$path" push -q -u origin work
+  "$REAL_GIT" -C "$path" remote add origin "$bare" 2>/dev/null || true
+  "$REAL_GIT" -C "$path" push -q origin "$br:main"
+  "$REAL_GIT" -C "$path" push -q -u origin "$br"
 }
 
 # Nothing this dispatcher may throw away: an untracked file, or a commit that is
@@ -2666,6 +2680,11 @@ print(json.dumps({"result": {"worktrees": [
     # `rm_never_works` plus a merged PR reaches the park the way `remove_advice`
     # does.
     make_fixture rm_never_works
+    # THE REFUSAL HAS TO COME FROM A RUNTIME, so this phase runs on the
+    # app-backed driver: `git worktree remove --force` does not refuse, and a
+    # park that cannot be reached is a claim about the dispatcher that nothing
+    # would be asserting.
+    use_orca_runner
     make_worktree
     add_origin
     ( in_fleet cmd_run --auto >"$WORK/run.log" 2>&1 ) &
@@ -3804,13 +3823,13 @@ $(cat "$AUTOFLEET_DIR/ran/42")"
     make_fixture ok
     make_worktree
     add_origin
-    make_overdue
     quiet_issue
-    build_running
+    build_ran_out
     cat >"$GH_ISSUES" <<'JSON'
-[{"number":42,"title":"the one that ground for three hours","body":"","labels":[{"name":"ready"}]}]
+[{"number":42,"title":"the one that ran out of turns","body":"","labels":[{"name":"ready"}]}]
 JSON
-    in_fleet enforce_timebox >/dev/null 2>&1
+    echo '[]' >"$GH_PRS"
+    in_fleet notice_build_exit >/dev/null 2>&1
     # --max-prs 1 bounds this either way: if the decline stops working the run
     # opens its one worktree and stops, and the assertion below fires -- rather
     # than the test hanging, which is a much worse way to fail.
@@ -4407,7 +4426,7 @@ JSON
     # leaves a bare directory: `reap_merged` gives up at `rev-parse` on it and
     # the worktree is owned forever, for a reason that is the fixture rather than
     # the code. Its path is the one the log just named.
-    launched="$(sed -n 's/^.*is running in //p' "$WORK/run.log" | head -1)"
+    launched="$(sed -n 's/^.*is building in //p' "$WORK/run.log" | head -1)"
     [ -n "$launched" ] || fail "could not tell where the run opened its worktree: $(cat "$WORK/run.log")"
     reapable_worktree_at "$launched"
     echo '[{"number":9,"body":"Closes #148"}]' >"$GH_PRS"
