@@ -96,16 +96,11 @@ else
   echo "==> no project setup hook ($AUTOFLEET_SETUP_HOOK); nothing project-specific to provision"
 fi
 
-# Detached, and last: the runner holds the agent's tab until this script
-# returns, so the draft this watches for cannot exist yet. `nohup` with HUP
-# ignored because the watcher has to outlive the hook that started it -- that is
-# the whole point of it.
-if [ "${AUTOFLEET_AGENT_AUTOSTART:-1}" != "0" ]; then
-  ( trap "" HUP
-    nohup ./scripts/fleet/agent-autostart.sh --watch \
-      >>"$REPO_ROOT/.autofleet/run/agent-autostart.log" 2>&1 & ) &
-  echo "==> watching for the agent's issue prompt to submit it"
-fi
+# THE AGENT IS NOT STARTED HERE. It used to be: the runtime opened a tab with
+# the brief drafted in it and a watcher this hook spawned pressed Return. The
+# dispatcher starts the build itself now (`fleet.sh`'s `start_build`), which is
+# what makes a build that will not start fail the launch out loud instead of
+# leaving a provisioned worktree sitting on an unsent prompt.
 
 echo
 echo "worktree ready."

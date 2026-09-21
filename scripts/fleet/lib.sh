@@ -8,36 +8,6 @@
 # because everything under it reads them.
 . "$(dirname "${BASH_SOURCE[0]}")/config.sh"
 
-# The agent autostart watcher, which outlives setup.sh and is the one thing a
-# worktree removal has to stop that is not a container. Two callers with opposite
-# timing: archive.sh runs INSIDE the worktree and reads the pidfile as it goes,
-# while fleet.sh has to read it before a removal it may not get and signal only
-# after one it did -- so reading and stopping are separate.
-#
-# The identity check is why this is shared rather than copied: a pidfile outlives
-# a `kill -9` and a reboot, and signalling a recycled pid means signalling an
-# unrelated process of the user's. One copy of that reasoning, not two.
-#
-# Non-zero means nothing was signalled, so a caller can report only a real stop.
-fleet_read_autostart_watcher() {
-  cat "$1/.autofleet/run/agent-autostart.pid" 2>/dev/null || true
-}
-fleet_stop_autostart_watcher() {
-  local pid="${1:-}"
-  [ -n "$pid" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  # `grep` without `-q`: every caller of this sources lib.sh under `pipefail`
-  # (fleet.sh, issue-command.sh), and `-q` exits on the first match, so `ps` can
-  # write into a closed pipe and the pipeline is 141 for a probe that MATCHED.
-  # `|| return 1` then reads that as "this pid is not the watcher", the watcher
-  # is never signalled, and `|| true` at the callsite hides it. CLAUDE.md carries
-  # the rule. Found by the independent review, which also pointed out that the
-  # sourced file is the one the detector could not see.
-  ps -o command= -p "$pid" 2>/dev/null | grep 'agent-autostart' >/dev/null || return 1
-  kill "$pid" 2>/dev/null || true
-  return 0
-}
-
 # A worktree's identity -- its compose project name and its port offset -- is a
 # pure function of its absolute path. env.sh writes the result to .env when the
 # worktree is created; teardown recomputes it instead of reading .env back.
@@ -197,39 +167,6 @@ fleet_kill_group() {
   fleet_signal_group KILL "$1"
 }
 
-# One row out of a `path`-keyed TSV, by path: the $2 column of the first line
-# whose $1 column equals $3, reading the table on stdin.
-#
-# ONE copy of it, because the same lookup exists twice -- the agent terminal in a
-# worktree, and that worktree's agent state -- and it had the SAME BUG in both,
-# fixed in both at once. `awk -v` REINTERPRETS what it assigns, so a worktree
-# path containing a backslash arrived as `/Users/joe/mydir` when it was
-# `/Users/joe/my\dir`, the comparison went false, and the caller was told there
-# is no agent there. That is `stop` never interrupting an agent, and
-# `agent-autostart.sh` giving up after two minutes with the prompt unsent -- both
-# silent, because "no agent in that worktree" is indistinguishable from the
-# truth. The python these replaced took the path as `sys.argv` and were immune;
-# `ENVIRON[]` is awk's equivalent.
-#
-# The COLUMN numbers still go through `-v`, and that is safe: they are integers
-# this file writes. Only the path is attacker-shaped. Merging the two copies was
-# the independent review's suggestion, so the next such lookup cannot
-# reintroduce it.
-# `fleet_field_for_path <match-column> <print-column> <path>`. The two callers
-# pass `2 1` and `1 2` -- opposite orders over the same helper, because their
-# listings put the path in different columns -- and bare integers carry no clue
-# which is which, so swapping them is silent and the answer becomes "there is
-# nothing there". The two wrappers below are what the callers use; this stays
-# private to them. Found by the independent review.
-fleet_field_for_path() {
-  AUTOFLEET_AWK_PATH="$3" awk -F'\t' -v k="$1" -v v="$2" \
-    '$k == ENVIRON["AUTOFLEET_AWK_PATH"] { print $v; exit }'
-}
-# `handle<TAB>path` -- match column 2, print column 1.
-fleet_handle_for_path() { fleet_field_for_path 2 1 "$1"; }
-# `path<TAB>state` -- match column 1, print column 2.
-fleet_state_for_path()  { fleet_field_for_path 1 2 "$1"; }
-
 # An issue number out of a bare number or any `.../issues/<n>[...]` URL. Empty
 # on stdout and rc 1 for anything that is neither, including the empty string,
 # so a caller with a fallback can take it and a caller without one can refuse.
@@ -265,29 +202,58 @@ fleet_issue_number() {
   printf '%s' "$num"
 }
 
-# Where a worktree keeps the note one attempt at an issue leaves the next.
+# ------------------------------------------------------- the build, one place
 #
-# The ROOT is a parameter and not $REPO_ROOT, because the dispatcher is the one
-# caller that asks about a tree other than its own: `.autofleet/run/` is per
-# worktree, so fleet.sh has to name the worktree that HOLDS the note, not the
-# one it is standing in. The other two callers pass their own root and get the
-# path they would have spelled by hand -- which is what this exists to stop them
-# spelling three different ways.
-fleet_handoff_path() { printf '%s/.autofleet/run/handoff-%s.md' "$1" "$2"; }
+# THE BUILD COMMAND IS THE FLEET'S, NOT A DRIVER'S. Both drivers run the
+# identical `claude -p`; the only difference is WHERE it runs -- headless in the
+# background of the dispatcher, app-backed in a terminal the maintainer can
+# watch. That is the whole of armaatus/autofleet#151's "both drivers run the
+# identical build command", and it is enforceable only because the line is
+# composed here and the drivers do not get to assemble their own.
+#
+# The generated line reads its two long inputs from FILES rather than carrying
+# them inline, which is what makes it safe to hand to a terminal: the prompt and
+# the brief are multi-line text from a tracker, and a command line quoting them
+# is a command line one apostrophe away from running something else.
+FLEET_BUILDS="${AUTOFLEET_DIR:-$HOME/.autofleet}/builds"
+fleet_build_dir() { printf '%s/%s\n' "$FLEET_BUILDS" "$1"; }
 
-# The one contract function with no runner in it: the agent terminal in ONE
-# worktree, filtered out of the machine-wide listing the driver does provide.
-# Defined HERE, above the driver source, so a driver whose runtime can answer it
-# directly still wins by defining its own -- and so that every driver does not
-# ship the same filter. The stub driver in tests/test_fleet.sh carried a
-# verbatim copy of it until the independent review said so.
+# The build command itself, so `runner_available` can look for the right thing.
+# A seam, like AUTOFLEET_REVIEW_CMD: point it at a wrapper, a different account,
+# or an `ssh` to the machine that holds the subscription.
+fleet_build_cmd() { printf '%s\n' "${AUTOFLEET_BUILD_CMD:-claude}"; }
+
+# `'` inside a single-quoted shell word, the only way there is: close, escape,
+# reopen. Not `printf %q`, whose output is bash's own dialect and is read by a
+# terminal that may be running something else.
+fleet_sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# The one command line, for the build directory $1.
 #
-# Non-zero only when the listing could not be read; no output means there is no
-# agent there, which is a real answer.
-runner_agent_terminal() {
-  local list
-  list="$(runner_agent_terminals)" || return 1
-  printf '%s\n' "$list" | fleet_handle_for_path "$1"
+# `--max-turns` and `--max-budget-usd` are the time-box now. The old one
+# interrupted a live session with a turn that asked it to stop, which needed a
+# session that could be typed into; these end the process. The run stops, the
+# worktree STAYS, and the dispatcher reports what it ran out of -- so a build
+# that was nearly done is resumed rather than redone (armaatus/autofleet#41).
+#
+# `--permission-mode acceptEdits` and NOT `--bare`: the guard hook still runs,
+# which is what keeps a headless agent from merging its own PR or pushing before
+# its review is recorded. A driver that passed `--bare` would disable every rule
+# in .claude/hooks/guard.py and nothing else would notice.
+#
+# `set -o pipefail` and the `tee` are load-bearing together: stdout is the result
+# JSON AND the thing a watching maintainer reads, and without pipefail the exit
+# status would be tee's, so every build would look like it succeeded.
+fleet_build_command_line() {
+  local dir="$1"
+  printf 'set -o pipefail; %s -p "$(cat %s)" --permission-mode acceptEdits --max-turns %s --max-budget-usd %s --output-format json --append-system-prompt-file %s 2>%s | tee %s\n' \
+    "$(fleet_build_cmd)" \
+    "$(fleet_sq "$dir/prompt")" \
+    "${AUTOFLEET_BUILD_MAX_TURNS}" \
+    "${AUTOFLEET_BUILD_MAX_BUDGET_USD}" \
+    "$(fleet_sq "$dir/system.md")" \
+    "$(fleet_sq "$dir/build.log")" \
+    "$(fleet_sq "$dir/result.json")"
 }
 
 # The runner driver: everything about creating a worktree, opening a terminal

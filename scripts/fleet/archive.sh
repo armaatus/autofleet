@@ -18,19 +18,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 . ./scripts/fleet/lib.sh
 
-# First, before any path that can exit -- including the bail-out below when no
-# project name can be derived, which is exactly when a watcher would be left
-# polling the Orca runtime from a directory Orca is deleting.
-#
-# Through lib.sh, because fleet.sh has to do the same thing at a different moment
-# and the pid identity check behind it should exist once. Guarded by `if` rather
-# than `|| true` for `set -e`: a missing pidfile is the normal case, and it must
-# not abort teardown before it has removed anything.
-watcher="$(fleet_read_autostart_watcher .)"
-if fleet_stop_autostart_watcher "$watcher"; then
-  echo "==> stopping the agent autostart watcher (pid $watcher)"
-fi
-
 # The project's own teardown, before the stack: it may need the containers it
 # is about to lose. Never fatal -- the runner is removing this worktree either
 # way, and a hook that exits non-zero must not stop the stack removal below,

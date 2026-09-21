@@ -21,32 +21,11 @@
 : "${AUTOFLEET_MAX:=3}"
 # How often the dispatcher re-reads the world, in seconds.
 : "${AUTOFLEET_POLL:=60}"
-# How long one issue may hold a worktree before the dispatcher gives it up, in
-# seconds. Long enough for a real issue including a full test run and both
-# review rounds.
-: "${AUTOFLEET_TIMEBOX:=10800}"
-# The same box for the ANSWERING half, which had none. The box above is
-# disarmed the moment a pull request opens -- the build got where it was going
-# -- and everything after that ran unwatched: 4h49m and 262 turns on issue #71,
-# 43M tokens. Defaults to the build's, because "the same box, starting when the
-# answering starts" is the claim, and a second number nobody set is a second
-# number nobody tuned. `fleet.sh` reads it through ANSWER_TIMEBOX_SECONDS.
-#
-# THE FALLBACK IS RESOLVED AT THE BOTTOM OF THIS FILE, not here, for exactly the
-# reason AUTOFLEET_SELF_REVIEW_CMD's is: `.autofleet/config` is sourced further
-# down so it can override these defaults, so a `:=` here would capture the
-# DEFAULT 10800 before a host had said `AUTOFLEET_TIMEBOX=1800`. Measured on a
-# config file holding only that line: TIMEBOX=1800, ANSWER=10800 -- a host that
-# halves its build box gets a six-times-longer answering box, and the row in
-# docs/CONFIGURATION.md that says it defaults to the build's is wrong for the
-# one route it is for. Empty here; `:=` treats empty as unset, so the
-# resolution below fires for anything the environment and the host config did
-# not set. Found by the local /code-review pass.
-: "${AUTOFLEET_ANSWER_TIMEBOX:=}"
-# Seconds between context recycles INSIDE the build, before the PR exists.
-# 0 is off, and off is the default -- see docs/CONFIGURATION.md for why the
-# right interval is a measurement nobody has taken yet.
-: "${AUTOFLEET_CONTEXT_RECYCLE:=0}"
+# THE TIME-BOXES ARE GONE. What bounded an issue used to be hours -- a build box
+# and a second one for the answering half -- because an interactive session runs
+# until something stops it. See AUTOFLEET_BUILD_MAX_TURNS and
+# AUTOFLEET_BUILD_MAX_BUDGET_USD under "the runner": a run ends by itself now,
+# and hours were never the thing that cost anything anyway.
 # How long a worktree removal may take before it is reported as refused.
 : "${AUTOFLEET_RM_DEADLINE:=180}"
 
@@ -76,8 +55,10 @@
 : "${AUTOFLEET_PRIORITY_LABEL:=priority}"
 
 # ---------------------------------------------------------------- the runner
-# Which driver creates worktrees and terminals. `orca` is the only one that
-# ships today; the contract a second one has to meet is docs/RUNNERS.md, which
+# Which driver creates a worktree and runs the build in it. `headless` is the
+# default and needs nothing but `git`, `gh` and the build command; `orca` runs
+# the identical build in a terminal on a machine that has the app, so the
+# maintainer can watch it. The contract a third one has to meet is docs/RUNNERS.md, which
 # CLAUDE.md hard rule 4 names as the authority -- fleet/runner/README.md, which
 # this used to point at, is about the seam and lists no `runner_*` at all.
 #
@@ -86,7 +67,30 @@
 # and stops the four scripts that call `fleet_require_runner`: the dispatcher,
 # the setup hook, the board and the autostart watcher. `evals/lint.sh` check 4g
 # goes red on it before an agent is ever opened.
-: "${AUTOFLEET_RUNNER:=orca}"
+: "${AUTOFLEET_RUNNER:=headless}"
+
+# What the build agent is, and how much of it one issue may have.
+#
+# THE TIME-BOX IS THESE TWO NUMBERS NOW. The old one was a wall clock the
+# dispatcher enforced by interrupting a live session with a turn that asked it
+# to stop, which needed a session that could be typed into and a runtime that
+# would relay the keystrokes. `claude -p` ends by itself at either of these, and
+# the dispatcher's job shrinks to reading the exit and saying which one it was.
+# armaatus/autofleet#41, armaatus/autofleet#151.
+#
+# A budget rather than only a turn count because the two fail differently: a
+# build that reads whole files burns dollars at a low turn count, and one that
+# greps in a loop burns turns cheaply. The defaults are this repository's
+# measurements -- a median issue here has cost about $20 -- and a host project
+# is expected to move them, which is what docs/CONFIGURATION.md says.
+: "${AUTOFLEET_BUILD_CMD:=claude}"
+: "${AUTOFLEET_BUILD_MAX_TURNS:=400}"
+: "${AUTOFLEET_BUILD_MAX_BUDGET_USD:=25}"
+
+# Where the headless driver puts the worktrees it creates. Empty means
+# `$AUTOFLEET_DIR/trees`, which is the answer for every host that does not care.
+# A host that keeps its checkouts on another volume sets this.
+: "${AUTOFLEET_WORKTREE_ROOT:=}"
 
 # ---------------------------------------------------------------- the review
 # Where the INDEPENDENT review runs -- the second opinion on the PR, from a
@@ -145,9 +149,9 @@
 # config did not set. Found by the local /code-review pass.
 : "${AUTOFLEET_SELF_REVIEW_CMD:=}"
 # How long ONE pass may run before it is killed. Lower than the independent
-# reviewer's 1800 because there are two of them and they are spent out of the
-# agent's AUTOFLEET_TIMEBOX (10800s), not out of the dispatcher's poll: two
-# wedged passes at 1800 would be an hour of a three-hour box with nothing to show.
+# reviewer's 1800 because there are two of them and they are spent inside the
+# build's own run: two wedged passes at 1800 would be an hour of a build's turns
+# and dollars with nothing to show.
 : "${AUTOFLEET_SELF_REVIEW_TIMEOUT:=1200}"
 # Each pass's turn budget, passed through as `--max-turns`. The same number
 # `claude-review.yml` and the independent reviewer get: both passes fan out into
@@ -322,76 +326,25 @@
 # Found by the local review.
 : "${AUTOFLEET_LOG_PASSES:=off}"
 
-# ------------------------------------------------------------- the handoff
-# How long the note one attempt leaves the next may be, in words.
+# ---------------------------------------------------- what replaced all this
+# FIVE KNOBS USED TO LIVE HERE and they are gone with armaatus/autofleet#151:
+# AUTOFLEET_HANDOFF_MAX_WORDS, AUTOFLEET_CONTEXT_RESET, AUTOFLEET_AGENT_CLEAR_CMD,
+# AUTOFLEET_HANDOFF_GRACE_SECONDS and AUTOFLEET_CONTEXT_RECYCLE.
 #
-# `scripts/fleet/handoff.sh` REFUSES over this rather than truncating, and that
-# is the whole argument for the cap being a number a script enforces instead of
-# a sentence in the brief. Unbounded, the note grows into a second spec that the
-# next attempt reads in full before its first edit -- which is the cost
-# armaatus/autofleet#55 exists to remove, arriving through the fix. Truncated,
-# it is worse still: the reader cannot tell "nothing else was open" from "the
-# rest did not fit", and what falls off the end of a note written in that order
-# is exactly what is still open.
+# Every one of them was about keeping ONE interactive session usable for the
+# whole of an issue: cap the note it writes before being cleared, decide whether
+# to clear it at the pull request, name the command that clears it, say how long
+# it gets to write the note, and how often to do the whole dance mid-build. The
+# cost they were managing is real -- sessions were measured past 900,000 tokens,
+# most of it a build nobody was still reading -- and the cause was that the
+# session could not be allowed to END.
 #
-# 300 is a starting point. Set it to 0 to turn the cap off, the way
-# AUTOFLEET_KEEP_REVIEWS=0 turns the sweep off -- an unbounded note is then
-# something a host asked for, not something a mistyped value produced silently.
-# The check at the foot of this file is what makes that distinction hold.
-: "${AUTOFLEET_HANDOFF_MAX_WORDS:=300}"
-
-# ------------------------------------------------- the context reset at the PR
-# A SESSION PER PHASE, NOT PER ISSUE.
-#
-# One agent session used to span the whole of an issue: build, open the PR, wait
-# for the review, answer it, wait for the validation. Every file it read while
-# building stayed in its context for all of that, and every turn afterwards paid
-# for the whole of it again -- sessions were measured past 900,000 tokens, most
-# of it a build nobody was still reading.
-#
-# The pull request is the seam. Once it is open the build is done, and what the
-# answering work needs is the review, the diff and what the build decided --
-# which is exactly what the handoff note holds. So the dispatcher asks for the
-# note, drops the conversation, and hands the answering half of the brief to a
-# session that starts from it.
-#
-# `off` keeps the one-session shape. Worth it for a host whose agent CLI has no
-# way to drop a conversation from the terminal, which is the same thing as
-# setting AUTOFLEET_AGENT_CLEAR_CMD empty and is spelled out here so a host does
-# not have to discover that equivalence.
-: "${AUTOFLEET_CONTEXT_RESET:=on}"
-
-# WHAT DROPS THE CONVERSATION, typed into the agent's terminal like any other
-# prompt. `/clear` is Claude Code's; a host on another CLI puts its own here.
-#
-# EMPTY TURNS THE RESET OFF, and says so in the log rather than resetting
-# nothing quietly: an unrecognised command typed at an agent is a turn spent on
-# a syntax error, and the next thing that arrives is the answering brief, which
-# the agent would then answer with its whole build still in front of it. That is
-# the one-session shape with an extra turn, which is worse than either.
-#
-# `=` AND NOT `:=`, which it had for one commit. Every other default in this
-# file substitutes on unset OR NULL, which is right when empty has no meaning;
-# here empty IS the off switch, and `:=` handed it straight back `/clear` -- so
-# a host that set it empty to turn the reset off got the reset, with Claude
-# Code's command typed at a CLI that does not have it. The same trap
-# AUTOFLEET_COST_ROOT documents below, and the phase that caught it is
-# `fleet context_reset_off`.
-: "${AUTOFLEET_AGENT_CLEAR_CMD=/clear}"
-
-# How long an agent gets to write its handoff note before the thing that asked
-# for it takes the terminal away.
-#
-# Three callers, all of them about to end a session: the reset above, the
-# time-box, and the reaper. Before this they interrupted first and asked
-# nothing, so an interrupted attempt wrote nothing down -- which is the half of
-# armaatus/autofleet#55 that the note's existence did not fix, because the note
-# needs a TURN to be written in.
-#
-# It is a ceiling, not a wait: the dispatcher stops as soon as the note's
-# timestamp moves. 0 means "do not ask", which is the pre-#106 behaviour and is
-# left reachable for a host that would rather not spend the turn.
-: "${AUTOFLEET_HANDOFF_GRACE_SECONDS:=120}"
+# A `claude -p` run ends. AUTOFLEET_BUILD_MAX_TURNS and
+# AUTOFLEET_BUILD_MAX_BUDGET_USD above are what bounds it, and a second run
+# starts from the branch and the pull request, which is state that outlives any
+# session and needs nothing written down. AUTOFLEET_BUILD_MAX_RUNS is how many
+# of those one worktree gets.
+: "${AUTOFLEET_BUILD_MAX_RUNS:=3}"
 
 # --------------------------------------------------------------- the cost
 # Where the agent CLI writes its session transcripts, and therefore the only
@@ -505,10 +458,6 @@ fi
 # The self-review's command, now that the host config has had its say. See the
 # note by the knob above for why this cannot be done where it is declared.
 : "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
-# ...and the answering box, derived from whatever AUTOFLEET_TIMEBOX ended up
-# being rather than from the default it had 460 lines ago. Same reason, written
-# by the knob above.
-: "${AUTOFLEET_ANSWER_TIMEBOX:=$AUTOFLEET_TIMEBOX}"
 
 # ----------------------------------------------------- knobs that must be sane
 #
@@ -581,17 +530,6 @@ config_whole_number AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_
 # Unlike the knob above, 0 is a LEGAL value here and means "no cap"; only a
 # non-number has to be refused, because only a non-number turns the guard off
 # without saying so.
-# Not a number, so not the helper -- and the same reasoning as
-# AUTOFLEET_REVIEW_SCOPE's: a misspelling fails in the safe direction (anything
-# that is not `on` leaves the one-session shape) but silently, and a host that
-# wrote `true` would keep paying for 900k contexts with no way to find out.
-case "$AUTOFLEET_CONTEXT_RESET" in
-  on|off) ;;
-  *) echo "AUTOFLEET_CONTEXT_RESET must be 'on' or 'off';" \
-          "got '$AUTOFLEET_CONTEXT_RESET'" >&2
-     exit 2 ;;
-esac
-
 # The same shape, for the same reason: anything that is not `on` would leave the
 # quiet default, but silently -- and here the misspelling fails in the LOUD
 # direction instead (`[ -n ]` read `0` and `off` as on), which is worse than
@@ -603,11 +541,15 @@ case "$AUTOFLEET_LOG_PASSES" in
      exit 2 ;;
 esac
 
-config_whole_number AUTOFLEET_HANDOFF_GRACE_SECONDS "$AUTOFLEET_HANDOFF_GRACE_SECONDS" \
-  0 "a whole number of seconds (0 does not ask for a note at all)"
+# WHAT ONE RUN MAY SPEND, and the reason these are checked rather than trusted
+# is the one stated above: the consumers are `claude -p` flags, and a
+# non-number reaches the build command as an argument it refuses -- which is a
+# build that dies the moment it starts, once per launch, forever.
+config_whole_number AUTOFLEET_BUILD_MAX_TURNS "$AUTOFLEET_BUILD_MAX_TURNS" \
+  1 "a positive whole number of turns"
 
-config_whole_number AUTOFLEET_HANDOFF_MAX_WORDS "$AUTOFLEET_HANDOFF_MAX_WORDS" \
-  0 "a whole number (0 turns the cap off)"
+config_whole_number AUTOFLEET_BUILD_MAX_RUNS "$AUTOFLEET_BUILD_MAX_RUNS" \
+  1 "a positive whole number (1 means a build is never resumed)"
 
 # The same validation, for the same reason: the only consumer is an integer `[`
 # test in fleet.sh, and a non-number makes that test FALSE rather than an error
@@ -644,22 +586,13 @@ config_whole_number AUTOFLEET_VALIDATE_MAX "$AUTOFLEET_VALIDATE_MAX" \
 #                     so no self-review ever runs and the push gate opens on
 #                     findings nothing produced. That is the hole self-review.sh
 #                     exists to close, reached through a config typo.
-#   ANSWER_TIMEBOX    `[ $((now - started)) -ge "$ANSWER_TIMEBOX_SECONDS" ]` in
-#                     fleet.sh. False forever is the unbounded answering session
-#                     that ran 4h49m on issue #71.
-#   CONTEXT_RECYCLE   fleet.sh guards this one inline, because 0 is its
-#                     documented off switch and the guard has to run before the
-#                     knob is read. Checked here too so a typo is refused at the
-#                     same place as its neighbours rather than being read as
-#                     "off" -- a wrong value that is indistinguishable from the
-#                     default is what AUTOFLEET_HEADROOM's check below exists to
-#                     refuse.
+#   BUILD_MAX_RUNS    `[ "$runs" -ge "$AUTOFLEET_BUILD_MAX_RUNS" ]` in
+#                     fleet.sh's `build_exited`. False forever is the resume
+#                     loop with no bound -- a run that ends the instant it
+#                     starts, restarted every poll, spending the account one
+#                     session at a time with the log saying "resuming".
 config_whole_number AUTOFLEET_SELF_REVIEW_MAX "$AUTOFLEET_SELF_REVIEW_MAX" \
   1 "a positive whole number (0 would mean no self-review ever runs)"
-config_whole_number AUTOFLEET_ANSWER_TIMEBOX "$AUTOFLEET_ANSWER_TIMEBOX" \
-  1 "a positive whole number of seconds"
-config_whole_number AUTOFLEET_CONTEXT_RECYCLE "$AUTOFLEET_CONTEXT_RECYCLE" \
-  0 "a whole number of seconds (0 turns the build recycle off)"
 
 config_whole_number AUTOFLEET_REVIEW_FULL_EVERY "$AUTOFLEET_REVIEW_FULL_EVERY" \
   1 "a positive whole number (1 makes every round a full review)"
