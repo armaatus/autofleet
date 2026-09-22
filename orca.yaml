@@ -12,9 +12,23 @@
 # each change -- these scripts execute on your machine.
 
 scripts:
-  # Runs once per new worktree -- for one a person created here by hand. A
-  # worktree the fleet opened has already had this run by the dispatcher, and
-  # setup.sh is safe to run twice.
+  # Runs once per new worktree -- EVERY new worktree, including the ones the
+  # dispatcher opens, and that is load-bearing rather than incidental.
+  # `launch` calls `runner_worktree_create` (which is where the app fires this
+  # hook) at fleet.sh:1890 and its own `setup.sh` at fleet.sh:1940, so on this
+  # driver the order is: the app's run FIRST and unmarked, the dispatcher's
+  # second with AUTOFLEET_DISPATCHER_LAUNCH set.
+  #
+  # `setup.sh` is safe to run twice, and its closing stanza is written for that
+  # unmarked first run: it states a condition rather than asserting "no
+  # dispatcher opened this worktree", which would be false here. Do not
+  # simplify it back into the assertion on the strength of this file -- reading
+  # orca.yaml alone is exactly how somebody concludes the unmarked run cannot
+  # happen on a fleet launch. The second run's stanza is also an invitation to
+  # start an agent on a branch `start_build` is about to commit to, which is
+  # why it says to ask `fleet.sh status` first. armaatus/autofleet#156, and the
+  # comment this replaces had the order backwards. Found by the independent
+  # review.
   setup: ./scripts/fleet/setup.sh
   # Runs when a worktree is removed through the app: tears down whatever stack
   # .autofleet/config named. `fleet.sh` runs it itself before a removal it
@@ -25,6 +39,16 @@ scripts:
 # started can run the tests before its rig is up, read the connection error as a
 # code bug, and go chasing it. The few seconds this costs buys away that whole
 # failure mode.
+#
+# UNCHANGED BY #151 AND BY #156, and it now carries a second job rather than
+# the one it was written for. The hook's closing stanza -- the one naming the
+# command that starts an agent -- prints at the very end of `setup.sh`, so on
+# this driver it lands in the setup output only moments before the tab becomes
+# usable. `wait-for-setup` is what puts it on screen BEFORE the person can
+# start typing in that tab; `no-wait` would race the stanza against the reader
+# it is for, on precisely the path #156 is about. The headless driver has no
+# tab and no such race -- a person there ran `setup.sh` in a shell and is
+# reading its output already. Named in #156's Scope, checked, and kept.
 setupAgentStartupPolicy: wait-for-setup
 
 # The prompt an agent starts with when the workspace is created from a linked

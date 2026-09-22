@@ -1994,8 +1994,11 @@ printf 'marker=[%s]\n' "${AUTOFLEET_DISPATCHER_LAUNCH:-}" >"$SETUP_RECORD"
 exit 0
 REC
     chmod +x "$WORK/repo/scripts/fleet/setup.sh"
+    # No `add_origin`: it is hardcoded to $WORK/wt, which this phase never
+    # creates, so its git calls would fail quietly into stderr (no `set -e`
+    # here) and the phase would pass carrying a line that did nothing -- for
+    # the next phase to copy. Raised by the independent review.
     make_repo_git
-    add_origin
 
     export SETUP_RECORD="$WORK/setup-env"
     in_fleet launch 44 "an issue the dispatcher opened" >/dev/null 2>&1 \

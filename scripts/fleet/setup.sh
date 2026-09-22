@@ -87,8 +87,11 @@ fi
 # day -- an image pull with no network, a scan that never finishes -- and under
 # `set -e` a failure here must not leave a watcher polling the runtime from a
 # worktree nobody will ever work in. #151 deleted the watcher; the ordering
-# still holds, because the stanza below tells a person what to run and a hook
-# that died owes them that line before they read it as an invitation.
+# still holds, and for the same shape of reason pointed at the stanza below. A
+# hook that dies here exits before it, so the invitation to start an agent
+# never prints for a worktree there is nothing to work in -- which is what it
+# would be doing if this ran last. Found stated backwards by the independent
+# review.
 if [ -n "${AUTOFLEET_SETUP_HOOK:-}" ] && [ -x "$AUTOFLEET_SETUP_HOOK" ]; then
   echo "==> $AUTOFLEET_SETUP_HOOK"
   "./$AUTOFLEET_SETUP_HOOK"
@@ -127,6 +130,13 @@ fleet_ports | sed 's/^/  port        /'
 # the headless path does not have. `launch` sets the variable when it calls
 # this hook itself, which is every launch on the default driver.
 #
+# IT IS TRUSTED, not verified. An `export AUTOFLEET_DISPATCHER_LAUNCH=1` left
+# in a shell silences this stanza for every worktree opened from it, silently
+# and permanently -- #156 inverted. A name nothing else uses is the whole of
+# the defence, which is proportionate for a variable that changes four lines of
+# output and nothing else; it would not be if it ever gated an action. Raised
+# by the independent review.
+#
 # IT DOES NOT REACH EVERY DISPATCHER LAUNCH, and the wording below is what
 # covers the gap rather than a claim that it does. On the app-backed driver
 # this hook has a SECOND caller: `orca.yaml` registers it as the worktree
@@ -157,7 +167,7 @@ if [ -z "${AUTOFLEET_DISPATCHER_LAUNCH:-}" ]; then
   echo "              If no dispatcher opened this worktree, nothing will submit"
   echo "              a prompt in it -- \`./scripts/fleet/fleet.sh status\` says"
   echo "              whether the fleet already has one here. If it does not,"
-  echo "              start it yourself, in the agent's tab:"
+  echo "              start it yourself, wherever you are running the agent:"
   echo "                GH_PAGER=cat ./scripts/fleet/issue-command.sh $issue"
   echo "              and follow what it prints."
 fi
