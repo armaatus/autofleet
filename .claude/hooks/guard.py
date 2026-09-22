@@ -737,6 +737,68 @@ def _bash_cases(cases):
     return failures
 
 
+# The refusals that are not a tool call at all: a payload this cannot read, and a
+# project config it cannot parse. Both are the not-failing-open rule, and both
+# were the only rules in this file with nothing asserting them.
+def _plumbing_checks():
+    import tempfile
+    failures = 0
+    cases = [
+        ('{"tool_name": "Bash", "tool_input": {"command": "ls"}}', None,
+         "a well-formed payload is read and judged"),
+        ("not json at all", 2, "a payload this cannot parse is refused, not allowed"),
+        ('["a", "list"]', 2, "...and so is one that is not an object"),
+        ("", 2, "...and an empty one"),
+    ]
+    for raw, want, what in cases:
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                parse_payload(raw)
+            got = None
+        except SystemExit as exc:
+            got = exc.code
+        if got != want:
+            print(f"FAIL: {what} (expected exit {want}, got {got})", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"  ok: {what}")
+
+    # A malformed `.autofleet/guard.json` is FATAL rather than ignored: falling
+    # back to "protect nothing" on a typo reports success on every write the
+    # rule was installed to stop.
+    with tempfile.TemporaryDirectory() as tmp:
+        for body, what in (
+            ("{ not json", "a guard.json that does not parse is fatal, not ignored"),
+            ('["a", "list"]', "...and so is one that is not an object"),
+        ):
+            path = os.path.join(tmp, "guard.json")
+            with open(path, "w") as fh:
+                fh.write(body)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    _load_guard_config(path)
+                got = None
+            except SystemExit as exc:
+                got = exc.code
+            if got != 2:
+                print(f"FAIL: {what} (expected exit 2, got {got})", file=sys.stderr)
+                failures += 1
+            else:
+                print(f"  ok: {what}")
+        # ...while an ABSENT one is the ordinary case: a host that configures
+        # nothing still gets the four universal rules.
+        if _load_guard_config(os.path.join(tmp, "nothing-here.json")) != {}:
+            print("FAIL: an absent guard.json is not the same as a broken one",
+                  file=sys.stderr)
+            failures += 1
+        else:
+            print("  ok: an absent guard.json leaves the universal rules in place")
+    return failures
+
+
+PLUMBING_ASSERTIONS = 7
+
+
 def _stateful_checks():
     """STOPPED_CASES and OWNED_CASES, against state this function controls.
 
@@ -802,19 +864,24 @@ def selftest():
         finally:
             STOP_FILE, OWNED_DIR = saved
     failures += _stateful_checks()
+    failures += _plumbing_checks()
     if failures:
         print(f"{failures} guard assertion(s) failed", file=sys.stderr)
         return 1
-    print(f"{len(SELFTEST) + len(STOPPED_CASES) + len(OWNED_CASES)} "
+    print(f"{len(SELFTEST) + len(STOPPED_CASES) + len(OWNED_CASES) + PLUMBING_ASSERTIONS} "
           "guard assertions hold")
     return 0
 
 
-if __name__ == "__main__":
-    if "--selftest" in sys.argv[1:]:
-        sys.exit(selftest())
+def parse_payload(raw):
+    """The tool call, or a refusal. A FUNCTION so it can carry a selftest row.
+
+    This is the not-failing-open rule itself -- the one the module docstring
+    opens with -- and while it lived inline under `__main__` it was the only
+    refusal in the file with nothing asserting it.
+    """
     try:
-        parsed = json.loads(sys.stdin.read())
+        parsed = json.loads(raw)
     except Exception:
         deny(
             "Blocked: .claude/hooks/guard.py could not read this tool call, so it "
@@ -823,4 +890,10 @@ if __name__ == "__main__":
         )
     if not isinstance(parsed, dict):
         deny("Blocked: .claude/hooks/guard.py got a tool call that is not an object.")
-    sys.exit(main(parsed))
+    return parsed
+
+
+if __name__ == "__main__":
+    if "--selftest" in sys.argv[1:]:
+        sys.exit(selftest())
+    sys.exit(main(parse_payload(sys.stdin.read())))
