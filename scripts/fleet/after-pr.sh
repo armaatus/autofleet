@@ -164,6 +164,44 @@ review_once() {
   return "$rc"
 }
 
+# Does the verdict standing on this head ask for changes? Asked of GitHub, and
+# through the same marker `merge_gate.py` reads, so "what was decided" has one
+# answer rather than one per reader.
+verdict_asks_for_changes() {
+  # The repository, resolved HERE rather than at the top of this script: this is
+  # the only thing in the loop that needs it, and it is reached on one exit out
+  # of six. `fleet_pr_payload` reads `$fleet_owner` and `$fleet_repo_name`, and
+  # under `set -u` an unresolved pair is not a soft failure -- it is the
+  # function erroring out and this answering "no changes asked for", which is
+  # the write-off it exists to prevent.
+  fleet_owner_repo || {
+    echo "after-pr.sh: gh would not say which repository this is, so what the" >&2
+    echo "  standing verdict says is unknown; leaving PR #$pr for the next poll." >&2
+    return 1; }
+  local payload; payload="$(mktemp)"
+  fleet_pr_payload "$pr" "$payload" || { rm -f "$payload"; return 1; }
+  local head; head="$(GH_PAGER=cat gh pr view "$pr" --json headRefOid \
+                        --jq .headRefOid 2>/dev/null)"
+  python3 - "$payload" "${head:-}" <<'ASKS'
+import json, re, sys
+doc = json.load(open(sys.argv[1]))
+head = sys.argv[2]
+pull = doc["data"]["repository"]["pullRequest"]
+marker = re.compile(r"<!--\s*autofleet-verdict:\s*request-changes\s+([0-9a-f]{7,40})\s*-->", re.I)
+for review in (pull.get("reviews") or {}).get("nodes") or []:
+    on_head = ((review.get("commit") or {}).get("oid") or "") == head
+    if on_head and review.get("state") == "CHANGES_REQUESTED":
+        raise SystemExit(0)
+    found = marker.search(review.get("body") or "")
+    if found and head.startswith(found.group(1)):
+        raise SystemExit(0)
+raise SystemExit(1)
+ASKS
+  local rc=$?
+  rm -f "$payload"
+  return "$rc"
+}
+
 park() {
   GH_PAGER=cat gh pr comment "$pr" --body "$1" >/dev/null 2>&1 \
     || echo "after-pr.sh: could not comment on PR #$pr." >&2
@@ -175,10 +213,24 @@ case "$rc" in
   0) echo "after-pr.sh: PR #$pr approved; GitHub decides the rest."; exit 0 ;;
   4) ;;                       # changes requested -- the fix is below
   3) exit 3 ;;
-  8) # A verdict for this head already exists and it was not this run's. Whoever
-     # posted it decided; re-reading it here to find out which way would be a
-     # third opinion on a two-opinion budget.
-     echo "after-pr.sh: PR #$pr already judged at its current head."; exit 0 ;;
+  8) # A VERDICT FOR THIS HEAD ALREADY EXISTS, and which way it went decides
+     # whether there is anything left to do. Read, not assumed: exiting 0 here
+     # unconditionally wrote `<pr>.done` and the dispatcher then skipped the
+     # pull request forever -- correct for an approve, and a write-off for a
+     # request-changes this fleet posted and was interrupted before answering.
+     # That is an ordinary path, not an edge one: the first review asks for
+     # changes, `fix.sh` meets `~/.autofleet/STOP` and exits 3, and on resume
+     # the head has not moved, so the next poll sees the standing refusal and
+     # calls the PR finished. It never gets the one fix session the loop
+     # promises and never gets the comment every other dead end posts. Found by
+     # the independent review.
+     if verdict_asks_for_changes; then
+       echo "after-pr.sh: PR #$pr already carries a request-changes for its"
+       echo "  current head; answering it rather than calling it finished."
+     else
+       echo "after-pr.sh: PR #$pr already judged at its current head."
+       exit 0
+     fi ;;
   9) park "**autofleet: needs a human.** This pull request has had the two
 reviews the loop allows and is still not approved. Nothing further is
 automatic: read the reviews above, or close this and re-open the issue with

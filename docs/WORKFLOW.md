@@ -955,7 +955,7 @@ fails if that entry disappears, because the agent brief names those skills.
 | It blocks | Why |
 |---|---|
 | `gh pr merge`, and the `gh api …/merge` spelling | separation of duties: the agent that wrote it does not merge it |
-| `gh pr merge --auto` is **allowed** — but not while the fleet is stopped | that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than the agent. A stop is different: arming a merge hands GitHub an instruction that outlives it, which is an outward effect like any other |
+| `gh pr merge --auto` **from a fleet worktree** | the merge queue is the dispatcher's: `after-pr.sh` arms it the moment the PR exists, and it has to be first, because GitHub refuses to queue auto-merge on a PR that is already mergeable. In a worktree you opened yourself it is allowed — that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than you — except while the fleet is stopped, since arming a merge hands GitHub an instruction that outlives the stop |
 | the GraphQL names for all of it — `mergePullRequest`, `addPullRequestReview`, `dismissPullRequestReview` | the same acts by a third name. Each was reachable until a review found it |
 | `gh api` carrying a body from a file (`--input`, `@file`) from a fleet worktree | a payload this hook cannot read is one it cannot judge, and `-F query=@file` put a whole mutation out of its sight |
 | force-pushing `main` | the commit chain is the audit trail |
@@ -965,14 +965,20 @@ fails if that entry disappears, because the agent brief names those skills.
 | editing `.claude/hooks/` and `settings.json` **in a fleet worktree** | an agent rewriting its own guards while nobody is watching has none |
 | editing `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md` **in a fleet worktree** | the same rule for the project's half of the layer. `merge-gate` will not let a PR touching these merge itself, but `guard.py` re-reads `guard.json` on every tool call — so an agent that empties it has disarmed every project rule while the PR is still open. Reading them is untouched: `config.sh` sources the config on the way into every fleet script |
 | `gh api` with `-X POST/PUT/PATCH/DELETE` while stopped | a write is outward; a read is not |
-| pushing or opening a PR from a fleet worktree with no `.autofleet/run/reviewed-<sha>` | a PR arrives reviewed or it does not arrive |
+| starting `review.sh`, `fix.sh` or `after-pr.sh` **in a fleet worktree** | the agent does not start the pass that judges its own pull request. The verdict releases the merge gate, so a branch that could start its own reviewer could certify itself |
 | anything outward while `~/.autofleet/STOP` exists (a drain sets `DRAIN`, which this does not read) | a stop that depends on cooperation is not a stop |
 
-Three of those apply **only in a worktree the fleet opened**: editing
+Four of those apply **only in a worktree the fleet opened**: editing
 `.claude/hooks/` and `settings.json`, editing the `.autofleet/` files that set
-the rules, and pushing with no recorded review. In
-your own worktree you are the control, and a guard that argues with a person
-doing manual work is a guard people route around. The two stop rows apply
+the rules, starting the review or the fix that judges the branch, and arming the
+merge queue. In your own worktree you are the control, and a guard that argues
+with a person doing manual work is a guard people route around.
+
+The push gate that used to sit in this table is gone.
+`.autofleet/run/reviewed-<sha>` refused `git push` and `gh pr create` until a
+local review had been recorded; [Stage 4](#stage-4--the-pull-request-and-where-the-agent-stops)
+says what happened to the passes that wrote it. A gate nothing can ever satisfy
+is not a gate. The two stop rows apply
 everywhere — a stop that reached only the fleet's own worktrees would not be
 one. It is also why the guards can still be
 improved: the first version protected itself everywhere, and made its own bug

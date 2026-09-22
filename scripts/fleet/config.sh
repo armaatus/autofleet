@@ -180,8 +180,10 @@
 # and every transcript for a PR that is no longer open goes -- after one grace
 # pass, and never while a reviewer for that PR is still writing to it.
 #
-# This also governs the `reviewed-<sha>` sweep, so 0 really does mean "keep
-# every piece of review state", which is what the line below promises.
+# TRANSCRIPTS ARE ALL IT GOVERNS NOW. It also drove the `reviewed-<sha>` marker
+# sweep until armaatus/autofleet#152 removed the markers; `prune_review_logs` is
+# the one consumer left, so `0` means "keep every transcript" rather than "keep
+# every piece of review state". Found by the independent review.
 : "${AUTOFLEET_KEEP_REVIEWS:=3}"
 
 # Bytes of fleet.log to keep. At the cap the file is rotated to fleet.log.1 --

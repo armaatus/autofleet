@@ -14,6 +14,11 @@
 #   nits         Suggestions alone are an approve. This is the phase that costs
 #                money when it regresses: a nit read as a blocker buys a fix
 #                session, a re-review and a park, to change a comment.
+#   interrupted  a request-changes standing on an unmoved head is ANSWERED, not
+#                written off. The first review refuses, fix.sh meets STOP and
+#                exits 3, and on resume review.sh exits 8 on the unmoved head --
+#                which used to end the loop with `.done` written and the PR
+#                skipped forever, never getting the one fix session it is owed.
 #   judged       a verdict already on this head exits 8 WITHOUT starting a
 #                reviewer -- the dispatcher polls, and a poll that spawned a
 #                second reviewer per head is how PR #32 collected fourteen.
@@ -226,6 +231,24 @@ case "${1:-}" in
   grep -q 'pr comment' "$GH_POSTS" \
     || { cat "$GH_POSTS" >&2; fail "the Suggestion was not posted at all"; }
   ok "a nit is posted, and that is all"
+  ;;
+# ---------------------------------------------------------------- interrupted
+  interrupted)
+  # The PR already carries a request-changes for its current head -- which is
+  # what an interrupted first round leaves behind.
+  make_fixture request-changes "$APPROVE"
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  printf '1\n' >"$AUTOFLEET_DIR/reviewing/42.reviews"
+  # review.sh finds that verdict and exits 8; fix.sh records that it ran.
+  printf '#!/usr/bin/env bash\nexit 8\n' >"$WORK/repo/scripts/fleet/review.sh"
+  printf '#!/usr/bin/env bash\necho ran >>"$WORK/fix-ran"\nexit 0\n' \
+    >"$WORK/repo/scripts/fleet/fix.sh"
+  chmod +x "$WORK/repo/scripts/fleet/review.sh" "$WORK/repo/scripts/fleet/fix.sh"
+  export WORK
+  (cd "$WORK/repo" && ./scripts/fleet/after-pr.sh 42 >/dev/null 2>&1)
+  [ -s "$WORK/fix-ran" ] \
+    || fail "the standing request-changes was never answered; the PR is written off with no fix session"
+  ok "an interrupted round is answered rather than called finished"
   ;;
 # --------------------------------------------------------------------- judged
   judged)
@@ -454,6 +477,6 @@ PROMPTSTUB
   ok "one review, one fix, one re-review, then a person"
   ;;
   *)
-  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|prompthead|bigdiff|parks}" >&2
+  echo "usage: $0 {approve|changes|nits|interrupted|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|prompthead|bigdiff|parks}" >&2
   exit 2 ;;
 esac

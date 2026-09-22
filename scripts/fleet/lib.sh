@@ -1040,18 +1040,20 @@ fleet_venv_is_usable() {
 # alive, the PR is never reviewed again.
 #
 # ANCHORED, and this is the whole of it. An unanchored `review\.sh` also matches
-# `await-review.sh`, `answer-review.sh` and `record-review.sh` -- and the first
-# of those is where EVERY worktree agent sits for up to 45 minutes waiting for
-# the very review the dispatcher starts. `stop_reviewers` SIGTERMs what this
-# matches, so a recycled pid landing on an agent's wait would kill the wait.
+# `await-review.sh`, which is where a person or a resumed dispatcher sits
+# waiting for the very review this is asked about. `stop_reviewers` SIGTERMs
+# what this matches, so a recycled pid landing on that wait would kill it. Two
+# more scripts made the same argument until armaatus/autofleet#152 deleted them;
+# one is enough for the rule to hold.
 #
 # ALL THREE SCRIPTS OF THE LOOP. The lock a dispatcher publishes names the
 # `after-pr.sh` subshell, and what that subshell is running at any moment is a
 # `review.sh` or a `fix.sh`. Matching only one of them read a live run as dead,
 # deleted its lock, and started another beside it every poll.
 #
-# Here rather than in fleet.sh because `review.sh` asks it too: a lock it may
-# not claim is one held by a live agent, and that is this question.
+# Here rather than in fleet.sh because `after-pr.sh` asks it too, through
+# `fleet_lock_claim`: a lock it may not claim is one held by a live agent, and
+# that is this question.
 fleet_agent_alive() {
   local pid="${1:-}" line
   case "$pid" in ''|*[!0-9]*|0) return 1 ;; esac

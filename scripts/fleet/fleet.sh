@@ -2098,10 +2098,13 @@ stop_reviewers() {
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ 2>/dev/null <"$marker" || true
+    # ...and the same here, for the same reason: a hand-run that claims this
+    # marker between the read and the removal must not have its live claim
+    # deleted by a drain that was reaping somebody else's.
     if reviewer_alive "$held"; then
       kill "$held" 2>/dev/null && stopped=$((stopped + 1))
     fi
-    rm -f "$marker"
+    fleet_lock_reap "$marker" "$held"
   done
   [ "$stopped" -gt 0 ] && echo "  stopped $stopped local reviewer(s)."
   return 0
@@ -2545,9 +2548,6 @@ rotate_fleet_log() {
   return 0
 }
 
-# `.autofleet/run/reviewed-<sha>` records, which guard.py reads as "the local
-# review for this commit is recorded". A sha that is on no branch is a commit
-
 review_open_prs() {
   # A stopped fleet writes nothing to a pull request, and the scripts below know
   # that -- they exit 3. But they exit 3 AFTER being spawned, once per open PR,
@@ -2609,11 +2609,21 @@ print(len(json.load(sys.stdin)))
       # which is not "no process" but THIS PROCESS GROUP -- the dispatcher and
       # every child it has -- and `kill -0 0` SUCCEEDS, which made an empty
       # marker immortal and its PR never reviewed again.
+      # BY CONTENT, through `fleet_lock_reap`, never `rm -f "$m"` by path.
+      # Between the `ps` above -- the slow part of this loop -- and the removal,
+      # a fresh loop can claim the same marker under its own pid, and a
+      # by-path delete then throws away a LIVE claim. The very same pass finds
+      # `[ -e "$marker" ]` false and spawns a second loop on that head: that is
+      # armaatus/autofleet#64, and the window is WIDER here than it was in the
+      # reviewer this replaced, because `after-pr.sh` claims its own lock. The
+      # helper exists for exactly this and its header says so. Found by the
+      # independent review, which noticed the merge base called it here and
+      # this did not.
       reviewer_alive "$p"; local is=$?
       if [ "$is" = 0 ]; then
         n=$((n + 1))
       elif [ "$is" = 1 ]; then
-        rm -f "$m"
+        fleet_lock_reap "$m" "$p"
       fi
       # rc 2 is "ps would not say", which is neither alive nor reapable: the
       # marker stands and the slot stays taken until something can answer.
