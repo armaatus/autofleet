@@ -465,8 +465,11 @@ it is skipped.
 ## `.autofleet/guard.json`
 
 What `guard.py` refuses to write in **this** repo, over and above its universal
-rules (merging a PR, force-pushing the default branch, editing `unblock.yml`,
-editing `.env`, and — in a fleet worktree only — editing the hooks themselves).
+rules — merging a pull request, force-pushing the default branch, editing
+`.env`, anything outward while the fleet is stopped, and (in a fleet worktree
+only) submitting the review of its own pull request. The **key** here also names
+that default branch, so a host on `trunk` gets the force-push rule rather than
+an exemption from it.
 
 ```json
 {

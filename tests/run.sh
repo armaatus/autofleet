@@ -21,9 +21,13 @@
 # it and a failure names itself. That is why the phase lists live here as data
 # rather than being discovered: a phase defined in the script and missing from
 # this list never executes, in this runner or in CI, and is indistinguishable
-# from a phase that passes. Each suite's own `*)` arm is what says so -- it
-# exits 2 naming the phase, so a registry that has fallen behind goes red rather
-# than quiet.
+# from a phase that passes.
+#
+# A lint check used to compare the two, and went with armaatus/autofleet#153.
+# What is left catches only HALF of it: a name in this list with no arm in the
+# script hits that script's `*)` and exits 2. **A phase defined in the script
+# and absent from this list is still silent**, and adding one is the moment to
+# remember it -- a line in `.autofleet/review.md` now, not a build step.
 #
 # A phase exits 0 for pass and any non-zero for fail, with ONE exception: exit 77
 # means "this phase could not judge anything" and is reported as a skip. It is
@@ -259,26 +263,23 @@ esac
 # naming three is worth more than a truncated one naming eleven.
 MAX_BLOCKED=3
 blocked=0
-# Counted in a FILE, because the cap is a property of the RUN and the suites may
-# be in separate processes. One byte per blocked phase, appended -- a single
-# short write, which is atomic on every filesystem this runs on, and `wc -c` is
-# the count. A counter in a shell variable would be per-worker, and four suites
-# blocking one phase each would never reach a cap of three: the give-up would
-# silently stop working the moment this runner learned to fork.
-# A VARIABLE, not a function called through `$( )`. Bash runs this shell's EXIT
-# trap inside a command substitution, and this runner's EXIT trap deletes
-# $SCRATCH -- so every `$(...)` on the dispatch path was a chance to delete the
-# directory the run was still writing into, and with more suites than workers it
-# took it. Found by the suite going from green to "nothing ran" between runs.
-# ONE FILE PER BLOCKED PHASE, counted with a GLOB. The count has to be readable
-# by the process deciding what to start next, which is not the process that
-# blocked -- and it has to be readable without `$( )`, for the reason the EXIT
-# trap above gives. A glob is expansion, not a subshell.
-BLOCKED_DIR="$SCRATCH"
+# ONE FILE PER BLOCKED PHASE, in $SCRATCH, counted with a GLOB.
+#
+# A file rather than a shell variable, because the cap is a property of the RUN
+# and the suites are separate processes: a per-worker counter means four suites
+# blocking one phase each never reach a cap of three, and the give-up silently
+# stops working the moment this runner learns to fork.
+#
+# A glob rather than a byte count over one appended-to file, because reading it
+# needs no `$( )` -- bash runs this shell's EXIT trap inside a command
+# substitution, so every `$(...)` on the dispatch path was a chance to run the
+# teardown against a directory the run was still writing into. A glob is
+# expansion, not a subshell. One file per phase also means two workers blocking
+# at the same moment cannot write over each other.
 read_blocked() {
   local f
   blocked=0
-  for f in "$BLOCKED_DIR"/blocked.*; do
+  for f in "$SCRATCH"/blocked.*; do
     # An unmatched glob comes back as the pattern itself, which is not a file.
     [ -e "$f" ] && blocked=$((blocked + 1))
   done
@@ -286,7 +287,7 @@ read_blocked() {
 }
 note_blocked() {
   # Named for the phase, so two workers blocking at once cannot write one file.
-  : >"$BLOCKED_DIR/blocked.${1//\//_}"
+  : >"$SCRATCH/blocked.${1//\//_}"
   read_blocked
 }
 
@@ -584,15 +585,10 @@ give_up_if_blocked() {
   return 0
 }
 
-# One suite, start to finish, in a process of its own. Everything it prints goes
-# to a file and everything it counted goes to a second one, because a subshell
-# cannot hand a variable back to its parent.
-#
-# The phases inside it stay SEQUENTIAL. Several of them ask the machine a
-# question -- `pgrep` for a stray `sleep`, `docker info` -- and a phase that
-# counts processes cannot be run beside one that spawns them. Suites are the
-# coarsest unit where that is not true: each builds its own `mktemp -d` fixture
-# and stubs its own PATH, so two of them share nothing.
+# One suite, start to finish. Everything it prints goes to a file and everything
+# it counted goes to a second one, because a worker cannot hand a variable back
+# to its parent. Why the phases inside it stay sequential is at the top of this
+# file, with the rest of what parallelism costs.
 run_suite() {
   local suite="$1" phases="$2"
   gave_up=0
@@ -615,7 +611,12 @@ run_suite() {
   {
     printf 'pass=%s fail=%s skipped=%s blocked=%s\n' \
       "$pass" "$fail" "$skipped" "$blocked"
-    printf 'failed=%q skips=%q gave_up=%s\n' "$failed" "$skips" "$gave_up"
+    # `gave_up` is deliberately NOT written back. The parent decides when to
+    # stop launching, from the shared blocked count; a worker's copy would be
+    # clobbered by the next suite's counts file as they are sourced in turn, so
+    # reading it would say "the last suite did not give up" whatever happened.
+    # The give-up itself is announced once, by whichever process claims it.
+    printf 'failed=%q skips=%q\n' "$failed" "$skips"
   } >"$SCRATCH/counts.$suite"
 }
 
@@ -628,8 +629,9 @@ JOBS="${AUTOFLEET_TEST_JOBS:-}"
 if [ -z "$JOBS" ]; then
   JOBS="$( (getconf _NPROCESSORS_ONLN || sysctl -n hw.ncpu || nproc) 2>/dev/null )" || JOBS=""
   case "$JOBS" in ''|*[!0-9]*|0) JOBS=4 ;; esac
-  # Past the suite count it buys nothing, and every extra worker is another
-  # fixture tree on a disk the suites are already hammering.
+  # Capped, because every extra worker is another fixture tree on a disk the
+  # suites are already hammering, and the run is bounded by its slowest suite
+  # long before it is bounded by cores. Eight is about the registry's size.
   [ "$JOBS" -le 8 ] || JOBS=8
 fi
 case "$JOBS" in
@@ -724,7 +726,6 @@ else
       total_pass=$((total_pass + pass)); total_fail=$((total_fail + fail))
       total_skipped=$((total_skipped + skipped))
       all_failed="$all_failed$failed"; all_skips="$all_skips$skips"
-      [ "$gave_up" = 0 ] || gave_up=1
     }
   done
   pass="$total_pass"; fail="$total_fail"; skipped="$total_skipped"

@@ -46,11 +46,11 @@ for f in "${scripts[@]}"; do
   out="$(bash -n "$f" 2>&1)" || bad "$f does not parse: $out"
 done
 
-# The linter, at severity=error, over the same list. It is what replaced four
-# hand-written scanners in this directory: SC2181 for `$?`, SC2086 for an
-# unquoted expansion, SC1073 for the continuation comment that comments out the
-# rest of a command. A tool with a changelog beats a regex somebody has to
-# maintain here.
+# The linter, at severity=error, over the same list. A tool with a changelog
+# beats a regex somebody has to maintain here -- wherever it actually covers the
+# class. `shell_code.py` went because SC2181 covers `$?`; the three scanners
+# below stayed because, measured against `--severity=style`, this tool reports
+# none of what they look for.
 #
 # A suppression must carry a reason on the same line, after a second `#`, and a
 # bare one is not an answer (armaatus/autofleet#17).
@@ -65,7 +65,33 @@ else
   printf '   brew install shellcheck / apt-get install shellcheck\n' >&2
 fi
 
-# The two guards that decide things, each asked to prove it still does. Both
+# THE THREE CLASSES THE LINTER ABOVE DOES NOT KNOW. Each is a rule in CLAUDE.md's
+# Code section, and each was measured before being kept -- 0.11 reports none of
+# them at any severity:
+#
+#   piped_quiet_grep     an assertion piped into a quiet grep under `pipefail`.
+#                        The grep exits on its first match, the producer dies of
+#                        EPIPE, and a check that HELD reports 141 -- on large
+#                        input only, so green on a Mac and red in CI.
+#   late_stderr_silence  `read -r x <"$f" 2>/dev/null` prints the open failure
+#                        and only THEN silences the stream.
+#   continuation_comment a comment after a line continuation ends the command
+#                        there, and the rest of it simply never runs. Nothing
+#                        else reports it -- `bash -n` parses it happily.
+#
+# Each carries its own `--selftest`, run FIRST: a scanner that has stopped
+# matching is a check that passes everything, which is hard rule 3.
+step "the classes the linter does not know"
+for scanner in piped_quiet_grep late_stderr_silence continuation_comment; do
+  python3 "evals/$scanner.py" --selftest >/dev/null \
+    || bad "evals/$scanner.py --selftest: the scanner itself has stopped matching"
+  # Its findings are the message, so they are shown -- but a clean run prints a
+  # bare newline, and five of those is a check that looks like it broke.
+  out="$(python3 "evals/$scanner.py" 2>&1)" \
+    || { printf '%s\n' "$out"; bad "evals/$scanner.py found something"; }
+done
+
+# The guards that decide things, each asked to prove it still does. Both
 # print their own assertion count, and both are the reason hard rule 3 exists:
 # a rule that stops matching stops blocking, in silence.
 step "the guard still guards"

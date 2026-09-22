@@ -50,5 +50,5 @@ Never hand-edit `blocked`/`ready`; `unblock.yml` derives them from `Blocked by
 before it; for a bug fix, commit that test first. Then push, open the pull
 request with `## Plan` — what the issue asked, where you departed, which issues
 you edited — plus its `Closes #N` line, and **stop**. `guard.py` refuses the merge
-from here, and a PR touching `.github/`, `.claude/` or `.autofleet/` never merges
-itself: a person merges that one.
+and the review from here; a PR touching `.github/`, `.claude/` or `.autofleet/`
+never merges itself, and a person merges that one.

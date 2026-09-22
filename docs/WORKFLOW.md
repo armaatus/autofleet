@@ -975,6 +975,14 @@ a rule that comes back silently is worse than one that never existed:
 - **The agent is not stopped from *starting* `review.sh`.** It inherits the
   worktree, so its `gh pr review` is refused one process later by the rule that
   is still here.
+- **`.github/workflows/unblock.yml` is not a protected path.** It derives the
+  `blocked`/`ready` labels that decide what other worktrees may start, and the
+  guard refused every write to it. `merge_gate.py` is the backstop that actually
+  holds: `.github/workflows/` is in `HUMAN_ONLY_PREFIXES`, so a pull request
+  touching that file never merges itself whoever wrote it. What is given up is
+  the window between the edit and the merge — and unlike `.autofleet/guard.json`,
+  which this hook re-reads on every tool call, nothing reads `unblock.yml`
+  until GitHub runs it on the merged result.
 
 **What the hook is not: a sandbox.** It reads a command and decides; it does not
 confine one. A session that means to get past it can — an interpreter one-liner

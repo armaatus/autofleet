@@ -617,15 +617,19 @@ SELFTEST = [
      "a heredoc body is data -- documenting a blocked command is not running it"),
 
     # --- 2. force-pushing the default branch --------------------------------
-    ("Bash", {"command": "git push --force origin main"}, 2, "force-pushing the default branch is blocked"),
-    ("Bash", {"command": "git push origin main -f"}, 2, "...with the flag last"),
-    ("Bash", {"command": "git push --force origin refs/heads/main"}, 2, "...spelled as a full ref"),
-    ("Bash", {"command": "git -C /w/demo push --force-with-lease origin main"}, 2,
+    # The fixture's default branch is `trunk`, so these rows fail against a rule
+    # that hardcodes a branch name instead of reading `.autofleet/guard.json`.
+    ("Bash", {"command": "git push --force origin trunk"}, 2, "force-pushing the default branch is blocked"),
+    ("Bash", {"command": "git push origin trunk -f"}, 2, "...with the flag last"),
+    ("Bash", {"command": "git push --force origin refs/heads/trunk"}, 2, "...spelled as a full ref"),
+    ("Bash", {"command": "git -C /w/demo push --force-with-lease origin trunk"}, 2,
      "...through git's global options"),
-    ("Bash", {"command": "git -C /w/main push --force origin some-branch"}, 0,
-     "a -C path containing 'main' is not a refspec"),
-    ("Bash", {"command": "git push --force origin armaatus/fix-main-loop"}, 0,
-     "a branch whose name contains 'main' is fine"),
+    ("Bash", {"command": "git push --force origin main"}, 0,
+     "...and `main` is an ordinary branch where the default is not main"),
+    ("Bash", {"command": "git -C /w/trunk push --force origin some-branch"}, 0,
+     "a -C path containing the branch name is not a refspec"),
+    ("Bash", {"command": "git push --force origin armaatus/fix-trunk-loop"}, 0,
+     "a branch whose name contains the default's is fine"),
     ("Bash", {"command": "git push -u origin armaatus/thing"}, 0, "an ordinary push is fine"),
 
     # --- 3. secrets, and the project's own protected paths ------------------
@@ -697,6 +701,13 @@ STOPPED_CASES = [
 # whose expectations come from whatever file happens to be on disk asserts
 # nothing. It doubles as the worked example of what a project puts in that file.
 SELFTEST_PROJECT = {
+    # NOT "main", which is the built-in default: a fixture that agrees with the
+    # fallback cannot tell a rule that READS this key from one that ignores it,
+    # and every force-push row below would have passed against a hardcoded
+    # branch name. Hard rule 2 says the branch arrives through configuration;
+    # this is what asserts that it does. Verified by hardcoding it and watching
+    # four rows go red.
+    "default_branch": "trunk",
     "protected_paths": [
         {
             "path": "server/contract/captures/",
@@ -837,12 +848,13 @@ def _stateful_checks():
 
 def selftest():
     global PROJECT, PROTECTED_PATHS, SECRET_SUFFIXES, SECRET_CONTAINS
-    global SECRET_TAILS, PROTECTED_TAILS, STOP_FILE, OWNED_DIR
+    global SECRET_TAILS, PROTECTED_TAILS, STOP_FILE, OWNED_DIR, DEFAULT_BRANCH
     import tempfile
 
     PROJECT = SELFTEST_PROJECT
     (PROTECTED_PATHS, SECRET_SUFFIXES, SECRET_CONTAINS,
      SECRET_TAILS, PROTECTED_TAILS) = _derive(PROJECT)
+    DEFAULT_BRANCH = PROJECT["default_branch"]
 
     failures = 0
     saved = (STOP_FILE, OWNED_DIR)
