@@ -6,47 +6,47 @@
 # before it does anything, so the `romm` tab -- which polls compose.sh from the
 # moment Orca opens it -- writes .env too, at the same moment setup.sh does.
 #
-#   test_env.sh concurrent   two writers at once both succeed and agree.
-#                                 This is the regression: sharing one `.env.tmp`
-#                                 let the first `mv` take the second's source
-#                                 away, and the loser's ENOENT aborted setup.sh
-#                                 at its first step under `set -e` -- a worktree
-#                                 with no build, no venv and no RomM, observed
-#                                 on a real worktree on 2026-09-04.
-#   test_env.sh readable     a reader never observes a partial .env, which
-#                                 is what the atomic rename was for originally.
-#   test_env.sh venv         a .venv whose interpreter is missing, dangling
-#                                 or too old is replaced, and a good one kept.
-#                                 The dangling case is the sharp one: `[ -x ]`
-#                                 is false for a dangling symlink, so a guard
-#                                 written that way leaves the venv in place and
-#                                 `python -m venv` over it exits 1 -- every
-#                                 re-run, forever.
+#   test_env.sh concurrent       two writers at once both succeed and agree.
+#                                This is the regression: sharing one `.env.tmp`
+#                                let the first `mv` take the second's source
+#                                away, and the loser's ENOENT aborted setup.sh
+#                                at its first step under `set -e` -- a worktree
+#                                with no build, no venv and no RomM, observed
+#                                on a real worktree on 2026-09-04.
+#   test_env.sh readable         a reader never observes a partial .env, which
+#                                is what the atomic rename was for originally.
+#   test_env.sh venv             a .venv whose interpreter is missing, dangling
+#                                or too old is replaced, and a good one kept.
+#                                The dangling case is the sharp one: `[ -x ]`
+#                                is false for a dangling symlink, so a guard
+#                                written that way leaves the venv in place and
+#                                `python -m venv` over it exits 1 -- every
+#                                re-run, forever.
 #   test_env.sh setup_fails_fast
-#                                 setup.sh itself stops on the interpreter
-#                                 before seeding or building, and says why.
-#   test_env.sh unstarted    a worktree the dispatcher did not open is told
-#                                 so, and told the command that starts its
-#                                 agent. This is the regression: #151 deleted
-#                                 the watcher that pressed Return on the drafted
-#                                 prompt, the dispatcher took over starting the
-#                                 build, and the path where there IS no
-#                                 dispatcher kept provisioning cleanly and
-#                                 stopping -- a worktree sitting on an unsent
-#                                 prompt for four and a half hours, observed on
-#                                 a real worktree on 2026-09-21 (#156).
-#   test_env.sh python       setup.sh installs server/requirements.txt with
-#                                 an interpreter new enough for it, and says so
-#                                 in one line when there is none. This is the
-#                                 regression: a worktree created from the Orca
-#                                 UI got macOS's 3.9.6 as `python3`, pip filtered
-#                                 out every candidate for `requests==2.33.0`
-#                                 (requires-python >=3.10) and reported "no
-#                                 matching distribution" over two hundred lines,
-#                                 naming neither Python nor the reason. setup.sh
-#                                 died under `set -e` and the worktree arrived
-#                                 with no RomM and no agent -- observed on a real
-#                                 worktree on 2026-09-04.
+#                                setup.sh itself stops on the interpreter
+#                                before seeding or building, and says why.
+#   test_env.sh unstarted        a worktree the dispatcher did not open is told
+#                                so, and told the command that starts its
+#                                agent. This is the regression: #151 deleted
+#                                the watcher that pressed Return on the drafted
+#                                prompt, the dispatcher took over starting the
+#                                build, and the path where there IS no
+#                                dispatcher kept provisioning cleanly and
+#                                stopping -- a worktree sitting on an unsent
+#                                prompt for four and a half hours, observed on
+#                                a real worktree on 2026-09-21 (#156).
+#   test_env.sh python           setup.sh installs server/requirements.txt with
+#                                an interpreter new enough for it, and says so
+#                                in one line when there is none. This is the
+#                                regression: a worktree created from the Orca
+#                                UI got macOS's 3.9.6 as `python3`, pip filtered
+#                                out every candidate for `requests==2.33.0`
+#                                (requires-python >=3.10) and reported "no
+#                                matching distribution" over two hundred lines,
+#                                naming neither Python nor the reason. setup.sh
+#                                died under `set -e` and the worktree arrived
+#                                with no RomM and no agent -- observed on a real
+#                                worktree on 2026-09-04.
 #
 # No phase needs Docker or Orca.
 set -uo pipefail

@@ -2,36 +2,36 @@
 # Covers scripts/fleet/answer-review.sh -- the answer that keeps a review's
 # findings from being outrun by the auto-merge armed before the review ran.
 #
-#   test_orca_answer_review.sh posts     an ordinary answer -> a comment
+#   test_answer_review.sh posts     an ordinary answer -> a comment
 #                                        carrying the marker merge_gate.py
 #                                        matches, and the gate's failed run on
 #                                        this head is re-run. No GitHub event
 #                                        does that: an `issue_comment` run's
 #                                        check attaches to the default branch,
 #                                        not to this PR's head.
-#   test_orca_answer_review.sh thin      "ok" -> refused, nothing posted. An
+#   test_answer_review.sh thin      "ok" -> refused, nothing posted. An
 #                                        answer the gate will not count is worse
 #                                        than none: it looks done and the PR
 #                                        stays red for a reason nothing states.
-#   test_orca_answer_review.sh unpushed  the worktree is ahead of the PR ->
+#   test_answer_review.sh unpushed  the worktree is ahead of the PR ->
 #                                        refused, told to push. The review to
 #                                        answer is the one of the code GitHub
 #                                        actually has.
-#   test_orca_answer_review.sh behind    ...and the other way -> refused, told to
+#   test_answer_review.sh behind    ...and the other way -> refused, told to
 #                                        fetch. "Push it first" on a branch that
 #                                        is behind is advice GitHub rejects.
-#   test_orca_answer_review.sh no_review no review has been submitted against this
+#   test_answer_review.sh no_review no review has been submitted against this
 #                                        head yet -> refused. An answer written
 #                                        before the review it answers is
 #                                        discarded by it, so the agent would be
 #                                        told it is done with the gate still red.
-#   test_orca_answer_review.sh flight    a gate run is still in flight -> waited
+#   test_answer_review.sh flight    a gate run is still in flight -> waited
 #                                        out and re-asked, not read as nothing
 #                                        to do. That run may have read the PR
 #                                        before the answer existed.
-#   test_orca_answer_review.sh stopped   the fleet stop file exists -> exit 3 and
+#   test_answer_review.sh stopped   the fleet stop file exists -> exit 3 and
 #                                        write nothing.
-#   test_orca_answer_review.sh gate      the posted answer satisfies the gate it
+#   test_answer_review.sh gate      the posted answer satisfies the gate it
 #                                        was written for -- the two halves are
 #                                        checked against each other rather than
 #                                        each against its own idea of the marker.
@@ -296,6 +296,6 @@ PY
     echo "ok: what this script writes is what the gate accepts as an answer"
     ;;
   *)
-    echo "usage: test_orca_answer_review.sh posts|thin|unpushed|behind|no_review|flight|stopped|gate" >&2
+    echo "usage: test_answer_review.sh posts|thin|unpushed|behind|no_review|flight|stopped|gate" >&2
     exit 2 ;;
 esac

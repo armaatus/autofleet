@@ -6,7 +6,12 @@
 # whichever driver created it. That is armaatus/autofleet#151: a hook mechanism
 # only one runtime has cannot be where the fleet's own steps live.
 #
-# What is left here is for worktrees a PERSON opens or removes through the app.
+# What is left here is the app's own hooks. `archive` is for a removal a PERSON
+# made through the app, one `fleet.sh` did not ask for. `setup` is NOT that
+# narrow: the app fires it for every worktree created here, the dispatcher's
+# included, which the block below is built on. Saying "this file is for what a
+# person does" of both is how a reader talks themselves out of that -- and it
+# is what this line used to say. Found by the independent review, round 2.
 #
 # Orca will ask you to trust this file before it runs anything, and again after
 # each change -- these scripts execute on your machine.
@@ -14,10 +19,13 @@
 scripts:
   # Runs once per new worktree -- EVERY new worktree, including the ones the
   # dispatcher opens, and that is load-bearing rather than incidental.
-  # `launch` calls `runner_worktree_create` (which is where the app fires this
-  # hook) at fleet.sh:1890 and its own `setup.sh` at fleet.sh:1940, so on this
-  # driver the order is: the app's run FIRST and unmarked, the dispatcher's
-  # second with AUTOFLEET_DISPATCHER_LAUNCH set.
+  # `launch` calls `runner_worktree_create` -- which is where the app fires
+  # this hook -- before it calls `setup.sh` itself, so on this driver the order
+  # is: the app's run FIRST and unmarked, the dispatcher's second with
+  # AUTOFLEET_DISPATCHER_LAUNCH set. NO LINE NUMBERS: `runner/orca.sh` and
+  # `tests/test_fleet.sh` both still cite "fleet.sh:702" for the first of those
+  # calls, which has since moved by twelve hundred lines. The two call sites
+  # name themselves.
   #
   # `setup.sh` is safe to run twice, and its closing stanza is written for that
   # unmarked first run: it states a condition rather than asserting "no

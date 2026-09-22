@@ -14,10 +14,6 @@
 #   test_orca_teardown.sh reap      reap.sh flags a stack with no worktree and
 #                                   never flags one still in use. Skips with 77
 #                                   when docker is down, like rig.smoke.
-#   test_orca_teardown.sh watcher   the agent autostart watcher is signalled on
-#                                   the way out, and a pid it merely left behind
-#                                   -- one the system has since handed to
-#                                   something else -- is not. Needs no docker.
 #   test_orca_teardown.sh compose   `compose.sh down` -- the teardown ci.yml and
 #                                   provision.py both point at -- activates every
 #                                   profile and removes orphans, while `up -d`

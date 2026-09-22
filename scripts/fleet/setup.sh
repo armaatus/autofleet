@@ -90,8 +90,9 @@ fi
 # still holds, and for the same shape of reason pointed at the stanza below. A
 # hook that dies here exits before it, so the invitation to start an agent
 # never prints for a worktree there is nothing to work in -- which is what it
-# would be doing if this ran last. Found stated backwards by the independent
-# review.
+# would be doing if the stanza came first. Found stated backwards by the
+# independent review, and its last clause still pointing the wrong way in
+# round 2.
 if [ -n "${AUTOFLEET_SETUP_HOOK:-}" ] && [ -x "$AUTOFLEET_SETUP_HOOK" ]; then
   echo "==> $AUTOFLEET_SETUP_HOOK"
   "./$AUTOFLEET_SETUP_HOOK"
