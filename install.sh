@@ -44,12 +44,17 @@ PAYLOAD=(
   # findings addressed -- is what a re-review of the fixed head answers in one
   # pass with no protocol, and the protocol was where it failed every time.
   ".claude/agents/reviewer.md"
-  # The lint: `bash -n`, shellcheck, and the two selftests. It shells out to
-  # nothing this installer does not also deliver -- a vendored lint that imports
-  # a file the installer left behind fails on every host PR, on a check about the
-  # host's own configuration (hard rule 1). It replaced `evals/lint.sh` and four
-  # hand-written python scanners in armaatus/autofleet#153.
+  # The lint: `bash -n`, shellcheck, three scanners and three selftests. It
+  # replaced `evals/lint.sh` in armaatus/autofleet#153.
   "evals/run.sh"
+  # ...and what it RUNS. A vendored lint that shells out to a file the installer
+  # did not deliver fails on every host pull request, on a check about the
+  # host's own configuration -- hard rule 1, and the reason this list exists.
+  # These three are the classes shellcheck does not report at any severity;
+  # `shell_code.py` is not here because SC2181 covers what it was for.
+  "evals/piped_quiet_grep.py"
+  "evals/late_stderr_silence.py"
+  "evals/continuation_comment.py"
   "docs/WORKFLOW.md"
   # Vendored because the payload POINTS AT IT: REVIEW.md links to it,
   # scripts/fleet/review.sh and .claude/agents/reviewer.md cite it as where the
