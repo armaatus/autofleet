@@ -193,7 +193,35 @@ turn budget; spend it on the files that decide behaviour, and say in a finding
 if you ran out before reading something that mattered."
 fi
 
-prompt="$(cat "$BRIEF")
+# THE BRIEF WITHOUT ITS FRONTMATTER, and this is not tidiness.
+#
+# `.claude/agents/reviewer.md` opens with a YAML block delimited by `---`,
+# because it is also a registered subagent. Inlined verbatim, the prompt STARTS
+# with `---`, and `claude -p "$prompt"` then parses it as a flag:
+#
+#     error: unknown option '---\nname: reviewer\n...
+#
+# The reviewer never starts, `review.sh` reports "produced no verdict this could
+# read", and the retry does the same thing again. Found by running this against
+# its own pull request -- nothing in the suite sees it, because `stub_reviewer`
+# replaces the command and never parses a flag.
+#
+# Stripping it is right anyway: the frontmatter is the subagent REGISTRATION --
+# a name, a description and a tool list this script already passes on the
+# command line -- and none of it is an instruction to a `-p` run.
+#
+# From line 1 only, and up to the FIRST closing delimiter: a `---` later in the
+# body is an ordinary horizontal rule and has to survive.
+brief_text="$(awk '
+  NR == 1 && $0 ~ /^---[[:space:]]*$/ { infm = 1; next }
+  infm && $0 ~ /^---[[:space:]]*$/    { infm = 0; next }
+  !infm
+' "$BRIEF")"
+[ -n "$brief_text" ] || {
+  echo "review.sh: $BRIEF is empty once its frontmatter is stripped." >&2
+  exit 2; }
+
+prompt="$brief_text
 
 --- REVIEW.md (the policy; follow it exactly) -------------------------------
 

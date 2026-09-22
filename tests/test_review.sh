@@ -32,6 +32,11 @@
 #   ceiling      after-pr.sh refuses a third review on a pull request, whatever
 #                it is asked.
 #   parks        a second request-changes parks the PR with a comment and stops.
+#   prompthead   the prompt does NOT start with the brief's `---` frontmatter.
+#                `claude -p "---\nname: reviewer..."` parses the whole thing as
+#                a flag -- "error: unknown option" -- so the reviewer never
+#                starts and the run reports "no verdict" forever. The stub
+#                reviewer cannot see it, because it parses no flags.
 #   bigdiff      a diff past AUTOFLEET_REVIEW_DIFF_MAX is NOT inlined and NOT
 #                truncated: the reviewer gets the stat and reads the hunks
 #                itself. PR #158 is 1.3MB, about 328k tokens, so an uncapped
@@ -350,6 +355,35 @@ STUB
     || fail "a reviewer that ran and produced no verdict was refunded; it cost what a review costs"
   ok "a review that started no model is refunded, and one that ran is not"
   ;;
+# ----------------------------------------------------------------- prompthead
+  prompthead)
+  make_fixture "" "$APPROVE"
+  # Records the prompt rather than judging anything.
+  cat >"$WORK/bin/stub-reviewer" <<'PROMPTSTUB'
+#!/usr/bin/env bash
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-p" ] && printf '%s' "$arg" >"$CLAUDE_CALLS"
+  prev="$arg"
+done
+printf '{"type":"result","result":"x","structured_output":{"verdict":"approve","findings":[]},"total_cost_usd":0.1,"num_turns":1}\n'
+PROMPTSTUB
+  chmod +x "$WORK/bin/stub-reviewer"
+  out="$(review_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "the review did not finish (rc $rc)"; }
+  first="$(head -1 "$CLAUDE_CALLS")"
+  case "$first" in
+    -*) fail "the prompt starts with '$first', which the CLI parses as an option: the reviewer never starts" ;;
+  esac
+  # ...and the frontmatter's KEYS are gone with it, not merely its delimiter.
+  grep -q '^name: reviewer' "$CLAUDE_CALLS" \
+    && fail "the brief's frontmatter reached the prompt; it is the subagent registration, not an instruction"
+  # ...while the brief itself did arrive. A strip that took the whole file would
+  # pass both tests above and review against no brief at all.
+  grep -q 'You are the second opinion on a pull request' "$CLAUDE_CALLS" \
+    || fail "the brief did not reach the prompt at all"
+  ok "the prompt opens with the brief, not with its frontmatter"
+  ;;
 # -------------------------------------------------------------------- bigdiff
   bigdiff)
   make_fixture "" "$APPROVE"
@@ -420,6 +454,6 @@ PROMPTSTUB
   ok "one review, one fix, one re-review, then a person"
   ;;
   *)
-  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|bigdiff|parks}" >&2
+  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|prompthead|bigdiff|parks}" >&2
   exit 2 ;;
 esac
