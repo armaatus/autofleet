@@ -1929,9 +1929,14 @@ launch() {
   # `archive.sh` through the watchdog for exactly that reason. Found by the
   # local `/code-review` pass, which noticed the same PR guarding one side and
   # not the other.
+  #
+  # AUTOFLEET_DISPATCHER_LAUNCH is how the hook tells the two callers apart. It
+  # closes with a stanza naming the command that starts the agent, for the
+  # person-opened worktree that has nothing behind it (armaatus/autofleet#156);
+  # `start_build` is a few lines below here, so this caller must not print it.
   local setup_out; setup_out="$(mktemp)"
   FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "${AUTOFLEET_SETUP_DEADLINE:-900}" \
-    "$setup_out" env -C "$path" ./scripts/fleet/setup.sh
+    "$setup_out" env -C "$path" AUTOFLEET_DISPATCHER_LAUNCH=1 ./scripts/fleet/setup.sh
   if [ $? != 0 ]; then
     say "  #$num: its worktree would not provision:"
     sed -n '1,10p' "$setup_out" | sed 's/^/    /' | tee -a "$LOG"

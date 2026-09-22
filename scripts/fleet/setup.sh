@@ -8,10 +8,11 @@
 # up reads the connection error as a code bug and goes chasing it; the seconds
 # this costs buy away that whole failure mode.
 #
-# autofleet's own half is small: derive the worktree's identity, initialise
-# submodules, and start the watcher that submits the agent's prompt. Everything
-# that is about THIS project -- containers, fixtures, a build, a venv -- lives
-# in `.autofleet/setup.sh` in the host repo, which this calls with .env already
+# autofleet's own half is small: derive the worktree's identity and initialise
+# submodules. It does NOT start the agent -- see the closing stanza for who
+# does, which differs by who opened the worktree. Everything that is about THIS
+# project -- containers, fixtures, a build, a venv -- lives in
+# `.autofleet/setup.sh` in the host repo, which this calls with .env already
 # exported.
 set -euo pipefail
 
@@ -41,8 +42,8 @@ set -a; . ./.env; set +a
 # install Orca when what is actually wrong is their PATH. That is the same
 # consequence-reported-as-cause this issue exists to remove, reintroduced by
 # the fix for it. `tests/test_env.sh setup_fails_fast` is the phase that caught
-# it. Everything the probe still guards -- submodules, the project hook, the
-# watcher -- is below.
+# it. Everything the probe still guards -- submodules and the project hook --
+# is below.
 #
 # It is FATAL rather than a warning: everything this hook exists to prepare is
 # for an agent the runner is supposed to start, and provisioning a worktree
@@ -81,10 +82,17 @@ if [ -f .gitmodules ]; then
   git submodule update --init --recursive
 fi
 
-# Before the watcher, not after it. The project hook is the step that fails on a
-# bad day -- an image pull with no network, a scan that never finishes -- and
-# `set -e` means a failure here must not leave a watcher polling the runtime
-# from a worktree nobody will ever work in.
+# LAST of the provisioning steps, and that order outlived its first reason. It
+# was "before the watcher": the project hook is the step that fails on a bad
+# day -- an image pull with no network, a scan that never finishes -- and under
+# `set -e` a failure here must not leave a watcher polling the runtime from a
+# worktree nobody will ever work in. #151 deleted the watcher; the ordering
+# still holds, and for the same shape of reason pointed at the stanza below. A
+# hook that dies here exits before it, so the invitation to start an agent
+# never prints for a worktree there is nothing to work in -- which is what it
+# would be doing if the stanza came first. Found stated backwards by the
+# independent review, and its last clause still pointing the wrong way in
+# round 2.
 if [ -n "${AUTOFLEET_SETUP_HOOK:-}" ] && [ -x "$AUTOFLEET_SETUP_HOOK" ]; then
   echo "==> $AUTOFLEET_SETUP_HOOK"
   "./$AUTOFLEET_SETUP_HOOK"
@@ -106,4 +114,62 @@ echo "worktree ready."
 echo "  project     $FLEET_PROJECT"
 fleet_ports | sed 's/^/  port        /'
 [ -n "${AUTOFLEET_TEST_COMMAND:-}" ] && echo "  tests       $AUTOFLEET_TEST_COMMAND"
+
+# WHO STARTS THE AGENT, said where the person who has to do it is looking.
+#
+# `start_build` covers the worktrees the dispatcher opened and nothing covers
+# the rest: a person opening one through the app gets a provisioned worktree, a
+# prompt drafted in a tab, and no watcher to press Return -- which is, word for
+# word, the failure `runner/orca.sh` gives as the reason #151 was made, reached
+# now by succeeding instead of by failing. Observed on 2026-09-21: four and a
+# half hours on an unsent prompt. armaatus/autofleet#156.
+#
+# The MARKER IS THE DISPATCHER'S, not the runner's. Asking which driver is
+# configured answers a different question -- `headless` is the default
+# everywhere, including in a worktree a person opened by hand -- and asking the
+# app whether it drafted anything makes this hook's output depend on a runtime
+# the headless path does not have. `launch` sets the variable when it calls
+# this hook itself, which is every launch on the default driver.
+#
+# IT IS TRUSTED, not verified. An `export AUTOFLEET_DISPATCHER_LAUNCH=1` left
+# in a shell silences this stanza for every worktree opened from it, silently
+# and permanently -- #156 inverted. A name nothing else uses is the whole of
+# the defence, which is proportionate for a variable that changes four lines of
+# output and nothing else; it would not be if it ever gated an action. Raised
+# by the independent review.
+#
+# IT DOES NOT REACH EVERY DISPATCHER LAUNCH, and the wording below is what
+# covers the gap rather than a claim that it does. On the app-backed driver
+# this hook has a SECOND caller: `orca.yaml` registers it as the worktree
+# creation hook, so a worktree `launch` opened runs it once from the app --
+# with no marker, since the app composes that environment -- and once from
+# `launch`. Asserting "no dispatcher opened this worktree" there would be
+# false, and false in the app's own setup output. So the line states the
+# condition instead of asserting the answer: true whoever is reading it, and a
+# person whose worktree really has nothing behind it still gets the command.
+# Found by the local /mattpocock-skills:code-review Standards pass.
+if [ -z "${AUTOFLEET_DISPATCHER_LAUNCH:-}" ]; then
+  # `fleet_issue_from_branch` is strict about the shape and answers nothing for
+  # a branch a person named. A PLACEHOLDER rather than a guess: the number is
+  # the one part of this line a reader cannot check, and a wrong one sends them
+  # to somebody else's issue with no sign anything is off.
+  issue="$(fleet_issue_from_branch "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)")" \
+    || issue="<issue>"
+  # ASK BEFORE STARTING ONE, and that line is not politeness. On the app-backed
+  # driver this hook also runs from the app's creation of a worktree `launch`
+  # opened, where the branch IS `<n>-<slug>` and the number below resolves to a
+  # live issue -- so the reader is one Return away from a second `claude -p` on
+  # a branch `start_build` is already committing to. Nothing readable from here
+  # tells the two apart: at this point in a launch the fleet has not yet owned
+  # the worktree or made its build directory. `fleet.sh status` can, and it is
+  # the one question whose answer settles it. Found by the local /code-review
+  # pass.
+  echo "  agent       not started by this hook."
+  echo "              If no dispatcher opened this worktree, nothing will submit"
+  echo "              a prompt in it -- \`./scripts/fleet/fleet.sh status\` says"
+  echo "              whether the fleet already has one here. If it does not,"
+  echo "              start it yourself, wherever you are running the agent:"
+  echo "                GH_PAGER=cat ./scripts/fleet/issue-command.sh $issue"
+  echo "              and follow what it prints."
+fi
 exit 0

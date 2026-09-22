@@ -2,20 +2,20 @@
 # Covers the two places scripts/fleet/fleet.sh used to report a state it had not
 # established: the board update, and the worktree removal.
 #
-#   test_orca_fleet.sh card_says      the Orca CLI refuses -> the dispatcher log
+#   test_fleet.sh card_says      the Orca CLI refuses -> the dispatcher log
 #                                     says the board update failed, and carries
 #                                     the CLI's own words. WORKFLOW.md calls the
 #                                     board THE status surface, so a silent
 #                                     failure freezes it with nothing anywhere
 #                                     saying it froze.
-#   test_orca_fleet.sh card_quiet     it worked -> nothing is said. A warning per
+#   test_fleet.sh card_quiet     it worked -> nothing is said. A warning per
 #                                     poll would be its own kind of noise.
-#   test_orca_fleet.sh remove_forces  `worktree rm` fails and `--force` works ->
+#   test_fleet.sh remove_forces  `worktree rm` fails and `--force` works ->
 #                                     the worktree is removed. This repo has a
 #                                     submodule and git refuses the plain
 #                                     removal outright, so without the retry
 #                                     EVERY merged worktree leaks.
-#   test_orca_fleet.sh remove_advice  both fail -> reap_merged says how to remove
+#   test_fleet.sh remove_advice  both fail -> reap_merged says how to remove
 #                                     it by hand, BOTH halves and in order: the
 #                                     directory first, because reap.sh alone
 #                                     skips a worktree that is still there and
@@ -29,31 +29,31 @@
 # BEFORE Orca refused the removal, so a worktree that was still there, still
 # owned and still being worked in lost its RomM mid-ctest.
 #
-#   test_orca_fleet.sh remove_keeps_stack   the removal refuses -> the hook was
+#   test_fleet.sh remove_keeps_stack   the removal refuses -> the hook was
 #                                           never asked for, the sweep never ran,
 #                                           and it says the stack is still up.
-#   test_orca_fleet.sh remove_sweeps_stack  it worked -> the stack is swept only
+#   test_fleet.sh remove_sweeps_stack  it worked -> the stack is swept only
 #                                           NOW. Dropping --run-hooks without
 #                                           this would leak two ports and four
 #                                           volumes per merged worktree.
-#   test_orca_fleet.sh merged_keeps_dirty   reap_merged leaves a dirty worktree
+#   test_fleet.sh merged_keeps_dirty   reap_merged leaves a dirty worktree
 #                                           and says what it holds, exactly as it
 #                                           already does for unpushed commits --
 #                                           #122's held two review fixes.
-#   test_orca_fleet.sh merged_keeps_owned   a refused removal keeps the issue
+#   test_fleet.sh merged_keeps_owned   a refused removal keeps the issue
 #                                           OWNED and is said once, the way
 #                                           reap_abandoned already does. Disowned,
 #                                           nothing ever looks at that worktree
 #                                           again.
-#   test_orca_fleet.sh merged_unknown_git   ...and a git that cannot say what is
+#   test_fleet.sh merged_unknown_git   ...and a git that cannot say what is
 #                                           in there is "could not tell", not
 #                                           "clean". A guard that fails open on
 #                                           its own error is not a guard.
-#   test_orca_fleet.sh merged_cli_silent    a CLI that never ANSWERED is not a
+#   test_fleet.sh merged_cli_silent    a CLI that never ANSWERED is not a
 #                                           refusal: retried next pass rather
 #                                           than parked, or Orca.app restarting
 #                                           costs the fleet a slot for good.
-#   test_orca_fleet.sh remove_scoped_sweep  the sweep names THIS worktree's stack.
+#   test_fleet.sh remove_scoped_sweep  the sweep names THIS worktree's stack.
 #                                           Unscoped, releasing one worktree also
 #                                           deletes the database of an orphan
 #                                           somebody is still looking at.
@@ -61,53 +61,53 @@
 # ...and the three places `needs-human-step` has to be honoured, because an
 # issue whose last step is outward and the maintainer's is not a stalled one:
 #
-#   test_orca_fleet.sh stall_expected an agent `waiting` on a labelled issue ->
+#   test_fleet.sh stall_expected an agent `waiting` on a labelled issue ->
 #                                     reported as waiting for you AS EXPECTED,
 #                                     and never as "nothing should be asking".
-#   test_orca_fleet.sh stall_reports  an agent `waiting` on an ordinary issue ->
+#   test_fleet.sh stall_reports  an agent `waiting` on an ordinary issue ->
 #                                     still the stall it always was. The whole
 #                                     point of the exemption is that the signal
 #                                     keeps meaning something.
-#   test_orca_fleet.sh timebox_waits  past the box, no PR, labelled -> NOT
+#   test_fleet.sh timebox_waits  past the box, no PR, labelled -> NOT
 #                                     interrupted, no "gave up" comment on the
 #                                     issue, said once rather than once a
 #                                     minute, and on the board rather than only
 #                                     in the log.
-#   test_orca_fleet.sh timebox_stops  past the box, no PR, unlabelled -> still
+#   test_fleet.sh timebox_stops  past the box, no PR, unlabelled -> still
 #                                     interrupted and still commented on.
-#   test_orca_fleet.sh queue_skips    a labelled issue is not startable: the
+#   test_fleet.sh queue_skips    a labelled issue is not startable: the
 #                                     dispatcher must not open a worktree for
 #                                     work no agent may finish, or it opens one
 #                                     per cycle forever (#148).
-#   test_orca_fleet.sh list_declines  ...and `fleet.sh run 148` declines it too,
+#   test_fleet.sh list_declines  ...and `fleet.sh run 148` declines it too,
 #                                     dropping it rather than skipping it: an
 #                                     issue kept in `wanted` that can never be
 #                                     launched is a run loop that never ends.
-#   test_orca_fleet.sh timebox_rearms the label comes off -> the box fires. The
+#   test_fleet.sh timebox_rearms the label comes off -> the box fires. The
 #                                     exemption keeps the started marker for
 #                                     exactly this: deleting it would leave a
 #                                     handed-back agent running uncapped.
-#   test_orca_fleet.sh labels_unknown the label lookup FAILS -> the agent is not
+#   test_fleet.sh labels_unknown the label lookup FAILS -> the agent is not
 #                                     stopped and the stall is not decided.
 #                                     Every lookup here has a third answer, and
 #                                     an agent is only ever stopped on an answer.
-#   test_orca_fleet.sh outage_once    ...and it is said ONCE across a real poll:
+#   test_fleet.sh outage_once    ...and it is said ONCE across a real poll:
 #                                     notice_stalled must not clear the marker
 #                                     enforce_timebox set moments earlier, which
 #                                     is the line-a-minute the markers prevent.
-#   test_orca_fleet.sh one_lookup     every watcher in one poll -> one `gh` call
+#   test_fleet.sh one_lookup     every watcher in one poll -> one `gh` call
 #                                     for that issue's state and labels, not one
 #                                     each.
-#   test_orca_fleet.sh own_clears     a fresh worktree for an issue that had one
+#   test_fleet.sh own_clears     a fresh worktree for an issue that had one
 #                                     before starts with NO markers. They only
 #                                     ever throttle a message to once, so an
 #                                     inherited one silences the new worktree --
 #                                     a `stalled-42` left behind makes
 #                                     notice_stalled say nothing at all.
-#   test_orca_fleet.sh timebox_clears both exits from enforce_timebox clear
-#   test_orca_fleet.sh stop_clears    every marker it owns, not only the ones it
+#   test_fleet.sh timebox_clears both exits from enforce_timebox clear
+#   test_fleet.sh stop_clears    every marker it owns, not only the ones it
 #                                     set on the way in.
-#   test_orca_fleet.sh one_card       exempt, waiting and past the box -> ONE
+#   test_fleet.sh one_card       exempt, waiting and past the box -> ONE
 #                                     board comment in the poll, not two, and it
 #                                     still says both things a person needs.
 #
@@ -115,35 +115,35 @@
 # merged PR held one of three slots forever, because `reap_merged` is keyed on a
 # PR that merged and nothing else ever removed one (#153).
 #
-#   test_orca_fleet.sh abandon_blocked      the issue went `blocked` -> released.
-#   test_orca_fleet.sh abandon_closed       the issue closed with no merged PR
+#   test_fleet.sh abandon_blocked      the issue went `blocked` -> released.
+#   test_fleet.sh abandon_closed       the issue closed with no merged PR
 #                                           for this branch -> released.
-#   test_orca_fleet.sh abandon_human_step   labelled `needs-human-step` -> released.
+#   test_fleet.sh abandon_human_step   labelled `needs-human-step` -> released.
 #                                           #139's agent correctly produced no PR
 #                                           and stopped; reap_merged would wait
 #                                           for a merged PR forever.
-#   test_orca_fleet.sh abandon_keeps_dirty  ...unless the working tree is dirty,
-#   test_orca_fleet.sh abandon_keeps_commits or carries commits that are not in
+#   test_fleet.sh abandon_keeps_dirty  ...unless the working tree is dirty,
+#   test_fleet.sh abandon_keeps_commits or carries commits that are not in
 #                                           origin/main. Kept, and it SAYS what
 #                                           is in there -- that pair is the whole
 #                                           safety argument, verified by hand
 #                                           before every removal on 2026-09-07.
-#   test_orca_fleet.sh abandon_unknown_git  ...and a git that cannot answer is
+#   test_fleet.sh abandon_unknown_git  ...and a git that cannot answer is
 #                                           "could not tell", not "nothing".
-#   test_orca_fleet.sh abandon_leaves_working the control: an open issue with no
+#   test_fleet.sh abandon_leaves_working the control: an open issue with no
 #                                           reason to release -> untouched. An
 #                                           agent mid-task must not lose its
 #                                           worktree.
-#   test_orca_fleet.sh abandon_timebox      the box stopped the agent -> released,
+#   test_fleet.sh abandon_timebox      the box stopped the agent -> released,
 #                                           and the record of it OUTLIVES the
 #                                           worktree.
-#   test_orca_fleet.sh gaveup_not_restarted ...so the freed slot does not go
+#   test_fleet.sh gaveup_not_restarted ...so the freed slot does not go
 #                                           straight back to the same three
 #                                           hours, which is what releasing it
 #                                           without the record would do.
-#   test_orca_fleet.sh gaveup_retry         `fleet.sh retry 42` is how it comes
+#   test_fleet.sh gaveup_retry         `fleet.sh retry 42` is how it comes
 #                                           back, and it is the only way.
-#   test_orca_fleet.sh abandon_warns_first  the first pass that finds a reason
+#   test_fleet.sh abandon_warns_first  the first pass that finds a reason
 #                                           WARNS and removes nothing. An agent
 #                                           plans before it edits (CLAUDE.md), so
 #                                           a worktree forty minutes into real
@@ -151,20 +151,20 @@
 #                                           `blocked` is re-derived by
 #                                           unblock.yml on every merge, so it
 #                                           lands under one that is mid-plan.
-#   test_orca_fleet.sh abandon_warned_saved ...and a minute is enough: something
+#   test_fleet.sh abandon_warned_saved ...and a minute is enough: something
 #                                           committed after the warning keeps the
 #                                           worktree.
-#   test_orca_fleet.sh abandon_two_keeps    the two keeps do not share one
+#   test_fleet.sh abandon_two_keeps    the two keeps do not share one
 #                                           marker. A transient git failure must
 #                                           not silence the line that says what
 #                                           is actually in there.
-#   test_orca_fleet.sh gaveup_pruned        the record is dropped once the issue
+#   test_fleet.sh gaveup_pruned        the record is dropped once the issue
 #                                           lands, or `fleet.sh status` lists
 #                                           finished work forever and the files
 #                                           never go away.
-#   test_orca_fleet.sh list_says_declined   a run that declined every issue it was
+#   test_fleet.sh list_says_declined   a run that declined every issue it was
 #                                           given does not report that they landed.
-#   test_orca_fleet.sh abandon_reason_flickers
+#   test_fleet.sh abandon_reason_flickers
 #                                           the reason goes away and comes back ->
 #                                           a FRESH pass of notice. unblock.yml
 #                                           re-derives `blocked` on every merge,
@@ -173,7 +173,7 @@
 #                                           the first occurrence must not be
 #                                           inherited by the second -- that is a
 #                                           worktree removed with no notice at all.
-#   test_orca_fleet.sh abandon_lookup_blind a lookup that FAILED is not "no
+#   test_fleet.sh abandon_lookup_blind a lookup that FAILED is not "no
 #                                           reason". Folded into one, it wipes a
 #                                           warning still owed to a reason nobody
 #                                           could read, and the notice starts over
@@ -184,21 +184,21 @@
 # worktree and NOT live in the dispatcher that is running -- for 27 hours, over
 # four PRs, with nothing anywhere saying so (#173).
 #
-#   test_orca_fleet.sh status_stale       fleet.sh moved on since the dispatcher
+#   test_fleet.sh status_stale       fleet.sh moved on since the dispatcher
 #                                         started -> status says when it started,
 #                                         NAMES the commits that are not live in
 #                                         it, and says a restart is what fixes
 #                                         it, the cap included.
-#   test_orca_fleet.sh status_current     it is running the file on disk ->
+#   test_fleet.sh status_current     it is running the file on disk ->
 #                                         still says when it started, and does
 #                                         not cry stale. A warning every poll on
 #                                         a current dispatcher teaches you to
 #                                         ignore the one that matters.
-#   test_orca_fleet.sh status_unrecorded  a dispatcher from before this check ->
+#   test_fleet.sh status_unrecorded  a dispatcher from before this check ->
 #                                         "cannot say", not "current". A staleness
 #                                         report that fails open is the silence
 #                                         #173 already was.
-#   test_orca_fleet.sh status_from_worktree
+#   test_fleet.sh status_from_worktree
 #                                         `status` run from a FLEET worktree,
 #                                         branched before the fix, about the
 #                                         dispatcher in the main one -> still
@@ -209,34 +209,34 @@
 #                                         two old files agree and reports
 #                                         "current" -- #173 rebuilt inside the
 #                                         check for it.
-#   test_orca_fleet.sh status_draining    stopped but still up -> BOTH lines. A
+#   test_fleet.sh status_draining    stopped but still up -> BOTH lines. A
 #                                         drain leaves the dispatcher running on
 #                                         purpose, and the code it is draining
 #                                         with is the stale code.
-#   test_orca_fleet.sh status_drained     ...and once it exits, `idle` prints
+#   test_fleet.sh status_drained     ...and once it exits, `idle` prints
 #                                         WHILE stopped. That line is what the
 #                                         documented restart waits for, and the
 #                                         stop file used to swallow it.
-#   test_orca_fleet.sh status_behind      the checkout it started from never
+#   test_fleet.sh status_behind      the checkout it started from never
 #                                         pulled the fix -> BEHIND, naming it and
 #                                         the pull. Nothing in the fleet updates
 #                                         that checkout, so "the bytes on disk
 #                                         are the bytes it parsed" is true of the
 #                                         exact 27 hours #173 is about.
-#   test_orca_fleet.sh status_behind_revert
+#   test_fleet.sh status_behind_revert
 #                                         ...but a commit and its revert leave
 #                                         `origin/main` byte-identical to what
 #                                         the dispatcher parsed -> NOT behind.
 #                                         The commits are how the report names
 #                                         what changed; the bytes are what
 #                                         decides that anything did.
-#   test_orca_fleet.sh status_unreadable  the dispatcher's own fleet.sh cannot be
+#   test_fleet.sh status_unreadable  the dispatcher's own fleet.sh cannot be
 #                                         READ -> "cannot say", not STALE. A hash
 #                                         nobody could take compares unequal to
 #                                         every recorded one, so a permission
 #                                         error would otherwise be reported as a
 #                                         change.
-#   test_orca_fleet.sh status_names_root  the restart it prints names the
+#   test_fleet.sh status_names_root  the restart it prints names the
 #                                         dispatcher's OWN checkout. This report
 #                                         is read from a fleet worktree, and a
 #                                         relative `run --auto` there starts a
@@ -248,20 +248,20 @@
 # enforced per PROCESS, so two dispatchers open twice the cap between them,
 # reap, card and interrupt the same worktrees, and say so nowhere (#179).
 #
-#   test_orca_fleet.sh run_refuses        a dispatcher is up -> `run` refuses,
+#   test_fleet.sh run_refuses        a dispatcher is up -> `run` refuses,
 #                                         NAMES its pid, and says how to take
 #                                         over. The pidfile is left naming the
 #                                         one that is running: a refusal that
 #                                         claimed it would leave the live
 #                                         dispatcher's own exit unable to
 #                                         release it.
-#   test_orca_fleet.sh run_stale_recycled the pid is alive and is somebody
+#   test_fleet.sh run_stale_recycled the pid is alive and is somebody
 #                                         else's -- a `kill -9` left the pidfile
 #                                         and the OS wrapped round -> it starts.
 #                                         `kill -0` alone would refuse to start
 #                                         the fleet at all, forever, on the
 #                                         strength of a stranger.
-#   test_orca_fleet.sh run_stale_gone     the process is simply gone -> it
+#   test_fleet.sh run_stale_gone     the process is simply gone -> it
 #                                         starts.
 #
 # ...and the same question asked in the two other places this file reads that
@@ -269,11 +269,11 @@
 # two screens disagreeing about whether the fleet is up -- and `stop --now` is
 # the one place the fleet SIGNALS a pid it read out of a file.
 #
-#   test_orca_fleet.sh status_recycled    the pid is a stranger's -> `idle`.
-#   test_orca_fleet.sh stop_spares_stranger
+#   test_fleet.sh status_recycled    the pid is a stranger's -> `idle`.
+#   test_fleet.sh stop_spares_stranger
 #                                         ...and `stop --now` does not signal
 #                                         it, and says why.
-#   test_orca_fleet.sh stop_stops_dispatcher
+#   test_fleet.sh stop_stops_dispatcher
 #                                         the control: a real one still goes.
 #
 # ...and the THIRD answer, which is not "no": a `ps` that will not answer at all
@@ -283,13 +283,13 @@
 # agent, announce there was no dispatcher, leave it polling, and let the next
 # `run` start a second one.
 #
-#   test_orca_fleet.sh run_blind_ps       it starts -- one stale file may not
+#   test_fleet.sh run_blind_ps       it starts -- one stale file may not
 #                                         hold the fleet down -- and WARNS,
 #                                         naming the pid.
-#   test_orca_fleet.sh status_blind_ps    ...and `status` says so rather than
+#   test_fleet.sh status_blind_ps    ...and `status` says so rather than
 #                                         `idle`, which is the line that sends
 #                                         somebody to start the second one.
-#   test_orca_fleet.sh stop_blind_ps      ...and `--now` signals it anyway,
+#   test_fleet.sh stop_blind_ps      ...and `--now` signals it anyway,
 #                                         because it promises the dispatcher is
 #                                         down when it returns.
 #
@@ -299,7 +299,7 @@
 # itself forbidden, and ended only when the time-box gave three worktrees up.
 # `DRAIN` and `STOP` are now different files with different readers.
 #
-#   test_orca_fleet.sh drain_ends_on_merge
+#   test_fleet.sh drain_ends_on_merge
 #                                         the acceptance, end to end and against
 #                                         a real dispatcher: one worktree past
 #                                         its time-box, kept because its PR is
@@ -310,32 +310,32 @@
 #                                         `break 2` out of the whole loop the
 #                                         moment the file appeared mid-pass,
 #                                         leaving the worktrees it held unreaped.
-#   test_orca_fleet.sh drain_after_stop   a drain asked for while STOP is still
+#   test_fleet.sh drain_after_stop   a drain asked for while STOP is still
 #                                         set changes nothing about the agents,
 #                                         and says so. It used to print the full
 #                                         "they are NOT frozen" reassurance over
 #                                         a stop that had them frozen.
-#   test_orca_fleet.sh stop_writes_drain  a drain writes DRAIN and NOT STOP.
-#   test_orca_fleet.sh stop_now_writes_both
+#   test_fleet.sh stop_writes_drain  a drain writes DRAIN and NOT STOP.
+#   test_fleet.sh stop_now_writes_both
 #                                         `--now` writes both: a hard stop is a
 #                                         drain plus a freeze.
-#   test_orca_fleet.sh drain_lets_agents_finish
+#   test_fleet.sh drain_lets_agents_finish
 #                                         THE issue, asserted against the real
 #                                         .claude/hooks/guard.py: after a drain
 #                                         that hook allows `git push` and
 #                                         `gh pr create`, so the PRs the drain is
 #                                         waiting on can actually land.
-#   test_orca_fleet.sh stop_freezes_agents
+#   test_fleet.sh stop_freezes_agents
 #                                         ...and after `--now` it still refuses
 #                                         both. The escape hatch is unchanged.
-#   test_orca_fleet.sh drain_launches_nothing
+#   test_fleet.sh drain_launches_nothing
 #                                         the half a drain must KEEP: `run`
 #                                         refuses with only DRAIN set.
-#   test_orca_fleet.sh status_stopped     a hard stop says STOPPED, and does not
+#   test_fleet.sh status_stopped     a hard stop says STOPPED, and does not
 #                                         call itself a drain.
-#   test_orca_fleet.sh resume_clears_both a resume that cleared one of the two
+#   test_fleet.sh resume_clears_both a resume that cleared one of the two
 #                                         would leave a fleet nothing can start.
-#   test_orca_fleet.sh stop_drain_blind_dispatcher
+#   test_fleet.sh stop_drain_blind_dispatcher
 #                                         a dispatcher that predates DRAIN cannot
 #                                         see one -> the drain WARNS and names
 #                                         the pid, rather than looking set while
@@ -2087,6 +2087,48 @@ LOOPSTUB
     [ "$alive" = 0 ] \
       || fail "the pid the lock holds is not one fleet_agent_alive recognises (rc $alive); ps says: $line"
     echo "ok: the post-PR loop's lock names a pid the liveness probe can see"
+    ;;
+
+  launch_marks_setup)
+    # THE MARKER HAS ONE WRITER, and nothing else asserted it. `setup.sh` closes
+    # by naming the command that starts an agent, for a worktree that has no
+    # dispatcher behind it, and stays quiet when AUTOFLEET_DISPATCHER_LAUNCH
+    # says one does. `launch` is the only place that sets it -- one word between
+    # `env -C "$path"` and the script path -- and `tests/test_env.sh unstarted`
+    # sets it by hand, so dropping that word would leave the whole suite green
+    # while every dispatcher-opened worktree on the default driver was told to
+    # start an agent that `start_build` is starting three lines later. CLAUDE.md
+    # hard rule 3 is about exactly this shape. Found by the local /code-review
+    # pass. armaatus/autofleet#156.
+    make_fixture ok
+    stub_runner
+
+    # A RECORDER IN PLACE OF THE HOOK, because `launch` captures setup output to
+    # a temp file and prints it only when setup FAILED -- so on the path under
+    # test there is nothing to grep. What the environment looked like is the
+    # question anyway; the stanza's own wording is `test_env.sh`'s.
+    cat >"$WORK/repo/scripts/fleet/setup.sh" <<'REC'
+#!/usr/bin/env bash
+printf 'marker=[%s]\n' "${AUTOFLEET_DISPATCHER_LAUNCH:-}" >"$SETUP_RECORD"
+exit 0
+REC
+    chmod +x "$WORK/repo/scripts/fleet/setup.sh"
+    # No `add_origin`: it is hardcoded to $WORK/wt, which this phase never
+    # creates, so the three of its four git calls that touch that path fail
+    # quietly into stderr (no `set -e` here) and the phase passes carrying a
+    # line that did nothing -- for the next phase to copy. The fourth, the
+    # bare `git init` of $WORK/origin.git, succeeds and leaves a repository
+    # nothing reads. Raised by the independent review.
+    make_repo_git
+
+    export SETUP_RECORD="$WORK/setup-env"
+    in_fleet launch 44 "an issue the dispatcher opened" >/dev/null 2>&1 \
+      || fail "launch failed against a driver that answers everything"
+    [ -s "$SETUP_RECORD" ] \
+      || fail "launch never ran the worktree's setup hook at all"
+    grep -q "marker=\[1\]" "$SETUP_RECORD" \
+      || fail "launch ran setup.sh without AUTOFLEET_DISPATCHER_LAUNCH, so the worktree it is about to build was told to start its own agent: $(cat "$SETUP_RECORD")"
+    echo "PASS: a dispatcher launch tells its setup hook that a build is coming"
     ;;
 
   runner_stub)

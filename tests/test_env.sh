@@ -6,37 +6,47 @@
 # before it does anything, so the `romm` tab -- which polls compose.sh from the
 # moment Orca opens it -- writes .env too, at the same moment setup.sh does.
 #
-#   test_orca_env.sh concurrent   two writers at once both succeed and agree.
-#                                 This is the regression: sharing one `.env.tmp`
-#                                 let the first `mv` take the second's source
-#                                 away, and the loser's ENOENT aborted setup.sh
-#                                 at its first step under `set -e` -- a worktree
-#                                 with no build, no venv and no RomM, observed
-#                                 on a real worktree on 2026-09-04.
-#   test_orca_env.sh readable     a reader never observes a partial .env, which
-#                                 is what the atomic rename was for originally.
-#   test_orca_env.sh venv         a .venv whose interpreter is missing, dangling
-#                                 or too old is replaced, and a good one kept.
-#                                 The dangling case is the sharp one: `[ -x ]`
-#                                 is false for a dangling symlink, so a guard
-#                                 written that way leaves the venv in place and
-#                                 `python -m venv` over it exits 1 -- every
-#                                 re-run, forever.
-#   test_orca_env.sh setup_fails_fast
-#                                 setup.sh itself stops on the interpreter
-#                                 before seeding or building, and says why.
-#   test_orca_env.sh python       setup.sh installs server/requirements.txt with
-#                                 an interpreter new enough for it, and says so
-#                                 in one line when there is none. This is the
-#                                 regression: a worktree created from the Orca
-#                                 UI got macOS's 3.9.6 as `python3`, pip filtered
-#                                 out every candidate for `requests==2.33.0`
-#                                 (requires-python >=3.10) and reported "no
-#                                 matching distribution" over two hundred lines,
-#                                 naming neither Python nor the reason. setup.sh
-#                                 died under `set -e` and the worktree arrived
-#                                 with no RomM and no agent -- observed on a real
-#                                 worktree on 2026-09-04.
+#   test_env.sh concurrent       two writers at once both succeed and agree.
+#                                This is the regression: sharing one `.env.tmp`
+#                                let the first `mv` take the second's source
+#                                away, and the loser's ENOENT aborted setup.sh
+#                                at its first step under `set -e` -- a worktree
+#                                with no build, no venv and no RomM, observed
+#                                on a real worktree on 2026-09-04.
+#   test_env.sh readable         a reader never observes a partial .env, which
+#                                is what the atomic rename was for originally.
+#   test_env.sh venv             a .venv whose interpreter is missing, dangling
+#                                or too old is replaced, and a good one kept.
+#                                The dangling case is the sharp one: `[ -x ]`
+#                                is false for a dangling symlink, so a guard
+#                                written that way leaves the venv in place and
+#                                `python -m venv` over it exits 1 -- every
+#                                re-run, forever.
+#   test_env.sh setup_fails_fast
+#                                setup.sh itself stops on the interpreter
+#                                before seeding or building, and says why.
+#   test_env.sh unstarted        a worktree the dispatcher did not open is told
+#                                so, and told the command that starts its
+#                                agent. This is the regression: #151 deleted
+#                                the watcher that pressed Return on the drafted
+#                                prompt, the dispatcher took over starting the
+#                                build, and the path where there IS no
+#                                dispatcher kept provisioning cleanly and
+#                                stopping -- a worktree sitting on an unsent
+#                                prompt for four and a half hours, observed on
+#                                a real worktree on 2026-09-21 (#156).
+#   test_env.sh python           setup.sh installs server/requirements.txt with
+#                                an interpreter new enough for it, and says so
+#                                in one line when there is none. This is the
+#                                regression: a worktree created from the Orca
+#                                UI got macOS's 3.9.6 as `python3`, pip filtered
+#                                out every candidate for `requests==2.33.0`
+#                                (requires-python >=3.10) and reported "no
+#                                matching distribution" over two hundred lines,
+#                                naming neither Python nor the reason. setup.sh
+#                                died under `set -e` and the worktree arrived
+#                                with no RomM and no agent -- observed on a real
+#                                worktree on 2026-09-04.
 #
 # No phase needs Docker or Orca.
 set -uo pipefail
@@ -282,8 +292,66 @@ case "${1:-}" in
     echo "PASS: .env is never observed partially written"
     ;;
 
+  unstarted)
+    # END TO END THROUGH setup.sh, not a grep of it. The stanza is one `if` away
+    # from being printed for every worktree or for none, and both of those read
+    # as a pass to anything that only checks the text exists somewhere.
+    make_fixture
+    cd "$FIXTURE" || fail "could not enter the fixture"
+
+    # A REAL REPO ON A REAL BRANCH, because the issue number in the printed
+    # command comes from `git rev-parse --abbrev-ref HEAD`. A bare mktemp -d
+    # makes that fail for every case, so only the no-number arm would ever run
+    # and the arm that prints a number would be covered by nothing. Found by
+    # the local /mattpocock-skills:code-review Standards pass.
+    # GIT'S OWN WORDS on a failure, not ours alone: a $TMPDIR git will not init
+    # in, a hostile `init.templateDir`, a `core.hooksPath` that errors -- all of
+    # them reach a person here as "could not make the fixture a repo" and no
+    # reason, in a suite that relays the tool everywhere else.
+    git_out="$(git init -q . 2>&1)" || fail "could not make the fixture a repo: $git_out"
+    git_out="$(git -c user.email=t@t -c user.name=t commit -q --allow-empty -m x 2>&1)" \
+      || fail "could not commit in the fixture: $git_out"
+
+    run_setup() {
+      local out; out="$(git checkout -q -B "$1" 2>&1)" \
+        || fail "could not name the branch $1: $out"
+      AUTOFLEET_RUNNER=headless "$BASH" ./scripts/fleet/setup.sh 2>&1
+    }
+
+    # The headless runner asks for git and gh and nothing else, so the probe
+    # setup.sh runs before any of this passes on a bare machine.
+    out="$(run_setup armaatus/156-a-slug)" \
+      || fail "setup.sh did not provision the fixture at all: $out"
+    grep -q "worktree ready" <<<"$out" || fail "setup.sh never finished: $out"
+    # The three things a person stranded here needs: that nothing is running,
+    # what to run, and the number to run it on.
+    grep -q "not started by this hook" <<<"$out" \
+      || fail "a provisioned worktree was not told its agent is unstarted: $out"
+    grep -q "issue-command.sh 156" <<<"$out" \
+      || fail "the command named no issue, or the wrong one: $out"
+
+    # A BRANCH A PERSON NAMED, and the sharp case rather than a shapeless one:
+    # `2fa-support` starts with a digit, so a `[0-9]*` guard yields a confident
+    # `2` and sends its reader to somebody else's issue. A placeholder they
+    # will obviously replace is the only honest answer here.
+    out="$(run_setup 2fa-support)" || fail "setup.sh failed on a person's branch: $out"
+    grep -q "issue-command.sh <issue>" <<<"$out" \
+      || fail "a branch carrying no issue number did not get a placeholder: $out"
+
+    # ...and the dispatcher, which starts the build itself, must not print any
+    # of it. A build that is already running told to run issue-command.sh by
+    # hand is the same confusion pointed the other way.
+    git_out="$(git checkout -q -B armaatus/156-a-slug 2>&1)" \
+      || fail "could not return to the fleet-named branch: $git_out"
+    out="$(AUTOFLEET_RUNNER=headless AUTOFLEET_DISPATCHER_LAUNCH=1 "$BASH" ./scripts/fleet/setup.sh 2>&1)" \
+      || fail "setup.sh failed under the dispatcher: $out"
+    grep -q "not started by this hook" <<<"$out" \
+      && fail "the dispatcher's own launch was told to start the agent by hand: $out"
+    echo "PASS: a provisioned worktree is told what starts its agent, with the right number or none"
+    ;;
+
   *)
-    echo "usage: $0 concurrent|readable|python|venv|setup_fails_fast" >&2
+    echo "usage: $0 concurrent|readable|python|venv|setup_fails_fast|unstarted" >&2
     exit 2
     ;;
 esac
