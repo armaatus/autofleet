@@ -6,14 +6,28 @@
 #   ./tests/run.sh fleet card_says # one phase of one suite
 #   ./tests/run.sh --verbose       # ...and one line per phase while it runs
 #   AUTOFLEET_TEST_VERBOSE=1       # ...the same, where a flag cannot be threaded
+#   AUTOFLEET_TEST_JOBS=1          # one suite at a time; the default is the
+#                                  # core count, capped at 8
+#
+# SUITES RUN SIDE BY SIDE, phases within a suite do not. Several phases ask the
+# MACHINE a question -- `pgrep` for a stray `sleep`, `docker info` -- and a phase
+# that counts processes cannot run beside one that spawns them. A suite is the
+# coarsest unit where that is not true: each builds its own `mktemp -d` fixture
+# and stubs its own PATH. It took the run from 4m45 to 2m45 on the machine this
+# was written on.
 #
 # The suites are shell, and several of them dispatch on a PHASE argument: one
 # process per case, so a case that wedges cannot take the rest of the file with
 # it and a failure names itself. That is why the phase lists live here as data
-# rather than being discovered -- a registry something else can read is what
-# lets evals/lint.sh assert that every phase a script defines is actually run.
-# A phase defined in the script and missing from this list never executes, in
-# this runner or in CI, and is indistinguishable from a phase that passes.
+# rather than being discovered: a phase defined in the script and missing from
+# this list never executes, in this runner or in CI, and is indistinguishable
+# from a phase that passes.
+#
+# A lint check used to compare the two, and went with armaatus/autofleet#153.
+# What is left catches only HALF of it: a name in this list with no arm in the
+# script hits that script's `*)` and exits 2. **A phase defined in the script
+# and absent from this list is still silent**, and adding one is the moment to
+# remember it -- a line in `.autofleet/review.md` now, not a build step.
 #
 # A phase exits 0 for pass and any non-zero for fail, with ONE exception: exit 77
 # means "this phase could not judge anything" and is reported as a skip. It is
@@ -26,16 +40,17 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Before the `cd`, so a runner invoked by a relative path can still fork itself.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$REPO_ROOT"
 
 # `suite:phase phase ...`, or `suite:` for a script that runs whole.
 SUITES=(
 "lint:"
-"ceilings:over wellformed"
-"brief:stage1 reading"
+"brief:brief"
 "env:concurrent readable python venv setup_fails_fast unstarted"
 "teardown:derives reap profiles mtime"
-"runner_bound:bounds passes skips hostlint guards interrupt orphans quiet"
+"runner_bound:bounds passes skips guards interrupt orphans quiet"
 "await_review:verdict refusal moved stopped quiet"
 "cost:sums json empty attempts degrades filtered reaped subcommand"
 "install:ignores idempotent dry"
@@ -43,11 +58,12 @@ SUITES=(
 "fleet:post_pr_records_survive post_pr_lock_alive launch_marks_setup waiting_names_foreign foundation_holds foundation_break_is_local foundation_resays foundation_waiting_once foundation_closed_frees foundation_cold_start foundation_restart_speaks foundation_launch_held foundation_said_once foundation_one_lookup foundation_frees poll_list_once poll_list_after_launch poll_list_after_remove poll_list_cache_unreadable poll_list_reshape_fails poll_list_short_write poll_cache_gate_empty poll_list_once_in_run foundation_sees_launch status_list_uncached foundation_none foundation_blind foundation_cli_blind create_says create_warns card_says card_quiet remove_forces remove_advice remove_keeps_stack remove_sweeps_stack merged_keeps_dirty merged_keeps_owned merged_unknown_git merged_cli_silent remove_scoped_sweep queue_skips list_declines one_lookup own_clears own_outlives_release abandon_blocked abandon_closed abandon_human_step abandon_keeps_dirty abandon_keeps_commits abandon_unknown_git abandon_leaves_working gaveup_not_restarted gaveup_retry abandon_warns_first abandon_warned_saved abandon_two_keeps gaveup_pruned list_says_declined abandon_reason_flickers abandon_lookup_blind status_stale status_current status_unrecorded status_from_worktree status_draining status_stopped status_drained status_behind status_behind_revert status_unreadable status_names_root run_refuses run_stale_recycled run_stale_gone status_recycled stop_spares_stranger stop_stops_dispatcher run_blind_ps status_blind_ps stop_blind_ps drain_ends_on_merge drain_after_stop stop_writes_drain stop_now_writes_both drain_lets_agents_finish drain_launches_nothing resume_clears_both stop_drain_blind_dispatcher runner_stub runner_unresolved runner_missing selector_git_unusable selector_relative_common create_scoped live_scoped foundation_foreign status_worktree_scope reap_blind_upstream poll_empties_cache restart_after_parked_drain farewell_runner_blind parked_since_swept_at_start queued_blind_keeps_polling status_parked_beside_working drain_parked_counted_once drain_ends_with_parked status_keeps_cache cap_ends_on_merge priority_first status_priority priority_renamed budget_idle_pass budget_scales budget_pr_list_once budget_pr_list_blind budget_pr_list_fresh_per_pass budget_ready_list_blind budget_ready_list_once budget_pr_list_truncated budget_listing_before_launch budget_launch_cost budget_pr_page_speaks budget_busy_pass budget_status_says_blind budget_status_keeps_said budget_pass_signal budget_status_says_backlog_blind budget_status_one_listing budget_ready_blind_speaks budget_list_mode_no_listing budget_drain_no_listing build_command resume_brief stop_now_stops_builds no_build_command"
 )
 
-# The one suite that is not a tests/test_*.sh file: it is the vendored lint, and
-# it is here so `./tests/run.sh` is the whole answer to "is this repo healthy".
+# The one suite that is not a tests/test_*.sh file: it is the vendored lint
+# (`bash -n`, shellcheck, and the two selftests), and it is here so
+# `./tests/run.sh` is the whole answer to "is this repo healthy".
 suite_command() {
   case "$1" in
-    lint) printf '%s\n' "./evals/lint.sh" ;;
+    lint) printf '%s\n' "./evals/run.sh" ;;
     *)    printf '%s\n' "bash tests/test_$1.sh" ;;
   esac
 }
@@ -100,8 +116,14 @@ VERBOSE="${AUTOFLEET_TEST_VERBOSE:-}"
 # unnoticed.
 refuse() { echo "$1; usage: $0 [--verbose] [suite [phase]]" >&2; exit 2; }
 want_suite=""; want_phase=""; positional=0
+# Set when this process IS one of the per-suite workers a parallel run forks.
+# Not in the usage line: nobody types it, and a flag in the usage line is a flag
+# somebody will use.
+WORKER=0; WORKER_SCRATCH=""
 for arg in "$@"; do
   case "$arg" in
+    --worker) WORKER=1 ;;
+    --scratch=*) WORKER_SCRATCH="${arg#--scratch=}" ;;
     --verbose) VERBOSE=1 ;;
     -*) refuse "unknown option '$arg'" ;;
     *)
@@ -122,7 +144,25 @@ done
 # every call, which is what makes passing it through `printf` safe.
 say_verbose() { [ -n "$VERBOSE" ] || return 0; printf "$@"; }
 
+# One directory for everything this run writes, so a killed run leaves nothing
+# in /tmp with a pid in its name that nobody will ever match up again.
+# A WORKER is handed its parent's on the COMMAND LINE, and does not delete it:
+# the parent is still reading the counts and the logs out of it.
+#
+# An ARGUMENT and not an environment variable, which is the whole of a bug worth
+# keeping the reason for. Through the environment it reached the phases too --
+# and tests/test_runner_bound.sh runs a COPY of this runner as its fixture, so
+# that copy adopted the real run's scratch directory and deleted it on the way
+# out. The run then reported "nothing ran" while every suite in it had passed.
+# An argument stops at the process it is given to.
+if [ -n "$WORKER_SCRATCH" ]; then
+  SCRATCH="$WORKER_SCRATCH"
+else
+  SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/autofleet-suite.XXXXXX")"
+fi
+
 pass=0; fail=0; failed=""
+total_pass=0; total_fail=0; total_skipped=0; all_failed=""; all_skips=""
 # A phase that could not judge anything is not a phase that judged and found
 # nothing wrong, and it is not a failure either. `teardown/reap` says so twice:
 # once when docker is not running, and once when the machine already carries an
@@ -161,7 +201,7 @@ SKIPPABLE="teardown/reap"
 # reason inheriting whichever message was written last. Found by the independent
 # review.
 may_skip() {
-  # shellcheck disable=SC2086 -- SKIPPABLE is a deliberate word list, like SUITES
+  # shellcheck disable=SC2086 # SKIPPABLE is a deliberate word list, like SUITES
   printf '%s\n' $SKIPPABLE | grep -xF -- "$1" >/dev/null || return 1
   # Listed, and still refused HERE. "Machine state, not diff state" is true of a
   # laptop and false of a runner, where a missing docker is an infrastructure
@@ -223,6 +263,33 @@ esac
 # naming three is worth more than a truncated one naming eleven.
 MAX_BLOCKED=3
 blocked=0
+# ONE FILE PER BLOCKED PHASE, in $SCRATCH, counted with a GLOB.
+#
+# A file rather than a shell variable, because the cap is a property of the RUN
+# and the suites are separate processes: a per-worker counter means four suites
+# blocking one phase each never reach a cap of three, and the give-up silently
+# stops working the moment this runner learns to fork.
+#
+# A glob rather than a byte count over one appended-to file, because reading it
+# needs no `$( )` -- bash runs this shell's EXIT trap inside a command
+# substitution, so every `$(...)` on the dispatch path was a chance to run the
+# teardown against a directory the run was still writing into. A glob is
+# expansion, not a subshell. One file per phase also means two workers blocking
+# at the same moment cannot write over each other.
+read_blocked() {
+  local f
+  blocked=0
+  for f in "$SCRATCH"/blocked.*; do
+    # An unmatched glob comes back as the pattern itself, which is not a file.
+    [ -e "$f" ] && blocked=$((blocked + 1))
+  done
+  return 0
+}
+note_blocked() {
+  # Named for the phase, so two workers blocking at once cannot write one file.
+  : >"$SCRATCH/blocked.${1//\//_}"
+  read_blocked
+}
 
 # The runner's own children, so they can be reaped if the runner itself dies.
 # Without this, a Ctrl-C or a cancelled CI job leaves the phase and the watchdog
@@ -231,9 +298,33 @@ blocked=0
 # that pid to have been reused, which makes this runner's cleanup a signal aimed
 # at an unrelated process. Found by review.
 RUNNING_PID=""; RUNNING_WATCHER=""
+# ...and the per-suite workers, when this run is forking them. An interrupt that
+# reaped only the phase in hand would leave one worker per job still building
+# fixtures in a scratch directory this is about to delete.
+WORKERS=""
+# THE EXIT TRAP DOES NOTHING A SUBSHELL MUST NOT DO, and that is not caution,
+# it is the bug. Bash runs this shell's EXIT trap inside a COMMAND SUBSTITUTION
+# -- every `$(...)` on the dispatch path is a process that exits -- so anything
+# destructive here runs dozens of times mid-run against state the run is still
+# using. Reaping the forked workers here killed all of them nineteen seconds in;
+# deleting the scratch directory took the logs and the counts with it, and the
+# run reported "nothing ran". Both of those belong to the interrupt path below,
+# which no subshell reaches. Found by the suite, twice.
+#
+# What is left is what was here before the runner learned to fork: the phase in
+# hand and its watchdog, which are only set while `run_one` is waiting.
 runner_cleanup() {
   [ -n "$RUNNING_WATCHER" ] && kill -TERM "$RUNNING_WATCHER" 2>/dev/null
   [ -n "$RUNNING_PID" ] && reap_tree "$RUNNING_PID"
+  return 0
+}
+
+# ...and the half that only a real interrupt, or the end of the run, may do.
+runner_teardown() {
+  local pid
+  for pid in $WORKERS; do reap_tree "$pid"; done
+  WORKERS=""
+  [ "$WORKER" = 1 ] || { [ -n "${SCRATCH:-}" ] && rm -rf "$SCRATCH"; }
   return 0
 }
 # EXIT gets the cleanup. INT and TERM get a handler that cleans up AND EXITS,
@@ -251,6 +342,7 @@ runner_cleanup() {
 # independent review.
 runner_interrupted() {
   runner_cleanup
+  runner_teardown
   echo "  (interrupted; the rest of the run is not reported)"
   exit "$1"
 }
@@ -356,7 +448,12 @@ report_fail() {
 
 run_one() {
   local label="$1"; shift
-  local out="/tmp/autofleet-suite.$$" marker="/tmp/autofleet-suite.$$.blocked"
+  # NAMED FOR THE PHASE, not for `$$`. Two suites running side by side are two
+  # subshells of one shell, so `$$` is the SAME number in both and each would
+  # report the other's phase -- and `$BASHPID`, which would be the honest
+  # answer, is bash 4 and the bash macOS ships is 3.2. A label is unique in a
+  # run by construction, and a file left behind says which phase left it.
+  local out="$SCRATCH/phase.${label//\//_}" marker="$SCRATCH/phase.${label//\//_}.blocked"
   local rc=0 pid watcher skip_refusal=0
   rm -f "$marker"
 
@@ -368,7 +465,13 @@ run_one() {
   # non-interactive shell also prints a notice per job, which is noise about this
   # runner rather than about the phase.
   set -m
-  "$@" >"$out" 2>&1 &
+  # The phase is told where its own blocked-marker is. Only one fixture needs it
+  # -- the one in tests/test_runner_bound.sh that makes the marker RACE
+  # deterministic by writing the marker itself -- and before this it guessed the
+  # path from `$PPID`. A guessed path is a check that stops checking the moment
+  # the runner renames anything, in silence, which is the failure hard rule 3 is
+  # about; it had already gone quiet once.
+  AUTOFLEET_TEST_MARKER="$marker" "$@" >"$out" 2>&1 &
   pid=$!
   RUNNING_PID="$pid"
   set +m
@@ -409,7 +512,7 @@ run_one() {
   [ "$rc" = "$SKIP_RC" ] && { may_skip "$label"; skip_refusal=$?; }
 
   if [ -e "$marker" ] && [ "$rc" != 0 ] && [ "$rc" != "$SKIP_RC" ]; then
-    blocked=$((blocked + 1))
+    note_blocked "$label"
     report_fail "$label"
     printf '       BLOCKED: produced no result in %ss and was killed.\n' "$PHASE_TIMEOUT"
     printf '       Output up to that point:\n'
@@ -471,32 +574,171 @@ run_one() {
 # the independent review.
 give_up_if_blocked() {
   [ "$blocked" -ge "$MAX_BLOCKED" ] || return 1
-  echo "  (giving up: $blocked phases blocked at ${PHASE_TIMEOUT}s each."
-  echo "   The rest of the run is not reported. See the BLOCKED lines above.)"
+  # Said ONCE for the whole run, whichever worker gets there first. `mkdir` is
+  # the claim because it is the one filesystem operation that either creates or
+  # fails, with no window between the two -- a `[ -e ]` test would let two
+  # workers crossing the cap together both print it.
+  if mkdir "$SCRATCH/gave-up" 2>/dev/null; then
+    echo "  (giving up: $blocked phases blocked at ${PHASE_TIMEOUT}s each."
+    echo "   Nothing further is started. See the BLOCKED lines above.)"
+  fi
   return 0
 }
 
-# Said once, where the run stops, rather than per phase.
-gave_up=0
-for entry in "${SUITES[@]}"; do
-  [ "$gave_up" = 0 ] || break
-  suite="${entry%%:*}"
-  phases="${entry#*:}"
-  [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
+# One suite, start to finish. Everything it prints goes to a file and everything
+# it counted goes to a second one, because a worker cannot hand a variable back
+# to its parent. Why the phases inside it stay sequential is at the top of this
+# file, with the rest of what parallelism costs.
+run_suite() {
+  local suite="$1" phases="$2"
+  gave_up=0
   say_verbose '== %s\n' "$suite"
-  # shellcheck disable=SC2046 -- suite_command is a deliberate word list
+  # shellcheck disable=SC2046 # suite_command is a deliberate word list
   if [ -z "${phases// /}" ]; then
     [ -z "$want_phase" ] || { echo "  (no phases; ignoring '$want_phase')"; }
     run_one "$suite" $(suite_command "$suite")
     give_up_if_blocked && gave_up=1
   else
+    local phase
     for phase in $phases; do
       [ -z "$want_phase" ] || [ "$want_phase" = "$phase" ] || continue
       run_one "$suite/$phase" $(suite_command "$suite") "$phase"
       give_up_if_blocked && { gave_up=1; break; }
     done
   fi
+  # The tallies, as shell assignments the parent sources back. `failed` and
+  # `skips` are space-separated lists and are quoted for that reason.
+  {
+    printf 'pass=%s fail=%s skipped=%s blocked=%s\n' \
+      "$pass" "$fail" "$skipped" "$blocked"
+    # `gave_up` is deliberately NOT written back. The parent decides when to
+    # stop launching, from the shared blocked count; a worker's copy would be
+    # clobbered by the next suite's counts file as they are sourced in turn, so
+    # reading it would say "the last suite did not give up" whatever happened.
+    # The give-up itself is announced once, by whichever process claims it.
+    printf 'failed=%q skips=%q\n' "$failed" "$skips"
+  } >"$SCRATCH/counts.$suite"
+}
+
+# How many suites may be in flight. ONE is exactly today's behaviour, and
+# tests/test_runner_bound.sh pins its copy of this runner there: every assertion
+# that file makes is about the bound, the traps and the strays of a sequential
+# run, and measuring those under a parallel one would be measuring something
+# else. A machine that cannot say how many cores it has gets 4.
+JOBS="${AUTOFLEET_TEST_JOBS:-}"
+if [ -z "$JOBS" ]; then
+  JOBS="$( (getconf _NPROCESSORS_ONLN || sysctl -n hw.ncpu || nproc) 2>/dev/null )" || JOBS=""
+  case "$JOBS" in ''|*[!0-9]*|0) JOBS=4 ;; esac
+  # Capped, because every extra worker is another fixture tree on a disk the
+  # suites are already hammering, and the run is bounded by its slowest suite
+  # long before it is bounded by cores. Eight is about the registry's size.
+  [ "$JOBS" -le 8 ] || JOBS=8
+fi
+case "$JOBS" in
+  ''|*[!0-9]*|0)
+    echo "AUTOFLEET_TEST_JOBS must be a positive whole number; got '$JOBS'" >&2
+    exit 2 ;;
+esac
+
+selected=()
+for entry in "${SUITES[@]}"; do
+  suite="${entry%%:*}"
+  [ -z "$want_suite" ] || [ "$want_suite" = "$suite" ] || continue
+  selected+=("$entry")
 done
+
+gave_up=0
+if [ "${#selected[@]}" -le 1 ] || [ "$JOBS" = 1 ]; then
+  for entry in "${selected[@]}"; do
+    [ "$gave_up" = 0 ] || break
+    run_suite "${entry%%:*}" "${entry#*:}"
+    # `run_suite` sets these in THIS shell when it is not forked, so the totals
+    # are already right and only the give-up flag has to be read back.
+  done
+else
+  # The cap, polled rather than waited on. `wait -n` is bash 4.3, and the bash
+  # macOS ships is 3.2 -- which is also why this file avoids every other
+  # convenience of a modern bash. A tenth of a second of latency per finished
+  # worker is nothing against a suite that runs for a minute.
+  # `nrunning` is kept alongside the list rather than counted on demand, for
+  # the same reason `BLOCKED_FILE` is a variable: counting it needed `$( )`.
+  nrunning=0
+  reap_finished() {
+    local still="" pid
+    nrunning=0
+    for pid in $WORKERS; do
+      if kill -0 "$pid" 2>/dev/null; then
+        still="$still $pid"; nrunning=$((nrunning + 1))
+      fi
+    done
+    WORKERS="${still# }"
+  }
+  for entry in "${selected[@]}"; do
+    while [ "$nrunning" -ge "$JOBS" ]; do sleep 0.1; reap_finished; done
+    # The cap is the PARENT's business here, which is why `blocked` is counted
+    # in a file: the process deciding what to start next is not the one that
+    # blocked. Checked only inside the workers, every wedged suite in the
+    # registry was already started before any of them had reported, and the
+    # give-up bounded nothing at all.
+    read_blocked
+    give_up_if_blocked && { gave_up=1; break; }
+    # A FRESH PROCESS, not a `( subshell ) &`. The difference is `set -m`:
+    # run_one turns on job control so the phase it starts is a process group
+    # leader, and a phase that signals a process group of its own -- which is
+    # what tests/test_runner_bound.sh interrupt does, because that is what a
+    # terminal Ctrl-C delivers to -- needs that to have actually happened. In a
+    # backgrounded subshell it does not, so `kill -INT -$pid` names no group,
+    # fails silently, and the phase reports that the runner survived an
+    # interrupt nothing ever sent it. A worker is this same script, one suite
+    # wide, so every phase has the parent it was written for.
+    #
+    # `suite.<name>`, and the phase files above are `phase.<label>`: a
+    # whole-suite entry's label IS its suite name, so one naming scheme put the
+    # worker's stdout and that phase's own output at the same path. run_one
+    # truncated the worker's log on open and deleted it on the way out, and a
+    # failing whole-suite entry reported its summary with nothing under it.
+    # Caught by tests/test_runner_bound.sh quiet, which is what it is for.
+    # `set -m` around the fork, for the same reason run_one uses it and it is
+    # not incidental here either. A command started with `&` from a
+    # NON-INTERACTIVE shell has SIGINT set to ignored on entry, and a shell that
+    # inherited SIG_IGN passes it on to everything it starts -- so a phase
+    # asserting that a Ctrl-C ends a run found a run that could not receive one,
+    # and reported a real bug against correct code. Job control gives each
+    # worker its own process group with default dispositions, which is what a
+    # terminal delivers to. Turned straight back off: a non-interactive shell
+    # with job control on also prints a notice per job.
+    set -m
+    AUTOFLEET_TEST_JOBS=1 \
+      "$SELF" --worker "--scratch=$SCRATCH" ${VERBOSE:+--verbose} \
+      "${entry%%:*}" $want_phase \
+      >"$SCRATCH/suite.${entry%%:*}" 2>&1 &
+    WORKERS="$WORKERS $!"; nrunning=$((nrunning + 1))
+    set +m
+  done
+  wait
+  # Printed in REGISTRY order, not in the order they finished: a run whose
+  # output reshuffles itself between invocations is one nobody can diff.
+  for entry in "${selected[@]}"; do
+    suite="${entry%%:*}"
+    [ -s "$SCRATCH/suite.$suite" ] && cat "$SCRATCH/suite.$suite"
+    # shellcheck disable=SC1090 # written by run_suite, one file per suite
+    [ -f "$SCRATCH/counts.$suite" ] && . "$SCRATCH/counts.$suite" && {
+      total_pass=$((total_pass + pass)); total_fail=$((total_fail + fail))
+      total_skipped=$((total_skipped + skipped))
+      all_failed="$all_failed$failed"; all_skips="$all_skips$skips"
+    }
+  done
+  pass="$total_pass"; fail="$total_fail"; skipped="$total_skipped"
+  failed="$all_failed"; skips="$all_skips"
+fi
+
+# A worker has already written its counts; the summary is the parent's to print,
+# and two dozen of them interleaved is not a summary.
+[ "$WORKER" = 0 ] || exit 0
+
+# Every worker is finished and every file has been read, so the half the EXIT
+# trap may not do is done here, once, on the way to the summary.
+runner_teardown
 
 echo
 # Named in both summaries. A count of skips in the green line is what makes a

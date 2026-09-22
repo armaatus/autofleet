@@ -37,13 +37,21 @@ in a full worktree and can reach here; the gate cannot reach out.
 
 `unblock.yml` is JavaScript inside YAML and cannot import this at all. What
 keeps it in step is that it spells BOTH patterns identically AND scopes them the
-same way. `evals/lint.sh` asserts all three: the two literals match character for
-character, and the workflow's reader is run over this module's own SELFTEST table
-and has to return the same answers. It fails if either side is edited alone.
+same way, and `--selftest` below asserts it: the two regex literals have to match
+character for character, with equivalent flags. It fails if either side is edited
+alone.
+
+That check used to live in `evals/lint.sh`, which armaatus/autofleet#153 deleted
+along with 3,600 lines of assertions that one DOCUMENT agreed with another. This
+one is not that: the two are parsers, they decide which issues the fleet may
+start, and a silent drift between them means the dispatcher opening a worktree
+for an issue whose foundation is still open. So it moved here, beside the
+pattern it is about, rather than going with the rest.
 
     python3 .github/scripts/issue_refs.py --selftest
 """
 
+import os
 import re
 import sys
 
@@ -323,6 +331,66 @@ SELFTEST = [
 ]
 
 
+# The workflow's copy of the two patterns, and how to find it. Read as TEXT
+# rather than executed: node is not a dependency of this repository, and the
+# property being asserted is that the literals are the same -- which a string
+# comparison answers exactly and a behavioural one only approximates.
+WORKFLOW = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "workflows", "unblock.yml")
+
+# `const NAME = /.../flags;`, with the assignment allowed to wrap: the
+# BLOCKED_BY literal is long enough that it lives on its own line under the
+# `const`.
+_JS_LITERAL = r"const\s+%s\s*=\s*\n?\s*/(.*)/([a-z]*);"
+
+
+def _js_pattern(source, name):
+    found = re.search(_JS_LITERAL % name, source)
+    return (found.group(1), found.group(2)) if found else (None, None)
+
+
+def _parity():
+    """Does `unblock.yml` spell these patterns the way this module does?
+
+    A FAILURE when the workflow cannot be read, not a skip. `merge_gate.py`
+    imports this module from a sparse checkout that holds `.github/scripts`
+    alone -- but nothing runs `--selftest` there, and a parity check that
+    quietly passes when it cannot find the other side is the shape hard rule 3
+    is about.
+    """
+    failures = 0
+    try:
+        source = open(WORKFLOW).read()
+    except OSError as exc:
+        print(f"FAIL: cannot read {WORKFLOW} to compare patterns against: {exc}",
+              file=sys.stderr)
+        return 1
+    for name, ours, want_flags in (
+        ("BLOCKED_BY", BLOCKED_BY, {"g", "i", "m"}),
+        ("BLOCKERS_MARKER", BLOCKERS_MARKER, {"g", "m"}),
+    ):
+        theirs, flags = _js_pattern(source, name)
+        if theirs is None:
+            print(f"FAIL: unblock.yml no longer declares a {name} literal this "
+                  f"can compare against", file=sys.stderr)
+            failures += 1
+            continue
+        if theirs != ours.pattern:
+            print(f"FAIL: {name} differs between this module and unblock.yml\n"
+                  f"      here:  {ours.pattern}\n"
+                  f"      there: {theirs}", file=sys.stderr)
+            failures += 1
+            continue
+        if set(flags) != want_flags:
+            print(f"FAIL: unblock.yml's {name} carries flags '{flags}', not "
+                  f"'{''.join(sorted(want_flags))}'", file=sys.stderr)
+            failures += 1
+            continue
+        print(f"  ok: {name} is spelled the same way in unblock.yml")
+    return failures
+
+
 def selftest():
     failures = 0
     for body, want_closes, want_blocked in SELFTEST:
@@ -342,10 +410,11 @@ def selftest():
         print("FAIL: closes_issue does not take an issue number off the shell",
               file=sys.stderr)
         failures += 1
+    failures += _parity()
     if failures:
         print(f"{failures} issue-reference assertion(s) failed", file=sys.stderr)
         return 1
-    print(f"{len(SELFTEST)} issue-reference assertions hold")
+    print(f"{len(SELFTEST) + 2} issue-reference assertions hold")
     return 0
 
 

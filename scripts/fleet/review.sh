@@ -97,7 +97,7 @@ review_body_f="$(mktemp)"; nit_body_f="$(mktemp)"
 # later traps cannot forget a name the first one had. That is how a temporary
 # file survives a run.
 SCRATCH="$payload $raw_out $raw_err $answer_json $review_body_f $nit_body_f"
-# shellcheck disable=SC2064 -- expanded NOW on purpose: the trap has to hold the
+# shellcheck disable=SC2064 # expanded NOW on purpose: the trap has to hold the
 # names even on an exit that happens before the next statement runs.
 trap "rm -f $SCRATCH" EXIT
 
@@ -298,10 +298,6 @@ tools="$tools,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
 
 echo "==> reviewing PR #$pr at ${head:0:8} with $AUTOFLEET_REVIEW_CMD"
 echo "    log: $log"
-
-# The compression proxy (#89). Above `set -m`, because the exports have to be in
-# place before the background job forks.
-fleet_headroom_env
 
 # `set -m` gives the reviewer its own PROCESS GROUP. AUTOFLEET_REVIEW_CMD is
 # advertised as a wrapper seam, and signalling the direct child of a wrapper

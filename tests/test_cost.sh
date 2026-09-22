@@ -288,6 +288,6 @@ assert doc["issues"][0]["issue"] == "48", doc
   *)
     echo "usage: tests/test_cost.sh <phase>" >&2
     echo "  the phases are the \`cost:\` row of SUITES in tests/run.sh --" >&2
-    echo "  one registry, which is what evals/lint.sh checks against." >&2
+    echo "  one registry, and this arm is what says so when it drifts." >&2
     exit 2 ;;
 esac

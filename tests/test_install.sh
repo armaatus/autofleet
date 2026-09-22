@@ -112,9 +112,9 @@ case "${1:-}" in
   # It is an APPEND, not a rewrite: the host's lines come first, in order.
   # NOT `head -1 ... | grep -q`. CLAUDE.md bans piping an assertion into `grep -q`
   # outright: `-q` exits on the first match, the producer dies of EPIPE, and
-  # `pipefail` turns a check that HELD into a failure. `evals/piped_quiet_grep.py`
-  # scans the PAYLOAD's shell and `tests/` is not vendored, so nothing would have
-  # caught it here. Found by the local /code-review pass.
+  # `pipefail` turns a check that HELD into a failure. Nothing scans for it --
+  # `.autofleet/review.md` names the shape for a reviewer instead. Found by the
+  # local /code-review pass.
   first="$(head -1 "$WORK/host/.gitignore")"
   [ "$first" = 'node_modules/' ] \
     || fail "the host's .gitignore was rewritten rather than appended to"

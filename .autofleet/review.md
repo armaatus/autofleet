@@ -3,10 +3,9 @@
 Read after [REVIEW.md](../REVIEW.md). That file is the generic policy and it is
 vendored; this one is autofleet's, and it is not.
 
-It does not restate the hard rules — `CLAUDE.md` has those in full, and stating
-an enforced rule twice is what `evals/lint.sh` refuses. It says where to *look*
-for a breach of them in a diff, which is a different thing and the part a
-reviewer cannot derive.
+It does not restate the hard rules — `CLAUDE.md` has those in full. It says
+where to *look* for a breach of them in a diff, which is a different thing and
+the part a reviewer cannot derive.
 
 ## Where this project breaks
 
@@ -25,35 +24,40 @@ reviewer cannot derive.
   save format for months.
 
 - **A guard rule with no assertion.** Every rule in `.claude/hooks/guard.py` has
-  a row in its `--selftest`, and every check in `evals/lint.sh` asserts the
-  wiring. A rule added without one is not shipped: it will stop matching, and
-  nothing will say so.
+  a row in its `--selftest`, and every condition in
+  `.github/scripts/merge_gate.py` has one in its. A rule added without one is not
+  shipped: it will stop matching, and nothing will say so. A row asserting only
+  the exit code, where the behaviour is what the refusal *says*, is not a test.
 
-- **A gate condition with no `--selftest` row.** Same property, in
-  `.github/scripts/merge_gate.py`. A row asserting only the verdict, where the
-  behaviour is what the refusal *says*, is not a test — the optional wording
-  field exists for exactly that.
+- **A rule deleted in silence.** The other half of the same property, and the
+  one armaatus/autofleet#153 made live: a refusal removed without its row
+  removed, or a row removed without the reader being told what is no longer
+  enforced, reads as a tidy-up. `docs/WORKFLOW.md`'s guardrails section names
+  what was deliberately given up; a deletion that is not there is a deletion
+  nobody will notice has happened.
 
 - **`orca` outside `scripts/fleet/runner/`.** Case-insensitively, including
   `ORCA_DEADLINE`, `mkdir -p .orca` and the `Orca` spelling in a message. Prose
-  does not count. `evals/lint.sh` check 4c runs the grep; a diff that widens the
-  surface without widening the check is the finding.
+  does not count, nor does `config.sh`'s `AUTOFLEET_RUNNER` default. The grep is
+  printed in [docs/RUNNERS.md](../docs/RUNNERS.md); run it against the diff.
+
+- **A `runner_*` call with no guard.** A script that reaches for the runtime
+  must ask `fleet_require_runner` first, and ask it *before* the first
+  `runner_*` — the order is the property. A driver that omits a function the
+  fleet calls is `command not found` in a script with no `-e`.
 
 - **An assertion piped into `grep -q`** in a file with `pipefail`. `-q` exits on
   the first match, the producer dies of EPIPE, and a check that *held* reports as
   failed — on large input only, so green on a Mac and red in CI.
-  `evals/piped_quiet_grep.py` scans the payload's shell; the `run:` blocks in
-  `.github/workflows/` are not scanned yet (#90).
 
-- **A brief that grew.** What an agent reads before its first edit —
-  `CLAUDE.md`, `REVIEW.md`, and stage 1 of `issue-command.sh` — is under a word
-  ceiling `evals/lint.sh` enforces, because it rides in the prompt prefix of
-  every request for the rest of the session. A paragraph added there is paid for
-  by every task in every worktree.
+- **stderr silenced after the redirection that fails.** `read -r x <"$f"
+  2>/dev/null` prints the open failure and *then* silences the stream. Write
+  `2>/dev/null <"$f"`.
 
-- **Two documents saying one thing.** `evals/lint.sh` asserts each enforced rule
-  is stated in full in exactly one agent-facing text. A change that adds a
-  helpful restatement elsewhere has added the thing that goes stale.
+- **A brief or a working agreement that grew.** `CLAUDE.md` is under 400 words
+  and the brief under 60 lines, because both ride in the prompt prefix of every
+  request for the rest of the session. `tests/test_brief.sh` holds the brief;
+  nothing holds `CLAUDE.md`, so this is where it is noticed.
 
 ## What not to report here
 

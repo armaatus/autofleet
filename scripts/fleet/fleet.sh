@@ -783,6 +783,9 @@ count_parked_owned() {
   #
   # Surviving a pass costs one poll of waiting on a worktree that really is
   # parked, and costs nothing at all on `stuck-`, which is still there next pass.
+  # shellcheck disable=SC2045 # $OWNED_DIR holds issue numbers by construction,
+  # so there is nothing here for a glob to survive that `ls` does not; a glob
+  # would also yield the literal pattern when the directory is empty.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
     # ONE CALL, NOT TWO. There used to be a `why_parked` pre-check on this line
     # with the same outcome as the gate below -- `parked_for_person` opens with
@@ -1094,13 +1097,12 @@ poll_cache_put() {
 # run loop exits -- so a `gh` outage read as an empty backlog is a fleet that
 # stops for the night on the first blip.
 ready_issues() {
-  # THE CACHE IS INSIDE THIS FUNCTION, not wrapped around a split-out reader,
-  # and that is `evals/lint.sh`'s doing: it asserts by name that `ready_issues`
-  # itself imports `issue_refs`, so that the pattern this queue selects on
-  # cannot drift away from the one `unblock.yml` writes the labels with. Moving
-  # the read into a helper would have satisfied a `grep` over the file while
-  # leaving the named function empty, which is the drift that check exists to
-  # catch. Found by ./evals/lint.sh.
+  # THE CACHE IS INSIDE THIS FUNCTION, not wrapped around a split-out reader:
+  # this queue has to select on the same `Blocked by #N` pattern `unblock.yml`
+  # writes the labels with, and `issue_refs` is the one spelling of it. A lint
+  # check asserted by name that `ready_issues` imported it; that went with
+  # armaatus/autofleet#153, and what holds the two parsers together now is
+  # `issue_refs.py --selftest`, which compares the literals directly.
   local cached="$POLL_CACHE/ready" listing
   poll_cache_get "$cached"; case $? in 0) return 0 ;; 1) return 1 ;; esac
   # NO `[ -z "$listing" ]` HERE, and that is not an oversight -- it is the one
@@ -3838,30 +3840,6 @@ cmd_status() {
   # question anyway. So the line says what it is instead.
   [ "${found:-0}" = 1 ] \
     && echo "             (from local records; the dispatcher sweeps a PR's when it closes)"
-  # ...and whether the fleet's own model calls are going through the compression
-  # proxy, on the same first screen and for the same reason: a seam whose whole
-  # point is that it changes nothing when off is a seam nobody can tell is on.
-  #
-  # IT PROBES rather than repeating the knob. `AUTOFLEET_HEADROOM=1` is what a
-  # person set; whether anything answers is what the next review will actually
-  # get, and those are the same sentence only while the daemon is up. The fleet
-  # never spawns it, so "up" is somebody else's state and this screen is where
-  # the two are compared.
-  #
-  # The probe costs one TCP connect, and only when the knob is on -- an
-  # unconfigured repository pays nothing for a row it still gets.
-  if fleet_headroom_on; then
-    if fleet_headroom_up "${AUTOFLEET_HEADROOM_URL:-}"; then
-      echo "headroom:    on -- '${AUTOFLEET_HEADROOM_URL:-}', answering"
-    else
-      echo "headroom:    on -- '${AUTOFLEET_HEADROOM_URL:-}', NOT ANSWERING"
-      echo "             (fleet-started agents run unwrapped, at full token price;"
-      echo "              a URL with no scheme or no host reads as unreachable)"
-    fi
-  else
-    echo "headroom:    off (AUTOFLEET_HEADROOM=1 in .autofleet/config turns it on;"
-    echo "             docs/CONFIGURATION.md says what it costs)"
-  fi
   # A stop and a running dispatcher are not alternatives: a drain leaves the
   # dispatcher up on purpose, because it is what reaps a worktree once its PR
   # merges -- and that draining dispatcher is running whatever code it parsed.
@@ -4200,6 +4178,9 @@ farewell_parked() {
   local parked="${1:-0}" n why line path parked_lines="" named=0
   case "$parked" in ''|*[!0-9]*) parked=0 ;; esac
   [ "$parked" -gt 0 ] || return 0
+  # shellcheck disable=SC2045 # $OWNED_DIR holds issue numbers by construction,
+  # so there is nothing here for a glob to survive that `ls` does not; a glob
+  # would also yield the literal pattern when the directory is empty.
   for n in $(ls "$OWNED_DIR" 2>/dev/null); do
     why="$(parked_for_person "$n" quiet)" || continue
     named=$((named + 1))

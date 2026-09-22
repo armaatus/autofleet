@@ -25,10 +25,10 @@ on:
   # nothing, so a dependency that had genuinely been resolved kept its issue
   # blocked.
   #
-  # evals/lint.sh asserts this exact list. Dropping `opened` returns the repo to
-  # issues nothing will ever start, silently, which is the hole this trigger set
-  # was widened to close -- and README.md and docs/WORKFLOW.md describe the list
-  # to agents, so it is not free to drift.
+  # Dropping `opened` returns the repo to issues nothing will ever start,
+  # silently, which is the hole this trigger set was widened to close -- and
+  # README.md and docs/WORKFLOW.md describe the list to agents, so it is not
+  # free to drift.
   issues:
     types: [opened, edited, closed, reopened]
   workflow_dispatch:
@@ -108,10 +108,10 @@ jobs:
             // Character for character the two patterns in
             // `.github/scripts/issue_refs.py`, which is the module `fleet.sh`
             // reads the same bodies with. This file is JavaScript inside YAML
-            // and cannot import it, so evals/lint.sh asserts the two agree --
-            // behaviourally, over that module's own selftest table, not only by
-            // grep. An issue the two disagree about is one the fleet may start
-            // while the labels call it blocked.
+            // and cannot import it, so that module's own `--selftest` compares
+            // these two literals against its own, character for character, and
+            // fails if either side is edited alone. An issue the two disagree
+            // about is one the fleet may start while the labels call it blocked.
             //
             // `^` rather than `\b`, because `\b` still matches inside `no longer
             // blocked by #7` -- and CLAUDE.md tells agents to write sentences

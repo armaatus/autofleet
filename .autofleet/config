@@ -21,17 +21,6 @@ AUTOFLEET_NOTIFY_TITLE="autofleet"
 # the per-issue numbers hold under 20M.
 AUTOFLEET_MAX=2
 
-# The compression proxy, on. It is worth 8.8% of what it can reach (measured:
-# 133,864 of 1,529,329 tokens, docs/CONFIGURATION.md) and it costs nothing when
-# it is right -- a proxy that stops answering degrades to a warning and full
-# price, not to a failure.
-#
-# WHAT IT CANNOT REACH IS THE PART THAT MATTERS, and that is why this is a
-# footnote rather than a fix: `review.sh` deliberately does not export the base
-# URL into the worktree agent, and the worktree agent is where 63% of an issue's
-# tokens are spent. This wraps the reviewer and the fix session. Do not read a
-# green line here as the cost problem being addressed.
-AUTOFLEET_HEADROOM=1
 
 # WHAT ONE BUILD MAY SPEND, left at the payload defaults for now.
 #

@@ -35,24 +35,6 @@
 #                                 named in SKIPPABLE -- an unlisted phase exiting
 #                                 77 is the phase that BROKE into skipping, and
 #                                 goes red saying which list it is missing from.
-#   test_runner_bound.sh hostlint evals/lint.sh's phase-registry check decides
-#                                 which repository it is running in, because it
-#                                 reads tests/run.sh and tests/ is NOT vendored.
-#                                 That decision was wrong twice in a row -- keyed
-#                                 on the `tests/` directory, which every pytest
-#                                 project has; then fixed only where the file is
-#                                 missing, so a host project with its own
-#                                 tests/run.sh failed on a SUITES block it had
-#                                 never heard of. Both were checked by hand, and
-#                                 by hand is what missed the second. The phase
-#                                 drives the SHIPPED check in throwaway trees.
-#
-#                                 NOTE: that check keys on THIS FILE's name --
-#                                 rename it and evals/lint.sh quietly decides it
-#                                 is in a host repo and asserts nothing. The
-#                                 phase reads the sentinel out of the lint and
-#                                 checks the tree really has it, so the rename
-#                                 goes red here instead of going silent there.
 #   test_runner_bound.sh guards   the two guards ON the bound: a nonsense
 #                                 AUTOFLEET_TEST_TIMEOUT is refused at startup
 #                                 rather than reporting every phase BLOCKED with
@@ -104,8 +86,10 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The `testrun` row of evals/lint.sh's ceilings table, read rather than restated.
-. "$REPO_ROOT/tests/ceiling.sh"
+# How many lines a fully green `./tests/run.sh` may print (armaatus/autofleet#52).
+# It lived in a ceilings table in evals/lint.sh until armaatus/autofleet#153;
+# one number used by one phase belongs beside the phase.
+TESTRUN_CEILING=5
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -374,6 +358,22 @@ EOF
     chmod +x "$WORK/tests/test_$suite.sh"
   done
 }
+
+# The runner under test is UP and into its first phase: the blocking fixture has
+# forked its nap. WAITED FOR, not slept for. A fixed `sleep 4` asserts a latency
+# rather than a state, and since tests/run.sh learned to run suites side by side
+# this phase shares the machine with seven others -- so the interrupt landed
+# before the runner had installed its trap and the phase failed against correct
+# code. Bounded, because a fixture that never starts is its own failure.
+await_phase_up() {
+  local waited=0
+  while [ "$waited" -lt 60 ]; do
+    pgrep -f "$(ere "$WORK/block-nap")" >/dev/null 2>&1 && return 0
+    sleep 0.5; waited=$((waited + 1))
+  done
+  fail "the runner never reached its first phase"
+}
+
 
 case "${1:-}" in
 
@@ -650,172 +650,6 @@ case "${1:-}" in
   ok "...and an unlisted phase is told so even where nothing may skip"
   ;;
 
-# ----------------------------------------------------------------- hostlint
-  hostlint)
-  # evals/lint.sh is VENDORED and tests/ is not, so its phase-registry check has
-  # to decide which repository it is running in. That decision has now been wrong
-  # in two consecutive commits -- first keyed on the `tests/` directory, which
-  # every pytest project has; then fixed only on the branch where the file is
-  # missing, leaving a host project with its own tests/run.sh to fail on a SUITES
-  # block it has never heard of. Both were verified by hand, and hand-verifying
-  # is what missed the second. So it gets a row. Found by the independent review.
-  #
-  # The check is driven out of the SHIPPED file rather than restated: the python
-  # block is extracted from evals/lint.sh and run in a throwaway tree, the same
-  # way make_runner drives a copy of the real runner.
-  WORK="$(mktemp -d)"; WORK="$(cd "$WORK" && pwd -P)"
-  python3 - "$REPO_ROOT/evals/lint.sh" "$WORK/check.py" <<'PY2'
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-s = open(src).read()
-marker = "if python3 - <<'PHASES'\n"
-if marker not in s:
-    sys.exit("evals/lint.sh no longer runs the phase check as an inline python block")
-block = s.split(marker, 1)[1].split("\nPHASES", 1)[0]
-if "SKIPPABLE" not in block:
-    sys.exit("the extracted block is not the phase-registry check")
-open(dst, "w").write(block)
-PY2
-  [ -s "$WORK/check.py" ] || fail "the phase-registry check could not be extracted"
-
-  # A host installation: no autofleet suite, and a tests/run.sh of its own --
-  # which is a common shell-project convention, and the case the second wrong
-  # discriminator failed on.
-  mkdir -p "$WORK/host/tests"
-  printf '#!/usr/bin/env bash\necho some other project\n' >"$WORK/host/tests/run.sh"
-  : >"$WORK/host/tests/test_something.py"
-  out="$(cd "$WORK/host" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 77 ] \
-    || fail "a host repo with its own tests/run.sh was not skipped (rc=$rc): $out"
-  grep -q "no phase registry" <<<"$out" \
-    || fail "the host repo was skipped without saying why: $out"
-  ok "a host installation is told the check does not apply, not that it failed"
-
-  # ...and the PLAIN host shape, with no tests/run.sh at all. Both shapes share
-  # one path today, since the discriminator answers before anything is opened --
-  # but that is an argument from the current implementation, and round 5 is what
-  # arguing from the implementation cost: the discriminator then guarded one of
-  # its two branches. Found by the independent review.
-  mkdir -p "$WORK/bare/tests"
-  : >"$WORK/bare/tests/test_something.py"
-  out="$(cd "$WORK/bare" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 77 ] \
-    || fail "a host repo with no tests/run.sh at all was not skipped (rc=$rc): $out"
-  ok "...whether or not it has a tests/run.sh of its own"
-
-  # ...and the caller turns that into silence rather than a green line.
-  # By behaviour, not by assertion-on-spelling: grepping for the `elif` line reds
-  # this row for a reformat that changes nothing. The shell fragment around the
-  # check is extracted and driven with a stub that exits 77 in its place.
-  #
-  # The EXTRACTION still anchors on text -- the `ok` line's opening words, and the
-  # second of this file's three then/fi ranges. That is a spelling, and it is one
-  # that fails LOUDLY: a missed match leaves caller.sh with an unterminated `if`,
-  # a syntax error and a red row, rather than a row that quietly stops asserting.
-  # Said here because that distinction is this phase's whole subject. Found by
-  # the independent review.
-  cat >"$WORK/caller.sh" <<EOF
-ok()   { echo "OK: \$*"; }
-fail() { echo "FAIL: \$*"; exit 1; }
-if python3 -c 'import sys; sys.exit(77)'; then
-$(sed -n '/^then$/,/^fi$/p' "$REPO_ROOT/evals/lint.sh" \
-   | sed -n '/^  ok "every phase-dispatching suite agrees/,/^fi$/p')
-EOF
-  out="$(bash "$WORK/caller.sh" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] || fail "the lint's 77 branch is not a clean exit: $out"
-  grep -q "OK:" <<<"$out" \
-    && fail "the lint prints a green line for a check that did not run: $out"
-  grep -q "FAIL:" <<<"$out" \
-    && fail "the lint fails a host installation: $out"
-  ok "...and the lint neither passes nor fails a check it did not run"
-
-  # ...and the same caller with a REAL failure. Without this row, relaxing the
-  # caller's `= 77` to `!= 0` -- the same one-character-class mutation round 6
-  # found in the runner -- leaves every genuine registry mismatch green, on a
-  # check that runs for every PR. The row above cannot see it: it only ever
-  # drives the caller with a skip. Found by the independent review.
-  sed 's|sys.exit(77)|sys.exit(1)|' "$WORK/caller.sh" >"$WORK/caller-fail.sh"
-  out="$(bash "$WORK/caller-fail.sh" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "the lint passed a genuine registry mismatch: $out"
-  grep -q "FAIL:" <<<"$out" \
-    || fail "a genuine registry mismatch did not reach the lint's fail branch: $out"
-  ok "...while a real mismatch still reaches fail"
-
-  # The sentinel, read out of the shipped lint rather than restated, and asserted
-  # against the REAL tree. Rename this file and update SUITES in the same change
-  # -- the ordinary way a suite gets renamed, and the suite stays green through
-  # it -- and inside autofleet the check would decide it was a host installation,
-  # exit 77 and assert nothing, on a lint that runs for every PR. The rows below
-  # cannot see that: they fabricate the filename inside their own trees.
-  # Found by the independent review.
-  # `sort -u`, because there is now more than one block asking the question --
-  # armaatus/autofleet#54's reading ceiling has to know whose CLAUDE.md it is
-  # looking at, for the same hard-rule-1 reason the registry check does. Reading
-  # them as one string made this row fail on a two-line `[ -e ]`, which is the
-  # phase doing its job: the property is not "exactly one block asks" but "every
-  # block that asks gets the same answer". Two different sentinels is two places
-  # the lint can be wrong about which repository it is in.
-  sentinels="$(sed -n 's/^[A-Z_]* = os.path.exists("\(.*\)")$/\1/p' "$REPO_ROOT/evals/lint.sh" | sort -u)"
-  [ -n "$sentinels" ] \
-    || fail "evals/lint.sh no longer decides which repository it is in with an os.path.exists"
-  [ "$(printf '%s\n' "$sentinels" | wc -l | tr -d ' ')" = 1 ] \
-    || fail "evals/lint.sh decides which repository it is in from more than one file: $(tr '\n' ' ' <<<"$sentinels")"
-  [ -e "$REPO_ROOT/$sentinels" ] \
-    || fail "evals/lint.sh keys on $sentinels, which is not in this tree: the phase check now asserts nothing here"
-  ok "every block of evals/lint.sh that asks which repository this is keys on the same file, and this tree has it"
-
-  # A tree that reaches the cross-check itself. Neither tree above does: one
-  # exits at the discriminator, the other at the missing registry, so the loop
-  # that compares SKIPPABLE against the registered labels was driven red by hand
-  # once and by nothing since -- the same gap as the branch this phase exists
-  # for, one function lower. Found by the independent review.
-  mkdir -p "$WORK/stale/tests"
-  : >"$WORK/stale/tests/test_runner_bound.sh"
-  cat >"$WORK/stale/tests/run.sh" <<'EOF'
-SUITES=(
-"runner_bound:bounds"
-)
-SKIPPABLE="runner_bound/nosuch"
-EOF
-  # A HEREDOC, not printf. evals/lint.sh strips heredoc bodies and nothing else
-  # before looking for phase arms, so a `  bounds)` spelled outside one is a
-  # phase this file appears to define -- agreeing with the real arm today, and
-  # becoming a phantom the moment that arm is renamed together with its SUITES
-  # entry. The lint would then report a file that is correct. Found by the
-  # independent review.
-  cat >"$WORK/stale/tests/test_runner_bound.sh" <<'EOF'
-#!/usr/bin/env bash
-case "${1:-}" in
-  bounds)
-  ;;
-esac
-EOF
-  out="$(cd "$WORK/stale" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "a SKIPPABLE entry naming no registered phase was accepted: $out"
-  grep -q "runner_bound/nosuch: allowed to skip" <<<"$out" \
-    || fail "the stale SKIPPABLE entry was not named: $out"
-  ok "...and a SKIPPABLE entry naming no registered phase is caught"
-
-  # ...while the entry that DOES name one is left alone, so the row above is not
-  # passing because the check rejects everything.
-  sed -i.bak 's|SKIPPABLE="runner_bound/nosuch"|SKIPPABLE="runner_bound/bounds"|' \
-    "$WORK/stale/tests/run.sh"
-  out="$(cd "$WORK/stale" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] || fail "a SKIPPABLE entry naming a registered phase was rejected: $out"
-  ok "...and one that names a registered phase is not"
-
-  # HERE, with the registry gone: the check silently stopping, which is the one
-  # case that must still be loud.
-  mkdir -p "$WORK/mine/tests"
-  : >"$WORK/mine/tests/test_runner_bound.sh"
-  out="$(cd "$WORK/mine" && python3 "$WORK/check.py" 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && fail "autofleet without tests/run.sh was waved through: $out"
-  [ "$rc" = 77 ] && fail "autofleet without tests/run.sh was read as a host repo: $out"
-  grep -q "asserts nothing" <<<"$out" \
-    || fail "the missing registry was not reported as the check stopping: $out"
-  ok "...while the registry going missing HERE is still the check stopping"
-  ;;
-
 # ----------------------------------------------------------------- guards
   guards)
   make_runner quick
@@ -849,15 +683,18 @@ EOF
     || fail "an empty bound was refused instead of falling back: $(cat "$WORK/out")"
   ok "...and an empty one means unset, so the default applies"
 
-  # The give-up. MAX_BLOCKED blocking phases and the run stops, saying so --
+  # The give-up. MAX_BLOCKED blocking phases and the run stops starting more --
   # otherwise ~130 of them at the bound outlast the 20-minute cap on the job
   # that runs this, and the log ends in exit 143 with most of it unreported,
   # which is where this started.
+  #
+  # ONE SUITE AT A TIME first, which is the shape the cap was written for.
   # Four blocking suites and nothing else registered, so a cap of 3 has a fourth
   # left to skip and the run has no real phase to wander into.
   make_runner blocker blocker2 blocker3 blocker4
 
-  AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" >"$WORK/out" 2>&1
+  AUTOFLEET_TEST_JOBS=1 AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" \
+    >"$WORK/out" 2>&1
   [ "$?" = 0 ] && fail "a run with four blocked phases passed: $(cat "$WORK/out")"
 
   grep -q "giving up: 3 phases blocked" "$WORK/out" \
@@ -872,6 +709,34 @@ EOF
   grep -q "blocker4" "$WORK/out" \
     && fail "the run continued past the cap into a fourth blocked suite"
   ok "...and does not go on to sit out the bound for every phase left"
+
+  # ...AND IN PARALLEL, which is the default and would otherwise have no
+  # assertion behind it at all. The count cannot be exact there -- every worker
+  # already in flight when the cap is crossed finishes its own phase, so the
+  # bound is MAX_BLOCKED plus at most one per worker -- but the property is the
+  # same one: the run stops STARTING suites, and a registry of eight does not
+  # sit out eight bounds. Two workers, so the arithmetic is 3 + 2 = 5 at worst
+  # and eight is unambiguously the failure.
+  make_runner blocker blocker2 blocker3 blocker4 \
+              blocker5 blocker6 blocker7 blocker8
+
+  AUTOFLEET_TEST_JOBS=2 AUTOFLEET_TEST_TIMEOUT=3 "$WORK/tests/run.sh" \
+    >"$WORK/out" 2>&1
+  [ "$?" = 0 ] && fail "a parallel run with eight blocked phases passed: $(cat "$WORK/out")"
+
+  grep -q "giving up:" "$WORK/out" \
+    || fail "a parallel run did not give up at the cap: $(cat "$WORK/out")"
+  said="$(grep -c "giving up:" "$WORK/out" || true)"
+  [ "${said:-0}" = 1 ] \
+    || fail "the give-up was announced $said times; it is one run, and it says so once: $(cat "$WORK/out")"
+  ok "...and a parallel run gives up too, saying so exactly once"
+
+  blocked_lines="$(grep -c "BLOCKED: produced no result" "$WORK/out" || true)"
+  [ "${blocked_lines:-0}" -ge 3 ] \
+    || fail "a parallel run gave up before the cap, at ${blocked_lines}: $(cat "$WORK/out")"
+  [ "${blocked_lines:-0}" -le 5 ] \
+    || fail "a parallel run sat out ${blocked_lines} bounds; the cap is 3 plus at most one per worker: $(cat "$WORK/out")"
+  ok "...after at most one bound per worker past the cap, and not one per suite"
   ;;
 
 # -------------------------------------------------------------- interrupt
@@ -891,13 +756,17 @@ EOF
   # "fail" against correct code and "pass" against nothing. Job control gives the
   # runner its own process group with default dispositions, which is what a
   # terminal Ctrl-C actually delivers to.
+  #
+  # ONE SUITE AT A TIME. Everything below counts processes -- a `sleep` with a
+  # distinctive duration, a descendant of the phase -- and a runner forking a
+  # worker per suite is a runner spawning more of both while this phase counts
+  # them. The parallel path gets its own, narrower assertion at the end.
   set -m
-  AUTOFLEET_TEST_TIMEOUT="$WATCH_NAP" "$WORK/tests/run.sh" >"$WORK/out" 2>&1 &
+  AUTOFLEET_TEST_JOBS=1 AUTOFLEET_TEST_TIMEOUT="$WATCH_NAP" \
+    "$WORK/tests/run.sh" >"$WORK/out" 2>&1 &
   runner=$!
   set +m
-  # Long enough for the first phase and its watchdog to be up, short enough that
-  # nothing has finished.
-  sleep 4
+  await_phase_up
   # The process GROUP, which is what a terminal Ctrl-C delivers to -- not the
   # runner alone. The difference is the whole second half of this phase: the
   # watchdog is forked after `set +m`, so it is IN that group and takes the INT
@@ -908,10 +777,12 @@ EOF
   # negative pid is its pgid.
   kill -INT -"$runner" 2>/dev/null
 
-  # It must END. Ten seconds is far longer than the handler needs and far shorter
-  # than $WATCH_NAP, so surviving this means it carried on rather than ran slow.
+  # It must END. Forty-five seconds is far longer than the handler needs and far
+  # shorter than $WATCH_NAP -- over an hour -- so surviving this means it carried
+  # on rather than ran slow. The margin is that wide because this phase now
+  # shares a machine with every other suite.
   waited=0
-  while kill -0 "$runner" 2>/dev/null && [ "$waited" -lt 10 ]; do
+  while kill -0 "$runner" 2>/dev/null && [ "$waited" -lt 45 ]; do
     sleep 1; waited=$((waited + 1))
   done
   if kill -0 "$runner" 2>/dev/null; then
@@ -938,6 +809,36 @@ EOF
   [ "${phase_strays:-0}" = 0 ] \
     || fail "SIGINT left ${phase_strays} descendant(s) of the running phase behind"
   ok "...and the running phase is reaped with its descendants"
+
+  # ...AND THE PARALLEL PATH, which reaps one more thing: the per-suite workers.
+  # A run forking three of them and trapping only the phase in hand would leave
+  # two building fixtures in a scratch directory the cleanup is about to delete.
+  # Narrower than the rows above on purpose -- it asks whether anything from
+  # this run survives, not how many sleeps exist on the machine -- because a
+  # parallel runner is spawning processes while this counts them.
+  set -m
+  AUTOFLEET_TEST_JOBS=3 AUTOFLEET_TEST_TIMEOUT="$WATCH_NAP" \
+    "$WORK/tests/run.sh" >"$WORK/out" 2>&1 &
+  runner=$!
+  set +m
+  await_phase_up
+  kill -INT -"$runner" 2>/dev/null
+  waited=0
+  while kill -0 "$runner" 2>/dev/null && [ "$waited" -lt 45 ]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  if kill -0 "$runner" 2>/dev/null; then
+    kill -9 -"$runner" 2>/dev/null
+    pkill -9 -f "$(ere "$WORK/block-nap")" 2>/dev/null
+    fail "a parallel run survived SIGINT"
+  fi
+  ok "...and a parallel run ends on SIGINT too"
+
+  sleep 2
+  worker_strays="$(pgrep -f "$(ere "$WORK/block-nap")" 2>/dev/null | grep -c . || true)"
+  [ "${worker_strays:-0}" = 0 ] \
+    || fail "SIGINT left ${worker_strays} phase descendant(s) of the forked workers behind"
+  ok "...taking every worker's phase with it, not only the one in hand"
   ;;
 
 # ---------------------------------------------------------------- orphans
@@ -972,16 +873,14 @@ EOF
   rc=$?
   [ "$rc" = 0 ] || fail "a green run did not pass: $(cat "$WORK/out")"
   green="$(wc -l <"$WORK/out" | tr -d " ")"
-  # The bar is #52's, and since armaatus/autofleet#56 it is the `testrun` row of
-  # evals/lint.sh's ceilings table rather than a number spelled here -- one home
-  # for the limit, raised in a diff or not at all. Five is not the shape: a green
+  # The bar is #52's. Five is not the shape: a green
   # run is two lines, a blank and the summary, and stays two however many suites
   # are registered (the row below). The slack is what a phase that DECLINES costs
   # -- its label and its own reason -- which is the one thing allowed to push a
   # green run past two, and the skip row further down spends it deliberately.
-  bar="$(ceiling testrun)" || exit 1
+  bar="$TESTRUN_CEILING"
   [ "$green" -le "$bar" ] \
-    || fail "$(ceiling_over testrun "$green"): $(cat "$WORK/out")"
+    || fail "a green run printed $green lines, over the $bar-line ceiling at the top of this file: $(cat "$WORK/out")"
   ok "a green run is at most $bar lines, and printed $green"
 
   grep -q "3 passed." "$WORK/out" \
@@ -1069,7 +968,7 @@ EOF
   # above could not see it.
   skipped_lines="$(wc -l <"$WORK/out" | tr -d " ")"
   [ "$skipped_lines" -le "$bar" ] \
-    || fail "$(ceiling_over testrun "$skipped_lines") -- two passes and one skip: $(cat "$WORK/out")"
+    || fail "a run with two passes and one skip printed $skipped_lines lines, over the $bar-line ceiling: $(cat "$WORK/out")"
   grep -q "ok   " "$WORK/out" \
     && fail "a run with a skip printed the per-phase lines: $(cat "$WORK/out")"
   grep -q "== " "$WORK/out" \
@@ -1212,8 +1111,9 @@ EOF
   # the filter AND matches the flag -- in the comment. And `grep -c` counts
   # LINES, so `./tests/run.sh --verbose && ./tests/run.sh` is one loud line with
   # a quiet run inside it. Both found by the independent review, which pointed at
-  # evals/lint.sh's `strip_comment` and said this was that function's first draft
-  # again; it is borrowed here rather than re-derived.
+  # the `strip_comment` that used to live in evals/lint.sh and said this was that
+  # function's first draft again; that file is gone and this is the copy that
+  # survived it.
   #
   # A VALUE is required of the variable: `AUTOFLEET_TEST_VERBOSE= ./tests/run.sh`
   # is a quiet run that mentions it. `="1"` counts, because a pattern rejecting
@@ -1252,10 +1152,9 @@ import re, sys
 def strip_comment(line):
     """The line with a trailing shell comment removed, quotes respected.
 
-    Lifted from evals/lint.sh, where the docstring explains why cutting at the
-    first `#` anywhere is wrong. Here the quoting matters less and the trailing
-    comment matters more, but one spelling of this in the repo is worth more
-    than two that drift.
+    Cutting at the first `#` anywhere is wrong: a `#` inside quotes is data.
+    Here the quoting matters less and the trailing comment matters more, but
+    getting it right costs three lines.
     """
     out, quote = [], ""
     for ch in line:
