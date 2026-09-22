@@ -16,8 +16,7 @@ reviewer's, not yours.
 2. **Nothing in `scripts/fleet/` may know about one project.** Ports, commands and
    protected paths all arrive through `.autofleet/`.
 3. **A guard that silently stops guarding is worse than no guard.** Every rule in
-   `guard.py` and `merge_gate.py` has a `--selftest` row; one without is not
-   shipped.
+   `guard.py` and `merge_gate.py` has a `--selftest` row; one without is not shipped.
 4. **The Orca dependency is named, not hidden, and is not the default.** A build
    is one `claude -p` in a plain `git worktree` (`runner/headless.sh`, what CI
    runs); Orca code stays behind `runner/`'s `runner_*` contract.
@@ -25,12 +24,12 @@ reviewer's, not yours.
 
 ## Environment
 
-Bash and Python 3.10+, no build step. Comments say *why*.
+Bash and Python 3.10+. Comments say *why*.
 
 ```bash
 ./tests/run.sh [suite [phase]]   # the suite; a `skip` judged nothing
-./evals/run.sh                   # bash -n, shellcheck, both selftests
-./scripts/fleet/fleet.sh status  # ...run --auto, cost; stop.sh drains
+./evals/run.sh                   # bash -n, shellcheck, scanners, selftests
+./scripts/fleet/fleet.sh status  # ...run --auto, cost; stop.sh
 ```
 
 ## The tracker is the spec
@@ -49,6 +48,6 @@ Never hand-edit `blocked`/`ready`; `unblock.yml` derives them from `Blocked by
 `./tests/run.sh` is green, and your change has a test that would have failed
 before it; for a bug fix, commit that test first. Then push, open the pull
 request with `## Plan` — what the issue asked, where you departed, which issues
-you edited — plus its `Closes #N` line, and **stop**. `guard.py` refuses the merge
+you edited — and its `Closes #N` line, then **stop**. `guard.py` refuses the merge
 and the review from here; a PR touching `.github/`, `.claude/` or `.autofleet/`
 never merges itself, and a person merges that one.
