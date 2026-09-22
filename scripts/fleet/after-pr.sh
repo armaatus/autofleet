@@ -141,15 +141,22 @@ review_once() {
     || echo "after-pr.sh: could not write $REVIEWS; the review cap is not counting" >&2
   ./scripts/fleet/review.sh "$pr"; rc=$?
   # ...AND REFUNDED WHEN NO MODEL RAN. `review.sh` has four exits that spend
-  # nothing: 2 (it could not tell what to review), 3 (the fleet is stopped), 6
-  # (its command is not on PATH) and 8 (a verdict for this head is already
-  # posted). Counted, they exhaust the ceiling of two without a single model
-  # call -- and 8 is the ORDINARY one: a dispatcher that lost its `<pr>.done`
-  # record, a second machine, or a pull request a person reviewed by hand all
-  # reach it, twice, and then the next real review is refused with "it has had
-  # its two". What is NOT refunded is 5 and 7, where a reviewer ran and produced
-  # nothing or was killed at the deadline: those cost what a review costs, and
-  # the whole point of the ceiling is that they cannot be retried forever.
+  # nothing: 2 (it could not tell what to review, before any model ran), 3 (the
+  # fleet is stopped), 6 (its command is not on PATH) and 8 (a verdict for this
+  # head is already posted). Counted, they exhaust the ceiling of two without a
+  # single model call -- and 8 is the ORDINARY one: a dispatcher that lost its
+  # `<pr>.done` record, a second machine, or a pull request a person reviewed by
+  # hand all reach it, twice, and then the next real review is refused with "it
+  # has had its two".
+  #
+  # What is NOT refunded is 5, 7 and 10: a reviewer that ran and produced
+  # nothing, one killed at its deadline, and one whose verdict GitHub would not
+  # take. All three cost what a review costs, and the whole point of the ceiling
+  # is that they cannot be retried forever. 10 exists BECAUSE it used to be a 2:
+  # a post that fails after the model has run was refunded like a pre-model
+  # failure, so a repository where `gh pr review` cannot work -- a token without
+  # PR-write, reviews disabled -- bought a full reviewer every poll, forever.
+  # Found by the independent review.
   case "$rc" in
     2|3|6|8) printf '%s\n' "$n" >"$REVIEWS" \
                || echo "after-pr.sh: could not refund $REVIEWS" >&2 ;;

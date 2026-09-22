@@ -35,7 +35,8 @@
 #
 # Exit codes, so the dispatcher can tell the cases apart:
 #   0  approve -- posted, and the merge gate can pass on this head
-#   2  could not tell what to review: no PR, or gh would not say the repository
+#   2  could not tell what to review, BEFORE any model ran: no PR, no
+#      repository, an empty diff. `after-pr.sh` refunds this one
 #   3  the fleet is stopped; nothing goes out
 #   4  changes requested -- posted. THE FIX SIGNAL: fleet.sh starts one fix
 #      session on this, and nothing else does
@@ -43,6 +44,13 @@
 #   6  the reviewer command is missing, or would not start
 #   7  the reviewer ran past AUTOFLEET_REVIEW_TIMEOUT and was killed
 #   8  a verdict for this head is already posted; nothing to do
+#  10  the reviewer ran and produced a verdict, and GitHub would not take it.
+#      SEPARATE FROM 2 ON PURPOSE. 2 is a pre-model failure -- no PR, no
+#      repository -- and `after-pr.sh` refunds it, because nothing was spent.
+#      A post that fails has already spent a whole reviewer and written its cost
+#      row, so refunding it is an unbounded loop of full-budget reviews against
+#      a repository where `gh pr review` cannot work: a token without PR-write,
+#      a repository with reviews disabled. Found by the independent review.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -451,7 +459,9 @@ if ! GH_PAGER=cat gh pr review "$pr" "$state" --body "$review_body" 2>"$raw_err"
   sed 's/^/    /' "$raw_err" >&2
   echo "review.sh: GitHub refused $state; posting the verdict as a comment." >&2
   GH_PAGER=cat gh pr review "$pr" --comment --body "$review_body" || {
-    echo "review.sh: could not post the review at all." >&2; exit 2; }
+    echo "review.sh: could not post the review at all. The reviewer ran and its" >&2
+    echo "  verdict is in $log; what failed is GitHub taking it." >&2
+    exit 10; }
 fi
 
 if [ -s "$nit_body_f" ]; then

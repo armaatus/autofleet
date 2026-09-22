@@ -1990,6 +1990,15 @@ REVIEWING_DIR="$FLEET_REVIEWING"
 #                been bought, against the ceiling of two. Written by
 #                `after-pr.sh` BEFORE each review, because a reviewer that
 #                crashes has still been bought.
+#   <pr>.fixes   a RECORD. The same, for the ONE fix session answering a
+#                review. It arrived without a row here and without a suffix in
+#                `is_review_record`, so `live_reviewers` read it as a LOCK,
+#                took its `1` for a pid, found `fleet_agent_alive 1` answering
+#                "dead" -- pid 1 is launchd -- and deleted it every poll. The
+#                ceiling it is was therefore never a ceiling. This list warns
+#                two lines down that a consumer working the suffixes out for
+#                itself is how the last one disagreed; the fix was to add the
+#                suffix, and the row. Found by the independent review.
 #   <pr>.said    a RECORD. Which hold has already been explained for this PR, so
 #                it cannot overwrite -- or be overwritten by -- the foundation
 #                hold's marker.
@@ -2005,7 +2014,7 @@ REVIEWING_DIR="$FLEET_REVIEWING"
 # list. `cmd_status` respelled it as a `find ! -name` and counted every record as
 # a reviewer in flight, permanently, on the screen its own comment calls the
 # first anybody looks at.
-is_review_record() { case "$1" in *.done|*.reviews|*.said) return 0 ;; esac; return 1; }
+is_review_record() { case "$1" in *.done|*.reviews|*.fixes|*.said) return 0 ;; esac; return 1; }
 
 # A TRANSCRIPT IS MORE THAN ONE FILE: a reviewer killed outside its own trap
 # leaves `.log.raw` and `.log.err` beside `pr-<n>-<head>.log`. They go WITH the
@@ -2074,17 +2083,18 @@ stop_reviewers() {
     # reviewed from the pull request itself, which is the only source that
     # cannot be stale.
     #
-    # `.reviews` AND `.done` are the exceptions, and neither is an oversight.
-    # Both are properties of the PULL REQUEST rather than of this dispatcher's
-    # run: how many of its two reviews have been bought, and the head the loop
-    # finished with. Clearing `.reviews` would hand every open PR a fresh pair
-    # on each drain, which is the ceiling not existing for anybody who restarts
-    # the fleet. Clearing `.done` would re-run the whole post-PR loop over every
-    # open pull request on every dispatcher start -- cheap per PR, since the
-    # review exits in two API calls once a verdict is on the head, and pure
-    # churn. `.done` is per HEAD, so a push clears it by itself; both are pruned
-    # when the PR closes, by the sweep at the end of review_open_prs.
-    case "$marker" in *.reviews|*.done) continue ;; esac
+    # `.reviews`, `.fixes` and `.done` are the exceptions, and none is an
+    # oversight. All three are properties of the PULL REQUEST rather than of
+    # this dispatcher's run: how many of its two reviews and its one fix have
+    # been bought, and the head the loop finished with. Clearing the two counts
+    # would hand every open PR a fresh set on each drain, which is the ceilings
+    # not existing for anybody who restarts the fleet. Clearing `.done` would
+    # re-run the whole post-PR loop over every open pull request on every
+    # dispatcher start -- cheap per PR, since the review exits in two API calls
+    # once a verdict is on the head, and pure churn. `.done` is per HEAD, so a
+    # push clears it by itself; all three are pruned when the PR closes, by the
+    # sweep at the end of review_open_prs.
+    case "$marker" in *.reviews|*.fixes|*.done) continue ;; esac
     is_review_record "$marker" && { rm -f "$marker"; continue; }
     held=""
     read -r held _ 2>/dev/null <"$marker" || true

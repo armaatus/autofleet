@@ -2006,6 +2006,44 @@ GHSTUB
     echo "ok: a resume is handed the same brief and counts as a run"
     ;;
 
+  post_pr_records_survive)
+    # THE LOOP'S COUNTS ARE RECORDS, NOT LOCKS, and `<pr>.fixes` arrived as
+    # neither. `is_review_record` matched `*.done|*.reviews|*.said` only, so
+    # `live_reviewers` read `42.fixes` as a LOCK, took its contents -- the
+    # literal `1` the fix count is -- for a pid, asked `fleet_agent_alive 1`,
+    # got "dead" because pid 1 is launchd, and deleted the file. Every poll.
+    # The ceiling that record IS was therefore never a ceiling: the next retry
+    # read 0 and bought a second full-budget fix session, which is exactly the
+    # hole it was added to close. `stop_reviewers` spared `.reviews` and `.done`
+    # by name and dropped this one too.
+    #
+    # Nothing else sees it: every phase in tests/test_review.sh drives
+    # `after-pr.sh` alone, and the sweep is the dispatcher's. Found by the
+    # independent review of this branch.
+    make_fixture ok
+    backlog_all_claimed 1
+    printf '2\n' >"$AUTOFLEET_DIR/reviewing/101.reviews"
+    printf '1\n' >"$AUTOFLEET_DIR/reviewing/101.fixes"
+    printf 'held\n' >"$AUTOFLEET_DIR/reviewing/101.said"
+    in_fleet review_open_prs >/dev/null 2>&1
+    for kept in reviews fixes done; do
+      [ -e "$AUTOFLEET_DIR/reviewing/101.$kept" ] \
+        || fail "a dispatcher pass deleted 101.$kept, so the count it holds is not a ceiling"
+    done
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/101.fixes")" = 1 ] \
+      || fail "the fix count was rewritten by the pass"
+    # ...and a DRAIN keeps the two counts as well, for the reason stop_reviewers
+    # states: they are properties of the pull request, not of this run.
+    in_fleet stop_reviewers >/dev/null 2>&1
+    for kept in reviews fixes done; do
+      [ -e "$AUTOFLEET_DIR/reviewing/101.$kept" ] \
+        || fail "stop_reviewers cleared 101.$kept; a restart then hands the PR a fresh ceiling"
+    done
+    [ -e "$AUTOFLEET_DIR/reviewing/101.said" ] \
+      && fail "stop_reviewers kept the say-once marker, so this dispatcher inherits a previous run's silence"
+    echo "ok: the loop's counts survive a pass and a drain; the say-once marker does not"
+    ;;
+
   post_pr_lock_alive)
     # THE LOCK'S PID HAS TO BE ONE `fleet_agent_alive` CAN RECOGNISE, and for
     # one commit it was not. `review_open_prs` wrapped the post-PR loop in a

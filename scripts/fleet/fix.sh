@@ -101,14 +101,33 @@ if ! python3 - "$payload" "$findings" <<'LATEST_REVIEW'
 import json, sys
 doc = json.load(open(sys.argv[1]))
 reviews = (doc["data"]["repository"]["pullRequest"].get("reviews") or {}).get("nodes") or []
-# The LATEST review, which is the only one that can have asked for changes: the
-# dispatcher re-reviews after a fix and a superseded verdict is not the one
-# being answered. `reviews(last:50)` already arrives oldest-first within the
-# newest fifty, so the end of the list is the newest.
+# THE LATEST REVIEW THAT ASKED FOR CHANGES, not merely the latest with a body.
+# In the dispatcher's own loop those are the same thing, so this was not a
+# defect -- but a human review posted between the verdict and this session would
+# silently become what the one fix answers, and the sentence above would stop
+# being true. Matched on the state OR on the marker `review.sh` writes, because
+# GitHub refuses CHANGES_REQUESTED on a self-authored pull request and the
+# marker is what carries the verdict there. Found by the independent review.
+#
+# `reviews(last:50)` arrives oldest-first within the newest fifty, so the end of
+# the list is the newest.
+import re
+asked = re.compile(r"<!--\s*autofleet-verdict:\s*request-changes\s", re.I)
 body = ""
 for review in reviews:
-    if (review.get("body") or "").strip():
-        body = review["body"]
+    text = (review.get("body") or "").strip()
+    if not text:
+        continue
+    if review.get("state") == "CHANGES_REQUESTED" or asked.search(text):
+        body = text
+# ...and nothing matching is not nothing to answer: a review left by hand, with
+# no marker and no state this can read, is still what a person expects the fix
+# to address. Fall back to the newest with a body, which is what this did
+# unconditionally before.
+if not body:
+    for review in reviews:
+        if (review.get("body") or "").strip():
+            body = review["body"]
 if not body.strip():
     raise SystemExit(1)
 open(sys.argv[2], "w").write(body)
