@@ -27,25 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A worktree of this repo is what the tests fabricate fixtures against,
-      # and `git worktree list` needs a real repository with a HEAD.
-      - name: the payload parses
-        run: |
-          set -euo pipefail
-          # .autofleet/*.sh with them: it is this repo's own seam answer and
-          # the template install.sh seeds into a host, and nothing parsed it.
-          # Found by the standards review of #85.
-          for script in scripts/fleet/*.sh scripts/fleet/runner/*.sh \
-                        .claude/hooks/*.sh .github/scripts/*.sh \
-                        evals/*.sh tests/*.sh .autofleet/*.sh install.sh; do
-            bash -n "$script" || { echo "::error file=$script::does not parse"; exit 1; }
-          done
-
-      - name: the selftests hold
-        run: |
-          set -euo pipefail
-          python3 .claude/hooks/guard.py --selftest
-          python3 .github/scripts/merge_gate.py --selftest
+      # First, and separately from the suite that also runs it: a parse error or
+      # a failed selftest should name itself in a step, not thirty phases later.
+      - name: the lint holds
+        run: ./evals/run.sh
 
       # env.sh writes the .env the reap phase reads back. On a runner there is
       # no worktree to provision, but the derivation is a pure function of the

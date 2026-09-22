@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Block the things this repo cannot afford an agent to do.
+"""Block the things a host project cannot afford an agent to do.
 
 A PreToolUse hook: reads the tool call as JSON on stdin, exits 2 to block and
 writes the reason to stderr, where Claude reads it and corrects itself. Exit 0
 allows.
 
-CLAUDE.md and the skills beside this file are advisory -- a session can read them
-and still do the thing. Everything here is a rule where "rare" is not good
-enough, so it is enforced instead of asked for.
+Five rules, and each one is here because asking for it is not good enough:
+
+  1. an agent does not merge a pull request
+  2. an agent does not force-push the default branch
+  3. an agent does not write a secret, or a path the project pinned
+  4. nothing goes outward while the fleet is stopped
+  5. an agent does not submit the review of its own pull request
 
 It does NOT fail open. An unreadable payload, a missing key, an unparseable
 command: all of those block, because a guard that quietly stops guarding when
-something upstream changes shape is worse than no guard at all -- nothing on
-screen says the enforcement went away.
+something upstream changes shape is worse than no guard at all.
 
 Commands are shell-tokenised with shlex rather than matched as raw strings, so
 `git -C /some/path push --force origin main` is caught and
@@ -21,13 +24,16 @@ on `;`, `&&`, `||` and `|` and each segment is judged on its own, and `bash -c`
 is recursed into.
 
 What this is NOT: a sandbox. It reads a command and decides; it does not confine
-one. A session that means to get past it can -- an interpreter one-liner that
-opens a file, a path assembled from a variable, an `exec` through something this
-does not model. The line it holds is the ROUTINE one: the heredoc, the redirect,
-the `sed -i`, the `gh pr merge`, the shapes an agent reaches for when it is
-solving the problem in front of it rather than working around a rule. Past that,
-the backstops are the diff and the human who merges. Do not write documentation
-that claims more than this.
+one. A session that means to get past it can. The line it holds is the ROUTINE
+one -- the shapes an agent reaches for when it is solving the problem in front of
+it rather than working around a rule. Past that, the backstops are the diff, the
+merge gate, and the person who merges.
+
+Writing a file is judged through the editing tools (Edit, Write, NotebookEdit),
+which is how an agent actually applies a diff. The shell half used to enumerate
+seven write verbs and still missed `patch -p1` and `git apply`
+(armaatus/autofleet#40); a partial model of writing is a guard that reports
+success on the spellings it does not know, so it is gone rather than extended.
 
     ./.claude/hooks/guard.py --selftest
 """
@@ -41,15 +47,12 @@ import shlex
 import subprocess
 import sys
 
-# What THIS project asks the guard to protect, over and above the universal
-# rules below.
-#
-# autofleet ships no knowledge of any one repo, and a guard whose rules are
-# hardcoded to one is a guard the next project has to fork. So the project-
-# specific half is a file: `.autofleet/guard.json` in the repo root, read here,
-# every key optional.
+# What THIS project asks the guard to protect, over and above the four rules.
+# autofleet ships no knowledge of any one repo, so the project-specific half is
+# a file: `.autofleet/guard.json` in the repo root, every key optional.
 #
 #   {
+#     "default_branch": "trunk",
 #     "protected_paths": [
 #       {"path": "server/contract/captures/",
 #        "tail": "captures/",
@@ -60,9 +63,9 @@ import sys
 #     "secret_tails":    ["token.dat", "config.ini"]
 #   }
 #
-# A malformed file is FATAL rather than ignored. A guard that silently falls
-# back to "protect nothing" on a typo is worse than no guard: it reports
-# success on every write it was installed to stop.
+# A malformed file is FATAL rather than ignored. A guard that silently falls back
+# to "protect nothing" on a typo reports success on every write it was installed
+# to stop.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GUARD_CONFIG = os.environ.get(
     "AUTOFLEET_GUARD_CONFIG", os.path.join(REPO_ROOT, ".autofleet", "guard.json")
@@ -86,16 +89,40 @@ def _load_guard_config(path):
 
 PROJECT = _load_guard_config(GUARD_CONFIG)
 
-# Each entry is a path this project will not let an agent write, and the reason
-# it gives when it refuses. The reason is the whole value of the rule: "blocked"
-# with no why sends the agent looking for a way around it.
-PROTECTED_PATHS = tuple(
-    (
-        entry["path"],
-        entry.get("tail", entry["path"].rstrip("/").rsplit("/", 1)[-1] + "/"),
-        entry.get("reason", "protected by this project's .autofleet/guard.json"),
+
+def _derive(project):
+    """Everything read off the project config, as one tuple.
+
+    One function so the selftest can swap the whole set at once: a fixture that
+    replaced four globals and forgot the fifth would assert against a mixture of
+    the fixture and whatever the host repo happens to configure.
+    """
+    paths = tuple(
+        (
+            entry["path"],
+            entry.get("tail", entry["path"].rstrip("/").rsplit("/", 1)[-1] + "/"),
+            entry.get("reason", "protected by this project's .autofleet/guard.json"),
+        )
+        for entry in project.get("protected_paths", [])
     )
-    for entry in PROJECT.get("protected_paths", [])
+    # `.env` is generated -- there is a script for it -- and every secret file is
+    # gitignored, so a session with a reason to write one has a bug.
+    suffixes = ("/.env", ".env") + tuple(project.get("secret_suffixes", []))
+    contains = tuple(project.get("secret_contains", []))
+    # The same files matched by a distinctive tail, so a relative path after a
+    # `cd` is still recognised.
+    tails = tuple(project.get("secret_tails", []))
+    return paths, suffixes, contains, tails, tuple(t for _, t, _ in paths) + tails
+
+
+(PROTECTED_PATHS, SECRET_SUFFIXES, SECRET_CONTAINS,
+ SECRET_TAILS, PROTECTED_TAILS) = _derive(PROJECT)
+
+# The branch whose history is the audit trail. Configurable because hard rule 2
+# says a project detail arrives through configuration: a host whose default
+# branch is `trunk` gets the rule, not an exemption from it.
+DEFAULT_BRANCH = os.environ.get(
+    "AUTOFLEET_DEFAULT_BRANCH", PROJECT.get("default_branch", "main")
 )
 
 # The fleet's state, shared by every worktree because a stop has to reach all of
@@ -104,6 +131,7 @@ FLEET_DIR = os.environ.get(
     "AUTOFLEET_DIR", os.path.join(os.path.expanduser("~"), ".autofleet")
 )
 STOP_FILE = os.path.join(FLEET_DIR, "STOP")
+# One file per issue the dispatcher is running, holding that worktree's path.
 OWNED_DIR = os.path.join(FLEET_DIR, "worktrees")
 
 # What a stopped fleet must not do. Reading, building and testing stay open --
@@ -115,18 +143,17 @@ OUTWARD = (
     ("gh", "pr", "comment"),
     ("gh", "pr", "review"),
     # Arming an auto-merge is an outward effect: it hands GitHub an instruction
-    # that outlives the stop. `stop.sh --now` promises nothing further reaches
-    # the outside world, and the merge rule below deliberately lets `--auto`
-    # past -- which is right when the fleet is running and wrong when it is not.
+    # that outlives the stop. The merge rule below deliberately lets `--auto`
+    # past, which is right when the fleet is running and wrong when it is not.
     ("gh", "pr", "merge"),
     ("gh", "pr", "close"),
-    ("gh", "issue", "close"),
-    ("gh", "workflow", "run"),
-    ("gh", "run", "rerun"),
     ("gh", "pr", "edit"),
+    ("gh", "issue", "close"),
     ("gh", "issue", "create"),
     ("gh", "issue", "comment"),
     ("gh", "issue", "edit"),
+    ("gh", "workflow", "run"),
+    ("gh", "run", "rerun"),
     ("gh", "api"),
 )
 
@@ -140,54 +167,36 @@ API_WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 # wearing a different hat.
 API_FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
 
-# Files that hold a real bearer token or key. Every one is gitignored, and a
-# session with a reason to write one has a bug. `.env` is generated -- there is
-# a script for it.
-SECRET_SUFFIXES = ("/.env", ".env") + tuple(PROJECT.get("secret_suffixes", []))
-SECRET_CONTAINS = tuple(PROJECT.get("secret_contains", []))
-# The same files matched by a distinctive tail, so a relative path after a `cd`
-# is still recognised.
-SECRET_TAILS = tuple(PROJECT.get("secret_tails", []))
 
-# The enforcement layer itself. An agent that can rewrite its own guards has no
-# guards; this is the line between "advisory" and "enforced" that CLAUDE.md
-# documents, and it has to be enforced by something the agent cannot reach.
-# Skills and subagents are deliberately NOT in here: they are advisory by
-# design, they are reviewed in the diff like anything else, and an agent
-# improving one is the loop working.
-SELF_PROTECTED = (
-    "/.claude/hooks/",
-    "/.claude/settings.json",
-    # Gitignored, so a permission rule written here appears in no diff. That is
-    # exactly why it needs the guard the committed file has.
-    "/.claude/settings.local.json",
-    # The PROJECT-owned half of the same layer, and the half this file reads.
-    # `merge_gate.py` will not let a PR touching these merge itself
-    # (armaatus/autofleet#38) -- but the merge is not where the damage lands.
-    # This module re-reads `guard.json` on EVERY tool call, so an agent that
-    # writes `{}` into it has disarmed every project rule from the next call
-    # on, with the PR still open and the gate still waiting for a person. Same
-    # "before any merge" argument `validate.yml` makes about reading the config
-    # off the head.
-    "/.autofleet/guard.json",
-    "/.autofleet/config",
-    # The host's own correctness rules, which REVIEW.md makes part of the
-    # policy the reviewer applies to this very branch.
-    "/.autofleet/review.md",
-)
+def _repo_root():
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
 
-# The same targets, matched loosely enough to survive a relative path. A shell
-# command can `cd` first, so `captures/login.json` and
-# `server/contract/captures/login.json` are the same file and only one of them
-# looks like it. Suffix-matching a distinctive tail is imperfect -- see the
-# honesty note in the module docstring -- but it is what makes the routine forms
-# reachable at all.
-PROTECTED_TAILS = (
-    ".claude/hooks/",
-    ".claude/settings.json",
-    ".claude/settings.local.json",
-    "workflows/unblock.yml",
-) + tuple(tail for _, tail, _ in PROTECTED_PATHS) + SECRET_TAILS
+
+def _fleet_owns_this_worktree():
+    """Was this worktree opened by the dispatcher rather than by a person?
+
+    Rule 5 is for the automatic flow only. Somebody reviewing a pull request
+    from their own checkout is the ordinary case, and a guard that argues about
+    it is a guard people route around.
+    """
+    root = _repo_root()
+    if not root or not os.path.isdir(OWNED_DIR):
+        return False
+    try:
+        for entry in os.listdir(OWNED_DIR):
+            with open(os.path.join(OWNED_DIR, entry)) as fh:
+                if os.path.realpath(fh.read().strip()) == os.path.realpath(root):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def deny(message):
@@ -229,16 +238,11 @@ def _is_git(words, verb):
 def _gh_rest(words):
     """`gh`'s subcommand tokens, with its own global options stripped.
 
-    `gh -R owner/repo pr review 26 --comment` is `gh pr review`, and matching on
-    `words[1:3]` said otherwise -- so every rule below that names a subcommand
-    was one `-R` away from not applying. `_is_git` has done this for git since
-    it was written; the gh rules were reading raw positions.
+    `gh -R owner/repo pr merge 26` is `gh pr merge`, and matching on `words[1:3]`
+    said otherwise -- so every rule naming a subcommand was one `-R` away from
+    not applying.
 
-    Found by the independent review of the change that added the review rule,
-    which noticed the merge rule has always had the same shape.
-
-    Only for deciding WHICH SUBCOMMAND this is. Rules that inspect flags -- the
-    `--auto` allowance on `gh pr merge`, the write detection on `gh api` -- keep
+    Only for deciding WHICH SUBCOMMAND this is. Rules that inspect flags keep
     reading the unstripped list, because that is where the flags still are.
     """
     if not words or words[0].rsplit("/", 1)[-1] != "gh":
@@ -263,74 +267,6 @@ def _verb(words):
     return words[0].rsplit("/", 1)[-1] if words else ""
 
 
-def _touches_protected(word):
-    """The PROTECTED_PATHS entry this word writes into, if any."""
-    tail = _protected_tail(word)
-    for entry in PROTECTED_PATHS:
-        where, protected_tail, _ = entry
-        if where in word or (protected_tail and tail == protected_tail):
-            return entry
-    return None
-
-
-def _protected_tail(path):
-    """The protected marker this path ends in, if any.
-
-    Suffix rather than prefix: the command may have `cd`-ed first, so the only
-    reliable part of a relative path is its tail.
-    """
-    normalised = path.replace("//", "/").lstrip("./")
-    for tail in PROTECTED_TAILS:
-        if tail.endswith("/"):
-            if ("/" + normalised).find("/" + tail) >= 0 or normalised.startswith(tail):
-                return tail
-        elif normalised == tail or normalised.endswith("/" + tail):
-            return tail
-    return None
-
-
-def _repo_root():
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return out.stdout.strip() if out.returncode == 0 else ""
-    except Exception:
-        return ""
-
-
-def _fleet_owns_this_worktree():
-    """Was this worktree opened by the dispatcher rather than by a person?
-
-    The push gate below is for the automatic flow only. Someone working by hand
-    in their own worktree gets no gate -- a half-finished branch is a normal
-    thing to push, and a guard that argues about it is a guard people route
-    around.
-    """
-    root = _repo_root()
-    if not root or not os.path.isdir(OWNED_DIR):
-        return False
-    try:
-        for entry in os.listdir(OWNED_DIR):
-            with open(os.path.join(OWNED_DIR, entry)) as fh:
-                if os.path.realpath(fh.read().strip()) == os.path.realpath(root):
-                    return True
-    except OSError:
-        return False
-    return False
-
-
-def _head_sha():
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5
-        )
-        return out.stdout.strip() if out.returncode == 0 else ""
-    except Exception:
-        return ""
-
-
 def _git_c_dir(words):
     """The directory `git -C <dir>` would act in, if any."""
     for i, w in enumerate(words):
@@ -353,7 +289,7 @@ def _current_branch(cwd=None):
 
 
 # `;` `&&` `||` `|` and newlines separate commands; only the first word of each
-# is the verb. Judging the whole string as one command is how `x && rm <secret>`
+# is the verb. Judging the whole string as one command is how `x && gh pr merge`
 # reads as an invocation of `x`.
 _SEGMENT_SPLIT = re.compile(r"(?:\|\||&&|\||;|\n)")
 
@@ -365,9 +301,7 @@ def _strip_heredocs(command):
 
     A heredoc body is data. Splitting it on newlines and judging every line as a
     command is how writing documentation about this file trips this file: a line
-    quoting a blocked command inside a doc is prose, not the command. The
-    redirect on the opening line is still a real write and is still judged; only
-    what follows the delimiter is skipped.
+    quoting a blocked command inside a doc is prose, not the command.
     """
     lines = command.split("\n")
     out, i = [], 0
@@ -392,692 +326,240 @@ def _segments(command):
             yield raw
 
 
-REDIRECT = re.compile(r"^(?:\d*|&)?>{1,2}$")
+def _gh_api_writes(words):
+    """Does this `gh api` call change anything?
 
-
-def _written_paths(words):
-    """Every path this command creates, replaces, moves or deletes.
-
-    A write is a write whichever verb performs it. The point of collecting them
-    is that check_path -- the rules about secrets, the pinned contract, the
-    workflow and the hooks themselves -- then applies to a shell command exactly
-    as it applies to an Edit. Without this, `cat > .claude/hooks/guard.py`
-    rewrites the guard and the guard says nothing.
+    "No -X" is not "harmless read": gh sends GET by default and POST the moment
+    any field is present, and a GraphQL mutation carries no method at all.
     """
-    written = []
-    positional = [w for w in words[1:] if not w.startswith("-")]
-    verb = _verb(words)
-
-    # Redirections, attached (`>out`) or detached (`> out`).
+    method = ""
+    writes = False
     for i, w in enumerate(words):
-        if REDIRECT.match(w):
-            if i + 1 < len(words):
-                written.append(words[i + 1])
+        if w in ("-X", "--method") and i + 1 < len(words):
+            method = words[i + 1].upper()
+        elif w.startswith("--method="):
+            method = w.split("=", 1)[1].upper()
+        elif w in API_FIELD_FLAGS or any(w.startswith(f + "=") for f in API_FIELD_FLAGS):
+            writes = True
+        elif "mutation" in w and "graphql" in " ".join(words):
+            writes = True
+    return method in API_WRITE_METHODS or writes
+
+
+def _check_stopped(words):
+    """Rule 4: nothing outward while ~/.autofleet/STOP exists."""
+    if not os.path.exists(STOP_FILE):
+        return
+    gh_sub = _gh_rest(words)
+    for prefix in OUTWARD:
+        if prefix[0] == "gh":
+            matched = ["gh"] + gh_sub[: len(prefix) - 1] == list(prefix)
         else:
-            m = re.match(r"^(?:\d*|&)?>{1,2}(.+)$", w)
-            if m:
-                written.append(m.group(1))
-
-    if verb in ("rm", "shred", "truncate", "unlink"):
-        written += positional
-    elif verb == "tee":
-        written += positional
-    elif verb in ("cp", "install", "ln") and positional:
-        written.append(positional[-1])
-    elif verb == "mv" and positional:
-        # Both ends: a move REMOVES the source. `cp` out is reading; `mv` out is
-        # deleting, and the comment that justifies ignoring cp's source does not
-        # carry to mv.
-        written += positional
-    elif verb == "dd":
-        written += [w.split("=", 1)[1] for w in words[1:] if w.startswith("of=")]
-    elif verb == "sed" and any(
-        w == "-i" or (w.startswith("-i") and not w.startswith("--")) for w in words[1:]
-    ):
-        written += positional
-    elif _is_git(words, "rm") or _is_git(words, "restore"):
-        written += positional[1:]
-    elif _is_git(words, "checkout") and "--" in words:
-        written += words[words.index("--") + 1:]
-
-    return [w for w in written if w and not w.startswith("-")]
-
-
-def _after_cd(prefix, words):
-    """Where a `cd` leaves the shell, as a prefix for the paths that follow.
-
-    `None` means "somewhere this cannot work out" -- a variable, a bare `cd`,
-    a `cd -`. Unknown has to stay unknown: guessing a prefix would resolve a
-    later path to a file the command never touches, and a guard that blocks the
-    wrong file gets switched off.
-    """
-    targets = [w for w in words[1:] if not w.startswith("-")]
-    if len(targets) != 1:
-        return None
-    target = targets[0]
-    if "$" in target or "`" in target or target == "-":
-        return None
-    if target.startswith("/"):
-        collapsed = _collapse(target)
-        if collapsed is None:
-            return None
-        return collapsed + "/" if collapsed != "/" else "/"
-    if prefix is None:
-        return None
-    collapsed = _collapse(prefix + target)
-    if collapsed is None:
-        return None
-    return collapsed + "/" if collapsed else ""
-
-
-def _collapse(path):
-    """`a/./b`, `a//b` and `a/c/../b` all as the one path they name.
-
-    `None` for a walk that climbs past the top: the same "unknown has to stay
-    unknown" rule `_after_cd` follows, for the same reason.
-
-    Both the prefix a `cd` leaves and the path written after it go through
-    this. Normalising only the prefix is what left `cd .claude && cat >
-    ./hooks/guard.py` writable -- the marker is matched literally, and `./`
-    in the tail is enough to stop it matching.
-    """
-    rooted = path.startswith("/")
-    out = []
-    for part in path.split("/"):
-        if not part or part == ".":
+            head = [w.rsplit("/", 1)[-1] for w in words[: len(prefix)]]
+            matched = head == list(prefix) or _is_git(words, prefix[1])
+        if not matched:
             continue
-        if part == "..":
-            if not out:
-                return None
-            out.pop()
-        else:
-            out.append(part)
-    joined = "/".join(out)
-    return ("/" + joined) if rooted else joined
+        if prefix == ("gh", "api") and not _gh_api_writes(words):
+            continue
+        deny(
+            f"Blocked: the fleet is stopped ({STOP_FILE}).\n"
+            "Nothing goes out while that file exists -- no push, no PR, no comment.\n"
+            "Say where you got to and stop. A person clears it with: "
+            "./scripts/fleet/fleet.sh resume"
+        )
 
 
-def check_bash(command, cwd=""):
-    branch = None
-    # What a `cd` earlier on this line has already consumed. Everything below
-    # matches a path by its tail, which is what survives a relative path -- but
-    # a marker whose own prefix is the thing the `cd` ate has no tail left to
-    # match: once `cd .claude` has run, `hooks/guard.py` shares nothing with
-    # `/.claude/hooks/`. Putting the prefix back is what makes it a path again.
+MERGE_REFUSAL = (
+    "Blocked: an agent does not merge a pull request in this repository.\n"
+    "Your job ends at an open pull request carrying its closing line. The\n"
+    "dispatcher arms auto-merge, the review runs, and GitHub merges on its own\n"
+    "rules -- or a person is told why not. See docs/WORKFLOW.md."
+)
+
+
+def _check_merge(words):
+    """Rule 1: an agent does not merge, by any of the three spellings."""
+    if _verb(words) != "gh":
+        return
+    rest = words[1:]
+    sub = _gh_rest(words)
+    if sub[:2] == ["pr", "merge"]:
+        # `--auto` does not merge. It asks GitHub to merge later, once the
+        # required checks pass -- and the merge gate is one of those, so the
+        # conditions in it are what actually decide. `--admin` bypasses them,
+        # which is merging.
+        if "--auto" in rest and "--admin" not in rest:
+            return
+        deny(MERGE_REFUSAL)
+    if sub[:1] == ["api"] and any(
+        re.search(r"/pulls/\d+/merge", w) or "mergePullRequest" in w for w in rest
+    ):
+        deny(MERGE_REFUSAL + "\n(The REST and GraphQL spellings are the same act.)")
+
+
+REVIEW_REFUSAL = (
+    "Blocked: this worktree was opened by the fleet, and an agent does not "
+    "submit the\n"
+    "independent review of its own pull request.\n"
+    "\n"
+    "The verdict is what releases the merge gate, and the reviewer signs in as "
+    "the same\n"
+    "GitHub account you do -- so the only thing separating its verdict from "
+    "yours is a\n"
+    "marker `review.sh` writes from a schema-validated field. This is what "
+    "keeps that\n"
+    "marker out of your reach; a branch that could review itself could certify "
+    "itself.\n"
+    "\n"
+    "Your job ends at an open pull request. To watch the verdict land:\n"
+    "  ./scripts/fleet/await-review.sh"
+)
+
+# The GraphQL names for the same act. A PENDING review submitted later is a
+# review too. `resolveReviewThread` is deliberately NOT here: whether every
+# thread is resolved is branch protection, and GitHub decides it.
+REVIEW_MUTATIONS = ("addPullRequestReview", "submitPullRequestReview")
+
+
+def _check_review(words):
+    """Rule 5: the author does not write the verdict that clears its own gate.
+
+    Four spellings, because the rule is worth exactly as much as its narrowest
+    one: the porcelain, the REST route, the GraphQL mutation, and a field whose
+    value this hook cannot read at all.
+    """
+    if _verb(words) != "gh" or not _fleet_owns_this_worktree():
+        return
+    rest = words[1:]
+    sub = _gh_rest(words)
+    if sub[:2] == ["pr", "review"]:
+        deny(REVIEW_REFUSAL)
+    if sub[:1] != ["api"]:
+        return
+    # A body this cannot READ is a body it must not allow. `gh api` treats a
+    # field value beginning with `@` as a FILENAME, and `--input` takes a plain
+    # path with no `@` at all -- either puts the whole mutation out of sight,
+    # which is how a verdict gets forged. Inline queries are unaffected.
+    if any(w == "--input" or w.startswith("--input=") or w.startswith("@")
+           or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=@", w) for w in rest):
+        deny(
+            "Blocked: `gh api` with a field read from a FILE, from a worktree the "
+            "fleet\n"
+            "opened. The rules here are about what the call does, and a body this "
+            "hook\n"
+            "cannot read is one it cannot judge. Put the query on the command "
+            "line instead."
+        )
+    if any(m in w for w in rest for m in REVIEW_MUTATIONS):
+        deny(REVIEW_REFUSAL + "\n(That GraphQL mutation is the same act by "
+             "another name.)")
+    if any(re.search(r"/pulls/\d+/reviews", w) for w in rest) and _gh_api_writes(words):
+        deny(REVIEW_REFUSAL + "\n(That is the same act by its REST name; a GET "
+             "of the same path is fine.)")
+
+
+def _check_force_push(words, branch_cache):
+    """Rule 2: a force-push to the default branch rewrites the audit trail."""
+    if not _is_git(words, "push"):
+        return
+    forced = any(
+        w in ("--force", "-f", "--force-with-lease")
+        or w.startswith("--force-with-lease=")
+        or (len(w) > 1 and w[0] == "-" and not w.startswith("--") and "f" in w)
+        for w in words[1:]
+    )
+    if not forced:
+        return
+    # Everything after the `push` verb. "words[1:] minus flags" swept in the verb
+    # itself and the ARGUMENT of a global option, so `git -C main push --force
+    # origin HEAD` read as targeting main.
+    try:
+        after = words[words.index("push") + 1:]
+    except ValueError:
+        after = words[1:]
+    refs = [w for w in after if not w.startswith("-")]
+    b = DEFAULT_BRANCH
+    targets = any(
+        r == b or r.startswith(b + ":") or r.startswith("+" + b)
+        or r.endswith(":" + b) or r.endswith(":refs/heads/" + b)
+        or r == "refs/heads/" + b
+        for r in refs
+    )
+    # `git push -f origin HEAD` is the commoner idiom than naming the branch,
+    # and `git push -f` with no refspec at all is the same rewrite.
+    if not targets and (any(r == "HEAD" for r in refs) or len(refs) <= 1):
+        if branch_cache[0] is None:
+            branch_cache[0] = _current_branch(_git_c_dir(words))
+        targets = branch_cache[0] == b
+    if targets:
+        deny(
+            f"Blocked: force-pushing {b} rewrites the commit chain that is this\n"
+            "project's audit trail. Push to your branch instead, or ask a person to\n"
+            "do it deliberately."
+        )
+
+
+def check_bash(command):
+    branch_cache = [None]
     for segment in _segments(command):
         words = _words(segment)
         if not words:
             continue
-
-        if _verb(words) == "cd":
-            # Before the prefix moves: a redirection on the `cd` line happens
-            # where the shell already stands, not where it is going.
-            _judge_writes(words, cwd)
-            cwd = _after_cd(cwd, words)
-            continue
-
         # `bash -c "..."` is a command in an argument. Judge what it will run.
         if _verb(words) in ("bash", "sh", "zsh", "dash") and "-c" in words:
             idx = words.index("-c")
             if idx + 1 < len(words):
-                check_bash(words[idx + 1], cwd)
+                check_bash(words[idx + 1])
             continue
-
-        # A stopped fleet produces no outward effects, even from an agent that
-        # is mid-thought and has not read the news. Reading, building and
-        # testing stay open: the point is to stop the work reaching anyone, not
-        # to freeze the machine.
-        if os.path.exists(STOP_FILE):
-            # `gh`'s own globals stripped, because `gh -R owner/repo pr comment`
-            # is `gh pr comment` and matching raw argv said otherwise -- so the
-            # stop that `stop.sh --now` promises freezes every outward effect
-            # was one `-R` away from letting a comment, a PR or an API write go
-            # out. `pr review` was fixed in the change that added its own rule
-            # and this loop was not, which is the same bug one rule over in the
-            # same file. Found by the independent review of that change.
-            gh_sub = _gh_rest(words)
-            for prefix in OUTWARD:
-                if prefix[0] == "gh":
-                    matched = ["gh"] + gh_sub[: len(prefix) - 1] == list(prefix)
-                else:
-                    head = [w.rsplit("/", 1)[-1] for w in words[: len(prefix)]]
-                    matched = head == list(prefix) or (
-                        prefix[0] == "git" and _is_git(words, prefix[1]))
-                if matched and prefix == ("gh", "api"):
-                    # A read is not outward. A write is, however it is spelled:
-                    # an explicit method, any field flag (which makes gh POST on
-                    # its own), or a GraphQL mutation.
-                    method = ""
-                    writes = False
-                    for i, w in enumerate(words):
-                        if w in ("-X", "--method") and i + 1 < len(words):
-                            method = words[i + 1].upper()
-                        elif w.startswith("--method="):
-                            method = w.split("=", 1)[1].upper()
-                        elif w in API_FIELD_FLAGS or any(
-                            w.startswith(f + "=") for f in API_FIELD_FLAGS
-                        ):
-                            writes = True
-                        elif "mutation" in w and "graphql" in " ".join(words):
-                            writes = True
-                    if method not in API_WRITE_METHODS and not writes:
-                        continue
-                if matched:
-                    deny(
-                        f"Blocked: the fleet is stopped ({STOP_FILE}).\n"
-                        "Nothing goes out while that file exists -- no push, no PR, no "
-                        "comment.\n"
-                        "Say where you got to and stop. A person clears it with: "
-                        "./scripts/fleet/fleet.sh resume"
-                    )
-
-        # The agent does not start the thing that judges it. `review.sh` is
-        # protected transitively -- a reviewer it spawned from here would inherit
-        # this worktree and be refused at its own `gh pr review` -- but that
-        # refusal arrives one process deep, in a log, after a full-budget agent
-        # run. It gets said here instead, and for a sharper reason since
-        # armaatus/autofleet#152: the reviewer's verdict is what releases the
-        # merge gate outright, so an agent that could start its own could certify
-        # its own branch. `after-pr.sh` is the loop that runs it and `fix.sh` the
-        # session that answers it -- both the dispatcher's, both refused here.
-        #
-        # By BASENAME, because `./scripts/fleet/review.sh`,
-        # `bash scripts/fleet/review.sh` and an absolute path are the same act.
-        # Only in a fleet-owned worktree: the DISPATCHER runs all three from the
-        # repo root, which is not one, and a person running any of them by hand
-        # is the ordinary case this must not argue about.
-        #
-        # POSITIONALLY, like every other rule in this file (`words[:len(prefix)]`
-        # above), and this scanned EVERY word for one commit. A script name is a
-        # command when it is the command and an operand everywhere else, so that
-        # version denied `bash -n scripts/fleet/review.sh` -- the parse check
-        # CLAUDE.md's Code section requires -- plus `git log -- review.sh`,
-        # `git diff validate.sh` and `git add` of either. On the branch that
-        # EDITS both files, which is the branch that needs those most.
-        #
-        # The verb is the first word, or the first non-flag operand of an
-        # interpreter. Nothing deeper: `env FOO=1 bash x.sh` reaching this is a
-        # miss, and a miss here costs one refusal arriving one process deep,
-        # while a false positive costs the agent a check it is told to run.
-        if _fleet_owns_this_worktree():
-            verbs = [words[0]] if words else []
-            if os.path.basename(verbs[0] if verbs else "") in ("bash", "sh", "zsh"):
-                # `-n` IS THE WHOLE POINT: `bash -n x.sh` reads x.sh and exits.
-                # It is the check CLAUDE.md requires on every script and it runs
-                # nothing, so the operand after it is not a verb. Any bundle
-                # carrying `n` counts (`-nu`, `-en`), because that is how the
-                # flag is actually typed.
-                parse_only = any(
-                    w.startswith("-") and not w.startswith("--") and "n" in w[1:]
-                    for w in words[1:]
-                )
-                if not parse_only:
-                    for w in words[1:]:
-                        if not w.startswith("-"):
-                            verbs.append(w)
-                            break
-            for w in verbs:
-                base = os.path.basename(w)
-                if base in ("review.sh", "fix.sh", "after-pr.sh"):
-                    deny(
-                        "Blocked: this worktree was opened by the fleet, and an agent does "
-                        "not start\n"
-                        f"the {base.split('.')[0]} pass that judges its own pull request.\n"
-                        "\n"
-                        "The dispatcher runs them, from the repository root, which is not a "
-                        "fleet\n"
-                        "worktree -- that is the whole of what separates their verdict from "
-                        "yours. The\n"
-                        "verdict is what releases the merge gate, so a branch that could "
-                        "start its own\n"
-                        "reviewer could certify itself.\n"
-                        "\n"
-                        "Your job ends at an open pull request carrying `Closes #N`. What "
-                        "happens after\n"
-                        "that -- one review, at most one fix answering it, and then GitHub's "
-                        "own rules --\n"
-                        "is the dispatcher's. If you are waiting to see a verdict land:\n"
-                        "  ./scripts/fleet/await-review.sh"
-                    )
-
-        # THE PUSH MARKER RULE IS GONE, and this note is what stops it being
-        # re-derived. `.autofleet/run/reviewed-<sha>` gated `git push` and
-        # `gh pr create` out of a fleet worktree on a local review having been
-        # run and recorded first. The two passes it recorded were the largest
-        # per-issue line item after the build -- sixteen rounds on PR #126,
-        # eight on #129, two fresh full-budget agents each -- and what they
-        # bought was a second opinion from the same context that wrote the
-        # code. armaatus/autofleet#152 removed them and moved the one opinion
-        # that is independent to after the PR exists, where the dispatcher runs
-        # it and this file's `review.sh` refusal above keeps it out of the
-        # author's reach. There is nothing left for a push to be gated on.
-
-        # "A human merges. Do not merge your own PR." -- CLAUDE.md, "Finishing a
-        # task". Separation of duties is the one review control this project
-        # has, and an agent that can merge is not separated from anything.
-        if _verb(words) == "gh":
-            rest = words[1:]
-            sub_cmd = _gh_rest(words)
-            # The independent review is not the author's to write, and in
-            # `AUTOFLEET_REVIEW_MODE=local` that stops being self-evident.
-            #
-            # In the default `github` mode this rule is redundant: the reviewer
-            # is a different GitHub account, so `merge_gate.independent_reviews()`
-            # discards anything the PR's own author submitted and an agent
-            # reviewing itself achieves nothing. In `local` mode the reviewer and
-            # the author ARE one account, and what separates them is a marker in
-            # the review body -- which an agent with `gh pr review` could simply
-            # write. This is the half that makes the marker mean something:
-            # the agent under review cannot reach the command that produces it.
-            #
-            # Only in a fleet-owned worktree. `scripts/fleet/review.sh` runs from
-            # the repo root, which is not one, which is how the dispatcher's
-            # reviewer still submits. And a person reviewing a PR from their own
-            # checkout is the ordinary case this must not argue about.
-            if sub_cmd[:2] == ["pr", "review"] and _fleet_owns_this_worktree():
-                deny(
-                    "Blocked: this worktree was opened by the fleet, and an agent does "
-                    "not submit\n"
-                    "the independent review of its own pull request.\n"
-                    "\n"
-                    "The reviewer signs in as the same GitHub account you do, so the "
-                    "ONLY thing\n"
-                    "separating its verdict from yours is a marker in the review body "
-                    "-- and this is\n"
-                    "what keeps that marker out of your reach. `review.sh` writes it "
-                    "from a JSON\n"
-                    "field the model cannot spell; you cannot write it at all.\n"
-                    "\n"
-                    "Your job ends at an open pull request carrying `Closes #N`. The "
-                    "dispatcher\n"
-                    "runs the review, and buys one fix session if it asks for changes. "
-                    "To watch:\n"
-                    "  ./scripts/fleet/await-review.sh"
-                )
-            if sub_cmd[:2] == ["pr", "merge"]:
-                # `--auto` does not merge. It asks GitHub to merge later, once
-                # the required checks pass -- and `merge-gate` is one of those,
-                # so the conditions in it are what actually decide. A PERSON
-                # arming auto-merge on a branch they opened is ordinary, and
-                # this must not argue about it.
-                #
-                # FROM A FLEET WORKTREE IT IS THE DISPATCHER'S, and that is the
-                # half armaatus/autofleet#152 added. `after-pr.sh` arms it the
-                # moment the pull request exists, FIRST, because GitHub refuses
-                # to queue auto-merge on a PR that is already mergeable -- so an
-                # agent that queued it too would either lose the race or make
-                # the dispatcher's call the erroring one. The agent's job ends
-                # at the open pull request; the queue is not part of it.
-                if "--auto" in rest and "--admin" not in rest:
-                    if not _fleet_owns_this_worktree():
-                        continue
-                    deny(
-                        "Blocked: this worktree was opened by the fleet, and the "
-                        "merge queue is\n"
-                        "the dispatcher's. It runs `gh pr merge --auto --squash` "
-                        "the moment the pull\n"
-                        "request exists -- first, because GitHub refuses to queue "
-                        "auto-merge on a PR\n"
-                        "that is already mergeable.\n"
-                        "\n"
-                        "Your job ends at an open pull request carrying "
-                        "`Closes #N`. Say so and stop."
-                    )
-                deny(
-                    "Blocked: agents do not merge PRs on this repo (CLAUDE.md, "
-                    '"Finishing a task").\n'
-                    "A human merges. Open the pull request with its `## Plan` and "
-                    "its closing line,\n"
-                    "and stop there."
-                )
-            # The REST spelling of the same thing.
-            if sub_cmd[:1] == ["api"] and any(
-                re.search(r"/pulls/\d+/merge", w) for w in rest
-            ):
-                deny(
-                    "Blocked: `gh api .../pulls/N/merge` is merging a PR, which agents "
-                    "do not do\n"
-                    'on this repo (CLAUDE.md, "Finishing a task"). A human merges.'
-                )
-            # ...and the REST spelling of submitting a review, which is the same
-            # act as `gh pr review` above and was reachable while that rule
-            # matched only the porcelain.
-            #
-            # THIS IS NOT SYMMETRY FOR ITS OWN SAKE. In `local` review mode the
-            # marker in a review body is the only thing separating the reviewer's
-            # verdict from the author's, so `gh api --method POST
-            # repos/O/R/pulls/N/reviews -f body='...<!-- independent-review:
-            # local <sha> -->'` was a live way for an agent to write its own.
-            # docs/CONFIGURATION.md claimed the marker was out of the author's
-            # reach; until this it was not.
-            #
-            # Reachable through `defaultMode: "auto"` in settings.json rather
-            # than through an allowlist entry -- an earlier version of this
-            # comment said `Bash(gh api:*)` was allowlisted, and it is not. The
-            # rule is right; the reason it gave was wrong. Found by the
-            # independent review of this change.
-            #
-            # Both review passes on the PR that introduced local mode found this
-            # independently, which is what two axes are for.
-            #
-            # A GET is left alone: reading the reviews on a PR is how
-            # `await-review.sh` answers "has this been reviewed yet", and
-            # refusing that would break the loop this guards.
-            # ...and the GRAPHQL spelling, which has no `/pulls/N/reviews` path
-            # in it at all. `gh api graphql -f query='mutation{
-            # addPullRequestReview(...) }'` creates the same review record, with
-            # the same author and the same commit oid, and
-            # `independent_reviews()` counts it identically.
-            #
-            # Not a spelling nobody had thought of: the stop-file rule above
-            # already detects a mutation this way. The rule that carried the
-            # security claim did not, which is the finding.
-            #
-            # The whole `addPullRequestReview*` family, plus the submit: a
-            # PENDING review submitted later is a review too. `resolveReviewThread`
-            # is deliberately NOT in here: whether every thread is resolved is
-            # `required_conversation_resolution`, which is branch protection and
-            # is GitHub's own to decide (armaatus/autofleet#152).
-            # A GraphQL body this cannot READ is a GraphQL body it must not
-            # allow. `gh api` treats a field value beginning with `@` as a
-            # FILENAME -- `-F query=@/tmp/m.gql` -- so every mutation name below
-            # is off the command line and every substring test here passes. That
-            # is not a corner: writing the file is unguarded, and in local review
-            # mode the marker in a review body is the only thing separating the
-            # reviewer's verdict from the author's, so this forged one. Verified
-            # against this hook before it was closed.
-            #
-            # The rule is the honest one: from a fleet worktree, a `gh api`
-            # carrying an indirect field is refused outright, because nothing
-            # here can say what it does. Inline queries are unaffected.
-            # ON THE FLAG, not on the `@`. `gh api --input <file>` takes a
-            # plain path with no `@` at all -- and this file already knew that,
-            # because `--input` has been in API_FIELD_FLAGS since the stop rule
-            # was written. Keying on the character left
-            # `gh api graphql --input /tmp/m.json` allowed, which is finding 1 of
-            # this change intact in a spelling gh documents. Found by the
-            # independent review of the change that added it.
-            _indirect = False
-            for i, w in enumerate(rest):
-                if w == "--input" or w.startswith("--input="):
-                    _indirect = True
-                elif w.startswith("@") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=@", w):
-                    _indirect = True
-            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and _indirect:
-                deny(
-                    "Blocked: `gh api` with a field read from a FILE, from a worktree the "
-                    "fleet\n"
-                    "opened. The rules here are about what the call does, and a body this "
-                    "hook\n"
-                    "cannot read is one it cannot judge -- `-F query=@file` puts the whole\n"
-                    "mutation out of its sight, which is how a review and a merge can be "
-                    "forged.\n"
-                    "\n"
-                    "Put the query on the command line instead, where this hook "
-                    "can read it."
-                )
-            # The mutations that ARE the acts other rules refuse, by their third
-            # name. `gh pr merge` and `gh api .../pulls/N/merge` have been
-            # blocked since they were written; `mergePullRequest` never was --
-            # the GraphQL coverage added for reviews stopped at reviews.
-            # `dismissPullRequestReview` is here because a dismissed review
-            # vanishes from merge_gate's `latest` while still counting as a
-            # review on the head, so dismissing the one that found something
-            # clears BOTH conditions at once.
-            # NOT worktree-scoped, unlike the review rules beside it. The
-            # porcelain `gh pr merge` and the REST `.../pulls/N/merge` both
-            # refuse everywhere, and CLAUDE.md lists merging among the rules that
-            # always apply rather than the three that hold only in a fleet
-            # worktree. Scoped, this name merged from the repo root while the
-            # other two were refused there. Found by the independent review.
-            if sub_cmd[:1] == ["api"] and any(
-                "mergePullRequest" in w for w in rest
-            ):
-                deny(
-                    "Blocked: `mergePullRequest` is merging a pull request, which agents do "
-                    "not do\n"
-                    'on this repo (CLAUDE.md, "Finishing a task"). A human merges. This is '
-                    "the same\n"
-                    "act as `gh pr merge` and `gh api .../pulls/N/merge`, by its GraphQL name."
-                )
-            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
-                "dismissPullRequestReview" in w for w in rest
-            ):
-                deny(
-                    "Blocked: dismissing a review, from a worktree the fleet opened.\n"
-                    "\n"
-                    "A dismissed review still counts as a review on this head, but drops out "
-                    "of\n"
-                    "the latest-verdict list merge_gate reads -- so dismissing the one that "
-                    "found\n"
-                    "something clears the verdict this head was given. A verdict is not "
-                    "yours\n"
-                    "to clear: push a fix and the "
-                    "dispatcher re-reviews\n"
-                    "the head you pushed, which is the only thing that supersedes one."
-                )
-            if sub_cmd[:1] == ["api"] and _fleet_owns_this_worktree() and any(
-                "addPullRequestReview" in w or "submitPullRequestReview" in w
-                for w in rest
-            ):
-                deny(
-                    "Blocked: that GraphQL mutation submits a pull request review, and this\n"
-                    "worktree was opened by the fleet. An agent does not submit the "
-                    "independent\n"
-                    "review of its own pull request -- see the `gh pr review` refusal; this "
-                    "is the\n"
-                    "same act by a third name.\n"
-                    "\n"
-                    "Resolving a thread is `resolveReviewThread`, which is allowed: "
-                    "whether every\n"
-                    "thread is resolved is branch protection, and GitHub decides it.\n"
-                    "\n"
-                    "The dispatcher runs the reviewer:  "
-                    "./scripts/fleet/await-review.sh"
-                )
-            if sub_cmd[:1] == ["api"] and any(
-                re.search(r"/pulls/\d+/reviews", w) for w in rest
-            ) and _fleet_owns_this_worktree():
-                method = ""
-                for i, w in enumerate(rest):
-                    if w in ("-X", "--method") and i + 1 < len(rest):
-                        method = rest[i + 1].upper()
-                    elif w.startswith("--method="):
-                        method = w.split("=", 1)[1].upper()
-                # `gh api` defaults to GET, and to POST as soon as a field is
-                # given -- so "no -X" is not "harmless read". The flag list is
-                # API_FIELD_FLAGS, shared with the stop-file rule above rather
-                # than spelled a second time here: a list that exists twice is a
-                # list that will disagree with itself.
-                writes = any(
-                    w in API_FIELD_FLAGS
-                    or any(w.startswith(f + "=") for f in API_FIELD_FLAGS)
-                    for w in rest[1:]
-                )
-                if method in ("POST", "PUT", "PATCH") or (not method and writes):
-                    deny(
-                        "Blocked: `gh api .../pulls/N/reviews` with a body is submitting a "
-                        "review,\n"
-                        "and this worktree was opened by the fleet. An agent does not submit "
-                        "the\n"
-                        "independent review of its own pull request -- see the `gh pr review` "
-                        "refusal;\n"
-                        "this is the same act by its REST name.\n"
-                        "\n"
-                        "The dispatcher runs the reviewer for you:  "
-                        "./scripts/fleet/await-review.sh"
-                    )
-
-        # A force-push to main rewrites the commit chain, which is this
-        # project's audit trail: who asked for what, what the agent produced,
-        # who approved it.
-        if _is_git(words, "push"):
-            forced = any(
-                w in ("--force", "-f", "--force-with-lease")
-                or w.startswith("--force-with-lease=")
-                or (len(w) > 1 and w[0] == "-" and not w.startswith("--") and "f" in w)
-                for w in words[1:]
-            )
-            if forced:
-                # Everything after the `push` verb. Taking "words[1:] minus
-                # flags" swept in the verb itself and the ARGUMENT of a global
-                # option, so `git -C main push --force origin HEAD` read as
-                # targeting main and `git push -f origin` read as having two
-                # refspecs and therefore not being a bare push.
-                try:
-                    after = words[words.index("push") + 1:]
-                except ValueError:
-                    after = words[1:]
-                refs = [w for w in after if not w.startswith("-")]
-                targets_main = any(
-                    r == "main"
-                    or r.startswith("main:")
-                    or r.startswith("+main")
-                    or r.endswith(":main")
-                    or r.endswith(":refs/heads/main")
-                    or r == "refs/heads/main"
-                    for r in refs
-                )
-                # `git push -f origin HEAD` is the commoner idiom than naming the
-                # branch, and on main it is the same rewrite.
-                if not targets_main and any(r == "HEAD" for r in refs):
-                    if branch is None:
-                        branch = _current_branch(_git_c_dir(words))
-                    targets_main = branch == "main"
-                # ...and so is `git push -f` with no refspec at all.
-                if not targets_main and len(refs) <= 1:
-                    if branch is None:
-                        branch = _current_branch(_git_c_dir(words))
-                    targets_main = branch == "main"
-                if targets_main:
-                    deny(
-                        "Blocked: force-pushing main rewrites the commit chain that is "
-                        "this project's audit trail.\n"
-                        "Push to your branch instead, or ask a human to do it "
-                        "deliberately."
-                    )
-
-        # Every path this segment writes goes through the same rules an Edit
-        # would. A write is a write whichever verb performs it.
-        _judge_writes(words, cwd)
-
+        _check_stopped(words)
+        _check_merge(words)
+        _check_review(words)
+        _check_force_push(words, branch_cache)
     return 0
 
 
-def _judge_writes(words, cwd):
-    """Judge every path one segment writes, from where the shell stands now.
+def _protected_tail(path):
+    """The protected marker this path ends in, if any.
 
-    A function rather than a loop in place because `cd` needs it too: a
-    redirection attached to the `cd` itself -- `cd tmp > .claude/settings.json`
-    -- is performed before the directory changes, so it is judged against the
-    prefix in hand, and skipping it lost the secrets, captures and
-    self-protection rules for that shape.
+    Suffix rather than prefix: the tool may name a relative path, so the only
+    reliable part of it is its tail.
     """
-    for path in _written_paths(words):
-        if cwd and not path.startswith("/"):
-            path = cwd + path
-        collapsed = _collapse(path)
-        if collapsed is not None:
-            path = collapsed
-        protected = _touches_protected(path)
-        if protected:
-            where, _, reason = protected
-            deny(
-                f"Blocked: {where} is {reason}.\n"
-                "Redirecting into it, or moving it away, rewrites it just as surely as "
-                "editing it.\n"
-                "Reading it is fine -- this blocks writing one."
-            )
-        check_path(path)
+    normalised = path.replace("//", "/").lstrip("./")
+    for tail in PROTECTED_TAILS:
+        if tail.endswith("/"):
+            if ("/" + normalised).find("/" + tail) >= 0 or normalised.startswith(tail):
+                return tail
+        elif normalised == tail or normalised.endswith("/" + tail):
+            return tail
+    return None
 
 
 def check_path(path):
+    """Rule 3: secrets, and the paths this project pinned."""
     normalised = path if path.startswith("/") else "/" + path
     tail = _protected_tail(path)
-
-    # Only in a worktree the dispatcher opened. In the automatic flow nobody is
-    # watching and an agent rewriting its own guards is a real risk; in a manual
-    # session the person editing IS the control, and a guard nobody can ever
-    # improve is a guard that rots. Same line the push gate draws, for the same
-    # reason.
-    for marker in SELF_PROTECTED if _fleet_owns_this_worktree() else ():
-        if marker in normalised or (tail and marker.endswith(tail)):
-            deny(
-                f"Blocked: {path} is part of the enforcement layer, and this worktree "
-                "was opened\n"
-                "by the fleet. An agent that can rewrite its own guards while nobody is "
-                "watching has\n"
-                "no guards -- that is the line CLAUDE.md draws between advisory and "
-                "enforced.\n"
-                "Change it in a worktree you opened yourself, where the diff and the "
-                "person merging\n"
-                "are the control. Skills and subagents are advisory and editable "
-                "anywhere."
-            )
 
     if (normalised.endswith(SECRET_SUFFIXES)
             or any(m in normalised for m in SECRET_CONTAINS)
             or (tail and tail in SECRET_TAILS)):
         deny(
-            f"Blocked: {path} holds per-worktree secrets, and none of them belong in "
-            "the tree.\n"
-            ".env is generated -- regenerate it with ./scripts/fleet/env.sh rather than "
-            "editing it."
+            f"Blocked: {path} holds per-worktree secrets, and none of them belong in\n"
+            "the tree. .env is generated -- regenerate it with "
+            "./scripts/fleet/env.sh rather than editing it."
         )
 
     for where, protected_tail, reason in PROTECTED_PATHS:
         if where in normalised or (protected_tail and tail == protected_tail):
+            # The reason is the whole value of the rule: "blocked" with no why
+            # sends the agent looking for a way around it.
             deny(
                 f"Blocked: {where} is {reason}.\n"
                 "Editing it to match a failing run silences whatever it exists to "
                 "catch.\n"
                 "Say in the PR body what changed and why, or ask for it to be "
-                "regenerated the way\n"
-                "this project regenerates it."
+                "regenerated the way this project regenerates it."
             )
-
-    if normalised.endswith("/.github/workflows/unblock.yml") or tail == "workflows/unblock.yml":
-        deny(
-            "Blocked: unblock.yml derives the blocked/ready labels that decide what "
-            "other agents\n"
-            'may start (CLAUDE.md, "Working in parallel"). Changing it changes what '
-            "three worktrees\n"
-            "are allowed to do. A human edits this one."
-        )
-
     return 0
-
-
-def _payload_cwd(payload):
-    """Where this Bash call starts, as a prefix relative to the repo root.
-
-    A `cd` is tracked within one command string, but Claude Code's shell keeps
-    its directory between tool calls: `cd .claude/hooks` in one call writes
-    nothing and is allowed, and `cat > guard.py` in the next arrived with no
-    prefix at all. The payload carries the directory it will run in, so the
-    second call can be judged the way the first would have been.
-
-    Same rule as everywhere else here: anything that cannot be established is
-    no prefix rather than a guessed one. A cwd outside the repo yields nothing,
-    because every marker is relative to the root and a path outside it is not
-    ours to judge.
-    """
-    cwd = payload.get("cwd")
-    # Absolute, or it is not the answer this claims to be: a relative or
-    # foreign-looking cwd resolves against wherever the hook happens to run,
-    # which is a guessed prefix wearing a real one's clothes.
-    if not isinstance(cwd, str) or not os.path.isabs(cwd):
-        return ""
-    # After the cheap checks: every Bash call reaches here, and this shells out.
-    root = _repo_root()
-    if not root:
-        return ""
-    try:
-        rel = os.path.relpath(os.path.realpath(cwd), os.path.realpath(root))
-    except (OSError, ValueError):
-        return ""
-    if rel == os.curdir or rel.startswith(os.pardir):
-        return ""
-    return rel + "/"
 
 
 def main(payload):
@@ -1088,12 +570,12 @@ def main(payload):
         command = tool_input.get("command")
         if not isinstance(command, str) or not command.strip():
             deny(
-                "Blocked: this Bash call carries no readable command, so the guards in "
+                "Blocked: this Bash call carries no readable command, so "
                 ".claude/hooks/guard.py\n"
                 "cannot tell whether it is allowed. Refusing rather than allowing an "
                 "unexamined command."
             )
-        return check_bash(command, _payload_cwd(payload))
+        return check_bash(command)
 
     # NotebookEdit names its target notebook_path, not file_path. Reading only
     # file_path is how a matcher ends up promising coverage it does not have.
@@ -1104,496 +586,116 @@ def main(payload):
     return check_path(path)
 
 
+# Every rule above has a row here, and hard rule 3 is why: a rule with no
+# assertion is a rule that can stop holding in silence. The list is the record of
+# what has been checked -- it is not a proof that nothing else gets through; see
+# the module docstring.
 SELFTEST = [
     # (tool, tool_input, expected exit, what it proves)
-    #
-    # Every row here is either a rule this repo depends on or an escape someone
-    # actually found. The list is the record of what has been checked -- it is
-    # not a proof that nothing else gets through; see the module docstring.
 
-    # --- merging ------------------------------------------------------------
+    # --- 1. merging ---------------------------------------------------------
     ("Bash", {"command": "gh pr merge 42 --squash"}, 2, "an agent cannot merge its own PR"),
     ("Bash", {"command": "gh pr merge 42 --auto --squash"}, 0,
      "...but it may ASK GitHub to merge once the required checks pass"),
-    ("Bash", {"command": "gh pr merge 42 --squash --admin"}, 2,
+    ("Bash", {"command": "gh pr merge 42 --auto --squash --admin"}, 2,
      "...and --admin, which bypasses those checks, is still merging"),
     ("Bash", {"command": "gh  pr  merge 12"}, 2, "...however it is spaced"),
     ("Bash", {"command": "/opt/homebrew/bin/gh pr merge 12"}, 2, "...through an absolute gh"),
-    ("Bash", {"command": "gh api -X PUT repos/o/r/pulls/12/merge"}, 2, "...or spelled as the REST call"),
+    ("Bash", {"command": "gh -R o/r pr merge 12"}, 2, "...past gh's own global options"),
+    ("Bash", {"command": "gh api -X PUT repos/o/r/pulls/12/merge"}, 2, "...spelled as the REST call"),
+    ("Bash", {"command": "gh api graphql -f query='mutation{ mergePullRequest(x) }'"}, 2,
+     "...and by its GraphQL name"),
+    ("Bash", {"command": "true && gh pr merge 3"}, 2, "a second segment is judged too"),
+    ("Bash", {"command": 'bash -c "gh pr merge 3"'}, 2, "...and so is bash -c"),
     ("Bash", {"command": "gh pr create --title x --body y"}, 0, "opening a PR is allowed"),
     ("Bash", {"command": "gh api repos/o/r/pulls/12"}, 0, "reading a PR over the API is allowed"),
-    ("Bash", {"command": "ctest --test-dir build --output-on-failure"}, 0, "running the tests is allowed"),
-    ("Bash", {"command": 'git commit -m "note: do not gh pr merge yourself"'}, 0, "a commit message is not a command"),
-    ("Bash", {"command": 'grep -rn "gh pr merge" CLAUDE.md'}, 0, "grepping for a blocked command is allowed"),
+    ("Bash", {"command": 'git commit -m "note: do not gh pr merge yourself"'}, 0,
+     "a commit message is not a command"),
+    ("Bash", {"command": 'grep -rn "gh pr merge" CLAUDE.md'}, 0,
+     "grepping for a blocked command is allowed"),
+    ("Bash", {"command": "cat > /tmp/doc.md <<'EOF'\ngh pr merge 1\nEOF"}, 0,
+     "a heredoc body is data -- documenting a blocked command is not running it"),
 
-    # --- force-pushing main -------------------------------------------------
-    ("Bash", {"command": "git push --force origin main"}, 2, "force-pushing main is blocked"),
+    # --- 2. force-pushing the default branch --------------------------------
+    ("Bash", {"command": "git push --force origin main"}, 2, "force-pushing the default branch is blocked"),
     ("Bash", {"command": "git push origin main -f"}, 2, "...with the flag last"),
     ("Bash", {"command": "git push --force origin refs/heads/main"}, 2, "...spelled as a full ref"),
+    ("Bash", {"command": "git -C /w/demo push --force-with-lease origin main"}, 2,
+     "...through git's global options"),
     ("Bash", {"command": "git -C /w/main push --force origin some-branch"}, 0,
      "a -C path containing 'main' is not a refspec"),
-    ("Bash", {"command": "git -C /w/demo push --force-with-lease origin main"}, 2, "...through git's global options"),
-    ("Bash", {"command": "git push --force origin armaatus/fix-main-loop"}, 0, "a branch whose name contains 'main' is fine"),
+    ("Bash", {"command": "git push --force origin armaatus/fix-main-loop"}, 0,
+     "a branch whose name contains 'main' is fine"),
     ("Bash", {"command": "git push -u origin armaatus/thing"}, 0, "an ordinary push is fine"),
 
-    # --- a project's own protected paths ------------------------------------
-    # Everything in this group is driven by SELFTEST_PROJECT below rather than
-    # by anything hardcoded here: these rows prove the .autofleet/guard.json
-    # mechanism, using the pinned-contract rule autofleet was extracted from
-    # (armaatus/rommsync-nx) as the worked example.
-    ("Bash", {"command": "probe.py > server/contract/captures/login.json"}, 2, "redirecting into a capture is blocked"),
-    ("Bash", {"command": "probe.py >server/contract/captures/login.json"}, 2, "...with no space after the >"),
-    ("Bash", {"command": "probe.py 1> server/contract/captures/login.json"}, 2, "...through an explicit fd"),
-    ("Bash", {"command": "cd server/contract && cp /tmp/x captures/login.json"}, 2, "...after a cd, where the path is relative"),
-    ("Bash", {"command": "rm server/contract/captures/login.json"}, 2, "deleting a capture is blocked"),
-    ("Bash", {"command": "mv server/contract/captures/login.json /tmp/gone.json"}, 2, "moving one AWAY is deleting it, and blocked"),
-    ("Bash", {"command": "sed -i '' s/a/b/ server/contract/captures/login.json"}, 2, "editing a capture in place is blocked"),
-    ("Bash", {"command": "cp /tmp/new.json server/contract/captures/login.json"}, 2, "copying over a capture is blocked"),
-    ("Bash", {"command": "cp server/contract/captures/login.json /tmp/look.json"}, 0, "copying one OUT is reading, and allowed"),
-    ("Bash", {"command": "cat server/contract/captures/login.json"}, 0, "reading a capture is allowed"),
-    ("Bash", {"command": "diff server/contract/captures/login.json /tmp/new.json > /tmp/d"}, 0, "a diff whose output goes elsewhere is allowed"),
-    ("Bash", {"command": "grep -r foo server/contract/captures/"}, 0, "grepping the captures is allowed"),
+    # --- 3. secrets, and the project's own protected paths ------------------
+    # Driven by SELFTEST_PROJECT below rather than by anything hardcoded here:
+    # these rows prove the .autofleet/guard.json mechanism, using the pinned-
+    # contract rule autofleet was extracted from (armaatus/rommsync-nx) as the
+    # worked example.
+    ("Edit", {"file_path": "/w/demo/.env"}, 2, "secrets are not editable"),
+    ("Edit", {"file_path": "/w/demo/server/testing/fixture-auth.env"}, 2,
+     "...including a project's fixture credentials"),
+    ("Write", {"file_path": "/w/demo/token.dat"}, 2, "...and a stored token"),
+    ("NotebookEdit", {"notebook_path": "/w/demo/.env"}, 2,
+     "NotebookEdit names its target notebook_path, and is guarded too"),
+    ("Edit", {"file_path": "/w/demo/server/contract/captures/login.json"}, 2,
+     "a pinned capture is not hand-edited"),
+    ("Write", {"file_path": "captures/login.json"}, 2, "...by a relative path, matched on its tail"),
+    ("Edit", {"file_path": "/w/demo/.claude/hooks/guard.py"}, 0,
+     "the guards themselves are editable -- the diff and the merge gate are their control"),
+    ("Edit", {"file_path": "/w/demo/src/app.c"}, 0, "ordinary source files are editable"),
+    ("Edit", {"file_path": "/w/demo/.claude/agents/reviewer.md"}, 0, "so are the subagents"),
 
-    # --- the enforcement layer, from the shell ------------------------------
-    # The whole class the first version missed: check_path only ran for Edit, so
-    # every one of these rewrote a guarded file and said nothing.
-    ("Bash", {"command": "cat > .claude/hooks/guard.py"}, 0,
-     "the guards are writable by hand; _stateful_checks covers the fleet case"),
-    ("Bash", {"command": "sed -i '' s/deny/allow/ .claude/hooks/guard.py"}, 0, "...by hand, the same"),
-    ("Bash", {"command": "sed -i '' s/deny/allow/ .github/workflows/unblock.yml"}, 2, "...nor the blocked/ready workflow"),
-    ("Bash", {"command": "echo TOKEN > token.dat"}, 2, "...nor a stored token"),
-    ("Bash", {"command": "printf x > .env"}, 2, "...nor .env"),
-    ("Bash", {"command": "echo '{}' > .claude/settings.local.json"}, 0, "...and so is the settings override"),
-    ("Bash", {"command": "true && rm .env"}, 2, "a second segment is judged too"),
-    ("Bash", {"command": 'bash -c "rm .env"'}, 2, "...and so is bash -c"),
-    ("Bash", {"command": "cat .claude/hooks/guard.py"}, 0, "reading the guard is allowed"),
-    ("Bash", {"command": "echo hi > /tmp/note.txt"}, 0, "an ordinary redirect is allowed"),
+    # --- 5. reviewing, outside a fleet worktree -----------------------------
+    ("Bash", {"command": "gh pr review 7 --approve"}, 0,
+     "a person reviewing from their own checkout is the ordinary case"),
+    ("Bash", {"command": "gh api graphql --input /tmp/m.json"}, 0,
+     "...and so is any other gh api call they make"),
 
     # --- payloads -----------------------------------------------------------
     ("Bash", {}, 2, "a Bash call with no command is refused, not allowed"),
-
-    # --- the editing tools --------------------------------------------------
-    ("Edit", {"file_path": "/w/demo-project/.env"}, 2, "secrets are not editable"),
-    ("Edit", {"file_path": "/w/demo-project/server/testing/fixture-auth.env"}, 2, "...including a project's fixture credentials"),
-    ("Write", {"file_path": "/w/demo-project/token.dat"}, 2, "...and a stored token"),
-    ("Edit", {"file_path": "/w/demo-project/server/contract/captures/login.json"}, 2, "a capture is not hand-edited"),
-    ("Edit", {"file_path": "/w/demo-project/.github/workflows/unblock.yml"}, 2, "the blocked/ready workflow is not agent-editable"),
-    # The enforcement layer is guarded only in a fleet worktree, so both halves
-    # of that live in _stateful_checks below.
-    ("Edit", {"file_path": "/w/demo-project/.claude/skills/house-style/SKILL.md"}, 0, "skills are advisory and stay editable"),
-    ("Edit", {"file_path": "/w/demo-project/.claude/agents/reviewer.md"}, 0, "so do subagents"),
-    ("Edit", {"file_path": "/w/demo-project/src/app.c"}, 0, "ordinary source files are editable"),
-    ("NotebookEdit", {"notebook_path": "/w/demo-project/.env"}, 2, "NotebookEdit names its target notebook_path, and is guarded too"),
-    ("Bash", {"command": "cat > /tmp/doc.md <<'EOF'\nrm .env\nEOF"}, 0,
-     "a heredoc body is data -- documenting a blocked command is not running it"),
-    ("Bash", {"command": "rm .env"}, 2, "...and the same line outside a heredoc still blocks"),
+    ("Edit", {}, 0, "a matched tool that names no path has nothing here to answer to"),
 ]
 
+# Rule 5, which holds only in a worktree the dispatcher opened. Same
+# (command, want, what) shape as STOPPED_CASES; _stateful_checks fabricates the
+# ownership record around them.
+OWNED_CASES = [
+    ("gh pr review 7 --comment --body x", 2,
+     "an agent does not submit the review of its own pull request"),
+    ("gh -R o/r pr review 7 --approve", 2, "...past gh's own global options"),
+    ("gh api -X POST repos/o/r/pulls/7/reviews -f body=x", 2,
+     "...nor by the REST route that writes the same record"),
+    ("gh api graphql -f query='mutation{ addPullRequestReview(x) }'", 2,
+     "...nor as the GraphQL mutation"),
+    ("gh api graphql --input /tmp/m.json", 2,
+     "...nor with the body in a file this hook cannot read"),
+    ("gh api graphql -F query=@/tmp/m.gql", 2, "...however that file is named"),
+    ("gh api repos/o/r/pulls/7/reviews", 0,
+     "reading the reviews is how await-review.sh works, and stays open"),
+    ("gh api graphql -f query='mutation{ resolveReviewThread(x) }'", 0,
+     "resolving a thread is branch protection's business, not this rule's"),
+    ("gh pr create --title x --body y", 0, "...and opening the pull request is the job"),
+]
 
-# The hook's own path, assembled rather than written out: this module is full of
-# rules about writing to it, and a literal makes the file its own false positive.
-HOOK_REL = ".claude/" + "hooks/" + "guard.py"
-SETTINGS_REL = ".claude/" + "settings.json"
-LOCAL_SETTINGS_REL = ".claude/" + "settings.local.json"
-# The project half, by the same rule: every entry in SELF_PROTECTED gets an
-# assertion below, and these are the ones that are not `.claude/`.
-PROJECT_RULE_RELS = (
-    ".autofleet/" + "guard.json",
-    ".autofleet/" + "config",
-    ".autofleet/" + "review.md",
-)
-_stateful_ran = 0
+# The rules that depend on a FILE rather than on the command alone. Same
+# (input, want, what) shape as SELFTEST; the state is built and torn down around
+# them by _stateful_checks.
+STOPPED_CASES = [
+    ("git push origin HEAD", 2, "a stopped fleet pushes nothing"),
+    ("gh pr create --title x --body y", 2, "...and opens no pull request"),
+    ("gh -R o/r pr comment 3 --body hi", 2, "...and comments on none, past gh's globals"),
+    ("gh api -X POST repos/o/r/issues/3/comments -f body=hi", 2, "...nor by the REST spelling"),
+    ("gh api graphql -f query='mutation{ addComment(x) }'", 2, "...nor as a GraphQL mutation"),
+    ("gh api repos/o/r/pulls/3", 0, "reading stays open: a stop is not a freeze"),
+    ("./tests/run.sh", 0, "...and so does building and testing"),
+]
 
-
-def _stateful_checks():
-    """The two gates that depend on files rather than on the command alone.
-
-    A stop that is not tested is a stop you find out about in the moment you
-    needed it, so this builds a throwaway fleet directory and drives both.
-    """
-    import tempfile
-
-    global STOP_FILE, OWNED_DIR
-    saved = (STOP_FILE, OWNED_DIR)
-    failures = 0
-
-    def expect(want, tool_input, what, tool="Bash", because=None, cwd=None):
-        """Drive one payload and judge the answer.
-
-        `because` is a substring of the refusal, and the reason it exists is
-        that exit 2 on its own is not proof: the guard also exits 2 for a
-        payload it cannot read. Without it, a refactor that made these payloads
-        unreadable -- or that moved a deny into the wrong branch -- would keep
-        every assertion here green for a reason nobody intended. This carries
-        the check the fleet-gate assertions had in evals/lint.sh before they
-        moved here, which the move had dropped.
-        """
-        nonlocal failures
-        global _stateful_ran
-        _stateful_ran += 1
-        # An allowed call writes no reason, so a `because` on one could never
-        # hold. Catching it here rather than letting it fail every run.
-        assert not (because and want == 0), "because= needs a refusal to read"
-        payload = {"tool_name": tool, "tool_input": tool_input}
-        if cwd is not None:
-            payload["cwd"] = cwd
-        said = io.StringIO()
-        try:
-            with contextlib.redirect_stderr(said):
-                main(payload)
-            got = 0
-        except SystemExit as exc:
-            got = exc.code
-        why = said.getvalue()
-        if got != want:
-            # With the reason, because that is what a false block looks like
-            # from here: capturing stderr to match it must not also swallow it.
-            detail = f" -- {why.strip()}" if why.strip() else ""
-            print(
-                f"FAIL: {what} (expected exit {want}, got {got}){detail}",
-                file=sys.stderr,
-            )
-            failures += 1
-        elif because and because not in why:
-            print(
-                f"FAIL: {what} (exit {got} for the wrong reason: "
-                f"{because!r} not in {why.strip()!r})",
-                file=sys.stderr,
-            )
-            failures += 1
-        else:
-            print(f"  ok: {what}")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        STOP_FILE = os.path.join(tmp, "STOP")
-        OWNED_DIR = os.path.join(tmp, "worktrees")
-        os.makedirs(OWNED_DIR)
-
-        # No stop, not fleet-owned: nothing in the way.
-        expect(0, {"command": "git push origin HEAD"}, "an ordinary push is not gated")
-        expect(0, {"command": "gh pr create --title x"}, "...nor opening a PR")
-        # The permitted half of the review rule, and it is not decoration: drop
-        # the `_fleet_owns_this_worktree()` conjunct from it and every deny row
-        # below stays green while `scripts/fleet/review.sh` -- which runs from
-        # the repo root -- can no longer submit anything, so every PR on a
-        # local-mode repository blocks forever. Found by the local review of the
-        # change that added the rule.
-        expect(0, {"command": "gh pr review 7 --comment --body x"},
-               "...nor reviewing a PR from a worktree the fleet does not own")
-        # ...but merging is refused everywhere, by every one of its three names.
-        expect(2, {"command": "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId} }'"},
-               "merging by mutation is refused outside a fleet worktree too",
-               because="GraphQL name")
-        expect(0, {"command": "gh api --method POST repos/o/r/pulls/7/reviews -f body=x"},
-               "...nor its REST spelling from there")
-        expect(0, {"file_path": os.path.join(_repo_root() or "/w", HOOK_REL)},
-               "the guards are editable by hand, where a person is watching", tool="Edit")
-
-        # Stopped: nothing outward, everything inward.
-        with open(STOP_FILE, "w") as fh:
-            fh.write("stopped\n")
-        expect(2, {"command": "git push origin HEAD"}, "a stopped fleet cannot push")
-        expect(2, {"command": "gh pr create --title x"}, "...cannot open a PR")
-        expect(2, {"command": "gh pr comment 7 --body x"}, "...cannot comment")
-        # ...and not by naming the repository, which used to walk past the whole
-        # OUTWARD list: `words[:3]` is `["gh","-R","o/r"]`, which is no prefix at
-        # all. `stop.sh --now` promises to freeze every outward effect.
-        expect(2, {"command": "gh -R owner/repo pr comment 7 --body x"},
-               "...nor by naming the repository")
-        # Arming an auto-merge hands GitHub an instruction that OUTLIVES the
-        # stop, which is the definition of an outward effect. The merge rule
-        # lets `--auto` past on purpose; that is right while the fleet runs and
-        # wrong while it is stopped.
-        expect(2, {"command": "gh pr merge 7 --auto --squash"},
-               "...nor arm an auto-merge, which outlives the stop")
-        expect(2, {"command": "gh pr close 7"}, "...nor close a PR")
-        expect(2, {"command": "gh issue close 7"}, "...nor close an issue")
-        expect(2, {"command": "gh workflow run merge-gate.yml -f pr=7"},
-               "...nor start a workflow")
-        expect(2, {"command": "gh run rerun 9"}, "...nor re-run one")
-        expect(2, {"command": "gh --repo owner/repo pr create --title x"},
-               "...nor with --repo, which takes its value the same way")
-        expect(2, {"command": "gh -R owner/repo api -X POST repos/o/r/issues/7/comments -f body=x"},
-               "...nor an API write behind a -R")
-        expect(0, {"command": "gh -R owner/repo pr view 7"},
-               "...while reading is still not outward")
-        expect(2, {"command": "gh issue edit 7 --body x"}, "...cannot edit an issue")
-        expect(0, {"command": "ctest --test-dir build"}, "...but can still run the tests")
-        expect(0, {"command": "cmake --build build"}, "...and still build")
-        expect(0, {"command": "git status"}, "...and still read git")
-        os.remove(STOP_FILE)
-
-        # Fleet-owned: what an agent may and may not do from one of these.
-        #
-        # THE PUSH GATE IS GONE and there is no row for it, deliberately. It
-        # refused `git push` and `gh pr create` until a local review had been
-        # recorded for the exact HEAD; the passes that produced that record went
-        # with armaatus/autofleet#152, and a marker nothing writes is a gate
-        # nothing can ever pass. What replaces it is the review AFTER the push,
-        # which the rows below keep out of the author's reach.
-        root = _repo_root()
-        if root:
-            with open(os.path.join(OWNED_DIR, "999"), "w") as fh:
-                fh.write(root + "\n")
-            try:
-                expect(0, {"command": "git push origin HEAD"},
-                       "a fleet worktree pushes; the review is what comes after")
-                expect(0, {"command": "gh pr create --title x"},
-                       "...and opens the pull request, which is where its job ends")
-                # The other half of a reviewer signed in as the author, and the
-                # sharp one:
-                # with `gh pr review` reachable from here, the marker that makes
-                # a self-review count is a string an agent can type.
-                expect(2, {"command": "gh pr review 7 --comment --body x"},
-                       "a fleet worktree cannot submit its own independent review",
-                       because="does not submit")
-                expect(0, {"command": "gh pr view 7 --json body"},
-                       "...but reading the PR is not reviewing it")
-                # ...nor start the reviewer, which is the sharper half: its
-                # verdict releases the merge gate outright, so an agent that
-                # could run this would be certifying its own branch.
-                expect(2, {"command": "./scripts/fleet/review.sh 7"},
-                       "a fleet worktree cannot start its own reviewer",
-                       because="does not start")
-                expect(2, {"command": "bash scripts/fleet/review.sh"},
-                       "...nor through bash, which is the same act",
-                       because="does not start")
-                expect(2, {"command": "./scripts/fleet/after-pr.sh 7"},
-                       "...nor the loop that runs it",
-                       because="does not start")
-                expect(2, {"command": "./scripts/fleet/fix.sh 7"},
-                       "...nor the fix session answering it, which is also the "
-                       "dispatcher's",
-                       because="does not start")
-                # THE OTHER DIRECTION, which this rule did not have and needed:
-                # it scanned every word, so naming either script as an OPERAND
-                # was refused. `bash -n` is the check CLAUDE.md's Code section
-                # requires on every script, and the branch that edits these two
-                # could not run it on them. Hard rule 3 cuts both ways -- a rule
-                # with no assertion on its allowed side is a rule that can
-                # tighten silently.
-                expect(0, {"command": "bash -n scripts/fleet/review.sh"},
-                       "...but the parse check CLAUDE.md requires is not starting one")
-                expect(0, {"command": "bash -n scripts/fleet/fix.sh"},
-                       "...on any of them")
-                expect(0, {"command": "git log --oneline -- scripts/fleet/review.sh"},
-                       "...nor is reading either one's history")
-                expect(0, {"command": "git diff scripts/fleet/fix.sh"},
-                       "...nor diffing it")
-                expect(2, {"command": "bash scripts/fleet/review.sh 7"},
-                       "...while an interpreter RUNNING one is still the same act",
-                       because="does not start")
-                expect(0, {"command": "./scripts/fleet/await-review.sh"},
-                       "...but WAITING for them is the whole of what it should do")
-                expect(0, {"command": "gh pr comment 7 --body 'rebased'"},
-                       "...and saying something on the pull request is not reviewing it")
-                # ...nor is the merge QUEUE the agent's, which it was until
-                # armaatus/autofleet#152. `after-pr.sh` arms it first, and a
-                # second `--auto` would either lose the race or make the
-                # dispatcher's call the erroring one.
-                expect(2, {"command": "gh pr merge 7 --auto --squash"},
-                       "a fleet worktree does not queue its own merge either",
-                       because="the merge queue is")
-                # The REST spelling. `gh pr merge` has had one of these since it
-                # was written; `gh pr review` did not, and `Bash(gh api:*)` is on
-                # the agent allowlist -- so this was the live way to forge the
-                # marker local review mode depends on.
-                expect(2, {"command": "gh api --method POST repos/o/r/pulls/7/reviews -f body=x"},
-                       "...nor by its REST name", because="REST name")
-                expect(2, {"command": "gh api -X POST repos/o/r/pulls/7/reviews -f event=COMMENT"},
-                       "...nor with -X and the short flag", because="REST name")
-                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews -f body=x"},
-                       "...nor with no method at all, which gh turns into a POST",
-                       because="REST name")
-                expect(2, {"command": "gh api --method=POST repos/o/r/pulls/7/reviews -f body=x"},
-                       "...nor with --method=POST, the equals spelling",
-                       because="REST name")
-                # `--input` is caught one rule earlier now, by the one that
-                # refuses a body this hook cannot read -- so the reason changed
-                # even though the answer did not. `because` is what noticed.
-                expect(2, {"command": "gh api repos/o/r/pulls/7/reviews --input body.json"},
-                       "...nor with --input, which hands it a body from a file",
-                       because="cannot read")
-                expect(0, {"command": "gh api repos/o/r/pulls/7/reviews"},
-                       "...but READING the reviews is what await-review.sh does")
-                # The THIRD spelling. A GraphQL mutation carries no
-                # `/pulls/N/reviews` path, so the rule above never sees it --
-                # and it creates the same review record. Found by the
-                # independent review of the change that added the other two.
-                expect(2, {"command": "gh api graphql -f query='mutation{ addPullRequestReview(input:{pullRequestId:\"x\",event:COMMENT,body:\"y\"}){clientMutationId} }'"},
-                       "...nor the GraphQL mutation that does the same thing",
-                       because="third name")
-                expect(2, {"command": "gh api graphql -f query='mutation{ submitPullRequestReview(input:{pullRequestReviewId:\"x\",event:COMMENT}){clientMutationId} }'"},
-                       "...nor submitting one that was left pending",
-                       because="third name")
-                expect(0, {"command": "gh api graphql -F id=x -f query='mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){clientMutationId} }'"},
-                       "...but resolving a thread is not submitting a review")
-                # THE FOURTH SPELLING, and the one that made the other three
-                # decorative: `gh api` reads a field value beginning with `@` from
-                # a FILE, so the mutation name is never on the command line at
-                # all. Verified against this hook before it was closed.
-                expect(2, {"command": "gh api graphql -F query=@/tmp/m.gql"},
-                       "...nor a mutation this hook cannot read, from a file",
-                       because="cannot read")
-                expect(2, {"command": "gh api graphql -f query=@m.gql"},
-                       "...nor the -f spelling of the same",
-                       because="cannot read")
-                # `graphql`, not a `/pulls/N/reviews` path: the pre-existing
-                # field-flag rule cannot reach this one, so these rows are the
-                # only thing covering it. The REST spelling was already blocked
-                # by that older rule, so a row for it proved nothing about this
-                # one -- which is what the independent review caught.
-                expect(2, {"command": "gh api graphql --input /tmp/m.json"},
-                       "...nor a body read from a file with no @ at all",
-                       because="cannot read")
-                expect(2, {"command": "gh api graphql --input=/tmp/m.json"},
-                       "...nor its equals spelling", because="cannot read")
-                expect(2, {"command": "gh api graphql --input -"},
-                       "...nor a body on stdin", because="cannot read")
-                # ...and the acts other rules refuse, by their GraphQL names.
-                expect(2, {"command": "gh api graphql -f query='mutation{ mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId} }'"},
-                       "...nor merging by the mutation name", because="GraphQL name")
-                expect(2, {"command": "gh api graphql -f query='mutation{ dismissPullRequestReview(input:{pullRequestReviewId:\"x\",message:\"m\"}){clientMutationId} }'"},
-                       "...nor dismissing the review that found something",
-                       because="dismissing a review")
-                # ...and a global option must not walk past any of it.
-                expect(2, {"command": "gh -R owner/repo pr review 7 --comment --body x"},
-                       "...nor `gh -R owner/repo pr review`, which read as a different subcommand",
-                       because="does not submit")
-                expect(2, {"file_path": os.path.join(root, HOOK_REL)},
-                       "a fleet worktree cannot rewrite its own guards", tool="Edit",
-                       because="enforcement layer")
-                expect(0, {"file_path": os.path.join(root, ".claude/skills/x/SKILL.md")},
-                       "...but skills stay advisory even there", tool="Edit")
-
-                # Every path in SELF_PROTECTED, not just the hook. Dropping
-                # settings.local.json from that tuple used to leave every
-                # assertion here green; it is the sharp one, because it is
-                # gitignored and a permission rule written into it appears in
-                # no diff. Moved here from evals/lint.sh (#98) so that deleting
-                # them is itself a change to the enforcement layer, which never
-                # auto-merges -- parked in lint.sh they could be removed by a
-                # PR that merged itself.
-                # `because` on each, because exit 2 alone would also be
-                # satisfied by the secrets branch: settings.local.json is
-                # gitignored and holds permission rules, so it is one plausible
-                # edit away from being denied as a secret instead. That would
-                # keep these green while making the file unwritable in a
-                # hand-opened worktree too, where it has to stay editable.
-                for rel in (SETTINGS_REL, LOCAL_SETTINGS_REL):
-                    expect(2, {"file_path": os.path.join(root, rel)},
-                           f"...nor {rel}", tool="Edit", because="enforcement layer")
-                    expect(2, {"command": "echo x > " + rel},
-                           f"...nor {rel} from the shell", because="enforcement layer")
-
-                # The project half of the layer, each of the three, by the
-                # absolute path and from the shell. `because` on each for the
-                # reason the settings files carry one: `.autofleet/` is where a
-                # host's secret rules are declared, so exit 2 alone could come
-                # from the secrets branch instead and these would stay green
-                # while the refusal said something else.
-                for rel in PROJECT_RULE_RELS:
-                    expect(2, {"file_path": os.path.join(root, rel)},
-                           f"...nor {rel}, which is what the rules ARE",
-                           tool="Edit", because="enforcement layer")
-                    expect(2, {"command": "echo x > " + rel},
-                           f"...nor {rel} from the shell", because="enforcement layer")
-                    # ...and after a `cd`, which is #139's case: the marker's
-                    # own prefix is what the cd consumed.
-                    expect(2, {"command": "cd .autofleet && cp /tmp/x "
-                                          + rel.split("/", 1)[1]},
-                           f"...nor {rel} after a cd into .autofleet",
-                           because="enforcement layer")
-                # READING one is not writing it. `config.sh` sources
-                # `.autofleet/config` on the way into every fleet script, and a
-                # guard that blocked that would stop the fleet rather than the
-                # agent -- the loudest possible way to get this rule removed.
-                expect(0, {"command": ". ./.autofleet/config"},
-                       "...while sourcing the config is reading, and stays allowed")
-                expect(0, {"file_path": os.path.join(root, ".autofleet/setup.sh")},
-                       "...and the project hooks beside them stay editable",
-                       tool="Edit")
-
-                # ...and the same three through a path a `cd` has shortened,
-                # which is the whole of #139: the marker's own prefix is what
-                # the `cd` consumed, so nothing about `hooks/guard.py` looks
-                # like the enforcement layer until the prefix is put back.
-                for rel in (HOOK_REL, SETTINGS_REL, LOCAL_SETTINGS_REL):
-                    expect(2, {"command": "cd .claude && cp /tmp/x " + rel.split("/", 1)[1]},
-                           f"...nor {rel} after a cd, where the path is relative")
-                expect(2, {"command": "cd .claude/hooks && sed -i '' s/deny/allow/ guard.py"},
-                       "...nor two levels down, where only the basename is left")
-                expect(2, {"command": "cd .claude && cd hooks && cat > guard.py"},
-                       "...nor a cd reached in two steps")
-                expect(2, {"command": "cd .claude/hooks && cd .. && cp /tmp/x settings.json"},
-                       "...and .. walks back up rather than giving up")
-                expect(0, {"command": "cd .claude && cat > notes.md"},
-                       "...while an ordinary file under the same cd stays writable")
-                expect(0, {"command": "cd $SOMEWHERE && cat > guard.py"},
-                       "...and an unresolvable cd does not invent a path to blame")
-
-                # The prefix was normalised and the written path was not, so a
-                # dot-segment in the tail was enough to stop the marker matching
-                # -- `./` is one keystroke from the case asserted above.
-                expect(2, {"command": "cd .claude && cp /tmp/x ./hooks/guard.py"},
-                       "...nor with a ./ in the path the cd left")
-                expect(2, {"command": "cd .claude && cp /tmp/x .//hooks/guard.py"},
-                       "...nor with a doubled slash")
-                expect(2, {"command": "cd .claude/skills && cp /tmp/x ../hooks/guard.py"},
-                       "...nor climbing back out of a deeper cd")
-                # `bash -c` is a shape the guard already models; it started its
-                # own prefix from scratch and so forgot the cd in front of it.
-                expect(2, {"command": "cd .claude && bash -c 'cp /tmp/x hooks/guard.py'"},
-                       "...nor when bash -c runs the write, inheriting the cd")
-                # A redirection on the `cd` line writes before the directory
-                # changes. Judging it needs the prefix in hand, not the new one.
-                expect(2, {"command": "cd tmp > .claude/hooks/guard.py"},
-                       "...nor a redirection attached to the cd itself")
-
-                # The shell keeps its directory between tool calls, so the
-                # prefix has to come from the payload as well as from the line.
-                # `cd .claude/hooks` writes nothing and is allowed; the write
-                # arrives in the next call with no `cd` in front of it at all.
-                expect(2, {"command": "cat > guard.py"},
-                       "...nor a write from a cwd the previous call left behind",
-                       cwd=os.path.join(root, ".claude", "hooks"))
-                expect(2, {"command": "cp /tmp/x ../settings.json"},
-                       "...nor one that climbs out of that cwd",
-                       cwd=os.path.join(root, ".claude", "hooks"))
-                # ...while a cwd that is not itself protected stays ordinary.
-                # `.claude/hooks/` is the wrong place to ask this: the whole
-                # directory is protected, so a note written beside the guard is
-                # blocked too, and rightly.
-                expect(0, {"command": "cat > notes.md"},
-                       "...while a write from an ordinary cwd is untouched",
-                       cwd=os.path.join(root, "server"))
-                expect(0, {"command": "cat > guard.py"},
-                       "...and a cwd outside the repo is not ours to judge",
-                       cwd="/tmp")
-
-                # Exit 2 is not proof on its own: an unreadable payload exits 2
-                # too. These pin the refusal to the branch that should produce
-                # it -- the check evals/lint.sh had before the move.
-                expect(2, {"command": "cd .claude && cp /tmp/x hooks/guard.py"},
-                       "...and the refusal names the enforcement layer",
-                       because="enforcement layer")
-            finally:
-                # Nothing to put back: the rows above write no marker. The
-                # `try` stays because `OWNED_DIR` below is what has to be
-                # restored whatever these rows do, and a `finally` that once
-                # held a rename is not a reason to unwind the block.
-                pass
-
-    STOP_FILE, OWNED_DIR = saved
-    return failures
-
-
-# The project config the selftest runs against.
-#
-# Not the host repo's own `.autofleet/guard.json`: the rows above assert exact
-# refusals, and a suite whose expectations come from whatever file happens to
-# be on disk asserts nothing. This is a fixture, and it doubles as the worked
-# example of what a project puts in that file.
+# The project config the selftest runs against. Not the host repo's own
+# `.autofleet/guard.json`: the rows above assert exact refusals, and a suite
+# whose expectations come from whatever file happens to be on disk asserts
+# nothing. It doubles as the worked example of what a project puts in that file.
 SELFTEST_PROJECT = {
     "protected_paths": [
         {
@@ -1608,80 +710,103 @@ SELFTEST_PROJECT = {
 }
 
 
-def _install_selftest_project():
-    """Put SELFTEST_PROJECT in place of whatever the host repo configured."""
-    global PROJECT, PROTECTED_PATHS, PROTECTED_TAILS
-    global SECRET_SUFFIXES, SECRET_CONTAINS, SECRET_TAILS
-    PROJECT = SELFTEST_PROJECT
-    PROTECTED_PATHS = tuple(
-        (
-            entry["path"],
-            entry.get("tail", entry["path"].rstrip("/").rsplit("/", 1)[-1] + "/"),
-            entry.get("reason", "protected by this project's .autofleet/guard.json"),
-        )
-        for entry in PROJECT["protected_paths"]
-    )
-    SECRET_SUFFIXES = ("/.env", ".env") + tuple(PROJECT["secret_suffixes"])
-    SECRET_CONTAINS = tuple(PROJECT["secret_contains"])
-    SECRET_TAILS = tuple(PROJECT["secret_tails"])
-    PROTECTED_TAILS = (
-        ".claude/hooks/",
-        ".claude/settings.json",
-        ".claude/settings.local.json",
-        "workflows/unblock.yml",
-    ) + tuple(tail for _, tail, _ in PROTECTED_PATHS) + SECRET_TAILS
+def _run(tool, tool_input):
+    """One case, with the refusal text swallowed.
 
-
-def selftest():
-    """Every assertion below, run against a fleet state this function controls.
-
-    The stateless cases assert what the guard does for an ordinary developer --
-    "an ordinary push is fine", "the guards are writable by hand". Run with the
-    real fleet directory those are not merely untrue inside a fleet worktree,
-    they are untrue BY DESIGN: that is what _stateful_checks exercises
-    separately, with a throwaway fleet it builds itself.
-
-    Left alone, the selftest therefore passed on a laptop and failed inside every
-    agent's worktree, which is where it matters most -- `ctest -R agent.config`
-    red for every agent all night, passing only on CI runners that are nobody's
-    fleet. A test that is red where the work happens teaches people to ignore a
-    red suite.
-
-    So: point the fleet at an empty directory for the duration. Nothing is owned,
-    nothing is stopped, and each case asserts the one thing it says it does.
+    Every blocking row prints its reason to stderr, and forty of them buries the
+    one line that matters -- which assertion failed. The failures below print
+    their own message, so nothing is lost.
     """
-    import tempfile
-
-    global STOP_FILE, OWNED_DIR
-    saved = (STOP_FILE, OWNED_DIR)
-    _install_selftest_project()
-    with tempfile.TemporaryDirectory() as empty:
-        STOP_FILE = os.path.join(empty, "STOP")
-        OWNED_DIR = os.path.join(empty, "worktrees")
-        try:
-            return _selftest_body()
-        finally:
-            STOP_FILE, OWNED_DIR = saved
-
-
-def _selftest_body():
-    failures = 0
-    for tool, tool_input, want, what in SELFTEST:
-        try:
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
             main({"tool_name": tool, "tool_input": tool_input})
-            got = 0
-        except SystemExit as exc:
-            got = exc.code
+        return 0
+    except SystemExit as exc:
+        return exc.code
+
+
+def _bash_cases(cases):
+    failures = 0
+    for command, want, what in cases:
+        got = _run("Bash", {"command": command})
         if got != want:
             print(f"FAIL: {what} (expected exit {want}, got {got})", file=sys.stderr)
             failures += 1
         else:
             print(f"  ok: {what}")
+    return failures
+
+
+def _stateful_checks():
+    """STOPPED_CASES and OWNED_CASES, against state this function controls.
+
+    The rows above assert what the guard does for an ordinary session -- "an
+    ordinary push is fine". Run against a real `~/.autofleet/STOP` those are not
+    merely untrue, they are untrue BY DESIGN, so the selftest would go red on
+    every machine whose fleet happened to be drained. It controls the state
+    instead.
+    """
+    import tempfile
+    global STOP_FILE, OWNED_DIR
+    saved = (STOP_FILE, OWNED_DIR)
+    failures = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        # Nothing is owned while the stop rows run, and nothing is stopped while
+        # the ownership rows do: a fixture that set both would let either rule
+        # pass for the other one's reason.
+        OWNED_DIR = os.path.join(tmp, "unowned")
+        STOP_FILE = os.path.join(tmp, "STOP")
+        open(STOP_FILE, "w").close()
+        try:
+            failures += _bash_cases(STOPPED_CASES)
+        finally:
+            STOP_FILE = saved[0]
+
+        OWNED_DIR = os.path.join(tmp, "worktrees")
+        os.mkdir(OWNED_DIR)
+        with open(os.path.join(OWNED_DIR, "7"), "w") as fh:
+            fh.write(_repo_root() or os.getcwd())
+        try:
+            failures += _bash_cases(OWNED_CASES)
+        finally:
+            OWNED_DIR = saved[1]
+    return failures
+
+
+def selftest():
+    global PROJECT, PROTECTED_PATHS, SECRET_SUFFIXES, SECRET_CONTAINS
+    global SECRET_TAILS, PROTECTED_TAILS, STOP_FILE, OWNED_DIR
+    import tempfile
+
+    PROJECT = SELFTEST_PROJECT
+    (PROTECTED_PATHS, SECRET_SUFFIXES, SECRET_CONTAINS,
+     SECRET_TAILS, PROTECTED_TAILS) = _derive(PROJECT)
+
+    failures = 0
+    saved = (STOP_FILE, OWNED_DIR)
+    with tempfile.TemporaryDirectory() as empty:
+        # Nothing is stopped and nothing is owned for the stateless rows,
+        # whatever this machine's own fleet is doing. Left alone, those rows
+        # would assert the opposite of themselves inside a fleet worktree --
+        # which is where they matter most.
+        STOP_FILE = os.path.join(empty, "STOP")
+        OWNED_DIR = os.path.join(empty, "worktrees")
+        try:
+            for tool, tool_input, want, what in SELFTEST:
+                got = _run(tool, tool_input)
+                if got != want:
+                    print(f"FAIL: {what} (expected exit {want}, got {got})", file=sys.stderr)
+                    failures += 1
+                else:
+                    print(f"  ok: {what}")
+        finally:
+            STOP_FILE, OWNED_DIR = saved
     failures += _stateful_checks()
     if failures:
         print(f"{failures} guard assertion(s) failed", file=sys.stderr)
         return 1
-    print(f"{len(SELFTEST) + _stateful_ran} guard assertions hold")
+    print(f"{len(SELFTEST) + len(STOPPED_CASES) + len(OWNED_CASES)} "
+          "guard assertions hold")
     return 0
 
 
@@ -1689,8 +814,7 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv[1:]:
         sys.exit(selftest())
     try:
-        raw = sys.stdin.read()
-        parsed = json.loads(raw)
+        parsed = json.loads(sys.stdin.read())
     except Exception:
         deny(
             "Blocked: .claude/hooks/guard.py could not read this tool call, so it "

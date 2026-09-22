@@ -15,8 +15,7 @@
 #                                  the answer would then be about a commit the
 #                                  caller never named.
 #   test_await_review.sh stopped   ~/.autofleet/STOP means nothing is coming.
-#   test_await_review.sh quiet     what one clean round COSTS the reader, against
-#                                  the `round` row of evals/lint.sh's ceilings.
+#   test_await_review.sh quiet     what one clean round COSTS the reader.
 #
 # `gh` is stubbed on PATH and the fleet state dir is a temp dir, so nothing here
 # touches a pull request or the machine's fleet.
@@ -24,8 +23,10 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The `round` row of evals/lint.sh's ceilings table, read rather than restated.
-. "$REPO_ROOT/tests/ceiling.sh"
+# What one clean round of `await-review.sh` may cost the reader, in lines.
+# It lived in a ceilings table in evals/lint.sh until armaatus/autofleet#153;
+# one number used by one phase belongs beside the phase.
+ROUND_CEILING=45
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok: $*"; }
@@ -155,8 +156,7 @@ case "${1:-}" in
   # review round, and every sentence in it was added because something failed
   # once -- which is exactly the shape armaatus/autofleet#56 is about: prose
   # grows back one useful paragraph at a time and nothing objects at any single
-  # step. So the round has a ceiling, and it is the `round` row of
-  # evals/lint.sh's ceilings table.
+  # step. So the round has a ceiling.
   #
   # A ceiling on lines rather than words: this is output a reader skims for the
   # next command, and the cost of it is screen, not vocabulary.
@@ -168,9 +168,9 @@ case "${1:-}" in
   grep -q 'has a verdict' <<<"$out" \
     || { echo "$out" >&2; fail "the round never reached a verdict, so its length proves nothing"; }
   lines="$(wc -l <<<"$out" | tr -d ' ')"
-  limit="$(ceiling round)" || exit 1
+  limit="$ROUND_CEILING"
   [ "$lines" -le "$limit" ] \
-    || { echo "$out" >&2; fail "$(ceiling_over round "$lines")"; }
+    || { echo "$out" >&2; fail "one clean round is $lines lines, over the $limit-line ceiling at the top of this file"; }
   ok "one clean round is $lines lines, ceiling $limit"
   ;;
   *)

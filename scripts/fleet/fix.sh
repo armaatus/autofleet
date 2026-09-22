@@ -181,7 +181,6 @@ issue and why in the commit message."
 
 echo "==> fixing PR #$pr in $worktree"
 
-fleet_headroom_env
 set -m
 ( cd "$worktree" && "$AUTOFLEET_REVIEW_CMD" -p "$prompt" \
     --permission-mode "$AUTOFLEET_BUILD_PERMISSION_MODE" \

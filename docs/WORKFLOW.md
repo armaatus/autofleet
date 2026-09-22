@@ -6,10 +6,9 @@ once and not per issue: it is that loop end to end — what each stage produces,
 what starts the next, where a person is required, how to stop the whole thing,
 and why each rule is the shape it is. An agent's own instructions are the brief
 ([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`),
-with [CLAUDE.md](../CLAUDE.md) the working agreement
-above it. `evals/lint.sh` holds what an agent reads before its first edit — those
-two and [REVIEW.md](../REVIEW.md), which the brief names at its review step —
-under a word ceiling.
+with [CLAUDE.md](../CLAUDE.md) the working agreement above it. Between them they
+are under 500 words, and that is the whole of what an agent reads before its
+first edit.
 
 An agent comes here for the conventions behind a rule — the `<!-- blockers -->`
 marker in [Stage 2](#stage-2--spec) chief among them — and not for what to run.
@@ -18,10 +17,9 @@ brief opened by sending the agent here, and the agent that did as it was told
 read 13,425 words — CLAUDE.md, the brief, and this page's longer retelling of
 the brief — before its first edit, then carried them in the prompt prefix of
 every request for the rest of the session
-([#54](https://github.com/armaatus/autofleet/issues/54)). Nothing was deleted
-here for being long; what changed is who is told to read it. Where this page and
-the brief disagree about what to do, the brief is right, and `evals/lint.sh`
-keeps this one from growing a second copy of it.
+([#54](https://github.com/armaatus/autofleet/issues/54)). What changed is who is told to read it. Where this page and the brief disagree
+about what to do, **the brief is right**: this one explains, and the brief
+instructs.
 
 The shape is adapted from Anthropic's
 [AI-native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook).
@@ -638,7 +636,6 @@ all of it arrived before the agent had opened a file and then rode in the prompt
 prefix of every request it made for the rest of the session
 (armaatus/autofleet#49). armaatus/autofleet#152 deleted that half instead: the
 agent's job ends at an open pull request and what follows is the dispatcher's.
-`evals/lint.sh` asserts the brief still names every step that is the agent's,
 and none that is not — a brief that told an agent to wait for a review would be
 a brief that spent its budget waiting.
 
@@ -686,8 +683,7 @@ the one grinding.
 ### Stage 4 — The pull request, and where the agent stops
 
 **The agent's job ends at an open pull request carrying `Closes #N`.** It does
-not queue the merge, wait for a review, or answer one; `guard.py` refuses all
-three from a fleet-owned worktree. What the body carries is the brief's step 2,
+not merge, review, or wait for a review; `guard.py` refuses the first two. What the body carries is the brief's step 2,
 and it is not decoration: [`merge-gate`](#the-merge-gate) reads the closing line,
 and the reviewer reads `## Plan` against the diff.
 
@@ -779,9 +775,9 @@ falls back to a `COMMENTED` review carrying
 The marker is written by the **script**, from the schema's `verdict` field —
 never spelled by the model — and it names a sha, so an approval cannot be
 inherited by a later head. `guard.py` refuses `gh pr review`, its REST spelling
-(`gh api .../pulls/N/reviews`) and its GraphQL spelling
-(`addPullRequestReview`) from a fleet-owned worktree, which is what keeps it out
-of the author's reach. A repository with a separate reviewer identity gets the
+(`gh api .../pulls/N/reviews`), its GraphQL spelling (`addPullRequestReview`) and
+any `gh api` whose body it cannot read, from a fleet-owned worktree — which is
+what keeps it out of the author's reach. A repository with a separate reviewer identity gets the
 real `APPROVED` badge for free.
 
 #### Why the model returns a value instead of posting one
@@ -831,7 +827,7 @@ hand with the check red — which is exactly the intended shape.
 
 The decision lives in a script rather than in the YAML so it can be run and
 tested without a pull request: `python3 .github/scripts/merge_gate.py --selftest`,
-and `evals/lint.sh` runs it.
+and the merge gate's `--selftest` covers it.
 
 Say `@claude …` on a PR or a review comment and the mention job picks it up,
 makes the change and pushes — gated to `OWNER`, `MEMBER` and `COLLABORATOR`,
@@ -909,10 +905,12 @@ are not decisions about an issue.
 And what comes back from the change re-enters at stage 1:
 
 - A review finding that appears **twice** stops being a review finding: the
-  correction goes into [CLAUDE.md](../CLAUDE.md) or a skill as part of that
-  review. `/mattpocock-skills:writing-for-agents` is the skill for editing those.
-- Anything that reached `main` and had to be reverted earns an eval case in
-  [`evals/cases/`](../evals/cases), written by whoever handled it.
+  correction goes into [CLAUDE.md](../CLAUDE.md) as part of that review.
+  `/mattpocock-skills:writing-for-agents` is the skill for editing it.
+- Anything that reached the default branch and had to be reverted earns a rule
+  with an assertion behind it — a `--selftest` row, or a suite phase — written by
+  whoever handled it. A rule with nothing running it is a rule that has already
+  stopped holding (hard rule 3).
 - Anything the work invalidated in the tracker is edited as it is found —
   including issues that are not yours.
 
@@ -935,83 +933,69 @@ visible without being interrupted.
 
 ## Guardrails
 
-Three layers, in increasing order of how hard they are to ignore.
+Two layers, in increasing order of how hard they are to ignore.
 
-**`CLAUDE.md`** — read in full at the start of every session, so its size is paid
-on every task in every worktree. `evals/lint.sh` fails if it grows past 200 lines.
+**[CLAUDE.md](../CLAUDE.md)** — read in full at the start of every session, so
+its size is paid on every task in every worktree. Under 400 words, which is the
+acceptance of armaatus/autofleet#153 and not a checked one: a lint that asserted
+it lived here too, and 43 of 63 open issues were about assertions like it. A
+document that grows back is a finding on the pull request that grew it.
 
-**Skills** — loaded when they become relevant rather than read every time.
-Repo-owned ones live in [`.claude/skills/`](../.claude/skills): `save-safety` on
-anything that writes a save, `core-portability` on anything reaching for a
-platform facility inside `core/`, `tracker-is-spec` on anything that finds an
-issue to be wrong. The `mattpocock-skills` plugin is enabled in the **committed**
-`.claude/settings.json`, so every worktree has it — `code-review` (standards and
-spec-vs-diff), `tdd`, `diagnosing-bugs`, `writing-for-agents`, `research`,
-`grilling` for stress-testing a plan before you commit to it. `evals/lint.sh`
-fails if that entry disappears, because the agent brief names those skills.
-
-**Hooks** ([`.claude/hooks/guard.py`](../.claude/hooks/guard.py)) — deterministic.
+**Hooks** ([`.claude/hooks/guard.py`](../.claude/hooks/guard.py)) —
+deterministic. Five rules, each with a `--selftest` row:
 
 | It blocks | Why |
 |---|---|
-| `gh pr merge`, and the `gh api …/merge` spelling | separation of duties: the agent that wrote it does not merge it |
-| `gh pr merge --auto` **from a fleet worktree** | the merge queue is the dispatcher's: `after-pr.sh` arms it the moment the PR exists, and it has to be first, because GitHub refuses to queue auto-merge on a PR that is already mergeable. In a worktree you opened yourself it is allowed — that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than you — except while the fleet is stopped, since arming a merge hands GitHub an instruction that outlives the stop |
-| the GraphQL names for all of it — `mergePullRequest`, `addPullRequestReview`, `dismissPullRequestReview` | the same acts by a third name. Each was reachable until a review found it |
-| `gh api` carrying a body from a file (`--input`, `@file`) from a fleet worktree | a payload this hook cannot read is one it cannot judge, and `-F query=@file` put a whole mutation out of its sight |
-| force-pushing `main` | the commit chain is the audit trail |
-| writing to `server/contract/captures/` | rewriting a capture silences the only test that notices RomM changing |
-| editing secrets, `.env`, `token.dat`, `device.dat` | hard rule 5 |
-| editing `unblock.yml` | it decides what other worktrees may start |
-| editing `.claude/hooks/` and `settings.json` **in a fleet worktree** | an agent rewriting its own guards while nobody is watching has none |
-| editing `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md` **in a fleet worktree** | the same rule for the project's half of the layer. `merge-gate` will not let a PR touching these merge itself, but `guard.py` re-reads `guard.json` on every tool call — so an agent that empties it has disarmed every project rule while the PR is still open. Reading them is untouched: `config.sh` sources the config on the way into every fleet script |
-| `gh api` with `-X POST/PUT/PATCH/DELETE` while stopped | a write is outward; a read is not |
-| starting `review.sh`, `fix.sh` or `after-pr.sh` **in a fleet worktree** | the agent does not start the pass that judges its own pull request. The verdict releases the merge gate, so a branch that could start its own reviewer could certify itself |
+| `gh pr merge`, and its REST (`gh api …/pulls/N/merge`) and GraphQL (`mergePullRequest`) spellings | separation of duties: the agent that wrote it does not merge it. `--auto` is allowed — that asks GitHub to merge *once `merge-gate` passes*, so a rule decides rather than the agent |
+| `gh pr review`, and its REST (`gh api …/pulls/N/reviews`) and GraphQL (`addPullRequestReview`, `submitPullRequestReview`) spellings, **in a fleet worktree** | the verdict is what releases the merge gate, and the reviewer signs in as the same account the author does — so the marker in a review body is the only thing separating the two. A branch that could review itself could certify itself |
+| `gh api` carrying a body from a file (`--input`, `@file`) **in a fleet worktree** | a payload this hook cannot read is one it cannot judge, and `-F query=@file` put a whole mutation out of its sight |
+| force-pushing the default branch | the commit chain is the audit trail. The branch name comes from `.autofleet/guard.json`, so a host on `trunk` gets the rule rather than an exemption from it |
+| editing `.env` and whatever `.autofleet/guard.json` names as a secret or a pinned path | hard rule 5, and the project's own half of rule 3 |
 | anything outward while `~/.autofleet/STOP` exists (a drain sets `DRAIN`, which this does not read) | a stop that depends on cooperation is not a stop |
 
-Four of those apply **only in a worktree the fleet opened**: editing
-`.claude/hooks/` and `settings.json`, editing the `.autofleet/` files that set
-the rules, starting the review or the fix that judges the branch, and arming the
-merge queue. In your own worktree you are the control, and a guard that argues
-with a person doing manual work is a guard people route around.
+Two of those hold **only in a worktree the fleet opened** — submitting a review,
+and the `gh api` file-body refusal that makes it reachable. In your own worktree
+you are the control, and a guard that argues with a person doing manual work is
+a guard people route around. The stop rows apply everywhere: a stop that reached
+only the fleet's own worktrees would not be one.
 
-The push gate that used to sit in this table is gone.
-`.autofleet/run/reviewed-<sha>` refused `git push` and `gh pr create` until a
-local review had been recorded; [Stage 4](#stage-4--the-pull-request-and-where-the-agent-stops)
-says what happened to the passes that wrote it. A gate nothing can ever satisfy
-is not a gate. The two stop rows apply
-everywhere — a stop that reached only the fleet's own worktrees would not be
-one. It is also why the guards can still be
-improved: the first version protected itself everywhere, and made its own bug
-unfixable.
+**What is deliberately NOT here**, because armaatus/autofleet#153 took it out and
+a rule that comes back silently is worse than one that never existed:
+
+- **The guards do not protect themselves.** `.claude/hooks/`, `settings.json`
+  and the `.autofleet/` rule files were unwritable from a fleet worktree. The
+  backstop that actually holds is `merge_gate.py`: a pull request touching any
+  of them never merges itself, whoever wrote it. A guard nobody can improve is a
+  guard that rots, and the first version of this one made its own bug unfixable.
+- **The shell is not a write model.** Redirects, `tee`, `cp`/`mv`, `sed -i`,
+  `rm` and `dd of=` were each modelled, and `patch -p1` and `git apply` — the two
+  an agent actually reaches for — were not (armaatus/autofleet#40). A partial
+  model of writing reports success on every spelling it does not know. Paths are
+  judged through the editing tools instead, which is how a diff gets applied.
+- **The agent is not stopped from *starting* `review.sh`.** It inherits the
+  worktree, so its `gh pr review` is refused one process later by the rule that
+  is still here.
 
 **What the hook is not: a sandbox.** It reads a command and decides; it does not
 confine one. A session that means to get past it can — an interpreter one-liner
 that opens a file, a path assembled from a variable. What it holds is the
-*routine* line: the heredoc, the redirect, the `sed -i`, the `gh pr merge`, the
-shapes an agent reaches for while solving the problem in front of it rather than
-working around a rule. Past that, the backstops are the diff and `merge-gate`.
-Do not write documentation — or a commit message — that claims more.
+*routine* line: the `gh pr merge`, the `gh pr review`, the `--force`, the shapes
+an agent reaches for while solving the problem in front of it rather than working
+around a rule. Past that, the backstops are the diff and `merge-gate`. Do not
+write documentation — or a commit message — that claims more.
 
-Four properties are deliberate:
+Three properties are deliberate:
 
 - **It does not fail open.** An unreadable payload or an unparseable command
   blocks. A guard that quietly stops guarding when something upstream changes
   shape is worse than no guard, because nothing says the enforcement went away.
 - **It tokenises with `shlex`**, splits compound commands on `;`, `&&`, `||` and
   `|`, recurses into `bash -c`, and skips heredoc *bodies* — so
-  `true && rm .env` is caught while a document quoting that line is not.
-- **A write is a write whichever verb performs it.** Redirects, `tee`, `cp`/`mv`
-  destinations, `sed -i`, `rm`, `dd of=` all go through the same rules an `Edit`
-  does. The first version checked paths only for the editing tools, so
-  `cat >` into a guarded file rewrote it and the guard said nothing.
-- **Skills and subagents are never protected.** They are advisory by design, and
-  an agent improving one is the loop working.
-
-`guard.py --selftest` is 68 assertions kept next to the code they constrain,
-and it counts what it ran rather than asserting a number kept in step by hand. Every
-row is either a rule this repo depends on or an escape somebody actually found.
-It is the record of what has been checked — **not** a proof that nothing else
-gets through.
+  `true && gh pr merge 3` is caught while a document quoting that line is not.
+- **`--selftest` counts what it ran** rather than asserting a number kept in step
+  by hand. Every row is either a rule this repo depends on or an escape somebody
+  actually found. It is the record of what has been checked — **not** a proof
+  that nothing else gets through.
 
 Agents run in **auto** permission mode (`permissions.defaultMode`), which is only
 safe because the above decides what they may do rather than a prompt for each
@@ -1019,44 +1003,50 @@ command.
 
 ## Repository settings this depends on
 
-`main` is protected. Required checks: `static`, `host-tests`, `switch-build`,
-`configuration is well-formed`, `merge-gate`. Conversation resolution required.
-**No required approving review** — that would make you the bottleneck on exactly
-the PRs that already did the work. `enforce_admins: false`, so you can always
-merge the enforcement-layer PRs that `merge-gate` deliberately fails.
+The default branch is protected, and `install.sh` sets it: `merge-gate` required
+(plus whatever `AUTOFLEET_REQUIRED_CHECKS` names), conversation resolution
+required, approvals dismissed when the head moves. **No required approving
+review** — that would make the maintainer the bottleneck on exactly the pull
+requests that already did the work. `enforce_admins: false`, so an admin can
+always merge the enforcement-layer PRs that `merge-gate` deliberately fails.
 
 Auto-merge is enabled at the repository level; without it `gh pr merge --auto`
 errors out.
 
-## The configuration is tested
+## The lint
 
-Every way `.claude/` breaks is silent. A skill whose frontmatter does not parse
-never loads. A hook whose path is wrong never runs. A guard whose pattern stopped
-matching stops blocking. None of it shows in a diff review or turns a build red.
+Every way the payload breaks is quiet. A script that stops parsing fails in the
+next worktree the dispatcher opens, during setup. A guard whose pattern stopped
+matching stops blocking. Neither shows in a diff review.
 
-- **`./evals/lint.sh`** — deterministic, free, no model. Also `the test suite -R
-  agent.config`, so a worktree sees a break before CI does.
-- **`./evals/run.sh`** — one headless session per case in `evals/cases/`, scoring
-  what the agent actually answers. Needs `CLAUDE_CODE_OAUTH_TOKEN`.
+**[`./evals/run.sh`](../evals/run.sh)** is the whole of it, and it runs things
+rather than reading prose: `bash -n` over every script in the payload and the
+suite, `shellcheck --severity=error` over the same list, and the two
+`--selftest`s. `./tests/run.sh lint` is the same check, so a worktree sees a
+break before CI does.
 
-The eval job runs on **push to `main`**, never on a pull request. What it
-evaluates is the instructions an agent loads, and it evaluates them by handing
-them to an agent holding the token — on a PR trigger those files are whatever the
-branch says they are, and a settings hook is plain command execution. A PR gets
-the token-less lint.
+It replaced 3,600 lines that asserted one document agreed with another — that
+CLAUDE.md restated a rule the brief also stated, that a page printing a pipeline
+printed the one that ran, that what an agent read before its first edit stayed
+under a word ceiling — plus four hand-written python scanners for classes
+shellcheck already knows. 43 of 63 open issues were about those assertions
+(armaatus/autofleet#153). A document that drifts is a review finding; a guard
+that stops guarding is not, which is why the selftests stayed.
+
 
 ## Working in parallel
 
-At most **three worktrees**. The ceiling is not machine capacity; it is how many
-streams one person can review properly. Each is fully isolated — its own ports,
-compose project, RomM database and `build/`. Only the immutable, expensive things
-are shared (`.cache/roms`, `.cache/ccache`), so no agent can corrupt another's
-fixtures.
+At most **`AUTOFLEET_MAX`** worktrees (two here). The ceiling is not machine
+capacity; it is how many streams one person can review properly, and raising it
+makes the review queue the bottleneck. Each worktree is isolated by everything
+`.autofleet/config` gives it a seam for — its own ports, its own compose project,
+its own `.env`. A host that sets none of those, as autofleet does, shares nothing
+because there is nothing to share.
 
-Removing a worktree from the **Orca UI** runs the teardown hook. `orca worktree
-rm` does **not** unless you pass `--run-hooks`. Sweep anything left behind with
-`./scripts/fleet/reap.sh --yes` — which is what `fleet.sh` does deliberately
-rather than passing the flag, for the reason in Stage 6.
+Removing a worktree through a runner's UI runs the teardown hook; removing it by
+hand may not. Sweep anything left behind with `./scripts/fleet/reap.sh --yes` —
+which is what `fleet.sh` does deliberately rather than passing `--run-hooks`, for
+the reason in Stage 6.
 
 ## When the loop stalls
 
@@ -1071,6 +1061,6 @@ rather than passing the flag, for the reason in Stage 6.
 | `await-review.sh` times out | the review job never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | `gh run list`; check `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret |
 | `await-review.sh` exits 2, naming `merge_gate.py` | that file is what decides which reviews count, and it does not import | fix the syntax or the missing name; nothing in the loop can answer until it does |
 | `await-review.sh` exits 4, "moved to &lt;sha&gt;" | the head moved while it waited | nothing — the verdict that matters is the one on the new head, and the dispatcher re-reviews it |
-| `merge-gate` red on a PR that looks fine | usually the body is missing a review section, the review predates the last push, or a review reporting findings has not been answered | read the check's output; it says which of the seven |
+| `merge-gate` red on a PR that looks fine | usually the body has no `Closes #N`, or the verdict predates the last push | read the check's output; it says which of the three |
 | A PR sits queued and never merges | a required check never reported | `gh pr checks <n>` |
-| the test suite reports `rig.smoke` **Skipped** | RomM is not running for this worktree | `./scripts/fleet/compose.sh up -d` |
+| `./tests/run.sh` reports a phase **skip** | that phase could not judge anything — it is not a pass | read its reason; `AUTOFLEET_TEST_NO_SKIP=1` makes it a failure |

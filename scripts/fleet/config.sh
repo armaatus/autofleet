@@ -65,8 +65,8 @@
 # A name with no `scripts/fleet/runner/<name>.sh` beside it is named where
 # lib.sh sources it -- the file it looked for and the drivers that do ship --
 # and stops the three scripts that call `fleet_require_runner`: the dispatcher,
-# the setup hook and the board. `evals/lint.sh` check 4g
-# goes red on it before an agent is ever opened.
+# the setup hook and the board -- refused where `lib.sh` sources the driver,
+# before an agent is ever opened.
 : "${AUTOFLEET_RUNNER:=headless}"
 
 # What the build agent is, and how much of it one issue may have.
@@ -244,38 +244,13 @@
 # than a knob to set. armaatus/autofleet#151.
 
 
-# ------------------------------------------------- the compression proxy
-# Every model call this fleet makes pays full price for its context, and the
-# cost knobs above only MEASURE that. A compressing proxy in front of the call
-# is the other half: the agent is pointed at a local HTTP endpoint that squeezes
-# what it READS -- tool output, logs, file reads, JSON, diffs -- before the
-# tokens are counted. Savings scale with how repetitive the payload is: repeated
-# JSON and log lines compress hard, prose and already-dense output barely at
-# all, and this fleet's traffic is a mix of both. docs/CONFIGURATION.md has the
-# measured number for this repo and what turning it on costs you.
-#
-# OFF BY DEFAULT, and off means INERT: at `0` nothing is exported, nothing is
-# probed, and there is nothing to install. That is what keeps CLAUDE.md's "no
-# build step, no dependencies to install" true for a repository that never sets
-# this. The install line is in docs/CONFIGURATION.md, which is where the price
-# of turning it on belongs.
-#
-# NAMED FOR HEADROOM, WIRED TO NOBODY. The knob carries the name because hard
-# rule 4's temperament is that a dependency is named rather than hidden -- but
-# nothing under scripts/fleet/ imports it, probes for its CLI, or reads a file
-# of its. The mechanism is two environment variables and a TCP probe, so any
-# Anthropic-compatible compressing proxy satisfies it.
-: "${AUTOFLEET_HEADROOM:=0}"
-# Where that proxy answers. ONE HOST-LEVEL ENDPOINT, shared by every worktree on
-# the machine -- deliberately NOT a per-worktree port out of AUTOFLEET_PORTS, and
-# deliberately not written into `.env`, which derives per-worktree values from
-# the worktree path. Writing this per worktree would imply an isolation that
-# does not exist, and the first person to debug it would look for three proxies.
-#
-# The fleet PROBES this and never spawns it. Starting and stopping the daemon is
-# outside autofleet: a dispatcher that owns a daemon's lifecycle is a dispatcher
-# that can fail to start for a reason that has nothing to do with the backlog.
-: "${AUTOFLEET_HEADROOM_URL:=http://127.0.0.1:8787}"
+# ---------------------------------------- the compression proxy, REMOVED
+# AUTOFLEET_HEADROOM pointed the fleet's model calls at a local compressing
+# proxy. Measured here it was worth 8.8% of what it could reach -- and what it
+# could reach was the reviewer and the fix session, never the build, which is
+# where 63% of an issue's tokens go. armaatus/autofleet#153 set the bar at 10%
+# of the BUILD's tokens and it cleared neither half, so the knob, its URL, its
+# TCP probe and the environment it exported are gone rather than carried.
 
 # ------------------------------------------------------------- per-worktree
 # The prefix every derived compose project name carries, and the thing reap.sh
@@ -508,16 +483,3 @@ if [ -n "$retired" ]; then
   exit 2
 fi
 
-# THE COMPRESSION KNOB IS A TOGGLE AND ONLY TWO VALUES ARE ONE. `fleet_headroom_on`
-# tests for the literal `1`, so `AUTOFLEET_HEADROOM=on` -- the spelling the two
-# knobs above this file take, which is exactly why somebody will write it --
-# read as OFF: every review quietly paid full token price, `fleet.sh status`
-# said "off", and nothing anywhere named the typo. A knob whose wrong value is
-# indistinguishable from its default is the silent-acceptance failure the rest of
-# this section exists to refuse. Found by the self-review.
-case "$AUTOFLEET_HEADROOM" in
-  0|1) ;;
-  *) echo "AUTOFLEET_HEADROOM must be '0' or '1'; got '$AUTOFLEET_HEADROOM'." >&2
-     echo "docs/CONFIGURATION.md has the row, and what turning it on costs." >&2
-     exit 2 ;;
-esac

@@ -5686,11 +5686,11 @@ JSON
     # NOT A SECOND REGISTRY. This used to spell out every phase, and it was
     # already ten names behind `tests/run.sh` before this change added five more
     # -- a list nothing reads and nothing checks. The fleet row of SUITES in
-    # tests/run.sh is the registry `evals/lint.sh` asserts against, so that is
+    # tests/run.sh is the registry the runner reads, so that is
     # where a reader is sent. Found by `/mattpocock-skills:code-review`, which
     # reported the drift; the copy is the reason for the drift.
     echo "usage: tests/test_fleet.sh <phase>" >&2
     echo "  the phases are the \`fleet:\` row of SUITES in tests/run.sh --" >&2
-    echo "  one registry, which is what evals/lint.sh checks against." >&2
+    echo "  one registry, and this arm is what says so when it drifts." >&2
     exit 2 ;;
 esac

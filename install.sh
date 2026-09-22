@@ -44,16 +44,11 @@ PAYLOAD=(
   # findings addressed -- is what a re-review of the fixed head answers in one
   # pass with no protocol, and the protocol was where it failed every time.
   ".claude/agents/reviewer.md"
-  "evals/lint.sh"
-  # lint.sh RUNS these -- a vendored lint that shells out to, or imports, a file
-  # the installer did not deliver fails on every host PR, on a check about the
-  # host's own configuration. Hard rule 1. `shell_code.py` is the import: the
-  # two compression-seam checks read it, and lint.sh drives its `--selftest`
-  # before trusting either of them.
-  "evals/piped_quiet_grep.py"
-  "evals/shell_code.py"
-  "evals/late_stderr_silence.py"
-  "evals/continuation_comment.py"
+  # The lint: `bash -n`, shellcheck, and the two selftests. It shells out to
+  # nothing this installer does not also deliver -- a vendored lint that imports
+  # a file the installer left behind fails on every host PR, on a check about the
+  # host's own configuration (hard rule 1). It replaced `evals/lint.sh` and four
+  # hand-written python scanners in armaatus/autofleet#153.
   "evals/run.sh"
   "docs/WORKFLOW.md"
   # Vendored because the payload POINTS AT IT: REVIEW.md links to it,
@@ -349,9 +344,8 @@ set_branch_protection
 # ---------------------------------------------------------------- the plugin
 # `mattpocock-skills` is not decoration and it is not optional. The agent brief
 # tells every worktree to run `/implement`, which drives
-# `/mattpocock-skills:tdd` at the seams, and `evals/lint.sh` fails if the entry
-# is missing. So a host repo without it gets a brief asking for a skill nobody
-# has.
+# `/mattpocock-skills:tdd` at the seams. A host repo without it gets a brief
+# asking for a skill nobody has.
 #
 # It used to be load-bearing twice over: `merge_gate.py` required
 # `/mattpocock-skills:code-review` to be NAMED in the PR body before a PR could
@@ -435,7 +429,7 @@ install_plugin() {
   # merge_plugin_entry just added -- reordering the keys as it goes, which shows
   # up as diff noise in the host repo on the first install. That is why the merge
   # above happens anyway rather than being left to this: `claude` may not be
-  # here, and the entry is what evals/lint.sh and the agent brief depend on.
+  # here, and the entry is what the agent brief depends on.
   ( cd "$TARGET" \
       && claude plugin marketplace add "$MARKETPLACE" >/dev/null 2>&1
     cd "$TARGET" && claude plugin install "$PLUGIN" --scope project >/dev/null 2>&1

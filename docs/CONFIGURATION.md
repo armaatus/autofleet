@@ -12,12 +12,6 @@ project detail in there is the thing that makes the next repo fork this one
 | `.autofleet/teardown.sh` | `scripts/fleet/archive.sh`, once per removal | no |
 | `.autofleet/guard.json` | `.claude/hooks/guard.py`, on every tool call | no |
 
-Those same three are also **unwritable from a fleet worktree** — `guard.py`
-refuses the edit there, as it does for its own hooks and settings, because it
-re-reads `guard.json` on every tool call and an emptied file disarms every
-project rule long before anything merges. In a worktree you opened yourself they
-stay editable: you are the control there. Reading them is never blocked.
-
 Three files here are **human-merge-only**: `merge-gate` refuses to let a PR
 touching `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md`
 merge itself, the same way it refuses one touching `.claude/` or
@@ -410,209 +404,6 @@ fleet-worktree rules do not apply to it — so it lands under the main checkout'
 slug and its tokens are not in that issue's row. `$FLEET_DIR/reviews/cost.tsv`
 is where those are.
 
-### Compressing what the agents read
-
-Off by default, and off costs nothing. At `AUTOFLEET_HEADROOM=0` — the default —
-nothing is exported, nothing is probed, and there is nothing to install, which is
-what keeps CLAUDE.md's "no build step, no dependencies to install" true for a
-repository that never touches this.
-
-At `1`, the fleet points the model calls **it makes itself** at a local HTTP
-proxy that compresses what the agent *reads* — tool output, logs, file reads,
-JSON, diffs — before those tokens are counted. It exports two variables:
-
-```
-ANTHROPIC_BASE_URL=$AUTOFLEET_HEADROOM_URL
-ENABLE_TOOL_SEARCH=true
-```
-
-| Knob | Default | Notes |
-|---|---|---|
-| `AUTOFLEET_HEADROOM` | `0` | `1` points fleet-started model calls at the compression proxy. `0` changes nothing anywhere. |
-| `AUTOFLEET_HEADROOM_URL` | `http://127.0.0.1:8787` | Where the proxy answers. **One host-level port**, shared by every worktree on the machine — deliberately not a per-worktree port out of `AUTOFLEET_PORTS`, and deliberately not in `.env`, which derives per-worktree values from the worktree path. |
-
-`./scripts/fleet/fleet.sh status` says which of the three states you are in: off,
-on and answering, or on and not answering.
-
-**It degrades, loudly, and never blocks.** Before it exports anything the fleet
-opens a TCP connection to that URL. If nothing answers it prints one line naming
-both the URL and the knob and runs the agent **unwrapped, at full token price**.
-A dispatcher that refuses to dispatch because an optional optimiser is down is a
-worse failure than one expensive pass.
-
-**The fleet probes the proxy and never spawns it.** Starting and stopping the
-daemon is yours; a dispatcher that owns a daemon's lifecycle is a dispatcher that
-can fail to start for a reason that has nothing to do with the backlog.
-
-#### What it covers, and what it does not
-
-The two model calls the fleet starts as a **direct child** of one of its own
-scripts:
-
-| Call | Script | Started by |
-|---|---|---|
-| the review | `scripts/fleet/review.sh` | the dispatcher, from the repo root |
-| the one fix answering it | `scripts/fleet/fix.sh` | the dispatcher, in the worktree |
-
-A third call site added without the export would be a knob that silently
-measures a fraction of what this page says it does, so **`evals/lint.sh` fails**
-on any shell file anywhere under `scripts/fleet/` that runs a
-`$AUTOFLEET_*_CMD` in command position
-and contains no call to the seam. It is in `evals/` rather than `tests/` because
-`evals/` is vendored: a host project gets the guard along with the thing it
-guards.
-
-What it does **not** catch, named here rather than left to be discovered: it is
-**per script**, not per call, so a script that goes through the seam once and
-then gains a second, unwrapped call still passes; it reads the command word, so a
-call captured into a variable (`out="$($AUTOFLEET_REVIEW_CMD …)"`) or a literal
-`claude -p` that bypasses the knob entirely is invisible to it. Both need a shell
-parser. `evals/shell_code.py --selftest` records the shapes it does and does not
-see, and `lint.sh` runs that selftest before trusting the scan.
-
-It does **not** cover the worktree agent. That process is started by the runtime,
-not by `fleet.sh`, and it does not inherit the dispatcher's environment. On the
-Orca driver the build's terminal is a child of the Orca app, not of the
-dispatcher — the process tree runs `Orca Helper → login → zsh → bash → claude`
-with `fleet.sh` nowhere in it, so nothing the dispatcher exports reaches it.
-
-**On the default driver it does reach it, and that is only half of what #130
-asked for.** The headless build is a `bash -c` child of `fleet.sh`, so it
-inherits the dispatcher's whole environment — which is the structural half of
-the fold #151's Scope claims. The other half is not done: `fleet_headroom_env`
-is still called only by the reviewer and the fix session, never before a build
-starts, so this knob still does not reach the build on either driver. What
-changed is that it now *could*.
-
-To cover the worktree agent, wrap `claude` on the machine instead. This is
-durable and global to your user, which is why it is a person's step and not the
-fleet's:
-
-```bash
-headroom wrap claude      # starts the proxy, sets ANTHROPIC_BASE_URL and
-                          # ENABLE_TOOL_SEARCH for `claude` from now on
-headroom unwrap claude    # undo the durable part
-```
-
-**The two overlap, and `wrap` wins. Pick one.** `wrap` is durable and global to
-your `claude`, and both the reviewer and the fix session run `claude` by default
-— so on a wrapped machine those two go through the proxy whatever
-`AUTOFLEET_HEADROOM` says, and the knob adds nothing there but the
-`status` row. Worse, its degrade line becomes **untrue**: if the proxy dies,
-`fleet_headroom_env` prints "running unwrapped, at full token price" and takes
-its own exports back, but a wrapped `claude` is still pointed at the dead proxy
-through its own settings and its model call fails anyway. `fleet.sh status` is
-reporting the knob's state, not the wrap's.
-
-So:
-
-- **Want the worktree agent covered?** Use `wrap`, and leave `AUTOFLEET_HEADROOM`
-  at `0`. `headroom doctor` is then the thing that tells you the proxy is down.
-- **Want the probe, the degrade and the `status` row?** Use the knob, and leave
-  `claude` unwrapped. The build pays full price: nothing calls
-  `fleet_headroom_env` before `runner_build_start`, on either driver. #151 made
-  that wiring possible on the headless path and did not do it; #153's scope is
-  where the knob is measured and kept or dropped.
-- Setting both is the "two mechanisms for one behaviour" outcome this seam was
-  written to avoid.
-
-#### Installing it
-
-```bash
-uv tool install --python 3.13 "headroom-ai[all]"   # or: pip install "headroom-ai[all]"
-headroom proxy --port 8787
-```
-
-The npm package of the same name is SDK-only and ships no CLI.
-
-**On "compression runs locally", from observation rather than from the README.**
-Started here, the proxy's own banner reports `Telemetry: DISABLED`, `Security:
-loopback-only (no inbound token)` and `License: OSS`, and its savings ledger is a
-local JSONL under `~/.headroom/`. But `lsof` on the proxy process during a run
-that sent **only** Anthropic traffic also showed connections to Google and CDN
-addresses — its routing table carries upstreams for other providers, so
-connection-pool warmup is the obvious explanation, and it was not established
-what, if anything, was sent over them. If you need a hard "nothing leaves this
-machine" guarantee, verify it yourself before turning the knob on. At `0` the
-proxy is never contacted at all.
-
-#### What a custom base URL costs you
-
-All three are Claude-side and apply to **any** non-default `ANTHROPIC_BASE_URL`,
-not just this one. Turning the knob on trades them away:
-
-- **Claude Remote Control is unavailable** in a proxied session.
-- **Server-managed settings are not fetched.** Anthropic skips that fetch for any
-  non-default base URL. The OS-level `managed-settings.json` is unaffected — it
-  is read from disk.
-- **`/context all` misreports** without `ENABLE_TOOL_SEARCH=true`, which is why
-  the knob sets it alongside the base URL rather than leaving it to you.
-
-#### What it is worth here
-
-Savings scale with how repetitive the payload is: repeated JSON and log lines
-clear 90%, prose and already-dense output compress very little. This fleet's
-traffic is a mix — issue bodies and PR bodies are prose, `gh` JSON, test output
-and diffs are not — so the number that matters is a measured one for this
-repository, not the vendor's.
-
-Measured here on one read-only pass over a real pull request (its body, its diff,
-the issue it closes, the files it touches, `git log`), run twice with the same
-prompt and the same tool allowlist. **Not a `review.sh` run**: `guard.py` refuses
-that from a fleet-opened worktree, which is the rule working, so the pass reads
-everything a review reads and submits nothing.
-
-| | unproxied | through the proxy |
-|---|---|---|
-| billed cost | $5.4725 | $2.7213 |
-| cache read | 3,476,688 | 1,659,126 |
-| cache creation | 330,435 | 131,728 |
-| output | 17,183 | 22,969 |
-| turns | 28 | 31 |
-| wall clock | 248s | 350s |
-
-The proxy's own ledger for that traffic: **8.8% compressed, 133,864 of 1,529,329
-tokens over 22 calls** — below the vendor's published 21–57%, which is what a
-prose-heavy mix predicts. Read the two numbers separately: **8.8% is what
-compression is worth here**, per payload and deterministic. The halved bill is
-one sample, it also carries whatever `ENABLE_TOOL_SEARCH=true` is worth on its
-own, and the two runs are not byte-identical (28 turns against 31). **Output
-tokens and wall clock both went up.** Measure your own traffic before you assume
-either figure.
-
-**Any Anthropic-compatible compressing proxy satisfies this seam.** Nothing under
-`scripts/fleet/` imports headroom, probes for its CLI, or reads a file of its:
-the mechanism is two environment variables and a TCP connect. The knob carries
-the name because a dependency is named rather than hidden, not because the code
-knows about it — and `evals/lint.sh` **runs** that rule rather than quoting it,
-so a `command -v headroom` added anywhere under `scripts/fleet/` later fails the
-build. It scans that directory and not the rest of the payload, which is where
-every line of this seam lives.
-
-The probe is strict about the URL on purpose: **no scheme or no host reads as
-unreachable**, so `AUTOFLEET_HEADROOM_URL=localhost:8787` (no `http://`) and an
-empty value both degrade loudly instead of being probed against port 80 of your
-own machine and then exported as a broken base URL.
-
-If the proxy dies between two calls in one process — a review and the fix
-answering it are minutes apart — the second call **puts back whatever was there
-before**
-rather than leaving the agent pointed at a dead endpoint.
-
-**If you already have your own `ANTHROPIC_BASE_URL`, the knob replaces it while
-the proxy is up.** It is recorded and restored, so it is not lost — but for as
-long as the proxy answers, the fleet's calls go to the proxy and then wherever
-*it* sends them upstream, **not through your gateway**. If that gateway is doing
-your authentication, your compliance logging or your egress control, that is the
-thing to know before setting `AUTOFLEET_HEADROOM=1`, and the reason to point
-`AUTOFLEET_HEADROOM_URL` at a proxy you have configured to forward through it.
-
-**Keep a non-loopback URL on `https://`.** The probe accepts any `http://` host,
-and whatever the knob exports is where `claude` then sends its credential — so
-`http://proxy.corp:8787` puts an API key or OAuth bearer token on the wire in
-cleartext for anything between here and that host. The default is loopback,
-where that does not apply; the moment the proxy is not on this machine, it does.
-
 ### Per-worktree isolation
 
 A worktree's identity is a pure function of its absolute path: a slug, an offset,
@@ -633,9 +424,8 @@ and a port nothing can re-derive is a port nothing can release.
 `AUTOFLEET_RUNNER` (`headless`) — see [RUNNERS.md](RUNNERS.md). A name with no
 `scripts/fleet/runner/<name>.sh` beside it is named where `lib.sh` sources it —
 the file it looked for and the drivers that do ship — and stops the three scripts
-that call `fleet_require_runner`; `evals/lint.sh` goes red on it, so a typo here is
-caught before a worktree is opened rather than by an agent sitting on a prompt
-that never sends.
+that call `fleet_require_runner`, so a typo here is caught before a worktree is
+opened rather than by an agent sitting on a prompt that never sends.
 `ORCA_CLI_COMMAND` (Orca driver only) — the CLI to try first, ahead of `orca`,
 `orca-dev`, `orca-ide` and the `/Applications` fallback. **Exactly one command**,
 so a path containing spaces is a single candidate and a value with arguments in
@@ -702,82 +492,14 @@ stop.
 
 A *well-formed* file with a mistyped key is the same failure wearing a nicer
 suit: `guard.py` reads every key with `.get()`, so `protected_path` is not an
-error, it is no rule at all. `evals/lint.sh` reads the keys `guard.py` actually
-reads and fails the build on a key in this file that is not one of them, and on a
-rule declared here that does not reach the tuple `guard.py` enforces.
-
-## The ceilings
-
-Some of what the fleet costs is text: the working agreement, the opening brief,
-the review policy, what a test run prints, what a review round hands back. All
-of it is read by an agent whose context has to survive a plan, an implementation
-and three review rounds — and prose grows back one useful paragraph at a time.
-The opening brief reached 1,521 words that way and nothing objected at any
-single step.
-
-So every one of those limits is a row in the **ceilings table at the top of
-[`evals/lint.sh`](../evals/lint.sh)**, and each row carries five fields:
-
-| Field | What |
-|---|---|
-| name | the key `ceiling <name>` is called with |
-| limit | the number, and the only copy of it. The **last allowed** value, on every row |
-| issue | the issue that set it. Every row cites one |
-| what is measured | the membership, so a limit and its contents cannot drift apart |
-| what measures it | a `; `-separated list of `evals/lint.sh` and `tests/test_<suite>.sh <phase>` entries — **every** place that reads the number, not just the first |
-
-The rows are `claude-md` and `reading` and `brief` — the text an agent reads
-before its first edit — `spec`, the room `reading` leaves for the issue body it
-is handed, and `testrun` and `round`, which bound what a green test run and one clean
-review round print back. `spec` is the one that is not a limit on autofleet's
-own text: an issue body is the maintainer's, and the row is the allowance the
-payload leaves for one. **No figure is written here, or in any comment.**
-The table holds the limit; the checks print what they measured. A measured
-number written into prose is stale by the next commit.
-
-Some rows bound the OUTPUT of a script rather than the contents of a file,
-because a ceiling has to be measured from what the agent *receives* — a check
-that reads the source counts words the agent never sees and misses the ones
-`sed` substitutes in. Those are measured by a test phase that runs the script,
-so a host installation, which does not vendor `tests/`, gets the rows
-`evals/lint.sh` measures and the numbers for the rest. Which is which is the
-table's fifth field, and is not counted in prose here: "three of the rows" was
-written when there were six and stayed after there were seven.
-
-### Raising one
-
-**Raising a ceiling is allowed, and it is the point.** Edit the row's second
-field. That is one line in a diff, reviewed like any other change, rather than a
-paragraph nobody notices — and a lint that cannot be raised is one that gets
-deleted the first time it is inconvenient. Say in the PR body what the room was
-bought for.
-
-Two things to know before you do:
-
-- **A number that moves on the branch alone has not moved.**
-  `.github/workflows/agent-config.yml` re-runs *main's* copy of the lint against
-  the branch, so the old ceiling is still the one in force until the change
-  lands. Paying for the words instead — tightening something else — is usually
-  faster than arguing with that, and it is what the brief did when it tried to
-  buy a sentence at 425 words.
-- **Nothing may restate the number.** A row measured by a test phase reads it
-  through `tests/ceiling.sh`; `evals/lint.sh` reads its own through `ceiling`.
-  The `== the ceilings` check fails the build if a row cites no issue, names a
-  phase the runner never calls, or is a number nothing reads.
-
-Adding a row is the same edit plus the check that measures it — a row with
-nothing behind it is a ceiling that has already stopped holding.
-
-**A ceiling bounds the text and nothing else.** The rest of what a run costs —
-tool output, files read twice, review rounds — is what [`fleet.sh
-cost`](#what-a-run-costs) measures, and [REVIEW.md](../REVIEW.md) asks a fleet
-PR body to carry that figure. The two halves belong together: the table stops
-the prompt growing, the cost report says whether anything actually got cheaper.
+error, it is no rule at all. `guard.py --selftest` drives every key in this file
+against the rules it produces, so a key nothing reads is a key with no assertion
+behind it.
 
 ## Checking your work
 
 ```bash
-./evals/lint.sh                                # is the agent config well-formed
-python3 .claude/hooks/guard.py --selftest      # do the guards still guard
+./evals/run.sh                                 # bash -n, shellcheck, both selftests
+python3 .claude/hooks/guard.py --selftest      # ...either on its own
 python3 .github/scripts/merge_gate.py --selftest
 ```

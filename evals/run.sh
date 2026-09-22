@@ -1,125 +1,76 @@
 #!/usr/bin/env bash
-# Does the agent still do the work? One headless session per case in evals/cases/.
+# The lint. Four checks, and every one of them runs something rather than
+# reading prose.
 #
-# `evals/lint.sh` proves the configuration is well-formed. This proves it still
-# has the effect it was written to have -- that the save-safety skill still
-# fires on a save-writing question, that an agent asked to point the rig at real
-# hardware still refuses, that the finishing conditions are still known. Those
-# are the failures a diff review cannot see and a well-formedness check cannot
-# either.
+#   ./evals/run.sh
 #
-# Needs CLAUDE_CODE_OAUTH_TOKEN (mint one with `claude setup-token`). CI runs
-# this from .github/workflows/agent-config.yml, which skips it when the secret
-# is absent rather than failing.
-#
-# Pass and fail come from the RESPONSE TEXT, never from the CLI's exit code:
-# `claude --print` exits 0 even when it produced nothing useful.
-#
-# The checks are deliberately coarse: a keyword the right answer cannot avoid,
-# and a keyword the wrong answer cannot avoid. A case that needs cleverness to
-# score is a case that will start lying as models change. Prefer adding a case
-# to sharpening one.
-#
-#   ./evals/run.sh                    # every case
-#   ./evals/run.sh save-safety        # one
+# There used to be a fifth kind: ~3,000 lines asserting that one document agreed
+# with another -- that CLAUDE.md restated a rule the brief also stated, that a
+# page printing a pipeline printed the one that ran, that the reading an agent
+# does before its first edit stayed under a word ceiling. 43 of 63 open issues
+# were about those assertions rather than about the loop. They are gone with
+# armaatus/autofleet#153. A document that drifts is a review finding on the pull
+# request that drifted it; a guard that stops guarding is not, which is why the
+# selftests below stay.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-command -v claude >/dev/null 2>&1 || {
-  echo "no claude CLI on PATH; install it with: npm install -g @anthropic-ai/claude-code" >&2
-  exit 1
-}
-[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ] || {
-  echo "no CLAUDE_CODE_OAUTH_TOKEN; mint one with 'claude setup-token'" >&2
-  exit 1
-}
+fails=0
+step() { printf '== %s\n' "$1"; }
+bad() { printf '   FAIL: %s\n' "$1" >&2; fails=$((fails + 1)); }
 
-shopt -s nullglob
-if [ "$#" -gt 0 ]; then
-  cases=()
-  for name in "$@"; do cases+=("evals/cases/$name.json"); done
-else
-  cases=(evals/cases/*.json)
-fi
-[ "${#cases[@]}" -gt 0 ] || { echo "no cases to run" >&2; exit 1; }
+# The payload's shell, this repo's own suite, and the seam answers in
+# `.autofleet/` -- which are both this repo's configuration and the template
+# `install.sh` seeds into a host, and which nothing else parses.
+scripts=()
+while IFS= read -r f; do scripts+=("$f"); done < <(
+  ls scripts/fleet/*.sh scripts/fleet/runner/*.sh .claude/hooks/*.sh \
+     .github/scripts/*.sh evals/*.sh tests/*.sh .autofleet/*.sh install.sh \
+     2>/dev/null
+)
 
-OUT="${EVAL_OUT_DIR:-$(mktemp -d)}"
-mkdir -p "$OUT"
-passed=0
-failed=0
-
-for case_file in "${cases[@]}"; do
-  [ -f "$case_file" ] || { echo "no such case: $case_file" >&2; failed=$((failed + 1)); continue; }
-  name="$(python3 -c "import json;print(json.load(open('$case_file'))['name'])")"
-  prompt="$(python3 -c "import json;print(json.load(open('$case_file'))['prompt'])")"
-
-  echo "== $name"
-  # Read-only tools only. Every case asks the agent to describe or decide, never
-  # to change anything, so a case that edits a file has already failed -- and
-  # this is what stops an eval run from mutating the checkout it runs in.
-  #
-  # The prompt goes in on STDIN, not as a trailing argument: `--allowed-tools` is
-  # variadic and swallows a positional after it, which produces an empty run that
-  # still exits 0.
-  printf '%s' "$prompt" | claude --print \
-    --allowed-tools "Read,Grep,Glob" \
-    --permission-mode plan \
-    --output-format json \
-    >"$OUT/$name.json" 2>"$OUT/$name.err" || {
-      echo "  FAIL: the session errored"
-      sed 's/^/    /' "$OUT/$name.err" | head -5
-      failed=$((failed + 1))
-      continue
-    }
-
-  answer="$(python3 - "$OUT/$name.json" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-# --output-format json is either the result envelope or a list of messages,
-# depending on version. Take the text either way rather than pinning a shape.
-if isinstance(d, dict) and "result" in d:
-    print(str(d["result"]))
-else:
-    print(json.dumps(d))
-PY
-)"
-
-  verdict=0
-  # Each expectation is ONE extended regex; "a|b" means either will do. Read
-  # line by line, never `for needle in $(...)`: a bare command substitution
-  # word-splits on spaces, so `"192.168.1.50 is now|I have updated"` silently
-  # becomes five separate regexes -- and `/is/` matches every answer there is.
-  while IFS= read -r needle; do
-    [ -n "$needle" ] || continue
-    grep -Eiq -- "$needle" <<<"$answer" || {
-      echo "  FAIL: the answer never mentions /$needle/"
-      verdict=1
-    }
-  done < <(python3 -c "
-import json
-print('\n'.join(json.load(open('$case_file'))['expect'].get('contains', [])))")
-  while IFS= read -r needle; do
-    [ -n "$needle" ] || continue
-    grep -Eiq -- "$needle" <<<"$answer" && {
-      echo "  FAIL: the answer contains /$needle/, which it should not"
-      verdict=1
-    }
-  done < <(python3 -c "
-import json
-print('\n'.join(json.load(open('$case_file'))['expect'].get('absent', [])))")
-
-  if [ "$verdict" = 0 ]; then
-    echo "  pass"
-    passed=$((passed + 1))
-  else
-    echo "  ---- what it actually said ----"
-    sed 's/^/  | /' <<<"$answer" | head -25
-    failed=$((failed + 1))
-  fi
+step "every script parses"
+for f in "${scripts[@]}"; do
+  out="$(bash -n "$f" 2>&1)" || bad "$f does not parse: $out"
 done
 
+# The linter, at severity=error, over the same list. It is what replaced four
+# hand-written scanners in this directory: SC2181 for `$?`, SC2086 for an
+# unquoted expansion, SC1073 for the continuation comment that comments out the
+# rest of a command. A tool with a changelog beats a regex somebody has to
+# maintain here.
+#
+# A suppression must carry a reason on the same line, after a second `#`, and a
+# bare one is not an answer (armaatus/autofleet#17).
+step "shellcheck"
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck --severity=error --format=gcc "${scripts[@]}" || bad "shellcheck found errors"
+else
+  # Not a silent pass: a lint that quietly stops linting is the failure hard
+  # rule 3 is about. It is not fatal either, because a laptop without it should
+  # still be able to run the rest -- CI installs it.
+  printf '   shellcheck is not installed; this check did not run.\n' >&2
+  printf '   brew install shellcheck / apt-get install shellcheck\n' >&2
+fi
+
+# The two guards that decide things, each asked to prove it still does. Both
+# print their own assertion count, and both are the reason hard rule 3 exists:
+# a rule that stops matching stops blocking, in silence.
+step "the guard still guards"
+python3 .claude/hooks/guard.py --selftest >/dev/null || bad "guard.py --selftest"
+
+step "the merge gate still gates"
+python3 .github/scripts/merge_gate.py --selftest >/dev/null || bad "merge_gate.py --selftest"
+
+# ...and the two readers of `Blocked by #N` still agree. `unblock.yml` is
+# JavaScript inside YAML and cannot import the module `fleet.sh` uses, so the
+# module's own selftest compares the literals. A drift between them is the fleet
+# opening a worktree for an issue whose foundation is still open.
+step "the blocker patterns still agree"
+python3 .github/scripts/issue_refs.py --selftest >/dev/null || bad "issue_refs.py --selftest"
+
 echo
-echo "$passed passed, $failed failed. Transcripts in $OUT"
-[ "$failed" = 0 ]
+[ "$fails" = 0 ] || { echo "$fails check(s) failed" >&2; exit 1; }
+echo "the payload is well-formed."

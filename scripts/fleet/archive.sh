@@ -83,7 +83,7 @@ for project in $projects; do
   # worktree's port with no directory left to identify it by -- the exact orphan
   # this hook exists to prevent. It also blocks the network removal, so the rest
   # of the teardown fails behind it.
-  # shellcheck disable=SC2086 -- the down args are a deliberate word list
+  # shellcheck disable=SC2086 # the down args are a deliberate word list
   if ! docker compose -p "$project" -f "$AUTOFLEET_COMPOSE_FILE" \
         ${AUTOFLEET_COMPOSE_DOWN_ARGS:-} down -v --remove-orphans; then
     echo "!! compose down failed for $project"

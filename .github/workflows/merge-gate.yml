@@ -15,8 +15,7 @@ on:
   # There is NO trigger for thread resolution: `pull_request_review_thread` is a
   # webhook event, not a workflow trigger, and putting it here makes the whole
   # file invalid -- which shows up as a failed run with no jobs, named after the
-  # file. actionlint rejects it too, so the check in evals/lint.sh catches a
-  # re-attempt before CI does. Nothing here needs it any more: whether every
+  # file. actionlint rejects it too. Nothing here needs it any more: whether every
   # thread is resolved is `required_conversation_resolution`, which is branch
   # protection and is GitHub's own to re-evaluate (armaatus/autofleet#152).
   #

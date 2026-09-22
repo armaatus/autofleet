@@ -154,7 +154,7 @@ for project in $stale; do
   # service whose profile is not active is invisible to `down`, and comes back
   # under `restart: unless-stopped`.
   if [ -n "${AUTOFLEET_COMPOSE_FILE:-}" ]; then
-    # shellcheck disable=SC2086 -- the down args are a deliberate word list
+    # shellcheck disable=SC2086 # the down args are a deliberate word list
     docker compose -p "$project" -f "$AUTOFLEET_COMPOSE_FILE" \
       ${AUTOFLEET_COMPOSE_DOWN_ARGS:-} down -v --remove-orphans \
       || echo "!! down failed for $project"

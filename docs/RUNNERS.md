@@ -33,13 +33,12 @@ grep -rni 'orca' scripts/fleet --include='*.sh' \
   | grep -v '^scripts/fleet/config.sh:[0-9]*:: "${AUTOFLEET_RUNNER:=orca}"$'
 ```
 
-returning nothing is what keeps it that way — and this is the same command
-`evals/lint.sh` check 4c runs, modulo whitespace: 4c's copy is indented inside an
-`if`, so the bytes differ by construction and 4d compares with runs of space
-normalised. That is the only reason this fence is worth printing here — the rule
-is asserted rather than quoted, and 4d fails the build if the fence and the check
-ever stop matching. If they do differ, `evals/lint.sh` is the definition and this
-page is the bug.
+returning nothing is what keeps it that way. It used to be run by a lint check
+that also compared itself against this fence, so the page and the check could not
+drift; armaatus/autofleet#153 removed both, along with 3,600 lines of other
+assertions that one document agreed with another. **This fence is now the
+definition**, and running it against a diff is a line in
+[`.autofleet/review.md`](../.autofleet/review.md) rather than a build step.
 
 The comment is truncated rather than the line skipped, and that is deliberate:
 Orca is *named* outside the driver all over this repo, which is the rule above
@@ -153,11 +152,12 @@ runtime, and asks `runner_available` only behind
 would refuse an agent its own brief. A sixth caller is guarded unless it can
 make the same argument.
 
-`evals/lint.sh` check 4h fails a caller that forgets, a caller that guards
-without reaching for the runtime, and a guard that comes *after* the first
-`runner_*` — the order is the property, not the presence. Check 4g fails a repo
-whose configured runner names no file at all, red before an agent is opened
-rather than after.
+The ORDER is the property, not the presence: a guard after the first `runner_*`
+guards nothing. A repository whose configured runner names no file at all is
+refused by `lib.sh` where it sources the driver, red before an agent is opened
+rather than after. Both were lint checks until armaatus/autofleet#153;
+[`.autofleet/review.md`](../.autofleet/review.md) is where a reviewer is told to
+look for them now.
 
 **Which stream a failure's words go on, per function, because the answer is not
 the same for all of them.** An earlier version of this paragraph said "stderr
@@ -202,8 +202,9 @@ for every other driver.
 `runner_set_deadline` exists so a caller that needs a shorter one can ask
 **without knowing which driver it has**. A driver with no deadline to set may do
 nothing, but it must DEFINE the function — a missing one is `command not found`
-on a script that does not set `-e`. `evals/lint.sh` fails a driver that omits
-any function the fleet calls, so this is checked rather than trusted. Creating a
+on a script that does not set `-e`. `tests/run.sh fleet runner_stub` drives the
+whole fleet on a driver that is not Orca, which is what actually exercises the
+contract; a missing function fails there. Creating a
 worktree is exempt by convention — nobody polls a create, and a short deadline
 on a call that legitimately takes minutes is a failed launch rather than a
 shorter wait. **The build is exempt too, and for a stronger reason**: it runs

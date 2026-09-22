@@ -10,25 +10,14 @@ fix session and that fix is re-reviewed once. That second verdict is final: a
 second request for changes parks the pull request for a person. **Two reviews
 maximum, ever.**
 
-Nothing else reads the branch. There is no validation pass behind this asking
-whether the findings were addressed — a re-review of the fixed head answers that
-in one pass with no protocol, which is what the two validations were
-approximating. They never once ended the loop on their own: every validation of
-#132 and #133 came back `fail` for reasons unrelated to the code, so every pull
-request landed on the maintainer at the cap having spent five model passes to
-get there. armaatus/autofleet#152.
+Nothing else reads the branch. That bound is the finding of #86, which burned
+four reviews without one ever judging the commit that merged: every answer to a
+finding is a commit, every commit moves the head, and a head move invalidates
+the review that asked for it. Reviewing a branch four times is not four times
+the assurance; it is the same review of four different commits.
 
-That shape replaced a loop bounded at four reviews per pull request that
-routinely spent all four. Every answer to a finding was a commit, every commit
-moved the head, and a head move invalidates the review that asked for it — so
-the reviewer read the whole diff again and found one more thing a level down.
-#86 burned four reviews without one ever judging the commit that merged.
-Reviewing a branch four times is not four times the assurance; it is the same
-review of four different commits.
-
-So this review is the only one. Read this file before reviewing. If you are the
-author, read it before you finish — a finding you can predict is one you can
-avoid.
+Read this file before reviewing. If you are the author, read it before you
+finish — a finding you can predict is one you can avoid.
 
 ## The dimensions
 
@@ -61,9 +50,8 @@ gets one line or none.
    edited, which is Important because those bodies are the only channel between
    parallel worktrees.
 
-**A fleet pull request carries its `fleet.sh cost` figure.** The ceilings bound
-what a run reads; that number says whether it got cheaper. Missing, it is a
-Suggestion.
+**A fleet pull request carries its `fleet.sh cost` figure.** It is the only
+number saying whether a run got cheaper. Missing, it is a Suggestion.
 
 ### ...and this project's own
 
@@ -137,8 +125,7 @@ reviewer signs in as whoever `gh` is — normally the account that opened the PR
 `review.sh` tries the real state first and falls back, so a repository with a
 separate reviewer identity gets the badge for free.
 
-**A count of findings is not a trailer any more.** Three HTML comments used to
-end every review body — `review-important`, `review-findings`,
-`independent-review` — because the gate could not otherwise tell five
-Suggestions from nothing at all, both being a COMMENTED verdict. The severity
-field tells it now, in the one place the reviewer states it.
+**A count of findings is not a trailer.** Three HTML comments used to end every
+review body, because the gate could not otherwise tell five Suggestions from
+nothing at all — both being a COMMENTED verdict. The severity field tells it
+now, in the one place the reviewer states it.
