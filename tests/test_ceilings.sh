@@ -102,11 +102,22 @@ says_all_four() {
 }
 
 # One row of the table, rewritten in the fixture's copy of the lint.
+# NO APOSTROPHE AND NO LONE BACKTICK IN A ROW, refused here rather than
+# discovered 3,000 lines later. The ceilings table is a heredoc inside
+# `"$( ... )"`, and bash lexes a command substitution for quotes and backticks
+# even where the heredoc delimiter is quoted -- so one `brief's` in a
+# description is an unterminated string and the whole file stops parsing. This
+# phase wrote exactly that row once, and the failure it produced ("raising the
+# row did not raise the ceiling") blamed the check rather than the quote.
 set_row() {
   local tree="$1" name="$2" row="$3"
   python3 - "$tree/evals/lint.sh" "$name" "$row" <<'PY'
 import sys
 path, name, row = sys.argv[1], sys.argv[2], sys.argv[3]
+if "'" in row or row.count("`") % 2:
+    sys.exit("a ceilings row may carry no apostrophe and no lone backtick: the "
+             "table is a heredoc inside a command substitution, and bash lexes "
+             "the body for quotes whatever the delimiter says")
 lines = open(path).read().splitlines(True)
 for i, line in enumerate(lines):
     if line.startswith(name + "|"):
@@ -168,7 +179,7 @@ case "${1:-}" in
   # simply hardcoded a smaller number somewhere else.
   raised=$((limit + 500))
   set_row "$WORK/tree" reading \
-    "reading|$raised|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, plus every \"count\" row of the reading table below|evals/lint.sh"
+    "reading|$raised|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief, plus every \"count\" row of the reading table below|evals/lint.sh"
   out="$(lint_in "$WORK/tree")"; rc=$?
   [ "$rc" = 0 ] \
     || { echo "$out" >&2; fail "raising the row in the ceilings table did not raise the ceiling (rc=$rc)"; }

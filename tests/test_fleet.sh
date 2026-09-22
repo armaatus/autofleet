@@ -1274,6 +1274,29 @@ backlog_all_claimed() {
     done
     printf ']\n'
   } >"$GH_PRS"
+  # ...and the post-PR loop has already finished with every one of them, which
+  # is the other half of "all claimed". Without it every phase below measures a
+  # FIRST pass, whose cost grows with the number of open pull requests rather
+  # than with the backlog -- and the property these phases exist to defend is
+  # the second.
+  post_pr_settled "$n"
+}
+
+# THE POST-PR LOOP ALREADY FINISHED WITH EVERY OPEN PR, which is what "idle"
+# means for a dispatcher that has one. `review_open_prs` spawns
+# `after-pr.sh` once per open pull request per HEAD, and the `<pr>.done` record
+# is how a PR that is waiting on a person stops being re-examined every poll --
+# so a budget phase that plants none is measuring a first pass, not an idle one,
+# and would grow with the number of open PRs rather than with the backlog.
+#
+# The heads match `backlog_all_claimed`'s, because the record is per head: a
+# `.done` naming another commit is correctly ignored.
+post_pr_settled() {
+  local n="$1" i
+  mkdir -p "$AUTOFLEET_DIR/reviewing"
+  for i in $(seq 1 "$n"); do
+    printf 'deadbee\n' >"$AUTOFLEET_DIR/reviewing/$((100 + i)).done"
+  done
 }
 
 # fleet.sh sourced from somewhere OTHER than the dispatcher's own checkout --
@@ -1932,12 +1955,20 @@ DRIVER
     ;;
 
   resume_brief)
-    # A RESUME IS THE AFTER-PR BRIEF. The issue: "Resume is a second `claude -p`
-    # in the same worktree whose prompt says which branch, which PR, and what is
-    # open." Nothing asserted that the second run is handed anything different
-    # from the first, so a resume that re-ran the opening brief -- starting the
-    # build again on a branch that already has a pull request -- would have been
-    # green. Found by `/mattpocock-skills:code-review`.
+    # A RESUME IS THE SAME BRIEF, AND IT COUNTS AS A RUN.
+    #
+    # It was the AFTER-PR brief, because the loop had a second half: a resumed
+    # run picked up at "wait for the review, answer it, resolve the threads".
+    # armaatus/autofleet#152 deleted that half -- the agent's job ends at an
+    # open pull request and everything after it is the dispatcher's -- so a
+    # resume differs from a first run in nothing at all. What it starts from is
+    # the branch and the pull request, which is state no brief carries.
+    #
+    # THE ASSERTION MOVED WITH THE SHAPE rather than being deleted with it. What
+    # it has to catch now is a `start_build` that stopped fetching the brief on
+    # the second call: a resumed build handed an empty system prompt looks like
+    # a build and produces nothing. So the two are compared for being the SAME
+    # rather than for differing, and the run count is what bounds them.
     make_fixture ok
     make_worktree
     add_origin
@@ -1957,17 +1988,105 @@ GHSTUB
       || grep -q "Your brief is in the system prompt" "$AUTOFLEET_DIR/builds/42/prompt" \
       || fail "the opening run was handed no brief at all: $(cat "$AUTOFLEET_DIR/builds/42/prompt")"
     opening="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
-    in_fleet start_build 42 "$WORK/wt" after-pr >/dev/null 2>&1 \
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
       || fail "the resume would not start"
     resumed="$(cat "$AUTOFLEET_DIR/builds/42/system.md")"
+    [ -s "$AUTOFLEET_DIR/builds/42/system.md" ] \
+      || fail "the resumed run was handed an empty system prompt"
     [ "$opening" = "$resumed" ] \
-      && fail "a resume was handed the same brief as the opening run, so it starts the build again on a branch that already has a pull request"
-    grep -q "after-pr\|--after-pr\|pull request" <<<"$resumed" \
-      || fail "the resumed run's brief says nothing about the pull request it is answering: $resumed"
+      || fail "the resume was handed a different brief from the opening run; there is only one"
+    # ...and the resume may not send the agent at a brief that refuses it.
+    # `--after-pr` is an ERROR now, so a resumed run told to fetch it would get
+    # a refusal where its instructions should be.
+    grep -qF -- "--after-pr" <<<"$resumed" \
+      && fail "the resumed run's brief still points at --after-pr, which now refuses"
     # ...and the run count moved, which is what AUTOFLEET_BUILD_MAX_RUNS reads.
     [ "$(cat "$AUTOFLEET_DIR/builds/42/run-count")" = 2 ] \
       || fail "the resume did not count as a run, so the bound on resumes never fires"
-    echo "ok: a resume is handed the after-PR brief and counts as a run"
+    echo "ok: a resume is handed the same brief and counts as a run"
+    ;;
+
+  post_pr_records_survive)
+    # THE LOOP'S COUNTS ARE RECORDS, NOT LOCKS, and `<pr>.fixes` arrived as
+    # neither. `is_review_record` matched `*.done|*.reviews|*.said` only, so
+    # `live_reviewers` read `42.fixes` as a LOCK, took its contents -- the
+    # literal `1` the fix count is -- for a pid, asked `fleet_agent_alive 1`,
+    # got "dead" because pid 1 is launchd, and deleted the file. Every poll.
+    # The ceiling that record IS was therefore never a ceiling: the next retry
+    # read 0 and bought a second full-budget fix session, which is exactly the
+    # hole it was added to close. `stop_reviewers` spared `.reviews` and `.done`
+    # by name and dropped this one too.
+    #
+    # Nothing else sees it: every phase in tests/test_review.sh drives
+    # `after-pr.sh` alone, and the sweep is the dispatcher's. Found by the
+    # independent review of this branch.
+    make_fixture ok
+    backlog_all_claimed 1
+    printf '2\n' >"$AUTOFLEET_DIR/reviewing/101.reviews"
+    printf '1\n' >"$AUTOFLEET_DIR/reviewing/101.fixes"
+    printf 'held\n' >"$AUTOFLEET_DIR/reviewing/101.said"
+    in_fleet review_open_prs >/dev/null 2>&1
+    for kept in reviews fixes done; do
+      [ -e "$AUTOFLEET_DIR/reviewing/101.$kept" ] \
+        || fail "a dispatcher pass deleted 101.$kept, so the count it holds is not a ceiling"
+    done
+    [ "$(cat "$AUTOFLEET_DIR/reviewing/101.fixes")" = 1 ] \
+      || fail "the fix count was rewritten by the pass"
+    # ...and a DRAIN keeps the two counts as well, for the reason stop_reviewers
+    # states: they are properties of the pull request, not of this run.
+    in_fleet stop_reviewers >/dev/null 2>&1
+    for kept in reviews fixes done; do
+      [ -e "$AUTOFLEET_DIR/reviewing/101.$kept" ] \
+        || fail "stop_reviewers cleared 101.$kept; a restart then hands the PR a fresh ceiling"
+    done
+    [ -e "$AUTOFLEET_DIR/reviewing/101.said" ] \
+      && fail "stop_reviewers kept the say-once marker, so this dispatcher inherits a previous run's silence"
+    echo "ok: the loop's counts survive a pass and a drain; the say-once marker does not"
+    ;;
+
+  post_pr_lock_alive)
+    # THE LOCK'S PID HAS TO BE ONE `fleet_agent_alive` CAN RECOGNISE, and for
+    # one commit it was not. `review_open_prs` wrapped the post-PR loop in a
+    # `( ... ) &` subshell, and a forked bash subshell keeps its PARENT's argv
+    # -- so `ps -o command=` on the pid the lock holds reads
+    # `bash ./scripts/fleet/fleet.sh run --auto`, which matches no
+    # `after-pr|review|fix\.sh`, and the probe answers 1: "dead, or a recycled
+    # pid". `live_reviewers` then deletes a LIVE lock every poll,
+    # `fleet_lock_claim` finds no file and claims, and a second loop starts
+    # beside the first -- armaatus/autofleet#64, plus two concurrent fix
+    # sessions editing one worktree. `stop_reviewers` takes the same false
+    # branch, so `stop --now` skips the kill and orphans an agent holding this
+    # machine's gh login.
+    #
+    # Nothing else in the suite sees it: every other phase either plants
+    # `.done` or stubs the loop away. Hard rule 3 -- the rule the spawn depends
+    # on gets an assertion of its own. Found by the local /code-review pass,
+    # which reproduced the `ps` output rather than reasoning about it.
+    make_fixture ok
+    backlog_all_claimed 1
+    # ...and NOT settled, so the loop actually starts. `backlog_all_claimed`
+    # plants `.done` for every PR it invents, which is what makes the budget
+    # phases measure an idle pass; this is the phase that wants the other state.
+    rm -f "$AUTOFLEET_DIR/reviewing/101.done"
+    # A loop that outlives the probe below and does nothing else.
+    cat >"$WORK/repo/scripts/fleet/after-pr.sh" <<'LOOPSTUB'
+#!/usr/bin/env bash
+sleep 20
+LOOPSTUB
+    chmod +x "$WORK/repo/scripts/fleet/after-pr.sh"
+
+    in_fleet review_open_prs >/dev/null 2>&1
+    marker="$AUTOFLEET_DIR/reviewing/101"
+    [ -e "$marker" ] || fail "no lock was published for PR #101 at all"
+    read -r lockpid _ 2>/dev/null <"$marker" || true
+    case "${lockpid:-}" in ''|*[!0-9]*) fail "the lock holds no pid: $(cat "$marker")" ;; esac
+    line="$(ps -o command= -p "$lockpid" 2>/dev/null)"
+    ( cd "$WORK/repo" && . ./scripts/fleet/lib.sh && fleet_agent_alive "$lockpid" )
+    alive=$?
+    kill "$lockpid" 2>/dev/null
+    [ "$alive" = 0 ] \
+      || fail "the pid the lock holds is not one fleet_agent_alive recognises (rc $alive); ps says: $line"
+    echo "ok: the post-PR loop's lock names a pid the liveness probe can see"
     ;;
 
   runner_stub)
@@ -2093,24 +2212,14 @@ GHSTUB
         && fail "$legacy outlived the worktree that wrote it, and nothing will ever clear it"
     done
 
-    # board.sh is the line issue-command.sh hands EVERY agent, so it is where the
-    # seam is asserted by the brief rather than by the dispatcher.
-    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
-      || fail "board.sh could not set this worktree's card through the driver: $out"
-    grep -q "worktree set $WORK/repo workspace-status in-review comment #42: PR #7" "$STUB_CALLS" \
-      || fail "board.sh did not send the status and the comment in ONE call: $(cat "$STUB_CALLS")"
-
-    # ...and the REFUSAL, which is the whole of what makes board.sh's written-down
-    # $REPO_ROOT assumption acceptable rather than quiet: if the path the agent's
-    # shell has does not match the one the runtime recorded, every update from
-    # inside that worktree fails, and the answer to that is a card named as stale
-    # rather than a board update reported and not made.
-    : >"$STUB_DIR/set-fails"
-    out="$( cd "$WORK/repo" && ./scripts/fleet/board.sh in-review "#42: PR #7" 2>&1 )" \
-      && fail "a board update the runner REFUSED was reported as done, so the card is stale and nobody knows: $out"
-    rm -f "$STUB_DIR/set-fails"
-    grep -q "the card was NOT updated" <<<"$out" \
-      || fail "board.sh did not name the card as stale, which is the only thing bounding the cost of its path assumption: $out"
+    # `runner_worktree_set` IS STILL IN THE CONTRACT, and two assertions used to
+    # drive it here through `board.sh` -- the card update the brief handed every
+    # agent, and the REFUSAL that made its written-down $REPO_ROOT assumption
+    # acceptable rather than quiet. `board.sh` went with the post-PR protocol it
+    # reported into (armaatus/autofleet#152); the dispatcher's own `card` calls
+    # are what exercise the seam now, and `card_says` and `card_quiet` assert
+    # them. Nothing is re-asserted here, and this note is what stops a reader
+    # concluding the coverage was merely dropped.
 
     # ...and the contract's STREAM, against a driver that is neither shipped
     # one. `launch` captures stdout only, so a driver obeying docs/RUNNERS.md
@@ -4965,20 +5074,27 @@ GITSTUB
   # docs/WORKFLOW.md's budget table are these. armaatus/autofleet#69.
   budget_idle_pass)
     # The ordinary state of a fleet whose slate is all claimed: every `ready`
-    # issue already has a PR, so the launch loop scans the list to the end and
-    # starts nothing. Before the per-poll PR listing this pass made 13 `gh`
-    # calls -- one `pr list` per candidate scanned, plus two `issue list`, plus
-    # `count_startable`'s own `pr list` -- and every one of those grew with the
-    # backlog.
+    # issue already has a PR, the post-PR loop has finished with each of them,
+    # so the launch loop scans the list to the end and starts nothing. Before
+    # the per-poll PR listing this pass made 13 `gh` calls -- one `pr list` per
+    # candidate scanned, plus two `issue list`, plus `count_startable`'s own
+    # `pr list` -- and every one of those grew with the backlog.
+    #
+    # THREE, and it was two. The third is `review_open_prs`' own
+    # `pr list --author @me`, which is a listing the dispatcher did not take
+    # while the review ran in GitHub Actions and the pass returned early
+    # (armaatus/autofleet#152). It is one call whatever the backlog is, which is
+    # the property this phase exists to defend -- `budget_scales` drives the
+    # same pass at 10 and at 50 and compares.
     make_fixture ok
     backlog_all_claimed 10
     out="$(in_fleet cmd_run --auto 2>&1)"
     grep -q "nothing startable left" <<<"$out" \
       || fail "the pass did not end on an empty slate, so what follows is not one pass: $out"
     gh="$(grep -c . "$GH_CALLS" || true)"
-    [ "$gh" = 2 ] \
-      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 2: $(cat "$GH_CALLS")"
-    echo "ok: one idle pass costs 2 gh calls"
+    [ "$gh" = 3 ] \
+      || fail "one idle pass over 10 claimed \`ready\` issues made $gh \`gh\` calls, not 3: $(cat "$GH_CALLS")"
+    echo "ok: one idle pass costs 3 gh calls"
     # ...and ONE worktree listing, which is #30's cache doing its job with
     # `in_flight` reading it too. One cache, one invalidation point: this
     # asserts the number, #30's own phases assert where it is dropped.
@@ -5169,8 +5285,10 @@ JSON
     grep -q "pass complete" <<<"$out" \
       || fail "AUTOFLEET_LOG_PASSES=on said nothing: $out"
     # ...AFTER the last call a pass makes, which is what makes it usable as the
-    # end-of-pass signal budget_busy_pass waits on rather than a clock.
-    [ "$(grep -c . "$GH_CALLS")" = 2 ] \
+    # end-of-pass signal budget_busy_pass waits on rather than a clock. Three
+    # since armaatus/autofleet#152: `review_open_prs` takes a listing of its own
+    # now, and budget_idle_pass is where that number is explained.
+    [ "$(grep -c . "$GH_CALLS")" = 3 ] \
       || fail "the pass line landed before the pass was done: $(cat "$GH_CALLS")"
     echo "ok: ...and on, it says so once the pass has spent everything it spends"
 
@@ -5337,13 +5455,18 @@ JSON
     # while this reads $GH_CALLS.
     n="$(grep -c . "$GH_CALLS" 2>/dev/null || true)"
     stop_dispatcher
-    [ "$n" = 14 ] \
-      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 14: $(cat "$GH_CALLS")"
+    # FIFTEEN, and it was fourteen. The extra is `review_open_prs`' own
+    # `pr list --author @me`: one call whatever the fleet holds, taken since
+    # armaatus/autofleet#152 because the dispatcher runs the post-PR loop rather
+    # than returning early and leaving it to GitHub Actions. budget_idle_pass
+    # carries the same note against its own number.
+    [ "$n" = 15 ] \
+      || fail "a full fleet of three worktrees cost $n \`gh\` calls in one pass, not 15: $(cat "$GH_CALLS")"
     # ...and a whole number of passes, which a count taken mid-pass would not be.
     # Belt to the pass line's braces, and the thing that would say so if the
     # signal were ever emitted before the last call of a pass rather than after.
-    [ $(( n % 14 )) = 0 ] \
-      || fail "the count was taken mid-pass ($n is not a whole number of 14s): $(cat "$GH_CALLS")"
+    [ $(( n % 15 )) = 0 ] \
+      || fail "the count was taken mid-pass ($n is not a whole number of 15s): $(cat "$GH_CALLS")"
     echo "ok: a full fleet of three worktrees costs 14 gh calls a pass"
     ;;
 
@@ -5490,11 +5613,16 @@ JSON
     backlog_all_claimed 10
     out="$(in_fleet cmd_run --auto 2>&1)"
     grep -q "nothing startable left" <<<"$out" || fail "the pass did not end: $out"
-    first="$(head -1 "$GH_CALLS")"
-    case "$first" in
-      "pr list --state open --json number,body"*) : ;;
-      *) fail "the pass's first gh call was '$first', not the open-PR listing: the launch loop got there first, and the window named at the cache is no longer the one the code takes" ;;
-    esac
+    # BEFORE THE LAUNCH LOOP, not first in the pass. `review_open_prs` runs
+    # ahead of both and takes a listing of its own, and that is not what the
+    # window is about: what may not get there first is `ready_issues`, the one
+    # reader that acts on the answer by opening a worktree.
+    listing_at="$(grep -n '^pr list --state open --json number,body' "$GH_CALLS" | head -1 | cut -d: -f1)"
+    launch_at="$(grep -n '^issue list --state open' "$GH_CALLS" | head -1 | cut -d: -f1)"
+    [ -n "$listing_at" ] || fail "the pass never took an open-PR listing at all: $(cat "$GH_CALLS")"
+    [ -n "$launch_at" ] || fail "the pass never reached the launch loop: $(cat "$GH_CALLS")"
+    [ "$listing_at" -lt "$launch_at" ] \
+      || fail "the launch loop listed issues before the open-PR listing was taken, so the window named at the cache is no longer the one the code takes: $(cat "$GH_CALLS")"
     echo "ok: the pass takes its open-PR listing before the launch loop scans anything"
     ;;
 

@@ -103,195 +103,67 @@
 : "${AUTOFLEET_WORKTREE_ROOT:=}"
 
 # ---------------------------------------------------------------- the review
-# Where the INDEPENDENT review runs -- the second opinion on the PR, from a
-# context that has not seen the conversation which produced the diff. The local
-# `/code-review` pass before the push is required in both modes and is not
-# affected by this.
 #
-#   github  .github/workflows/claude-review.yml submits it, from its own
-#           account. Needs a CLAUDE_CODE_OAUTH_TOKEN secret on the repository
-#           (`claude setup-token`). Without that secret the job no-ops and every
-#           PR blocks forever on a review that cannot arrive -- which is the
-#           whole reason the other mode exists.
-#   local   the DISPATCHER runs the reviewer on this machine
-#           (`scripts/fleet/review.sh`) and it submits as whoever `gh` is logged
-#           in as -- usually the same account that opened the PR. Independence
-#           becomes context-level rather than identity-level. That is weaker;
-#           docs/CONFIGURATION.md says exactly how, and `merge_gate.py` reads
-#           this knob from the BASE ref so a PR cannot turn it on for itself.
-#
-# `merge_gate.py` parses this out of `.autofleet/config` with a regex rather
-# than sourcing it, so keep the assignment on one line.
-: "${AUTOFLEET_REVIEW_MODE:=github}"
-# What `review.sh` runs to produce that review. A command on PATH, invoked with
-# `-p` and a fixed tool allowlist. Named rather than hardcoded so a project can
-# point it at a wrapper -- a different model, a different account, a `ssh` to
-# the machine that holds the subscription.
+# ONE REVIEW PER PULL REQUEST, and at most one fix answering it. That is the
+# whole loop after the build (armaatus/autofleet#152), and these are the knobs
+# that size it. What used to be here was five: a review mode, two self-review
+# passes with three knobs of their own, a validation cap, a delta scope and a
+# context ceiling. The loop they described never once ended on its own.
+
+# What `review.sh` runs to produce the review, and `fix.sh` to answer it. A
+# command on PATH, invoked with `-p`. Named rather than hardcoded so a project
+# can point it at a wrapper -- a different model, a different account, an `ssh`
+# to the machine that holds the subscription.
 : "${AUTOFLEET_REVIEW_CMD:=claude}"
-# How long one local review may run before it is killed and the PR left for the
-# next poll to pick up. Long enough for a real diff; short enough that a wedged
+# How long one review may run before it is killed and the PR left for the next
+# poll to pick up. Long enough for a real diff; short enough that a wedged
 # reviewer is not an overnight hold on the worktree waiting for it.
 : "${AUTOFLEET_REVIEW_TIMEOUT:=1800}"
 # The reviewer's turn budget, passed through as `--max-turns`. The wall clock
 # above is the backstop for a wedged process; this is the bound the reviewer can
-# see and spend against, which is what makes "submit before you run out" in
-# .claude/agents/reviewer.md a budget rather than a hope. 80 is what
-# claude-review.yml grants.
-: "${AUTOFLEET_REVIEW_MAX_TURNS:=80}"
-# ---------------------------------------------------------------- the SELF-review
+# see and spend against.
 #
-# The OTHER review: the two passes the author runs on its own diff before the
-# pull request exists (`scripts/fleet/self-review.sh`). Separate knobs from the
-# independent reviewer's above, because the two runs are shaped differently --
-# one reads a pull request through `gh` and submits a verdict, the other reads a
-# local range and prints findings -- and a project that wants a cheaper model for
-# its own diff than for the verdict on it has to be able to say so.
-#
-# The command DEFAULTS to the independent reviewer's, so a host that has set
-# nothing, and a host that has set only `AUTOFLEET_REVIEW_CMD`, both still work.
-#
-# THE FALLBACK IS RESOLVED AT THE BOTTOM OF THIS FILE, not here. `.autofleet/config`
-# is sourced further down so it can override these defaults -- so a host that
-# sets `AUTOFLEET_REVIEW_CMD=my-wrapper` in that file would have had the
-# self-review fall back to the `claude` this line saw, which is the one route
-# the documented fallback is actually for. Empty here; `:=` treats empty as
-# unset, so the resolution below fires for anything the environment and the host
-# config did not set. Found by the local /code-review pass.
-: "${AUTOFLEET_SELF_REVIEW_CMD:=}"
-# How long ONE pass may run before it is killed. Lower than the independent
-# reviewer's 1800 because there are two of them and they are spent inside the
-# build's own run: two wedged passes at 1800 would be an hour of a build's turns
-# and dollars with nothing to show.
-: "${AUTOFLEET_SELF_REVIEW_TIMEOUT:=1200}"
-# Each pass's turn budget, passed through as `--max-turns`. The same number
-# `claude-review.yml` and the independent reviewer get: both passes fan out into
-# sub-agents of their own, so the visible budget is what keeps "report what you
-# have while you still have turns" meaningful.
-: "${AUTOFLEET_SELF_REVIEW_MAX_TURNS:=80}"
-# How many times ONE BRANCH may run the two passes before the loop is called
-# done and what it has found is handed on to the independent reviewer.
-#
-# THE NEIGHBOUR ABOVE BOUNDS ONE PASS. This bounds the number of them, and it
-# was the hole: `AUTOFLEET_REVIEW_MAX=1` and `AUTOFLEET_VALIDATE_MAX=2` bound
-# everything AFTER the pull request exists, and nothing bounded what came
-# before it. Measured on this machine, PR #126 ran SIXTEEN rounds of both
-# passes and PR #129 ran eight, each round two fresh full-budget agents
-# re-reading the whole branch diff -- 36% of issue #71's 207M tokens.
-#
-# It ground because the loop has nothing to converge on. A review pass can
-# always find one more Suggestion; the agent answers a finding with a commit;
-# the commit moves the head; `record-review.sh` keys its marker on the head, so
-# the marker is stale and another round is needed to push. Every turn of that
-# cycle is the same size as the last.
-#
-# TWO, for the same reason AUTOFLEET_VALIDATE_MAX is two: one round to find
-# what is there, one to check the answers to it. The findings that survive a
-# second round are the independent reviewer's job, which is the phase that
-# exists for exactly this and is bounded at one.
-: "${AUTOFLEET_SELF_REVIEW_MAX:=2}"
+# LOWER THAN THE 80 THIS USED TO BE, because the reviewer's job got smaller in
+# the same change: it no longer submits its own verdict, no longer fans out into
+# `/mattpocock-skills:code-review`, and is handed the policy, the issue and the
+# diff in its prompt rather than made to fetch them. Issue #152 asks for a
+# review costing at most $4 against a measured $0.84-$8.65 per round.
+: "${AUTOFLEET_REVIEW_MAX_TURNS:=40}"
 
-# How many attempts one head may get that produce NO VERDICT.
+# The byte ceiling on the diff inlined into the reviewer's prompt.
 #
-# A reviewer that runs and submits nothing is retried, because that is usually
-# transient -- and unbounded, it is a full-budget reviewer started every poll
-# against a head that will never get a verdict, until the agent pushes or its
-# three-hour time-box expires. `claude-review.yml` bounds the same case at ONE
-# more attempt per head and then leaves a comment saying a person decides. This
-# is that bound.
-: "${AUTOFLEET_REVIEW_MAX_TRIES:=3}"
-# Validated, because of how a bad value fails. The only consumer is
-# `[ "${tries_n:-0}" -ge "$AUTOFLEET_REVIEW_MAX_TRIES" ]` in fleet.sh: with a
-# non-number, `[` prints "integer expression expected" and returns 2, so the
-# test is FALSE, the cap never fires, and the unbounded full-budget-reviewer-
-# every-poll behaviour this knob exists to bound is back -- silently, apart from
-# one stderr line per poll. `fleet.sh` runs without `-e`, so nothing stops.
+# A diff has no upper bound and a prompt does: PR #158 is 1,315,566 bytes, about
+# 328k tokens, which is past the context window entirely -- so an uncapped
+# inline is a review that fails before it reads anything, on exactly the change
+# too big to review by eye. Past this the reviewer is handed `gh pr diff --stat`
+# and reads the hunks itself with the `gh pr diff` and `git diff` it is already
+# granted. Nothing is truncated: a reviewer given half a hunk reports
+# confidently on the half it can see.
 #
-# 0 is rejected separately: it reads as "never review", and the gave-up line
-# would announce "0 reviewers on <sha> submitted nothing, which is the cap",
-# which is not true of any run. A knob whose bad value turns a guard OFF has to
-# refuse the value; this is the same reasoning tests/run.sh applies to
-# AUTOFLEET_TEST_TIMEOUT, which had the check this one only had the argument
-# for. Found by the independent review.
-#
-# The check itself is at the BOTTOM of this file, after `.autofleet/config` is
-# sourced. Here it could only ever see the environment route: the host config is
-# read last so it can override these defaults, so a project writing
-# `AUTOFLEET_REVIEW_MAX_TRIES=three` into the file this table documents reached
-# the cap unchecked and the guard was decorative for the one route that matters.
+# 256K is about 64k tokens, which leaves the policy, the brief and the issue
+# room in a 200k window. Raise it on a model with more, and `0` is not an off
+# switch -- it would mean "never inline", which is the stat path for every PR.
+: "${AUTOFLEET_REVIEW_DIFF_MAX:=262144}"
 
-# How many reviews one PULL REQUEST gets, and how many validations may follow.
+# ------------------------------------------------------------------- the fix
 #
-# THE LOOP IS ONE REVIEW AND THEN AT MOST TWO VALIDATIONS, and these are the two
-# numbers that say so. It replaced a loop bounded at four reviews per PR that
-# routinely spent all four: #86 burned four without one ever judging its current
-# head, because every answer to a finding was a commit, every commit moved the
-# head, and a head move invalidates the review that asked for it. Reviewing the
-# same branch four times is not four times the assurance; it is the same review
-# of four different commits, none of which is the one that merges.
+# The one session that answers a review asking for changes (`scripts/fleet/fix.sh`).
+# Its own knobs rather than the build's, because it is a different shape of run:
+# the build starts from an issue and an empty branch, this starts from a diff
+# somebody has already read and a list of things to change in it.
 #
-# So the two phases are bounded separately, because they are different jobs:
-#
-#   AUTOFLEET_REVIEW_MAX     how many times the REVIEWER judges the diff. One.
-#                            It fires at PR-open, on the head the PR opened
-#                            with, and everything after that is the fix.
-#   AUTOFLEET_VALIDATE_MAX   how many times the VALIDATOR judges the answer.
-#                            Two: one for the commits answering the review, and
-#                            one more for the commits answering the validator.
-#                            Past it a person decides, which is the point -- an
-#                            unbounded loop ends in a person too, just later and
-#                            having spent a night getting there.
-#
-# Both are per PULL REQUEST, not per head, and both count only runs that
-# submitted something. A validator killed at its deadline, or one whose CLI was
-# not on PATH, is refunded -- `validate.sh` says which exits do that and why,
-# in the same words `review.sh` says it.
-: "${AUTOFLEET_REVIEW_MAX:=1}"
-: "${AUTOFLEET_VALIDATE_MAX:=2}"
-# ABOVE the `.autofleet/config` source, like every other default here. Placed
-# below it once, in the same change that added it, and the empty-value refusal
-# became unreachable: the host file sets `KNOB=`, then a `:=` running afterwards
-# substitutes the default, and the check the tests drive through that file has
-# nothing left to refuse. Green here, dead for the one route that matters --
-# the same failure this knob's neighbour records two comments up.
-#
-# The check itself is at the BOTTOM, with its neighbour's, for that reason.
+# The PERMISSION MODE is the build's, deliberately and not by omission: this
+# edits, tests, commits and pushes in the same worktree the build ran in, under
+# the same guard hooks, and a fix that needed a different answer to "may I edit
+# this" than the build did would mean the two disagree about what the worktree
+# is.
+: "${AUTOFLEET_FIX_MAX_TURNS:=120}"
+: "${AUTOFLEET_FIX_MAX_BUDGET_USD:=8}"
+# The wall clock, the same backstop the reviewer has and for the same reason.
+# Longer, because this one runs the project's test suite.
+: "${AUTOFLEET_FIX_TIMEOUT:=3600}"
 
-# Found by the independent review of the change that added it.
 
-# What a round-N reviewer is asked to read: `full` (the whole branch, every
-# round) or `delta` (what changed since the last reviewed head, plus what that
-# reaches).
-#
-# DEFAULTS TO `full`, and that is not timidity. `review.sh` inlines
-# `.claude/agents/reviewer.md` verbatim as the reviewer's brief, and that file
-# is under `.claude/`, which `merge_gate.HUMAN_ONLY_PREFIXES` refuses to let an
-# agent merge. So the machinery here can land before the brief does, and a
-# `review.sh` that started handing out ranges while the brief still said
-# "`gh pr diff <N>`" would produce a reviewer that read the whole diff anyway:
-# no saving, and a confused reviewer. The default flips in a one-line follow-up
-# once the brief knows what a range is. armaatus/autofleet#65.
-: "${AUTOFLEET_REVIEW_SCOPE:=full}"
-# ...and every Kth round is `full` regardless, so no pull request is ever judged
-# by an unbroken chain of deltas.
-#
-# The risk a delta review carries is that `git diff <last>..<head>` shows lines,
-# not reachability: a round-five commit that changes a helper's exit convention
-# shows three changed lines, and the caller it breaks was reviewed in round one
-# and is not in the delta at all. The brief buys most of that back by requiring
-# the touched files whole plus a grep for the callers of anything whose contract
-# moved -- and this is the backstop for what those two clauses miss. 4 means at
-# most three consecutive deltas.
-: "${AUTOFLEET_REVIEW_FULL_EVERY:=4}"
-# The byte ceiling on the carried-forward context file a delta round is handed.
-#
-# The file holds the previous round's findings, how they were answered, the
-# unresolved threads and the commits between the two heads -- all of it text
-# somebody else wrote on a pull request, and all of it unbounded in principle.
-# The whole point of this issue is a prompt that does not grow with the rounds,
-# so the file that replaces the growth needs a cap of its own or it becomes the
-# growth. 16K is about seven times the largest reviewer body PR #32 ever
-# produced (2,320 bytes).
-: "${AUTOFLEET_REVIEW_CONTEXT_MAX:=16384}"
 # ------------------------------------------------------------- what is KEPT ---
 #
 # Every store under $FLEET_DIR only ever grew. On this machine the reviewer
@@ -308,8 +180,10 @@
 # and every transcript for a PR that is no longer open goes -- after one grace
 # pass, and never while a reviewer for that PR is still writing to it.
 #
-# This also governs the `reviewed-<sha>` sweep, so 0 really does mean "keep
-# every piece of review state", which is what the line below promises.
+# TRANSCRIPTS ARE ALL IT GOVERNS NOW. It also drove the `reviewed-<sha>` marker
+# sweep until armaatus/autofleet#152 removed the markers; `prune_review_logs` is
+# the one consumer left, so `0` means "keep every transcript" rather than "keep
+# every piece of review state". Found by the independent review.
 : "${AUTOFLEET_KEEP_REVIEWS:=3}"
 
 # Bytes of fleet.log to keep. At the cap the file is rotated to fleet.log.1 --
@@ -448,10 +322,6 @@ if [ -f "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}" ]; then
   . "${AUTOFLEET_CONFIG:-$REPO_ROOT/.autofleet/config}"
 fi
 
-# The self-review's command, now that the host config has had its say. See the
-# note by the knob above for why this cannot be done where it is declared.
-: "${AUTOFLEET_SELF_REVIEW_CMD:=$AUTOFLEET_REVIEW_CMD}"
-
 # ----------------------------------------------------- knobs that must be sane
 #
 # AFTER the host config, because that is the route that matters: a value only
@@ -495,18 +365,26 @@ config_whole_number() {
 # announces "0 reviewers on <sha> submitted nothing, which is the cap", which is
 # the exact untrue line the 0 rejection exists to prevent. One spare zero and the
 # guard was the failure. Found by the independent review.
-config_whole_number AUTOFLEET_REVIEW_MAX_TRIES "$AUTOFLEET_REVIEW_MAX_TRIES" \
-  1 "a positive whole number"
-# The self-review's two, refused for the same reason and with a sharper edge:
-# the timeout's only consumer is
-# `[ "$waited" -ge "$AUTOFLEET_SELF_REVIEW_TIMEOUT" ]` in self-review.sh, so a
-# non-number makes `[` return 2, the test FALSE, and the deadline never fires --
-# a wedged pass then holds the worktree until the three-hour time-box expires.
-# Found by the local /code-review pass.
-config_whole_number AUTOFLEET_SELF_REVIEW_TIMEOUT "$AUTOFLEET_SELF_REVIEW_TIMEOUT" \
+config_whole_number AUTOFLEET_REVIEW_TIMEOUT "$AUTOFLEET_REVIEW_TIMEOUT" \
   1 "a positive whole number of seconds"
-config_whole_number AUTOFLEET_SELF_REVIEW_MAX_TURNS "$AUTOFLEET_SELF_REVIEW_MAX_TURNS" \
+config_whole_number AUTOFLEET_REVIEW_MAX_TURNS "$AUTOFLEET_REVIEW_MAX_TURNS" \
   1 "a positive whole number of turns"
+# The only consumer is `[ "$diff_bytes" -gt "$AUTOFLEET_REVIEW_DIFF_MAX" ]`, and
+# a non-number makes `[` return 2, which reads as FALSE -- so the whole diff is
+# inlined whatever its size, which is the failure the ceiling exists to prevent.
+config_whole_number AUTOFLEET_REVIEW_DIFF_MAX "$AUTOFLEET_REVIEW_DIFF_MAX" \
+  1 "a positive whole number of bytes"
+# The fix session's three, refused for the same reason and with a sharper edge
+# on the timeout: its only consumer is `[ "$waited" -ge "$AUTOFLEET_FIX_TIMEOUT" ]`
+# in fix.sh, so a non-number makes `[` return 2, the test FALSE, and the
+# deadline never fires -- a wedged fix then holds the worktree until the
+# dispatcher's own time-box expires hours later.
+config_whole_number AUTOFLEET_FIX_TIMEOUT "$AUTOFLEET_FIX_TIMEOUT" \
+  1 "a positive whole number of seconds"
+config_whole_number AUTOFLEET_FIX_MAX_TURNS "$AUTOFLEET_FIX_MAX_TURNS" \
+  1 "a positive whole number of turns"
+config_whole_number AUTOFLEET_FIX_MAX_BUDGET_USD "$AUTOFLEET_FIX_MAX_BUDGET_USD" \
+  1 "a positive whole number of dollars (0 would mean the fix may spend nothing)"
 
 # The same shape, for the same reason: anything that is not `on` would leave the
 # quiet default, but silently -- and here the misspelling fails in the LOUD
@@ -564,91 +442,69 @@ case "$AUTOFLEET_BUILD_MAX_BUDGET_USD" in
      exit 2 ;;
 esac
 
-# The same validation, for the same reason: the only consumer is an integer `[`
-# test in fleet.sh, and a non-number makes that test FALSE rather than an error
-# anybody sees, so the cap silently does not exist.
-config_whole_number AUTOFLEET_REVIEW_MAX "$AUTOFLEET_REVIEW_MAX" \
-  1 "a positive whole number"
-config_whole_number AUTOFLEET_VALIDATE_MAX "$AUTOFLEET_VALIDATE_MAX" \
-  1 "a positive whole number"
-
-# The two knobs armaatus/autofleet#65 added, refused for the same reason: each
-# is read by an arithmetic expansion or a command argument where a non-number
-# means the bound is absent rather than wrong.
+# THE CAP THAT BOUNDS WHAT AN ISSUE SPENDS, refused for the reason every other
+# number in this section is: a non-number makes `[ N -ge X ]` return 2, bash
+# reads 2 as false, and the cap never fires. Silently, which is worse here than
+# for most of these, because this IS the bound on a loop that has already been
+# measured running away.
 #
-#   FULL_EVERY  `$(( rounds % AUTOFLEET_REVIEW_FULL_EVERY ))` -- 0 is a division
-#               by zero, which prints an error and yields 1, so EVERY round
-#               would read as the Kth. The floor is 1, which means "every round
-#               is full" and is a legitimate way to turn the delta path off from
-#               the config file.
-#   CONTEXT_MAX `head -c "$AUTOFLEET_REVIEW_CONTEXT_MAX"` -- a non-number makes
-#               `head` fail and the context file empty, which is a delta review
-#               with nothing carried forward and no sign that anything is
-#               missing. 0 is legal and means "carry nothing".
-# THE THREE CAPS THAT BOUND WHAT AN ISSUE SPENDS, refused for the reason every
-# other number in this section is: a non-number makes `[ N -ge X ]` return 2,
-# bash reads 2 as false, and the cap never fires. Silently, which is worse here
-# than for most of these, because each of these three IS the bound on a loop
-# that has already been measured running away.
-#
-#   SELF_REVIEW_MAX   `[ "$round" -gt "$AUTOFLEET_SELF_REVIEW_MAX" ]` in
-#                     self-review.sh. False forever means the pre-PR loop is
-#                     uncapped again -- sixteen rounds on PR #126, two fresh
-#                     full-budget agents each. The floor is 1 and 0 is NOT an
-#                     off switch: at 0 the first round is already over the cap,
-#                     so no self-review ever runs and the push gate opens on
-#                     findings nothing produced. That is the hole self-review.sh
-#                     exists to close, reached through a config typo.
 #   BUILD_MAX_RUNS    `[ "$runs" -ge "$AUTOFLEET_BUILD_MAX_RUNS" ]` in
 #                     fleet.sh's `build_exited`. False forever is the resume
 #                     loop with no bound -- a run that ends the instant it
 #                     starts, restarted every poll, spending the account one
 #                     session at a time with the log saying "resuming".
-config_whole_number AUTOFLEET_SELF_REVIEW_MAX "$AUTOFLEET_SELF_REVIEW_MAX" \
-  1 "a positive whole number (0 would mean no self-review ever runs)"
-
-config_whole_number AUTOFLEET_REVIEW_FULL_EVERY "$AUTOFLEET_REVIEW_FULL_EVERY" \
-  1 "a positive whole number (1 makes every round a full review)"
-config_whole_number AUTOFLEET_REVIEW_CONTEXT_MAX "$AUTOFLEET_REVIEW_CONTEXT_MAX" \
-  0 "a whole number of bytes (0 carries nothing forward)"
-
-# Not a number, so not the helper. A misspelling here fails in the safe
-# direction anyway -- `review.sh` tests for the literal `delta` and anything
-# else is a full review -- but silently, and a project that wrote `deltas` in
-# its config would keep paying for full reviews and have no way to find out.
-case "$AUTOFLEET_REVIEW_SCOPE" in
-  full|delta) ;;
-  *) echo "AUTOFLEET_REVIEW_SCOPE must be 'full' or 'delta';" \
-          "got '$AUTOFLEET_REVIEW_SCOPE'" >&2
-     exit 2 ;;
-esac
-
-# THE OLD KNOB IS AN ERROR, NOT AN ALIAS.
+# THE OLD KNOBS ARE AN ERROR, NOT AN ALIAS.
 #
-# `AUTOFLEET_REVIEW_MAX_ROUNDS` bounded reviews-per-PR at four when four reviews
-# was the shape. The two knobs above replaced it, and a host repository that
-# tuned the old one meant something by the number -- "give this project more
-# rounds" -- which maps onto neither of them. Aliasing it to the review cap
-# would keep the file working and quietly change what it asks for, which is the
-# failure mode every other check in this file is written against: a setting that
-# is read, accepted, and does something else.
+# A host repository that tuned one of these meant something by the number, and
+# the shape it meant it about is gone. Aliasing any of them onto a surviving
+# knob would keep the config file working and quietly change what it asks for,
+# which is the failure every other check in this file is written against: a
+# setting that is read, accepted, and does something else.
 #
-# So it is loud. A host repo hits this once, on the first run after upgrading,
-# with both replacements named in the message.
-# `${VAR+set}`, not `-n "${VAR:-}"`. A host config that has been half-edited
-# leaves `AUTOFLEET_REVIEW_MAX_ROUNDS=` with nothing after the `=` -- still a
-# line about a knob nothing reads, and still someone who thinks they have
-# configured the cap. `-n` sees an empty string and says nothing, which is the
-# silent-acceptance this check exists to refuse. Found by the suite, which
-# already drove the empty case through `.autofleet/config` for the old knob.
-if [ -n "${AUTOFLEET_REVIEW_MAX_ROUNDS+set}" ]; then
-  echo "AUTOFLEET_REVIEW_MAX_ROUNDS is set, and nothing reads it any more." >&2
-  echo "The loop is one review and then at most two validations, bounded" >&2
-  echo "separately because they are different jobs:" >&2
-  echo "  AUTOFLEET_REVIEW_MAX=1     how many times the reviewer judges the diff" >&2
-  echo "  AUTOFLEET_VALIDATE_MAX=2   how many times the validator judges the answer" >&2
-  echo "Remove the old line from .autofleet/config and set whichever of those" >&2
-  echo "you meant. docs/CONFIGURATION.md has both rows." >&2
+# So it is loud, once, on the first run after upgrading, naming what replaced
+# the loop rather than pretending there is a knob for it.
+#
+# `${VAR+set}`, not `-n "${VAR:-}"`. A half-edited config leaves `KNOB=` with
+# nothing after the `=` -- still a line about a knob nothing reads, and still
+# someone who thinks they have configured the cap. `-n` sees an empty string and
+# says nothing, which is the silent acceptance this check exists to refuse.
+#
+#   REVIEW_MAX_ROUNDS   bounded reviews-per-PR at four, when four was the shape.
+#   REVIEW_MAX          one review, and the code no longer counts them.
+#   VALIDATE_MAX        the validator is gone; a re-review answers what it asked.
+#   SELF_REVIEW_*       the two pre-PR passes are gone; the reviewer is cheaper
+#                       than either of them was.
+#   REVIEW_SCOPE        there is no round two to take a delta of.
+#   REVIEW_FULL_EVERY   likewise.
+#   REVIEW_CONTEXT_MAX  likewise -- nothing is carried forward between rounds.
+#   REVIEW_MAX_TRIES    bounded reviewers that submitted NOTHING. The verdict is
+#                       a return value now, so that state does not exist.
+#   REVIEW_MODE         there is one venue. `.github/workflows/claude-review.yml`
+#                       is gone; a host that wants the review in Actions uses
+#                       `anthropics/claude-code-action` directly.
+# armaatus/autofleet#152.
+retired=""
+for knob in AUTOFLEET_REVIEW_MAX_ROUNDS AUTOFLEET_REVIEW_MAX AUTOFLEET_VALIDATE_MAX \
+            AUTOFLEET_SELF_REVIEW_CMD AUTOFLEET_SELF_REVIEW_TIMEOUT \
+            AUTOFLEET_SELF_REVIEW_MAX_TURNS AUTOFLEET_SELF_REVIEW_MAX \
+            AUTOFLEET_REVIEW_SCOPE AUTOFLEET_REVIEW_FULL_EVERY \
+            AUTOFLEET_REVIEW_CONTEXT_MAX AUTOFLEET_REVIEW_MAX_TRIES \
+            AUTOFLEET_REVIEW_MODE; do
+  # `eval` rather than `${!knob+set}`: the payload runs on the /bin/bash macOS
+  # ships, which is 3.2, and indirect expansion there has no `+set` form.
+  eval "[ -n \"\${$knob+set}\" ]" && retired="$retired $knob"
+done
+if [ -n "$retired" ]; then
+  echo "These knobs are set and nothing reads them any more:$retired" >&2
+  echo "The loop after the build is ONE review and at most ONE fix answering" >&2
+  echo "it, then GitHub's own rules decide. What is left to tune:" >&2
+  echo "  AUTOFLEET_REVIEW_CMD        what runs the review, and the fix" >&2
+  echo "  AUTOFLEET_REVIEW_TIMEOUT    how long one review may take" >&2
+  echo "  AUTOFLEET_REVIEW_MAX_TURNS  the reviewer's turn budget" >&2
+  echo "  AUTOFLEET_FIX_MAX_TURNS     the fix session's" >&2
+  echo "  AUTOFLEET_FIX_MAX_BUDGET_USD, AUTOFLEET_FIX_TIMEOUT" >&2
+  echo "Remove the old lines from .autofleet/config; docs/CONFIGURATION.md has" >&2
+  echo "a row for each of the replacements." >&2
   exit 2
 fi
 

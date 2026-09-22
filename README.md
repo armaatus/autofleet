@@ -26,12 +26,16 @@ model runs in the dispatcher, and no agent merges its own work.
 2. **Opens a worktree** with its own isolated identity: a derived project name, a
    derived block of ports, its own `.env`. Your project's setup hook provisions
    whatever else it needs, and the agent's tab is held until that finishes.
-3. **Briefs the agent** from the issue body itself — plan, build test-first,
-   review its own branch, open a PR with a closing line, arm auto-merge, answer
-   the independent review.
-4. **Gates the merge.** `merge-gate` is a required check that fails closed: no
-   local review recorded, no independent review, an unanswered finding, an
-   unresolved thread, no `Closes #N` — no merge. `unblock.yml` then re-derives
+3. **Briefs the agent** from the issue body itself — build it test-first, open a
+   PR with a closing line, and stop there. Everything after that is the
+   dispatcher's: it arms auto-merge, runs **one** review, buys **one** fix
+   session if that review asks for changes, re-reviews the fix once, and then
+   either GitHub merges or a person is told why not.
+4. **Gates the merge.** `merge-gate` is a required check that fails closed, and
+   it asks three things: a `Closes #N` line, a change that does not touch the
+   enforcement layer, and a review of the current head that said approve. CI
+   green, every thread resolved and an approval dismissed on a push are branch
+   protection, which `install.sh` sets. `unblock.yml` then re-derives
    the `blocked`/`ready` labels so the next issue becomes startable — on a merged
    pull request, and on an issue `opened`, `edited`, `closed` or `reopened`,
    because an issue filed with no blockers carries no label at all until one of
@@ -79,7 +83,7 @@ Nothing in `scripts/fleet/` knows about your project. See
 ## What it needs
 
 - **GitHub**, with `gh` authenticated, and `merge-gate` set as a required check.
-- **Claude Code**, for the agents themselves and for `claude-review.yml`.
+- **Claude Code**, for the agents, the review and the one fix answering it.
 - **Nothing else.** A build is one `claude -p` in a plain `git worktree`, so
   the fleet runs on any machine with `git`, `gh` and `claude`.
   **[Orca](https://orca.computer)** is optional and runs the identical build in
@@ -103,12 +107,11 @@ thing that makes the rule readable a year later.
   instructions are the brief `scripts/fleet/issue-command.sh` prints.
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every knob, and what it costs.
 - [docs/RUNNERS.md](docs/RUNNERS.md) — the driver contract.
-- [REVIEW.md](REVIEW.md) — the review policy `/code-review` and the workflow follow.
-- The independent review runs in GitHub Actions by default and needs a
-  `CLAUDE_CODE_OAUTH_TOKEN` secret. Without one, set
-  `AUTOFLEET_REVIEW_MODE=local` and the dispatcher runs it on your machine
-  instead — [CONFIGURATION.md](docs/CONFIGURATION.md#the-review) for what that
-  trades away.
+- [REVIEW.md](REVIEW.md) — the review policy, and what makes a finding block.
+- The review runs on your machine, started by the dispatcher, in a context that
+  has not seen the conversation which produced the diff —
+  [CONFIGURATION.md](docs/CONFIGURATION.md#the-review) for what that trades
+  away.
 - [CLAUDE.md](CLAUDE.md) — the working agreement for contributing here.
 
 MIT.

@@ -5,13 +5,13 @@ unattended. A deterministic shell dispatcher opens worktrees, an agent works eac
 issue to a PR, and the rules — not the agent — decide whether it merges.
 
 **Which document is whose.** Required reading: this file and the brief
-(`./scripts/fleet/issue-command.sh <n>`, then `--after-pr <n>`).
-[REVIEW.md](REVIEW.md) is the review policy and you do not read it: the passes
-that apply it — both self-reviews and the reviewer — run in their own processes
-and read it there. The validator reads its own brief instead. `evals/lint.sh`
-asserts each enforced rule is stated in full in exactly one of those three — not that the others link to it,
+(`./scripts/fleet/issue-command.sh <n>`). There is no second half of it: your
+job ends at an open pull request carrying the closing line the brief names, and
+the review after it is the dispatcher's. [REVIEW.md](REVIEW.md) is the review policy and you do not
+read it — `review.sh` inlines it into the reviewer's own prompt. `evals/lint.sh`
+asserts each enforced rule is stated in full in exactly one of those two — not that the other links to it,
 which is on you — and holds what is read *before the first edit* — this file,
-the opening brief, and the room it leaves for your issue —
+the brief, and the room it leaves for your issue —
 under a word ceiling. The rest are consulted, never read through:
 [docs/WORKFLOW.md](docs/WORKFLOW.md) for why a rule exists — the maintainer's
 page, read once, not per issue — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
@@ -149,18 +149,17 @@ doing its job. Name who asked, in the PR body or an issue comment.
    runner allows it only for the phases named in `SKIPPABLE` in `tests/run.sh`,
    and on a machine where one of those skips, read the reason before believing
    the green.
-2. **Both self-review passes — `/code-review` AND
-   `/mattpocock-skills:code-review` — are required**, and both sets of findings
-   go in the PR body; `merge_gate.py` refuses a body naming only one. Step 3 of
-   the brief runs them, not you. The body's `## Plan` is what the issue asked
-   for and where the implementation departed from it; departing is normal,
-   departing silently is not.
-3. Any issue your findings invalidated is edited; the PR body says which and why.
-4. **The rest of the loop is one command**, fetched when it applies:
-   `./scripts/fleet/issue-command.sh --after-pr <n>`. What the PR body must
-   carry, how the merge is queued, which paths a person has to merge, how the
-   one review and the two validations end — stated there and nowhere else,
-   because a second copy is what an agent reads instead of the original.
+2. **Push, open the pull request, and stop.** The body's `## Plan` is what the
+   issue asked for and where the implementation departed from it — departing is
+   normal, departing silently is not — plus every issue you edited and why. The
+   brief states the closing line the gate reads and is the only place it is
+   written; copy it from there, not from here.
+3. Any issue this work invalidated is edited; the PR body says which and why.
+4. **Nothing after that is yours.** The dispatcher arms auto-merge and runs the
+   review; [REVIEW.md](REVIEW.md) says how many of those a pull request gets and
+   what a fix answering one may be. `guard.py` refuses every part of it from a
+   worktree, which is what makes the verdict independent of the context that
+   wrote the code.
 
 ## What is watching you
 
@@ -168,14 +167,14 @@ doing its job. Name who asked, in the PR body or an issue comment.
   reason: merging a PR, force-pushing `main`, editing secrets or `unblock.yml`,
   and whatever `.autofleet/guard.json` adds. Three more apply **only in a
   worktree the fleet opened**: editing the hooks, settings or `.autofleet/`'s
-  rule files, pushing before the review is recorded, and anything outward while
-  the fleet is stopped. A block is a rule you were about to break, not a bug.
+  rule files, starting the review or the fix that judges your own pull request,
+  and anything outward while the fleet is stopped. A block is a rule you were
+  about to break, not a bug.
 - **Subagents**: [`researcher`](.claude/agents/researcher.md) answers questions
   about the codebase without spending your context on the files it read.
-  [`reviewer`](.claude/agents/reviewer.md) and
-  [`validator`](.claude/agents/validator.md) are the two post-PR passes — the
-  **dispatcher** starts both, from the repo root, and `guard.py` refuses either
-  by name from a fleet worktree. You wait for them; you do not run them.
+  [`reviewer`](.claude/agents/reviewer.md) is the one post-PR pass — the
+  **dispatcher** starts it, from the repo root, and `guard.py` refuses it by
+  name from a fleet worktree. You do not run it and you do not wait for it.
 - `./evals/lint.sh` checks that all of the above is still well-formed and still
   enforcing what it claims.
 
@@ -186,9 +185,9 @@ part of the work, not in a note to yourself.
 
 | Path | What |
 |---|---|
-| `scripts/fleet/` | The dispatcher and the worktree lifecycle. Vendored into host repos. |
+| `scripts/fleet/` | The dispatcher, the worktree lifecycle, and the post-PR loop (`after-pr.sh` → `review.sh` → `fix.sh`). Vendored into host repos. |
 | `scripts/fleet/runner/` | The runner drivers. `headless.sh` is the default; `orca.sh` runs the identical build in a terminal. |
-| `.github/workflows/` | `merge-gate`, `unblock`, `claude-review`, `agent-config`. Vendored. |
+| `.github/workflows/` | `merge-gate`, `unblock`, `agent-config`. Vendored. |
 | `.github/scripts/` | The gate's decision (`merge_gate.py`) and the PR query. Vendored. |
 | `.claude/` | Hooks and subagents — what blocks and what steers. Vendored. |
 | `evals/` | Regression tests for the agent configuration itself. Vendored. |

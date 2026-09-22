@@ -18,9 +18,13 @@ cd "$REPO_ROOT"
 fleet_derive_env "$REPO_ROOT" \
   || { echo "no sha1 tool (shasum/sha1sum/python3); cannot name this worktree's stack" >&2; exit 1; }
 
-# The hooks' own scratch space -- the review markers guard.py reads, and what
-# the local review passes write. Created here so nothing later has to check.
-mkdir -p "$REPO_ROOT/.autofleet/run"
+# `.autofleet/run/` WAS CREATED HERE and is not any more. It held the
+# `reviewed-<sha>` push markers guard.py read and what the two local review
+# passes wrote; armaatus/autofleet#152 removed both, so this made a directory
+# nothing writes -- and the installer stopped adding it to the host's
+# `.gitignore` in the same change, which left an untracked directory the payload
+# creates and nothing ignores. Hard rule 1, in the direction the installer is
+# supposed to guarantee. Found by the local /code-review pass.
 
 # A private temp file per run, not a shared `.env.tmp`. Anything that reads .env
 # may also GENERATE it when it is missing, so a second writer can be running at
