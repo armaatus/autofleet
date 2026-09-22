@@ -30,6 +30,16 @@ while IFS= read -r f; do scripts+=("$f"); done < <(
      .github/scripts/*.sh evals/*.sh tests/*.sh .autofleet/*.sh install.sh \
      2>/dev/null
 )
+# An empty list is a lint that checked NOTHING and said it was well-formed,
+# which is hard rule 3 wearing a green tick. It is also the one shape that
+# cannot be expanded: under `set -u` the bash macOS ships treats `"${a[@]}"` on
+# an empty array as an unbound variable, so this would die with a message about
+# a variable rather than about a payload that is not there.
+[ "${#scripts[@]}" -gt 0 ] || {
+  echo "evals/run.sh found no scripts to check. It expects to run from the root" >&2
+  echo "of a repository the autofleet payload is installed in." >&2
+  exit 2
+}
 
 step "every script parses"
 for f in "${scripts[@]}"; do
