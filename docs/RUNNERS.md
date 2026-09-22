@@ -113,7 +113,7 @@ second pass costs another `--version` timeout per candidate, and this is the
 first call `setup.sh` makes while the runner holds the agent's tab.
 
 **Every caller that reaches for the runtime probes before it spends anything.**
-`fleet.sh` (at source time), `setup.sh` and `board.sh` all call it; `setup.sh` is
+`fleet.sh` (at source time) and `setup.sh` both call it; `setup.sh` is
 fatal on a no, because everything it provisions is for a build the dispatcher is
 about to start in that worktree. `setup.sh` probes *after* `env.sh` and before
 the submodules and the project hook — env.sh is milliseconds and is
@@ -138,13 +138,13 @@ one layer up. `lib.sh` names `scripts/fleet/runner/$AUTOFLEET_RUNNER.sh` and the
 drivers that do ship, sets `FLEET_RUNNER_MISSING`, and **finishes sourcing** —
 it neither returns nor exits, because most of what it defines has nothing to do
 with a runner and the scripts that source it mostly call no `runner_*` at all
-(`cost`, and the whole review and validation pipeline). **Three** — `fleet.sh`,
-`setup.sh`, `board.sh` — call `fleet_require_runner`
+(`cost`, and the whole post-PR loop). **Two** — `fleet.sh` and `setup.sh` —
+call `fleet_require_runner`
 before their first `runner_*`, which adds the consequence and stops; without it
 that first call is `command not found`, and rc 127 through a `|| die` reports
 the consequence as the cause.
 
-`issue-command.sh` is the fourth script that names a `runner_*` and is
+`issue-command.sh` is the third script that names a `runner_*` and is
 deliberately **not** guarded: it prints an agent's brief, which needs no
 runtime, and asks `runner_available` only behind
 `if [ -z "$ref" ] && runner_available 2>/dev/null` to decide whether it can
@@ -172,11 +172,11 @@ reader checking it. The truth is three cases:
   `  could not create it:` followed by nothing. This one is load-bearing, and
   the reference driver shipped it wrong three times before the page said so.
 - **`runner_worktree_set` should use stdout, by convention rather than
-  necessity.** Both of its callers merge the streams — `card` does
-  `runner_worktree_set … >"$out" 2>&1` and `board.sh` does
-  `out="$(runner_worktree_set … 2>&1)"` — so either stream reaches the reader
+  necessity.** Its caller merges the streams — `card` does
+  `runner_worktree_set … >"$out" 2>&1` — so either stream reaches the reader
   today. Stdout keeps it the same shape as create; nothing breaks if a driver
-  uses stderr.
+  uses stderr. (`board.sh` was the second caller and went with the post-PR
+  protocol it reported into; the convention outlived it.)
 - **`runner_available` uses stderr**, because it is a probe whose output nobody
   captures, and the caller adds the consequence.
 
@@ -350,8 +350,8 @@ could answer it directly still won — and it went with the listing it filtered.
 
 `tests/test_fleet.sh runner_stub` is the worked example and the regression
 guard: it defines the whole contract over a handful of text files, points
-`AUTOFLEET_RUNNER` at them, and then drives the dispatcher, the reap,
-`issue-command.sh` and `board.sh` through it — asserting at
+`AUTOFLEET_RUNNER` at them, and then drives the dispatcher, the reap and
+`issue-command.sh` through it — asserting at
 the end that the `orca` CLI was never asked anything, with an `orca` planted on
 `PATH` that records anything reaching for it. A driver that satisfies that phase
 satisfies the fleet.

@@ -96,11 +96,18 @@ qgrep() { grep "$@" >/dev/null; }
 # heredoc, which is fast and vendored, and counted again by a phase that RUNS
 # the script, which is the measurement the acceptance actually asks for. Naming
 # only the first left the second deletable with the table still green.
+# NO APOSTROPHE AND NO LONE BACKTICK IN A ROW BELOW, and it is not a style
+# rule. This heredoc sits inside `"$( ... )"`, and bash lexes the body of a
+# command substitution for quotes and backticks even where the heredoc
+# delimiter is quoted -- so one `it's` in a description is an unterminated
+# string, and the whole file stops parsing 3,000 lines later with the error
+# pointing at the end of it. Two rows carried one each, which balanced; editing
+# one of them was what found this.
 CEILINGS="$(cat <<'CEILINGS'
 claude-md|200|armaatus/autofleet#56|lines of CLAUDE.md, which every session reads in full|evals/lint.sh
-brief|400|armaatus/autofleet#49|words of the opening brief's stage 1, the issue spec excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
-reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief's stage 1, every "count" row of the reading table below, and the one text autofleet does not write but the agent still reads -- the issue spec at the `spec` allowance|evals/lint.sh; tests/test_brief.sh reading
-spec|500|armaatus/autofleet#98|words of an issue body the reading ceiling budgets for. NOT a limit on a tracker a maintainer writes -- it is the allowance the payload leaves for one, because the spec is injected into stage 1 and read before the first edit like everything else|evals/lint.sh
+brief|400|armaatus/autofleet#49|words of the opening brief, the issue spec excluded and __TEST_COMMAND__ counted as one word|evals/lint.sh; tests/test_brief.sh stage1
+reading|3500|armaatus/autofleet#54|words a fleet agent is told to read before its first edit: the brief, every "count" row of the reading table below, and the one text autofleet does not write but the agent still reads -- the issue spec at the `spec` allowance|evals/lint.sh; tests/test_brief.sh reading
+spec|500|armaatus/autofleet#98|words of an issue body the reading ceiling budgets for. NOT a limit on a tracker a maintainer writes -- it is the allowance the payload leaves for one, because the spec is injected ahead of the brief and read before the first edit like everything else|evals/lint.sh
 testrun|5|armaatus/autofleet#52|lines a fully green ./tests/run.sh prints|tests/test_runner_bound.sh quiet
 round|45|armaatus/autofleet#53|lines of one WHOLE clean round of ./scripts/fleet/await-review.sh, the review it hands back included, not the trailing prose alone|tests/test_await_review.sh quiet
 CEILINGS
@@ -501,269 +508,159 @@ else
   fail "mattpocock-skills is not enabled in .claude/settings.json, but the agent brief calls its skills"
 fi
 
-echo "== local review mode"
+echo "== the one review"
 # Every one of these is a link in a chain whose breakage is SILENT, and the
-# silence is the same in each case: merge-gate wants an independent review on the
-# head, nothing produces one, and every PR the fleet opens waits forever. The
-# mode exists precisely because that failure already happens by default on a
-# repository with no CLAUDE_CODE_OAUTH_TOKEN.
+# silence is the same in each case: merge-gate wants an approving verdict on the
+# head, nothing produces one, and every pull request the fleet opens waits
+# forever.
 
 # 1. The reviewer's brief. review.sh inlines it into the prompt, so a missing
-#    file is a review submitted against no policy at all.
+#    file is a review run against no policy at all.
 if [ -f .claude/agents/reviewer.md ]; then
-  for needle in "review-findings" "review-important" "independent-review: local" \
-                "REVIEW.md" "mattpocock-skills:code-review"; do
+  for needle in "REVIEW.md" "request-changes" "verdict" "severity"; do
     grep -q -- "$needle" .claude/agents/reviewer.md \
-      || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to write or read"
+      || fail ".claude/agents/reviewer.md no longer mentions '$needle', which the reviewer has to answer with or read"
   done
-  ok "the reviewer brief names every trailer, REVIEW.md and the standards pass"
+  ok "the reviewer brief names REVIEW.md, the verdict and the severities"
 else
-  fail ".claude/agents/reviewer.md is missing, so local review mode has no brief"
+  fail ".claude/agents/reviewer.md is missing, so the review has no brief"
 fi
 
-# 2a. REVIEW.md must not forbid the marker. It used to end the findings-trailer
-#     rule with "and nothing else after it", which is exactly the second trailer
-#     -- so a reviewer following the policy it is told to read "first and in
-#     full" produced a review the gate then discarded. Found by the independent
-#     review that hit it.
+# 2a. THE RULE THAT DECIDES A MERGE, stated the same way in the two places the
+#     reviewer reads. `verdict` is request-changes if and only if something is
+#     Critical or Important -- a brief that says one thing and a policy that
+#     says another is a reviewer choosing, and what it chooses between is
+#     whether the branch merges.
 # Read with the whitespace squeezed out, because this is prose: a reflow that
-# moved "nothing else" onto the next line would silence a line-oriented grep,
-# and an assertion a reflow can switch off is not an assertion.
+# moved the clause onto the next line would silence a line-oriented grep, and an
+# assertion a reflow can switch off is not an assertion.
 flat() { tr -s '[:space:]' ' ' <"$1"; }
-if flat REVIEW.md | qgrep 'nothing else after it'; then
-  fail "REVIEW.md still says nothing may follow the findings trailer, which forbids the local-review marker the gate requires"
-elif grep -q 'independent-review: local' REVIEW.md; then
-  ok "REVIEW.md allows the trailers local review mode depends on"
+if flat REVIEW.md | qgrep 'if and only if' \
+   && flat .claude/agents/reviewer.md | qgrep 'if and only if'; then
+  ok "the policy and the brief agree on when a verdict blocks"
 else
-  fail "REVIEW.md does not mention the local-review marker, so a reviewer reading it in full does not know to write one"
+  fail "the 'request-changes if and only if Critical or Important' rule is missing from REVIEW.md or the reviewer brief; the reviewer is choosing"
 fi
 
-# 2b. ...and it must not order a verdict GitHub refuses in this mode. `local`
-#     means the reviewer is the PR's author, and GitHub declines
-#     CHANGES_REQUESTED on your own pull request -- so a brief that orders
-#     `--request-changes` for an Important finding ends the run with a non-zero
-#     exit on its last action and nothing submitted.
-if flat REVIEW.md | qgrep 'request changes on your own pull request' \
-   && flat .claude/agents/reviewer.md | qgrep 'request changes on your own pull request'; then
-  ok "REVIEW.md and the brief both say --request-changes is unavailable in local mode"
+# 2b. ...and both of them say a Suggestion blocks nothing. This is the half that
+#     costs money when it goes: a nit treated as a blocker buys a fix session,
+#     a re-review and a park, to change a comment.
+if flat REVIEW.md | qgrep 'blocks nothing' \
+   && flat .claude/agents/reviewer.md | qgrep 'blocks nothing'; then
+  ok "...and that Suggestions alone are an approve"
 else
-  fail "the reviewer is still told to --request-changes, which GitHub refuses on a self-authored PR"
+  fail "REVIEW.md or the reviewer brief has stopped saying a Suggestion blocks nothing"
 fi
 
-# 2c. The severity trailer, in all four places that have to agree about it.
-#     It is what tells a nit-only review from an Important one, and the failure
-#     it exists to prevent is silent in the cheap direction: a brief that stops
-#     asking for it produces reviews with no `review-important` line, the gate
-#     reads that as "did not say" forever, and the nit-only wording -- the whole
-#     point of the trailer -- is never printed again. Nothing goes red. The loop
-#     just quietly costs what it used to.
+# 2c. THE VERDICT MARKER, spelled the same way in every file that writes or
+#     reads it. `review.sh` writes it, `merge_gate.py` is the only thing that
+#     lets a PR merge on it, and `await-review.sh` is what a person polls with.
+#     A drift is a review that posts and is then ignored, which reads exactly
+#     like a reviewer that never ran.
+marker_missing=""
+for f in scripts/fleet/review.sh .github/scripts/merge_gate.py \
+         scripts/fleet/await-review.sh; do
+  grep -q 'autofleet-verdict' "$f" || marker_missing="$marker_missing $f"
+done
+if [ -z "$marker_missing" ]; then
+  ok "the verdict marker is spelled the same in the writer, the gate and the wait"
+else
+  fail "the verdict marker is missing from:$marker_missing -- a verdict nothing reads holds every PR forever"
+fi
+
+# 2d. ...and the MODEL does not spell it. The marker is what releases the merge
+#     gate, so a prompt that handed the reviewer the string would put the one
+#     thing separating its verdict from the author's inside untrusted output.
+#     `review.sh` builds it from the schema's `verdict` field.
 #
-#     `github` mode gets the trailer too. It has no round number to gate the
-#     late-round rule on, but the count is what `merge_gate.py` reads, and the
-#     gate does not know which mode wrote the review it is looking at.
+#     The literal OPENING of the comment, not the word: REVIEW.md explains the
+#     marker in prose and must go on being able to, and what may not appear is a
+#     block the reviewer could copy.
+if grep -q -- '<!-- autofleet-verdict' .claude/agents/reviewer.md; then
+  fail "the reviewer brief hands the model the verdict marker; review.sh writes it from the schema, and a model that can type it can approve itself"
+else
+  ok "...and the brief explains the marker without handing it to the model"
+fi
+
+# 2e. THE SEVERITIES THE SCHEMA ACCEPTS ARE THE ONES THE POLICY DEFINES. The
+#     schema is an enum, so a policy word outside it is a finding the reviewer
+#     cannot return at all -- and a value outside an enum fails the whole call
+#     rather than dropping the field, which is a review that produces nothing.
 sev_missing=""
-for f in REVIEW.md .claude/agents/reviewer.md scripts/fleet/review.sh \
-         .github/workflows/claude-review.yml docs/WORKFLOW.md; do
-  grep -q -- 'review-important' "$f" || sev_missing="$sev_missing $f"
+for sev in Critical Important Suggestion; do
+  grep -q "\"$sev\"" scripts/fleet/review.sh || sev_missing="$sev_missing review.sh:$sev"
+  grep -qF -- "**$sev**" REVIEW.md || sev_missing="$sev_missing REVIEW.md:$sev"
 done
 if [ -z "$sev_missing" ]; then
-  ok "the severity trailer is asked for by both briefs, the policy and the spawner"
+  ok "the schema's severities are the three REVIEW.md defines"
 else
-  fail "review-important is missing from:$sev_missing -- severity stops reaching merge_gate.py, and the nit-only remedy stops being printed"
+  fail "a severity is in one of the schema and the policy and not the other:$sev_missing"
 fi
 
-# 2d. ...and merge_gate.py still reads it. A trailer three files ask for and
-#     nothing parses is worse than no trailer: every reviewer pays to write it
-#     and no reader is any better off.
-if grep -q 'review-important:\\s\*(' .github/scripts/merge_gate.py \
-   && grep -q 'declared_important' .github/scripts/merge_gate.py; then
-  ok "merge_gate.py parses the severity trailer the briefs write"
+# 2f. THE CEILING IS TWO REVIEWS, and it is a FILE rather than the shape of a
+#     script: a dispatcher restart, a second machine or a person running
+#     `after-pr.sh` by hand would each otherwise get their own two. What this
+#     really defends is that the count is written BEFORE the review runs --
+#     counting on success is a crash loop that re-reviews every poll at full
+#     budget.
+if grep -q '\.reviews' scripts/fleet/after-pr.sh \
+   && grep -q 'Written BEFORE the run' scripts/fleet/after-pr.sh; then
+  ok "after-pr.sh counts a review before it buys it"
 else
-  fail "merge_gate.py no longer parses review-important, so the trailer every review writes reaches nothing"
+  fail "after-pr.sh no longer counts reviews before running them, so the ceiling of two is not a ceiling"
 fi
 
-# 2e. THE TRAILER BLOCK, CHARACTER FOR CHARACTER, in the three places that
-#     dictate it and the one that documents it. Presence (2c) is not enough:
-#     the first draft of this change had REVIEW.md stating the two trailers in
-#     the OPPOSITE order from the block review.sh tells the reviewer to copy,
-#     and every grep for presence was green. Parsing is order-independent, so
-#     nothing would have broken -- but REVIEW.md is the file the brief calls
-#     the authority a reviewer reads "first and in full", and the last time it
-#     contradicted the dictated trailers a real review was discarded and the PR
-#     blocked on a review that already existed. That paragraph is still in
-#     REVIEW.md. Found by both independent reviews of this change.
-if python3 - <<'PYEOF'
-import re, sys
-
-def block(path):
-    """The dictated trailer block: the first two ADJACENT trailer lines.
-
-    Anchored on the literal `<!-- ... -->` lines, not on the names: every one of
-    these files also discusses the trailers in prose, in whatever order the
-    sentence wanted, and matching that reported drift where there was none.
-    Adjacency is what makes it the block a reviewer copies.
-    """
-    lines = [re.search(r"<!--\s*review-(important|findings):", ln)
-             for ln in open(path).read().split("\n")]
-    for i in range(len(lines) - 1):
-        if lines[i] and lines[i + 1]:
-            return [lines[i].group(1), lines[i + 1].group(1)]
-    return []
-
-want = ["important", "findings"]
-bad = []
-for path in ("REVIEW.md", ".claude/agents/reviewer.md", "scripts/fleet/review.sh",
-             ".github/workflows/claude-review.yml", "docs/WORKFLOW.md"):
-    got = block(path)
-    if got != want:
-        bad.append(f"{path} states the trailers as {got}, not {want}")
-if bad:
-    sys.exit("the trailer block has drifted:\n  " + "\n  ".join(bad))
-PYEOF
-then
-  ok "every file stating the two trailers states them in the same order"
+# 2g. THE REVIEWER READS AND THE FIX WRITES, and never the other way round. If
+#     `review.sh` ever grants an edit tool, the pass that judges the diff is the
+#     pass that wrote it; if it grants a posting tool, the verdict stops being
+#     a value the script controls.
+if grep -q "^tools='Read,Grep,Glob'" scripts/fleet/review.sh \
+   && ! grep -qE '^tools=.*(Edit|Write|gh pr review)' scripts/fleet/review.sh; then
+  ok "the reviewer's tool list is read-only, and does not include posting"
 else
-  fail "the trailer block has drifted between the policy and the prompts (above)"
+  fail "scripts/fleet/review.sh grants the reviewer a tool that edits or posts; the script posts, and fix.sh edits"
 fi
 
-# 2f. ...and the round number reaches the reviewer at all. 2g below asserts the floor
-#     is WRITTEN in both files; nothing asserted the one line that makes it
-#     reachable. Delete `Review round:` from review.sh's prompt and every
-#     reviewer falls back to the documented "treat it as round one", the floor
-#     stops firing on every PR forever, and nothing goes red -- the same
-#     silent-in-the-cheap-direction failure 2c exists to prevent, one level
-#     down. Found by the independent review.
-if grep -q 'Validation round: \$round' scripts/fleet/validate.sh \
-   && grep -q 'validate_round' scripts/fleet/validate.sh; then
-  ok "validate.sh tells the validator which round it is, and what the cap is"
-else
-  fail "validate.sh no longer passes the round number, so a validator cannot tell its last pass from its first and the 'a fail at the cap is the right outcome' rule never fires"
-fi
-
-# 2g. THE VALIDATION TRAILER, spelled the same way in every file that writes it
-#     and the one file that reads it.
-#
-#     This replaced the late-round nit floor, which existed because a review
-#     could spend four rounds on a pull request. It cannot any more: the reviewer
-#     runs once and the validator runs at most twice, and what makes that
-#     terminate rather than deadlock is `merge_gate.py` reading a `pass` on the
-#     current head as standing in for a review the author's own fix moved the
-#     head out from under.
-#
-#     So the trailer is now the load-bearing string of the whole loop, and every
-#     way it can break is silent: a validator writing a format the gate does not
-#     read submits a verdict that is discarded, the PR is held forever on a
-#     validation that already happened, and nothing goes red. Exactly the
-#     silent-in-the-cheap-direction failure 2c exists to prevent, one phase down.
-trailer_missing=""
-for f in .github/scripts/merge_gate.py scripts/fleet/validate.sh \
-         .claude/agents/validator.md .github/workflows/validate.yml; do
-  [ -f "$f" ] || { trailer_missing="$trailer_missing $f(absent)"; continue; }
-  grep -q 'validated:' "$f" || trailer_missing="$trailer_missing $f"
-done
-if [ -z "$trailer_missing" ]; then
-  ok "the validated trailer is named by the gate, both drivers and the brief"
-else
-  fail "the validated trailer is missing from:$trailer_missing -- a verdict nothing reads holds every PR forever"
-fi
-
-# 2h. ...and every one of them states the FAIL-CLOSED property: a missing or
-#      unrecognised verdict is not a pass.
-#
-#      POSITIVE AND STRUCTURAL, for the reason the check this replaced arrived at
-#      after two failed attempts: hunting the wrong sentence matches one historic
-#      wording and fires only on a byte-exact revert, and widening the pattern
-#      walks straight into a negation trap. So this asserts what must be TRUE --
-#      each file names both verdicts, so neither can quietly become the default.
-#
-#      The direction is the whole safety of the phase. A validator that crashed
-#      writes nothing at all, and nothing at all must not read as consent.
-verdicts_missing=""
-for f in .github/scripts/merge_gate.py scripts/fleet/validate.sh \
-         .claude/agents/validator.md; do
-  [ -f "$f" ] || { verdicts_missing="$verdicts_missing $f(absent)"; continue; }
-  # THE TRAILER, not the word. `qgrep -F 'pass'` and `qgrep -F 'fail'` were the
-  # test, and those are two of the commonest substrings in this tree: "passed
-  # over", "the pass", "is not a pass", and nineteen spellings of `fail` in
-  # merge_gate.py alone. Deleting every literal verdict token from all three
-  # files left this check green -- a guard that had stopped guarding while
-  # printing ok, which is hard rule 3 exactly. Found by the self-review.
-  #
-  # `validated:` with the verdict after it is the shape all three files actually
-  # have to carry, and it is the shape a deletion would take away. The comment
-  # calling this "POSITIVE AND STRUCTURAL" was right about the intent and the
-  # implementation bought it by asserting nothing.
-  # BOUNDED, because `flat` puts the whole file on one line: an unbounded gap
-  # lets `validated:` on one line pair with a `pass` two paragraphs later, which
-  # is the same vacuousness one step subtler. 40 characters is the trailer plus
-  # a sha and no more. `[^>]*` is not usable -- the documented spelling is
-  # `<head-sha>`, whose own `>` would end the gap before the verdict.
-  flat "$f" | qgrep -E 'validated:.{0,40}pass' \
-    || verdicts_missing="$verdicts_missing $f(pass)"
-  flat "$f" | qgrep -E 'validated:.{0,40}fail' \
-    || verdicts_missing="$verdicts_missing $f(fail)"
-done
-if [ -z "$verdicts_missing" ]; then
-  ok "...and each names both verdicts, so an unrecognised one cannot default to consent"
-else
-  fail "a validation verdict is unnamed in:$verdicts_missing -- a verdict that cannot be written is one the gate never sees"
-fi
-
-# 2i. THE VALIDATOR IS NOT THE AUTHOR'S TO START, asserted here rather than only
-#     in guard.py's own table.
-#
-#     A `pass` releases the merge gate outright, so an agent that could run
-#     `validate.sh` from its own worktree could certify its own branch. The hook
-#     refuses it; this is the assertion that the hook still contains the rule,
-#     which is hard rule 3 -- a rule with no assertion is not shipped.
-if grep -q 'validate.sh' .claude/hooks/guard.py \
+# 2h. THE REVIEW IS NOT THE AUTHOR'S TO START, asserted here rather than only in
+#     guard.py's own selftest: the selftest proves the rule works, and this
+#     proves the rule is still wired to all three scripts it has to cover.
+if grep -q '"review.sh", "fix.sh", "after-pr.sh"' .claude/hooks/guard.py \
    && python3 .claude/hooks/guard.py --selftest >/dev/null 2>&1; then
-  ok "guard.py refuses validate.sh from a fleet worktree, and its selftest holds"
+  ok "guard.py refuses the review, the fix and the loop from a fleet worktree"
 else
-  fail "guard.py no longer refuses validate.sh from a fleet worktree, or its selftest does not hold -- a branch that can start its own validator can certify itself"
+  fail "guard.py no longer refuses review.sh, fix.sh and after-pr.sh from a fleet worktree -- a branch that can start its own reviewer can certify itself"
 fi
 
-# 2. The marker, spelled the SAME WAY on both sides. review.sh tells the reviewer
-#    what to write and merge_gate.py decides what counts; a drift between them is
-#    a review that submits and is then ignored, which reads exactly like a
-#    reviewer that never ran.
-if grep -q 'independent-review:\\s\*local' .github/scripts/merge_gate.py \
-   && grep -q 'independent-review: local' .claude/agents/reviewer.md; then
-  ok "the local-review marker is spelled the same in the gate and in the brief"
-else
-  fail "the local-review marker has drifted between merge_gate.py and reviewer.md"
-fi
-
-# 3. The BASE-ref read. Drop `.autofleet/config` from that sparse-checkout and
-#    review_mode() finds no file, returns `github`, and every PR on a local-mode
-#    repository blocks -- with the workflow still green and nothing saying why.
-# ONE step, not two greps. Checked separately, `.autofleet/config` could move to
-# a head-ref checkout and both halves would stay green -- and a head-ref read is
-# exactly the hole the base-ref read exists to close, since the PR would then be
-# choosing the rule that judges it. Found by the local review of this change.
-if python3 - <<'PYEOF'; then
+# 3. THE BASE-REF READ. On a pull_request event actions/checkout defaults to the
+#    MERGE ref, so without this pin the script deciding the required check is
+#    the one the PR is proposing -- and a PR that replaced merge_gate.py's body
+#    with an exit(0) would pass its own gate.
+#
+#    ONE step, not two greps: checked separately, the scripts could move to a
+#    head-ref checkout and both halves would stay green.
+if python3 - <<'BASEREF'; then
 import re, sys
 wf = open(".github/workflows/merge-gate.yml").read()
 # Each `- uses: actions/checkout` block, up to the next step at the same indent.
 steps = re.split(r"\n      - (?=uses:|name:|id:)", wf)
 for step in steps:
     # `startswith`, because split()'s first element is the whole file preamble --
-    # which discusses both the checkout and the config in prose and would
-    # otherwise be judged as if it were the step.
+    # which discusses the checkout in prose and would otherwise be judged as if
+    # it were the step.
     if not step.startswith("uses: actions/checkout"):
         continue
-    if ".autofleet/config" not in step:
+    if ".github/scripts" not in step:
         continue
     if "github.event.pull_request.base.sha" in step:
         sys.exit(0)
-    sys.exit("the checkout that fetches .autofleet/config is not pinned to the base sha, "
-             "so a pull request could turn on local review mode for itself")
-sys.exit("no checkout step in merge-gate.yml fetches .autofleet/config; review_mode() "
-         "would silently answer github and block every PR on a local-mode repository")
-PYEOF
-  ok "merge-gate.yml reads .autofleet/config from the BASE ref, in one checkout"
+    sys.exit("the checkout that fetches .github/scripts is not pinned to the base "
+             "sha, so a pull request could rewrite the gate that judges it")
+sys.exit("no checkout step in merge-gate.yml fetches .github/scripts; the Decide "
+         "step would run nothing at all")
+BASEREF
+  ok "merge-gate.yml reads the gate from the BASE ref, in one checkout"
 else
-  fail "merge-gate.yml's base-ref read of .autofleet/config has come apart (above)"
+  fail "merge-gate.yml's base-ref read of the gate has come apart (above)"
 fi
 
 # 4. The guard that makes the marker mean anything. Without it the agent under
@@ -841,19 +738,22 @@ else
   fail 'guard.py: the rule refusing a body it cannot read has lost a spelling (above)'
 fi
 
-#    THE SUBMIT GRANT. Drop or misspell `Bash(gh pr review:*)` in review.sh's
-#    tool list and the reviewer starts, reads the diff, spends its whole turn
-#    budget, forms a verdict and CANNOT SUBMIT: exit 5, and every PR on a
-#    local-mode repository blocked forever on a review that was actually
-#    written. It is the one link in this chain with no assertion, and the suite
-#    structurally cannot cover it -- `stub_reviewer` replaces the reviewer
-#    command wholesale, so the allowlist is exercised by no test at all.
+#    THE REVIEWER'S ALLOWLIST, which since armaatus/autofleet#152 is defended
+#    in the opposite direction from the one it used to be. It used to have to
+#    GRANT `Bash(gh pr review:*)`: the reviewer submitted for itself, and a list
+#    without it produced an agent that read the whole diff, formed a verdict and
+#    could not post -- every PR blocked on a review that had actually been
+#    written. The script posts now, so the same grant is the hazard: a reviewer
+#    that can post can post a verdict the script did not derive from the schema.
 #
 #    Both halves in one check, because .claude/agents/reviewer.md duplicates the
 #    list in its frontmatter and ASSERTS that the two are identical. A drift
 #    makes the registered subagent more powerful than the driven one, which is
-#    the thing that paragraph exists to prevent. Found by the independent review.
-if python3 - <<'PYEOF'; then
+#    the thing that paragraph exists to prevent.
+#
+#    The suite structurally cannot cover this -- `stub_reviewer` replaces the
+#    reviewer command wholesale, so the allowlist is exercised by no test at all.
+if python3 - <<'TOOLS'; then
 import re, sys
 driven = open("scripts/fleet/review.sh").read()
 brief = open(".claude/agents/reviewer.md").read()
@@ -863,15 +763,19 @@ if not block:
     sys.exit("scripts/fleet/review.sh no longer builds a `tools=` allowlist")
 granted = set(re.findall(r"[A-Za-z]+\([^)]*\)|(?<![\w(])[A-Z][A-Za-z]+(?![\w)])",
                          block.group(0).replace("tools=", "").replace('"$tools,', "")))
-if "Bash(gh pr review:*)" not in granted:
-    sys.exit("review.sh does not grant `Bash(gh pr review:*)`, so its reviewer can "
-             "read the whole diff and then not submit -- exit 5, and the PR blocks "
-             "on a review that was written")
-if "Bash(gh api:*)" in granted:
-    sys.exit("review.sh grants `Bash(gh api:*)` again. It is withheld on purpose: "
-             "in local mode the reviewer holds the maintainer's own gh login, and "
-             "that is the one grant on the list with no ceiling. "
-             "docs/CONFIGURATION.md carries it as a row in what local gives up")
+for forbidden, why in (
+        ("Bash(gh pr review:*)",
+         "the SCRIPT posts the verdict, from the schema's own `verdict` field. A "
+         "reviewer that can post can post one the script did not derive, which is "
+         "the whole of what the marker keeps out of reach"),
+        ("Bash(gh api:*)",
+         "it is withheld on purpose: the reviewer holds the maintainer's own gh "
+         "login, and that is the one grant on the list with no ceiling. "
+         "docs/CONFIGURATION.md carries it as a row in what this gives up"),
+        ("Edit", "the reviewer reads; fix.sh writes"),
+        ("Write", "the reviewer reads; fix.sh writes")):
+    if forbidden in granted:
+        sys.exit(f"review.sh grants `{forbidden}`. " + why)
 
 front = re.search(r"^tools:\s*(.+)$", brief, re.M)
 if not front:
@@ -885,75 +789,37 @@ if extra:
              + ", ".join(sorted(extra))
              + " -- the registered subagent would be more powerful than the "
                "driven one, which is what that file's own note says it must not be")
-PYEOF
-  ok 'the reviewer can submit, cannot reach `gh api`, and the two routes agree'
+TOOLS
+  ok 'the reviewer reads only, cannot post its own verdict, and the two routes agree'
 else
   fail "the reviewer's tool allowlist has drifted (above)"
 fi
 
-#    ...and the SELF-review's allowlist, which has a sharper edge than the
-#    independent reviewer's: self-review.sh runs INSIDE a fleet-owned worktree,
-#    where a pass that could edit files could edit `.claude/hooks/guard.py` on
-#    its way past -- the one thing guard.py refuses the agent itself. It reports;
-#    the author fixes. `gh api` is withheld for the same no-ceiling reason as
-#    above.
-#
-#    WHAT THIS COVERS, stated because the check's own message overclaimed it:
-#    the DIRECT grant, and nothing more. `Task` and `Agent` are on the list --
-#    both passes are skills that fan out -- so whether a subagent inherits this
-#    ceiling is a property of the runner, not of this line. `review.sh` has the
-#    same shape and the same gap. Read this as "the pass itself was not handed a
-#    pen", which is the part a diff to this repo can change. armaatus/autofleet#51, found by the local
-#    /mattpocock-skills:code-review pass, which noted review.sh had this
-#    assertion and self-review.sh had none.
-if python3 - <<'PYEOF'; then
+#    ...and the FIX session's, which has the opposite shape and a sharper edge:
+#    it runs INSIDE a fleet-owned worktree with the build's own permission mode,
+#    so it can edit, test, commit and push. What it may not do is the three
+#    things `guard.py` refuses there anyway -- review, approve, merge -- and the
+#    assertion that matters is that it goes on running under that guard rather
+#    than being handed a permission mode of its own.
+if python3 - <<'FIXTOOLS'; then
 import re, sys
-src = open("scripts/fleet/self-review.sh").read()
-block = re.search(r"^TOOLS=.*?(?=\n\n)", src, re.S | re.M)
-if not block:
-    sys.exit("scripts/fleet/self-review.sh no longer builds a `TOOLS=` allowlist, "
-             "so its two passes run with whatever the command defaults to")
-granted = block.group(0)
-if "Bash(gh api:*)" in granted:
-    sys.exit("self-review.sh grants `Bash(gh api:*)`. It is withheld on purpose: "
-             "it is the one grant on the list with no ceiling, and this pass runs "
-             "under the maintainer's own gh login")
-# THE DENY LIST IS WHAT ACTUALLY TAKES THE PEN AWAY. `--allowed-tools` is
-# ADDITIVE -- it grants on top of `.claude/settings.json`, which permits
-# `Write(.claude/agents/**)` and `Edit(.claude/agents/**)` by design. An earlier
-# version of this check read the absence of those words in `TOOLS=` as a
-# guarantee, which is hard rule 3 with the silence in the check rather than in
-# the guard. Assert the flag that binds. Found by the local
-# /mattpocock-skills:code-review pass.
-denied = re.search(r"^DENIED=.*$", src, re.M)
-if not denied:
-    sys.exit("scripts/fleet/self-review.sh no longer sets a `DENIED=` list, so "
-             "nothing stops a pass writing: `--allowed-tools` only ADDS to what "
-             ".claude/settings.json already permits, and that includes "
-             "Write/Edit under .claude/agents/ -- the independent reviewer's brief")
-for forbidden in ("Write", "Edit", "NotebookEdit"):
-    if forbidden not in denied.group(0):
-        sys.exit(f"self-review.sh's DENIED list no longer refuses `{forbidden}`. "
-                 "The self-review passes report and the author fixes -- and this "
-                 "one runs in a fleet-owned worktree, where a pass that can write "
-                 "can rewrite .claude/agents/reviewer.md, the brief the "
-                 "independent reviewer runs on")
-# ON THE SPAWN, not anywhere in the file. `"--disallowed-tools" in src` was true
-# of the COMMENT that explains it, so the assertion survived the flag being
-# dropped from the command line -- hard rule 3, in the check written to prevent
-# exactly that. Anchored on the flag followed by the variable, on a line that is
-# not a comment. Found by the local /code-review pass.
-if not re.search(r'^\s*--disallowed-tools "\$DENIED"', src, re.M):
-    sys.exit("scripts/fleet/self-review.sh builds a DENIED list and never passes "
-             "it to the command as `--disallowed-tools \"$DENIED\"`, so it "
-             "refuses nothing")
-if "Skill" not in granted:
-    sys.exit("self-review.sh no longer grants `Skill`, so both passes -- which ARE "
-             "skills -- silently review with most of what they are for switched off")
-PYEOF
-  ok 'the self-review passes report only, and cannot reach `gh api`'
+src = open("scripts/fleet/fix.sh").read()
+if not re.search(r'^\s*--permission-mode "\$AUTOFLEET_BUILD_PERMISSION_MODE"', src, re.M):
+    sys.exit("scripts/fleet/fix.sh no longer runs on AUTOFLEET_BUILD_PERMISSION_MODE. "
+             "It edits the same worktree the build edited, under the same hooks; a "
+             "second answer to `may I edit this` is two answers about one tree")
+if not re.search(r'^\s*\( cd "\$worktree" &&', src, re.M):
+    sys.exit("scripts/fleet/fix.sh no longer runs the fix IN the worktree, so "
+             "guard.py's fleet-worktree rules -- the ones that refuse review, "
+             "approve and merge -- do not apply to it")
+for cap in ("--max-turns", "--max-budget-usd"):
+    if cap not in src:
+        sys.exit(f"scripts/fleet/fix.sh passes no {cap}, so the one fix session a "
+                 "pull request gets is bounded by the wall clock alone")
+FIXTOOLS
+  ok 'the fix session runs in the worktree, under the guard, with both caps'
 else
-  fail "the self-review's tool allowlist has drifted (above)"
+  fail "the fix session's bounds have drifted (above)"
 fi
 
 #    Everything the payload POINTS AT must be in the payload. docs/CONFIGURATION.md
@@ -1552,27 +1418,34 @@ for shipped in ".claude/agents/reviewer.md"; do
   grep -q "\"$shipped\"" install.sh \
     || fail "install.sh does not ship $shipped, so a host project vendors a broken local review mode"
 done
-grep -q 'AUTOFLEET_REVIEW_MODE' install.sh \
-  || fail "install.sh never mentions AUTOFLEET_REVIEW_MODE, so a host project is not told the default needs a secret"
-ok "install.sh ships the reviewer and names the knob"
+# ...and sets the three rules the gate deliberately does not check. They are
+# branch protection since armaatus/autofleet#152 -- a host that installs the
+# payload and never sets them has a merge gate that asks three questions and a
+# repository that will merge a red build.
+for rule in required_status_checks required_conversation_resolution \
+            dismiss_stale_reviews; do
+  grep -q "$rule" install.sh \
+    || fail "install.sh does not set $rule, and merge_gate.py stopped checking it -- nothing does"
+done
+ok "install.sh ships the reviewer and sets the branch rules the gate leaves to GitHub"
 
-# 7. `fleet.sh status` names which reviewer is going to answer. This is the one
-#    line whose whole purpose is to speak when everything else is quiet -- a
-#    `github`-mode repository with no token has a green review job, a waiting
-#    agent, and nothing anywhere saying which reviewer it is waiting for.
-if grep -q 'AUTOFLEET_REVIEW_MODE' scripts/fleet/fleet.sh \
-   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | qgrep 'review:'; then
-  ok "fleet.sh status names the review mode on its first screen"
+# 7. `fleet.sh status` says how much of the post-PR loop a pull request has
+#    spent. This is the one line whose whole purpose is to speak when everything
+#    else is quiet: a PR at its ceiling of two reviews sits with nothing
+#    happening to it, and that looks exactly like a PR nothing has started on.
+if sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | qgrep 'review:' \
+   && sed -n '/^cmd_status()/,/^}/p' scripts/fleet/fleet.sh | qgrep 'AT THE CEILING'; then
+  ok "fleet.sh status names the reviews spent, and says when one is at the ceiling"
 else
-  fail "fleet.sh status no longer names the review mode, so nothing says which reviewer a waiting agent is waiting for"
+  fail "fleet.sh status no longer says how many reviews a PR has spent, so a PR parked at the ceiling looks like one nothing has started"
 fi
 
 # 7b. EVERY MODEL CALL THE FLEET STARTS GOES THROUGH THE COMPRESSION SEAM.
 #
 #     `AUTOFLEET_HEADROOM` (armaatus/autofleet#89) is worth exactly what it
 #     covers, and what it covers is every `scripts/fleet/*.sh` that runs an
-#     agent as a direct child. Three do: review.sh, validate.sh, self-review.sh.
-#     A fourth added without `fleet_headroom_env` is the failure with NO
+#     agent as a direct child. Two do: review.sh and fix.sh. A third added
+#     without `fleet_headroom_env` is the failure with NO
 #     symptom -- the seam still works, its own tests still pass, and the number
 #     docs/CONFIGURATION.md publishes quietly becomes a fraction of the truth.
 #
@@ -1600,7 +1473,7 @@ fi
 #     two now say it too. Found by the self-review.
 #
 #     THE CANARY IS THE OTHER HALF. A detector that matches nothing reports a
-#     clean tree, so the three call sites this repository HAS are named: if the
+#     clean tree, so the two call sites this repository HAS are named: if the
 #     scan stops finding them, the scan is broken, not the payload.
 python3 "$REPO_ROOT/evals/shell_code.py" --selftest \
   || fail "evals/shell_code.py fails its own selftest, so the two scans below mean nothing"
@@ -1628,7 +1501,7 @@ PYEOF
     fail "these start a model call and never go through fleet_headroom_env, so the compression knob silently covers less than docs/CONFIGURATION.md says:
 $(printf '%s\n' "$leaks" | sed 's/^/    /')"
   fi
-  for known in scripts/fleet/review.sh scripts/fleet/validate.sh scripts/fleet/self-review.sh; do
+  for known in scripts/fleet/review.sh scripts/fleet/fix.sh; do
     printf '%s\n' "$sites" | qgrep -xF "site $known" && continue
     clean=0
     fail "the model-call scan no longer sees $known, so it is asserting nothing about the compression seam"
@@ -1679,138 +1552,27 @@ else
   fail "the headroom-leak scan could not run, so it is asserting nothing"
 fi
 
-# 8. THE GATE AND THE SHELL AGREE, spelling for spelling.
+# 8 AND 9 WENT WITH THE MODE THEY GUARDED.
 #
-#    This is the assertion whose absence let the two disagree in the BLOCKING
-#    direction. `merge_gate.review_mode()` read `: "${X:=local}"` as local while
-#    every shell consumer read github, because config.sh's own default runs
-#    before `.autofleet/config` is sourced -- so a host copying the style it sees
-#    all over config.sh got a gate sitting in local mode waiting for a review no
-#    dispatcher would ever start. The check that existed compared the gate to the
-#    INSTALLER, never to the shell that actually runs the fleet.
+# Two checks lived here. One drove `merge_gate.review_mode()` and
+# `fleet_review_mode()` against the same spellings, because a gate and a
+# dispatcher that disagree about which reviewer is running block every pull
+# request between them. The other held `install.sh`'s normalisation of
+# `AUTOFLEET_REVIEW_MODE=local` at least as wide as the gate's reader, so a
+# seeded host config could not hand a project the weaker independence guarantee
+# by accident.
 #
-#    Driven by sourcing config.sh for real, not by a second regex. A paraphrase
-#    of the shell is what is being tested here; using one to test it would assert
-#    that two copies of the same mistake match. Found by the independent review.
-if python3 - <<'PYEOF'; then
-import os, shutil, subprocess, sys, tempfile
-sys.path.insert(0, ".github/scripts")
-# The environment wins in review_mode() -- deliberately, for --selftest -- so an
-# exported value here would make every answer below the same constant and the
-# assertion vacuous. That happened to the installer check beside this one.
-os.environ.pop("AUTOFLEET_REVIEW_MODE", None)
-from merge_gate import review_mode
-
-SPELLINGS = [
-    "AUTOFLEET_REVIEW_MODE=local",
-    "AUTOFLEET_REVIEW_MODE='local'",
-    'AUTOFLEET_REVIEW_MODE="local"',
-    "export AUTOFLEET_REVIEW_MODE=local",
-    "  AUTOFLEET_REVIEW_MODE=local",
-    ': "${AUTOFLEET_REVIEW_MODE:=local}"',
-    "# AUTOFLEET_REVIEW_MODE=local",
-    # The two the list was missing, and the reason it was missing them is that
-    # it was written from the shapes the gate accepts rather than from the shapes
-    # a person types. Both made the two readers disagree.
-    "AUTOFLEET_REVIEW_MODE=LOCAL",
-    "AUTOFLEET_REVIEW_MODE= local",
-    "AUTOFLEET_REVIEW_MODE=Local",
-    "AUTOFLEET_REVIEW_MODE=local\nAUTOFLEET_REVIEW_MODE=github",
-    "AUTOFLEET_REVIEW_MODE=whatever",
-    "",
-]
-root = os.getcwd()
-bad = []
-for text in SPELLINGS:
-    d = tempfile.mkdtemp()
-    os.makedirs(os.path.join(d, ".autofleet"))
-    open(os.path.join(d, ".autofleet", "config"), "w").write(text + "\n")
-    gate = review_mode(root=d)
-    # ...and what the shell is left holding, from config.sh itself.
-    # `fleet_review_mode`, not the raw variable: an unrecognised value leaves
-    # the variable holding itself while every consumer treats it as github, and
-    # comparing the raw string would report a disagreement that is not one --
-    # then be silenced by whoever normalised the comparison instead of the code.
-    # The function IS what the fleet asks, so it is what this asks.
-    shell = subprocess.run(
-        ["bash", "-c",
-         'REPO_ROOT="$1"; cd "$2"; AUTOFLEET_CONFIG="$1/.autofleet/config"; '
-         '. "$2/scripts/fleet/lib.sh"; fleet_review_mode',
-         "_", d, root],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    shutil.rmtree(d)
-    if gate != shell:
-        bad.append(f"{text!r}: gate says {gate!r}, the shell holds {shell!r}")
-if bad:
-    sys.exit("merge_gate.review_mode() and scripts/fleet/config.sh disagree:\n  "
-             + "\n  ".join(bad))
-PYEOF
-  ok "merge_gate.review_mode() and the shell read .autofleet/config the same way"
-else
-  fail "the gate and the shell disagree about the review mode (above); one of them will block every PR"
-fi
-
-# 9. ...and install.sh normalises every spelling of `local` that the gate can READ.
-#    This repo's own .autofleet/config says `local`, and install.sh seeds that
-#    file verbatim. If the installer's matcher is narrower than
-#    merge_gate.REVIEW_MODE_RE, a rewording of the line here silently ships the
-#    weaker mode to every host project -- "chosen by nobody and announced
-#    nowhere", which is the outcome the installer's own comment says it prevents.
-#    Found by the local review of the change that added it.
-if python3 - <<'PYEOF'; then
-import re, subprocess, sys, tempfile, os, shutil
-# `review_mode()` reads the environment before the file, so an exported value
-# would make `seen_by_gate` the same constant for every spelling and this whole
-# assertion vacuous. Found by the independent review of the change that added it.
-os.environ.pop("AUTOFLEET_REVIEW_MODE", None)
-spellings = [
-    "AUTOFLEET_REVIEW_MODE=local",
-    "AUTOFLEET_REVIEW_MODE='local'",
-    'AUTOFLEET_REVIEW_MODE="local"',
-    "export AUTOFLEET_REVIEW_MODE=local",
-    '  AUTOFLEET_REVIEW_MODE=local',
-    ': "${AUTOFLEET_REVIEW_MODE:=local}"',
-]
-sys.path.insert(0, ".github/scripts")
-from merge_gate import review_mode
-src = open("install.sh").read()
-m = re.search(r"ASSIGN = re\.compile\(\n(.*?)\n\s*re\.I,\n\)", src, re.S)
-if not m:
-    sys.exit("install.sh no longer has an ASSIGN pattern to check against the gate's")
-# The two adjacent raw-string literals, concatenated the way Python would. The
-# captured text ends in the `,` that separates them from `re.I`, so it has to go
-# before this is an expression rather than a one-tuple.
-literal = m.group(1).strip().rstrip(",")
-try:
-    pattern = re.compile(eval("(" + literal + ")"), re.I)
-except Exception as exc:
-    sys.exit(f"could not read install.sh's ASSIGN pattern ({exc}); it has changed shape")
-bad = []
-for line in spellings:
-    d = tempfile.mkdtemp()
-    os.makedirs(os.path.join(d, ".autofleet"))
-    open(os.path.join(d, ".autofleet", "config"), "w").write(line + "\n")
-    seen_by_gate = review_mode(root=d) == "local"
-    shutil.rmtree(d)
-    seen_by_installer = bool(pattern.match(line))
-    if seen_by_gate and not seen_by_installer:
-        bad.append(line)
-if bad:
-    sys.exit("install.sh would not normalise these, but merge_gate.py reads them "
-             "as local: " + "; ".join(bad))
-PYEOF
-  ok 'install.sh normalises every spelling of `local` merge_gate.py can read'
-else
-  fail "install.sh's normalisation is narrower than merge_gate.py's reader (above)"
-fi
+# There is one venue now (armaatus/autofleet#152): the dispatcher. The knob, the
+# workflow it chose between and both readers of it are gone, and a check with
+# nothing to compare is worse than no check -- it is a green line about a
+# property that no longer exists. The note stays so the next person to wonder
+# where the parity assertion went does not write a third one.
 
 echo "== the flow's own scripts"
 # The brief names these by path. A rename that misses the brief turns into an
 # agent halfway through a task running a command that does not exist.
-for script in fleet.sh stop.sh await-review.sh review-status.sh record-review.sh \
-              resolve-thread.sh answer-review.sh issue-command.sh \
-              review.sh self-review.sh; do
+for script in fleet.sh stop.sh issue-command.sh await-review.sh \
+              after-pr.sh review.sh fix.sh; do
   path="scripts/fleet/$script"
   [ -x "$path" ] || { fail "$path is missing or not executable"; continue; }
   bash -n "$path" || { fail "$path does not parse"; continue; }
@@ -1899,102 +1661,62 @@ else
   fail "the continuation-comment scan could not run, so it is asserting nothing"
 fi
 
-# ...and the brief must still name them -- across BOTH of its stages.
+# ...and the brief must still name them.
 #
-# Since armaatus/autofleet#49 the brief arrives in two pieces out of the one
-# file: the bare form prints the spec, steps 1-3 and a pointer, and `--after-pr`
-# prints steps 4-6.
-# The risk the split carries is an instruction that lands in NEITHER stage,
-# which is a rule nobody enforces: armaatus/rommsync-nx#90's PR that nobody queued for
-# auto-merge, armaatus/rommsync-nx#88 and #89 sitting blocked on one unresolved thread.
+# The risk is an instruction that falls out of the brief entirely, which is a
+# rule nobody enforces: armaatus/rommsync-nx#90's PR that nobody queued for
+# auto-merge, armaatus/rommsync-nx#88 and #89 sitting blocked on one unresolved
+# thread.
 #
-# Asserted PER STAGE rather than over the union, which is strictly stronger and
-# is the union by construction. The union alone passed for the wrong reason and
-# all three review passes said so: stage 1 says "Two subagents in
-# `.claude/agents/`", so a union grep for `.claude/` matched forever, and
-# deleting `.claude/` from stage 2's list of paths no agent may merge still
-# printed ok. That is hard rule 3 -- a guard that silently stops guarding -- and
-# the cost of it is an agent spending its review and both validations turning green a
-# gate that can never pass.
-# The brief is ONE heredoc with a `@@AFTER-PR@@` line in it -- which is also
-# what keeps main's copy of this check readable, since its extraction is the
-# range from the `sed` line to `BRIEF` and two heredocs left it reading nothing.
+# THERE IS ONE STAGE. There were two -- the bare form printed the spec, steps
+# 1-3 and a pointer, `--after-pr` printed steps 4-6 -- and this check was
+# asserted PER STAGE rather than over the union, because the union passed for
+# the wrong reason: stage 1 said "Two subagents in `.claude/agents/`", so a
+# union grep for `.claude/` matched forever and deleting it from stage 2 still
+# printed ok. armaatus/autofleet#152 deleted stage 2 instead: the agent's job
+# ends at an open pull request, and everything that half described is the
+# dispatcher's. What is left to assert is one text, and the NEGATIVE list is
+# what keeps the second stage from growing back inside the first.
 brief="$(sed -n "/^sed .*BRIEF/,/^BRIEF$/p" scripts/fleet/issue-command.sh)"
 # The text begins at the `---` rule the brief opens with and ends at the
 # terminator; between them is exactly what the agent receives. Anchored on the
 # TEXT rather than on the shape of the command that prints it: keyed to `| awk `
 # this went blind the moment that command grew a second line, and counted awk's
-# own source as part of the brief. Found by the independent review, twice over
-# -- once as the nit about this file's line-oriented scanning, once as the
-# measurement being of something other than what it claims.
-body="$(sed -n '/^---$/,$p' <<<"$brief" | sed '$d')"
-stage1="$(sed -n "1,/^@@AFTER-PR@@$/p" <<<"$body" | sed '$d')"
-stage2="$(sed -n "/^@@AFTER-PR@@$/,\$p" <<<"$body" | sed '1d')"
-if [ -z "$stage1" ] || [ -z "$stage2" ]; then
-  fail "one of issue-command.sh's two brief heredocs could not be read, so everything below asserts nothing"
+# own source as part of the brief.
+stage1="$(sed -n '/^---$/,$p' <<<"$brief" | sed '$d')"
+if [ -z "$stage1" ]; then
+  fail "issue-command.sh's brief heredoc could not be read, so everything below asserts nothing"
 else
   brief_fails_before=$fails
-  # Stage 1: what is due before anything leaves the worktree -- including the
-  # pointer, without which stage 2 is unreachable and half the brief is dead
-  # text -- and the three things armaatus/autofleet#49 added because CLAUDE.md
-  # names them and the brief the fleet actually sends never did.
-  # `self-review.sh` rather than `record-review.sh` since armaatus/autofleet#51:
-  # step 3 is one command that runs both passes in processes that are not the
-  # agent's, and records the marker itself. `record-review.sh` is still the
-  # primitive and stage 2 still names it -- the rebase remedy re-records without
-  # re-reviewing -- so it is asserted there, in the list below.
-  #
-  # `verifier` left this list with the subagent: one review and two validations
-  # replaced it, and the brief names those two by their own scripts.
-  for named in self-review.sh "/code-review" "mattpocock-skills:code-review" \
-                --after-pr researcher "gh pr diff --stat" "Commit as you go"; do
+  # What is due before the agent stops: the build, the pull request body the
+  # gate reads, the subagent that keeps a wide search off the bill, and the
+  # STOP file.
+  for named in "/implement" "Closes #" researcher "gh pr diff --stat" \
+                "Commit as you go" ".autofleet/STOP" \
+                ".github/workflows/" ".github/scripts/" ".claude/"; do
     grep -qF -- "$named" <<<"$stage1" \
-      || fail "the opening brief no longer names $named, which is due before anything leaves the worktree"
+      || fail "the brief no longer names $named, which the agent needs before it stops"
   done
-  # ...and none of what stage 2 owns, because carrying it here is the cost
-  # armaatus/autofleet#49 measured: it rides in the prompt prefix of every request made before the PR
-  # exists.
-  # `board.sh` and `Closes #` as well as the scripts: tests/test_brief.sh has
-  # both in its own negative list and tests/ is NOT vendored, so this loop is
-  # the only thing holding the split in a host installation. Found by the
-  # independent review.
-  for named in await-review.sh answer-review.sh review-status.sh validate.sh \
-                board.sh "--auto --squash" "Closes #"; do
+  # ...and none of what the dispatcher owns. Every one of these was in the
+  # deleted second stage, and every one of them is now a thing the agent is
+  # refused by `guard.py` -- a brief that asked for it would send an agent to
+  # spend its budget being told no.
+  #
+  # `--after-pr` is in this list and that is the point: the flag is an ERROR
+  # now, so a brief that still pointed at it would be pointing at a refusal.
+  for named in --after-pr await-review.sh review.sh fix.sh after-pr.sh \
+                "--auto --squash" "gh pr merge"; do
     grep -qF -- "$named" <<<"$stage1" \
-      && fail "the opening brief carries $named, which belongs to --after-pr; the split is not holding"
+      && fail "the brief carries $named, which is the dispatcher's; the agent's job ends at the open pull request"
   done
   # Guarded on the counter: `ok` after a loop that may have called `fail` prints
-  # a green line for an assertion that just failed, two lines above it. Found by
-  # the independent review.
+  # a green line for an assertion that just failed, two lines above it.
   [ "$fails" = "$brief_fails_before" ] \
-    && ok "stage 1 names what is due before the push, and nothing that is not"
-  brief_fails_before=$fails
-
-  # Stage 2: every script of the loop, the closing line merge-gate demands, and
-  # the three paths no agent can merge itself.
-  # `handoff.sh` WAS IN BOTH STAGES and is in neither. The note existed so an
-  # interrupted session left something behind; a `claude -p` run is not
-  # interrupted and leaves its branch, so stage 1 says "commit as you go"
-  # instead -- which is asserted above, in stage 1's own list.
-  # `resolve-thread.sh` is NOT in this list any more, and its absence is the
-  # assertion. The validator resolves what it is satisfied by; an author that
-  # closed its own threads would be holding the per-finding ledger it is judged
-  # against. The negative is checked below, where the rest of the negatives are.
-  for named in record-review.sh await-review.sh review-status.sh \
-                answer-review.sh "--auto --squash" "Closes #" \
-                "THERE IS ONLY ONE" "VALIDATOR" "At most TWO validations" \
-                ".github/workflows/" ".github/scripts/" ".claude/"; do
-    grep -qF -- "$named" <<<"$stage2" \
-      || fail "the post-PR half of the brief no longer mentions $named, so the loop stops at that step"
-  done
-  grep -qF -- "resolve-thread.sh" <<<"$stage2" \
-    && fail "the post-PR brief tells the author to resolve its own review threads; the validator resolves what it accepts, or a resolved thread means nothing"
-  [ "$fails" = "$brief_fails_before" ] \
-    && ok "stage 2 names one review, two validations, and the paths a person has to merge"
+    && ok "the brief names what is due before the agent stops, and nothing that is not"
 
   # The `brief` row, in the vendored check and not only in autofleet's own
-  # suite: a host project gets the brief and the reason it was split, so it
-  # should get the thing that stops it growing back. tests/test_brief.sh stage1
+  # suite: a host project gets the brief and the reason it is short, so it
+  # should get the thing that stops it growing back. tests/test_brief.sh
   # measures the same row on what the script actually PRINTS, and reads the
   # number out of the same table.
   #
@@ -2005,23 +1727,10 @@ else
   # nine-word `docker compose run --rm app pytest -q --tb=short --maxfail=1`
   # puts a clean installation over the ceiling on its first PR, on a text it did
   # not write, with a failure that tells it to edit a vendored file the next
-  # `install.sh` overwrites. That is hard rule 1, and it is what rounds 1 and 2
-  # of that review were both circling: the answer was not a better reader for
-  # `.autofleet/config`, it was not reading it at all.
-  #
-  # The budget did NOT move for armaatus/autofleet#55, and the attempt to move
-  # it is worth recording. #55's other half is the attempt the time-box
-  # interrupts, and the only place an agent can be told to leave a note before a
-  # PR exists is stage 1 -- stage 2 is fetched after the push. The first
-  # spelling added a paragraph and raised this to 425; `agent-config.yml` re-runs
-  # MAIN's copy of this file against the branch and refused, which is the check
-  # doing exactly what it is for. The sentence was paid for out of stage 1
-  # instead: the STOP paragraph absorbed it (both are the work being put down),
-  # and three sentences elsewhere were tightened without losing a rule.
+  # `install.sh` overwrites. That is hard rule 1.
   #
   # No figure is written here. One was, twice -- `391`, then `386` -- and each
-  # went stale at the next commit to the brief; three rounds of
-  # armaatus/autofleet#105's review caught it. The line below prints what it
+  # went stale at the next commit to the brief. The line below prints what it
   # measured, which is the only copy that cannot rot.
   rendered="${stage1//__ISSUE__/49}"
   words="$(printf '%s\n' "$rendered" | wc -w | tr -d " ")"
@@ -2062,7 +1771,7 @@ echo "== the rule of one home"
 # from it for being long. What changed is who is told to read it. The assertion
 # that keeps that true is further down: a page whose agent-instruction sections
 # are pointers has no copy-pasteable fence for a step of the loop.
-if [ -n "$stage1" ] && [ -n "$stage2" ]; then
+if [ -n "$stage1" ]; then
   reading_ceiling="$(ceiling reading)" || exit 2
   # WHAT AUTOFLEET DOES NOT WRITE, AND THE AGENT STILL READS. Stage 1 injects
   # the issue body, which is in the context before the first edit and was not in
@@ -2078,7 +1787,7 @@ if [ -n "$stage1" ] && [ -n "$stage2" ]; then
   spec_allowance="$(ceiling spec)" || exit 2
   reading_what="$(ceiling_what reading)" || exit 2
   reading_issue="$(ceiling_issue reading)" || exit 2
-  if stage1="$stage1" stage2="$stage2" rendered="$rendered" \
+  if stage1="$stage1" rendered="$rendered" \
      reading_ceiling="$reading_ceiling" reading_what="$reading_what" \
      spec_allowance="$spec_allowance" \
      reading_issue="$reading_issue" python3 - <<'PYEOF'; then
@@ -2119,9 +1828,8 @@ def read(path):
 IN_AUTOFLEET = os.path.exists("tests/test_runner_bound.sh")
 
 texts = {
-    "REVIEW.md":          read("REVIEW.md"),
-    "the brief, stage 1": os.environ["stage1"],
-    "the brief, stage 2": os.environ["stage2"],
+    "REVIEW.md": read("REVIEW.md"),
+    "the brief": os.environ["stage1"],
 }
 if IN_AUTOFLEET:
     # Ordered so a failure names CLAUDE.md first, where a second copy usually is.
@@ -2152,56 +1860,28 @@ def triple(text):
 # Each signature is the OPERATIVE form, chosen so that naming the rule in
 # passing does not match it:
 #
-#   self-review.sh      by name. Nothing else may say it: CLAUDE.md's "Finishing
-#                       a task" used to carry its own copy of the two slash
-#                       commands, which is how an agent ends up running them in
-#                       the context the move was supposed to get them out of
-#                       (armaatus/autofleet#51). Stage 2 names `record-review.sh`
-#                       bare in the rebase remedy, which is the primitive under
-#                       this one and a pointer rather than the instruction.
-#   at most two validations  the phrasing IS the rule. It replaced "at most
-#                       three rounds", which was the cap on REVIEWS when a pull
-#                       request could have four of them; the reviewer now runs
-#                       once and the bound that is left to state is the
-#                       validator's.
+#   the review runs once  REVIEW.md's, not the brief's, and that moved with
+#                       armaatus/autofleet#152. The agent's job ends at the open
+#                       pull request, so how many reviews follow is no longer
+#                       something it acts on -- it is the policy the reviewer
+#                       reads. A brief that restated it would be spending the
+#                       reading ceiling on a fact nobody in that context uses.
 RULES = [
-    ("run both self-review passes and record the result before pushing",
-     "the brief, stage 1",
-     lambda t: "self-review.sh" in t),
-    ("arm `--auto --squash` the moment the PR exists", "the brief, stage 2",
-     lambda t: "--auto --squash" in t),
-    ("the two-validation cap", "the brief, stage 2",
-     lambda t: re.search(r"at most\s+two\s+validations", t, re.I) is not None),
-    # The reviewer runs ONCE, and an agent that believes otherwise answers a
-    # review with a push expecting a fresh one -- which is the loop this shape
-    # removed, re-derived from a brief that forgot to say so. Stage 2's home,
-    # next to the wait that reads it back.
-    ("the review runs once", "the brief, stage 2",
-     lambda t: "THERE IS ONLY ONE" in t),
-    ("the paths only a person may merge", "the brief, stage 2", triple),
-    ("the STOP file", "the brief, stage 1",
+    ("the review runs once, and one fix answers it", "REVIEW.md",
+     lambda t: re.search(r"[Tt]wo reviews\s+maximum", t) is not None),
+    ("a Suggestion blocks nothing", "REVIEW.md",
+     lambda t: "blocks nothing" in t),
+    ("the paths only a person may merge", "the brief", triple),
+    ("the STOP file", "the brief",
      lambda t: ".autofleet/STOP" in t),
-    # ALL THREE, because the rule is all three: the closing line AND both pass
-    # names `merge_gate.py` greps the body for. Keyed on `Closes #` alone,
-    # stage 2 could drop the pass names and this still printed ok, on a check
-    # named for a rule it was covering a third of. Found by the independent
-    # review.
-    #
-    # `/code-review` was dropped from this tuple when it was dropped from
-    # `LOCAL_PASSES`, and the gate got it back -- armaatus/autofleet#51 moved
-    # both passes into `self-review.sh`, which runs them outside the agent's
-    # session, so the "a second overlapping pre-PR review is cost with no
-    # reader" argument for cutting one is gone. The commit that restored it to
-    # `merge_gate.py`, its selftest, CLAUDE.md and the brief missed this row, so
-    # the lint that asserts the brief names what the gate greps for was covering
-    # half of what the gate greps for. Found by the self-review.
-    #
-    # The paragraph above this one was, briefly, written twice in mutually
-    # contradicting singular and plural. That is what a merge leaves when both
-    # sides edit the same comment, and it is why the count is stated once.
-    ("`Closes #N`, and what merge-gate reads from the body", "the brief, stage 2",
-     lambda t: all(n in t for n in ("Closes #", "/code-review",
-                                    "mattpocock-skills:code-review"))),
+    # `Closes #N` AND NOTHING ELSE, which is what the gate reads from the body
+    # since armaatus/autofleet#152. This tuple used to require the two
+    # self-review pass names beside it, because `merge_gate.LOCAL_PASSES`
+    # grepped the body for both -- and keyed on `Closes #` alone it printed ok
+    # while the brief had dropped one of them. The passes are gone and the gate
+    # reads a verdict rather than prose, so the closing line is the whole rule.
+    ("`Closes #N`, which is what merge-gate reads from the body", "the brief",
+     lambda t: "Closes #" in t),
 ]
 
 bad = []
@@ -2235,7 +1915,7 @@ for rule, home, states in RULES:
 #   written  a file the agent WRITES. Not reading at all.
 DOCS = {
     "CLAUDE.md":                    ("count", "read in full at the start of every session"),
-    "REVIEW.md":                    ("map",   "the policy the REVIEWING processes apply, each in its own context: self-review.sh hands it to both self-review passes (armaatus/autofleet#51), reviewer.md reads it in full, claude-review.yml points at it. It was a `count` row while step 3 ran inside the agent's session, and charging it after that moved out made the ceiling bound 1,352 words nothing in that context holds. Stage 1 naming it is still a failure, by the `map` rule below -- that is what stops it moving back"),
+    "REVIEW.md":                    ("map",   "the policy the REVIEW applies, in its own context: review.sh inlines it into the reviewer's prompt. It was a `count` row while a self-review ran inside the agent's session, and charging it after that moved out made the ceiling bound 1,352 words nothing in that context holds. The brief naming it is still a failure, by the `map` rule below -- that is what stops it moving back"),
     "docs/WORKFLOW.md":             ("map",   "the maintainer's explanation, and the reference an agent consults when it needs one; not per-issue reading"),
     "docs/CONFIGURATION.md":        ("map",   "read when wiring a host project"),
     "docs/RUNNERS.md":              ("map",   "read when touching the runner seam (hard rule 4)"),
@@ -2243,10 +1923,8 @@ DOCS = {
     "AGENTS.md":                    ("map",   "a symlink to CLAUDE.md; counting it would count it twice"),
     ".claude/agents/researcher.md": ("map",   "read by the subagent, in the subagent's own context"),
     ".claude/agents/reviewer.md":   ("map",   "inlined by review.sh into the reviewer's own prompt, not read here"),
-    ".claude/agents/validator.md":  ("map",   "inlined by validate.sh and validate.yml into the validator's own prompt"),
+    ".autofleet/run/self-review.md": ("written", "retired with the self-review passes (armaatus/autofleet#152); the row stays so a brief that names it fails as a pointer to a file nothing writes rather than as an unknown path"),
     ".autofleet/review.md":         ("map",   "the host project's own correctness rules; read by the reviewer, in its own context"),
-    "findings.md":                  ("written", "what a pass run BY HAND writes for record-review.sh; step 3's own file is the one below"),
-    ".autofleet/run/self-review.md": ("written", "where self-review.sh leaves what the two passes found -- gitignored, and the file the rebase remedy re-records"),
 }
 
 # `+`, not `*`. With `*` the prefix is optional, so the bare word `.md` in
@@ -2259,14 +1937,11 @@ NAMED = re.compile(r"[A-Za-z0-9_./-]+\.md")
 # document named in stage 1 is both reported here AND counted into the ceiling
 # below, because that is what it costs.
 required = {p for p, v in DOCS.items() if v[0] == "count"}
-# BOTH STAGES are scanned for pointers, though only stage 1's words are in the
-# ceiling. The first version scanned stage 1 alone, which left the guard watching
-# half the brief: a `docs/WORKFLOW.md` added to stage 2 tripped nothing -- not
-# this scan, not the ceiling, not tests/test_brief.sh -- and that is the
-# regression armaatus/autofleet#54 is about, one stage over. Found by the
-# independent review.
-scanned = [("the brief, stage 1", texts["the brief, stage 1"], ("count", "written")),
-           ("the brief, stage 2", texts["the brief, stage 2"], ("count", "written"))]
+# ONE STAGE to scan, and every word of it is in the ceiling below. This used to
+# scan both halves of a split brief though only the first half's words were
+# charged -- a `docs/WORKFLOW.md` added to the second tripped nothing, which is
+# the regression armaatus/autofleet#54 is about, one stage over.
+scanned = [("the brief", texts["the brief"], ("count", "written"))]
 if IN_AUTOFLEET:
     scanned.append(("CLAUDE.md", texts["CLAUDE.md"], ("count", "map", "written")))
 for where, text, may_name in scanned:
@@ -2283,27 +1958,22 @@ for where, text, may_name in scanned:
             if kind[0] == "map":
                 required.add(path)
 
-# The ordering check this replaced asked only that stage 1 name REVIEW.md AFTER
-# `/code-review`, so it was read at the step rather than in the preamble. Once
-# the passes moved out of the agent's session there is no step left that reads
-# it here at all: `self-review.sh` names the policy to the processes it starts.
-# So stage 1 may not name it in either position, which the `map` rule above
-# already enforces -- and unlike the ordering test, it also charges the words
-# back if someone puts it there anyway.
+# The ordering check this replaced asked only that the brief name REVIEW.md
+# AFTER `/code-review`, so it was read at the step rather than in the preamble.
+# There is no step in this context that reads it at all: `review.sh` inlines the
+# policy into the process it starts. So the brief may not name it in either
+# position, which the `map` rule above already enforces -- and unlike the
+# ordering test, it also charges the words back if someone puts it there anyway.
 
 # The reading ceiling is the acceptance of armaatus/autofleet#54: CLAUDE.md, the
 # OPENING brief, and anything either names as required reading, before the first
 # edit. Its number is the `reading` row of the ceilings table at the top of this
 # file.
 #
-# STAGE 2 IS DELIBERATELY OUTSIDE THE SUM, and this is the only place that says
-# so. "Before its first edit" is the measurement, and stage 2 is fetched after
-# the PR exists -- counting its ~1,100 words would put the total near 4,500 and
-# make the ceiling mean something other than its name. What stage 2 does NOT get
-# is a free pointer: the scan above reads both halves, so neither can send an
-# agent to a document whose words nobody counted. Found by the independent
-# review, which caught the ceiling's comment claiming "either" while the sum took
-# one.
+# THE WHOLE BRIEF IS IN THE SUM, which it was not when the brief had two
+# stages: the second was fetched after the PR existed, so its ~1,100 words were
+# outside a ceiling whose name is "before its first edit". That half is deleted
+# rather than exempt now (armaatus/autofleet#152), so the exemption goes with it.
 #
 # `rendered` is stage 1 with the issue number substituted and __TEST_COMMAND__
 # left standing as the one word it is -- the same figure the `brief` row above
@@ -2324,7 +1994,7 @@ CEILING = int(os.environ["reading_ceiling"])
 if not IN_AUTOFLEET:
     required.discard("CLAUDE.md")
 parts = [(p, len(read(p).split())) for p in sorted(required)]
-parts.append(("the brief, stage 1", len(os.environ["rendered"].split())))
+parts.append(("the brief", len(os.environ["rendered"].split())))
 # The one the tree does not hold. An allowance, not a measurement: a host
 # project's issues are not autofleet's to bound. What this does is stop the
 # payload spending its room.
@@ -2405,9 +2075,11 @@ for m in re.finditer(r"(?m)^ {4,}\S.*$", page):
 
 # The loop's steps. `issue-command.sh` itself is NOT here: printing the command
 # that fetches the brief is the pointer this check is asking for.
-STEPS = ["self-review.sh", "record-review.sh", "await-review.sh",
-         "review-status.sh", "resolve-thread.sh", "answer-review.sh",
-         "gh pr merge", "/code-review", "/mattpocock-skills:code-review"]
+# Six of these went with the post-PR protocol (armaatus/autofleet#152) and
+# `gh pr merge` is the dispatcher's now. What is left is what an AGENT could
+# still be told to run from the wrong page.
+STEPS = ["await-review.sh", "review.sh", "fix.sh", "after-pr.sh",
+         "gh pr merge", "/implement", "/mattpocock-skills:tdd"]
 found = sorted({s for b in blocks for s in STEPS if s in b})
 if found:
     sys.exit("docs/WORKFLOW.md still prints a runnable copy of the loop: "
@@ -2563,67 +2235,22 @@ else
   fail "the phase registries in tests/run.sh do not match the scripts; an unregistered phase never runs, and a stale SKIPPABLE entry allows nothing. The line above says which"
 fi
 
-echo "== the two review venues grant the same thing"
-# THE MODE PICKS WHERE A REVIEW RUNS, NEVER WHAT IT DOES. `local` spawns the
-# reviewer and the validator here; `github` runs the same briefs in
-# claude-review.yml and validate.yml. Both are handed `.claude/agents/*.md`
-# verbatim, and that brief orders `/mattpocock-skills:code-review` -- a skill
-# that fans out into two sub-agents of its own.
+# THE TWO REVIEW VENUES WENT WITH THE MODE.
 #
-# The workflows granted no `Skill`, no `Task` and no `Agent`, so in `github`
-# mode the reviewer was ordered to run a pass it had no tool for: it reviewed
-# without the standards and spec-vs-diff axes and nothing in the log said so.
-# One review shape became two, decided by a knob nobody set for that reason.
+# Two checks lived here, and both were about the same hazard: `local` mode ran
+# the reviewer and the validator on the dispatcher, `github` mode ran the same
+# briefs in `claude-review.yml` and `validate.yml`, and any difference between
+# the two made the knob decide what a review DOES rather than only where it
+# runs. One held their tool grants equal -- the workflows once granted no
+# `Skill`, so the reviewer was ordered to run a fan-out pass it had no tool for
+# and nothing in the log said so. The other held each workflow to standing down
+# when the base ref said `local`, because two venues running meant two agents
+# and two bills per pull request.
 #
-# Asserted as the three names rather than as whole-list equality, because the
-# lists are legitimately not equal: the local reviewer withholds
-# `Bash(gh api:*)` (it holds the maintainer's own login, not a scoped Actions
-# token) and validate.yml adds the project's test command. Those differences are
-# documented where they are made; this check is about the fan-out.
-venue_bad=""
-for venue in "scripts/fleet/review.sh" "scripts/fleet/validate.sh" \
-             ".github/workflows/claude-review.yml" ".github/workflows/validate.yml"; do
-  [ -f "$REPO_ROOT/$venue" ] || { venue_bad="$venue_bad $venue(missing)"; continue; }
-  for grant in Skill Task Agent; do
-    grep -q "[\"',]$grant[,\"']" "$REPO_ROOT/$venue" \
-      || venue_bad="$venue_bad $venue(no $grant)"
-  done
-done
-if [ -n "$venue_bad" ]; then
-  fail "the review venues do not grant the same fan-out, so AUTOFLEET_REVIEW_MODE changes what a review DOES and not only where it runs:$venue_bad"
-else
-  ok "local and github mode grant the reviewer the same Skill, Task and Agent"
-fi
-
-# ...AND THE MODE IS WHAT PICKS THE VENUE, which for a long time it was not.
-#
-# `AUTOFLEET_REVIEW_MODE` decided what COUNTS as a review -- `merge_gate.py`
-# reads it -- while the workflows decided whether they RUN on whether a
-# CLAUDE_CODE_OAUTH_TOKEN secret exists. Two switches for one question, and they
-# agreed only while a repository had no token: add one to a `local`-mode repo
-# and both venues review every pull request, two agents and two bills, with the
-# gate counting the Actions one because a non-author review counts in either
-# mode. For the validator it is worse -- validate.yml fires on every push with
-# no cap, beside a dispatcher-started validator capped at two.
-#
-# Asserted as the three things that make it hold: the base-ref read (a head-ref
-# one would let a PR pick its own venue in the change being judged), the mode
-# step, and at least one step gated on it. armaatus/autofleet#22.
-mode_bad=""
-for venue in ".github/workflows/claude-review.yml" ".github/workflows/validate.yml"; do
-  [ -f "$REPO_ROOT/$venue" ] || { mode_bad="$mode_bad $venue(missing)"; continue; }
-  qgrep -F 'pull_request.base.sha' "$REPO_ROOT/$venue" \
-    || mode_bad="$mode_bad $venue(no base-ref read)"
-  qgrep -F 'AUTOFLEET_REVIEW_MODE' "$REPO_ROOT/$venue" \
-    || mode_bad="$mode_bad $venue(never reads the mode)"
-  qgrep -F "steps.mode.outputs.mode != 'local'" "$REPO_ROOT/$venue" \
-    || mode_bad="$mode_bad $venue(nothing gated on it)"
-done
-if [ -n "$mode_bad" ]; then
-  fail "a workflow does not stand down in local mode, so both venues run the same phase -- two agents per pull request, and the validator uncapped beside a capped one:$mode_bad"
-else
-  ok "...and each stands down when the base ref says AUTOFLEET_REVIEW_MODE=local"
-fi
+# There is one venue now (armaatus/autofleet#152) and both workflows are gone.
+# A host that wants the review inside Actions writes one around
+# `anthropics/claude-code-action` directly -- which is a thing to choose, and
+# the thing these two checks existed to stop autofleet choosing on its behalf.
 
 echo "== the workflows parse as GitHub reads them"
 # An invalid workflow file does not fail loudly: GitHub creates a run with no
@@ -2685,118 +2312,22 @@ else
 
 fi
 
-# Silence is this workflow's failure mode and it is invisible: the action can
-# burn 35 turns and real money, decide a verdict, and end without ever running
-# `gh pr review` -- is_error false, job green, nothing on the PR. That happened
-# on #99 twice on one head, and every watcher downstream then waits forever for
-# a review that already came and went.
+# THE WORKFLOW REVIEWER'S CHECKS WENT WITH THE WORKFLOW.
 #
-# Two things have to stay true, and both are one careless edit from gone.
-review_wf=".github/workflows/claude-review.yml"
-if [ -f "$review_wf" ]; then
-  grep -q "no verdict was submitted" "$review_wf" \
-    || fail "claude-review.yml no longer notices a review that submitted nothing"
-  ok "a review that submits nothing is reported"
-
-  # It must stay a COMMENT. A generated review would satisfy merge_gate.py's
-  # requirement for an independent review while carrying no judgement at all --
-  # worse than the silence it replaces, because it would merge things.
-  if sed -n '/say so if no verdict/,/^      - /p' "$review_wf" | qgrep "gh pr review"; then
-    fail "the no-verdict notice submits a REVIEW; that would satisfy merge-gate with no judgement"
-  fi
-  ok "the no-verdict notice is a comment, never a review"
-
-  # ...and the reviewer is told to declare what it found. Without the trailer
-  # every review fails closed, so this does not break a PR -- it makes every one
-  # of them wait for an answer to findings that may not exist, which is the
-  # slow way for a gate to stop meaning anything.
-  grep -q 'review-findings' "$review_wf" \
-    || fail "claude-review.yml no longer tells the reviewer to end with <!-- review-findings: N -->, which merge_gate.py reads to tell a clean review from one with findings"
-  ok "the reviewer is told to declare how many findings it left"
-fi
-
-# The reviewer is told to submit its verdict with a command it can actually run.
+# Four lived here, all about one failure: `claude-review.yml` could burn 35
+# turns and real money, decide a verdict, and end without ever running
+# `gh pr review` -- is_error false, job green, nothing on the pull request. It
+# happened on #99 twice on one head and on #131 three times. So the workflow had
+# to notice the silence, had to report it as a COMMENT rather than a generated
+# review, had to tell the reviewer to declare its finding count, and had to
+# name a submit command its own `claude_args` could actually run.
 #
-# `claude_args` grants Read, Grep, Glob and a fixed list of gh/git calls -- no
-# Write, no generic Bash, no redirection and no mktemp. The prompt nonetheless
-# told it to submit with `--body-file <file>`, a file it had no way to create.
-# So a run only submitted at all if it improvised away from its instruction, and
-# PR #131 got three green review runs and zero reviews out of it. A green job
-# that did nothing is the shape nothing else here catches.
-if [ -f "$review_wf" ]; then
-  # 2>&1 because the checks below report by `sys.exit("...")`, which writes to
-  # stderr; without it the failure would print a reason that is an empty string.
-  if reason="$(python3 - "$review_wf" 2>&1 <<'REVIEWCMD'
-import re, sys
-
-text = open(sys.argv[1]).read()
-# From `review:` to the next top-level job key, BY SHAPE. Naming the job that
-# follows would hard-code the very thing the comment on the sed below says not
-# to, and the two slices of this same file must not disagree.
-start = text.find("\n  review:")
-if start < 0:
-    sys.exit("claude-review.yml has no `review:` job")
-after = re.search(r"\n  [a-z][a-z_-]*:\n", text[start + 1:])
-job = text[start:start + 1 + after.start()] if after else text[start:]
-
-args = re.search(r"claude_args:\s*(.+)", job)
-if not args:
-    sys.exit("the review job has no claude_args, so what it may run is unknown")
-allowed = args.group(1)
-# Anything that could create a file for --body-file to read.
-can_write = ("Write" in allowed
-             or re.search(r"Bash(?!\()", allowed)
-             or "Bash(mktemp" in allowed)
-# The COMMAND, not the word: the prompt explains why --body-file is wrong, and a
-# bare search flags its own explanation.
-told_to = [ln for ln in job.splitlines()
-           if "gh pr review" in ln and "--body-file" in ln]
-if told_to and not can_write:
-    sys.exit("the review prompt submits with `--body-file`, and the job grants "
-             "no tool that can create a file: " + told_to[0].strip())
-if "gh pr review" not in job:
-    sys.exit("the review prompt no longer names `gh pr review`, so nothing tells "
-             "it to submit a review at all")
-if "Bash(gh pr review:" not in allowed:
-    sys.exit("the review job does not allow `gh pr review`, so it cannot submit")
-REVIEWCMD
-)"
-  then
-    ok "the reviewer can run the command it is told to submit with"
-  else
-    # The check's OWN words. A fixed string here reported a renamed job or a
-    # missing claude_args as "the reviewer cannot run its submit command",
-    # which sends the reader to the wrong line.
-    fail "claude-review.yml: $reason"
-  fi
-
-  # A review is not a build. Cancelling the run that was producing the verdict
-  # leaves that head with none -- and the no-verdict notice is `needs: review`,
-  # so it does not fire either. #86's merged head and #81's both show
-  # `cancelled` for this job.
-  # From `review:` to the next top-level job key, by shape rather than by name:
-  # a range hard-coded to `verdict:` would silently swallow the rest of the file
-  # the day that job is renamed, and pick up the `mention` job's own
-  # cancel-in-progress -- a failure about the wrong job.
-  if sed -n '/^  review:/,/^  [a-z][a-z_-]*:$/p' "$review_wf" \
-       | qgrep -E "^[[:space:]]*cancel-in-progress:[[:space:]]*true"; then
-    fail "the review job cancels in progress; a killed review leaves the head with no verdict and nothing that says so"
-  fi
-  ok "a review in flight is never cancelled by the next event"
-
-  # ...and when a review IS silent, the pipeline asks once more on its own. The
-  # comment alone named two remedies and both were manual, so a PR whose review
-  # said nothing waited for a person to notice it.
-  grep -q 'gh workflow run claude-review.yml' "$review_wf" \
-    || fail "a review that submitted nothing no longer asks for another one; the PR waits for a person"
-  # ...and the run it asks for must be allowed to happen. A dispatch by
-  # GITHUB_TOKEN runs as github-actions[bot], and claude-code-action refuses a
-  # non-human actor unless it is named here -- so without this the retry starts
-  # a run that always declines, which is a mechanism that cannot fire.
-  grep -qE "^[[:space:]]*allowed_bots:.*(github-actions|\*)" "$review_wf" \
-    || fail "the review job does not allow github-actions, so the review it asks for after a silent one is refused as a non-human actor"
-  ok "a silent review asks for exactly one more, and that one is allowed to run"
-fi
+# That whole class of failure is gone rather than unguarded: the reviewer
+# returns a VALUE now (armaatus/autofleet#152), `review.sh` posts it, and a
+# model that returns a value cannot forget to return it. The checks are deleted
+# rather than left behind an `[ -f ]` that silently passes -- a guard that
+# stops guarding is hard rule 3's own example -- and this note is what stops
+# the next reader concluding they were merely dropped.
 
 # A cancelled run is not a green run. `cancel-in-progress` is right on a branch,
 # where only the newest push matters, and wrong on main, where every commit is
@@ -3362,19 +2893,22 @@ else
 fi
 rm -rf "$sparse_tmp"
 
-# One query, paginated, in one file. `reviewThreads(first:100)` is the FIRST
-# hundred: past that a PR silently loses its newest threads and the gate reports
-# "no review thread is unresolved" from a page it knew was partial. Both readers
-# used to carry their own copy of that query, and so their own copy of the bug.
+# ONE QUERY, IN ONE FILE. The readers used to carry their own copies, and so
+# their own copy of the bug in them: `reviewThreads(first:100)` is the FIRST
+# hundred, and past that a pull request silently lost its newest threads while
+# the gate reported "no review thread is unresolved" from a page it knew was
+# partial (#114). Thread resolution is branch protection now and the query no
+# longer pages anything -- but what made the copies drift was that there WERE
+# copies, so the rule survives its original reason.
 if [ -x .github/scripts/pr_payload.sh ]; then
   bash -n .github/scripts/pr_payload.sh || fail ".github/scripts/pr_payload.sh does not parse"
-  # THREE readers, not two. await-review.sh joined them when it stopped asking
-  # `pulls/<n>/comments` for the findings it hands back (#53) -- and it is the
-  # one most able to drift, because it wants a field the other two do not read.
-  # Unlisted, it could grow its own `reviewThreads(first:100)` tomorrow and this
-  # would stay green, which is #114 exactly.
-  for reader in .github/workflows/merge-gate.yml scripts/fleet/review-status.sh \
-                scripts/fleet/await-review.sh; do
+  # FOUR readers. `fix.sh` joined them for the review body it answers, and
+  # `await-review.sh` is the one most able to drift because it asks a question
+  # the gate does not -- "has ANYONE judged this head", which includes a refusal.
+  # Unlisted, either could grow a query of its own tomorrow and this would stay
+  # green, which is #114 exactly.
+  for reader in .github/workflows/merge-gate.yml scripts/fleet/review.sh \
+                scripts/fleet/fix.sh scripts/fleet/await-review.sh; do
     # Comment lines excluded HERE TOO, and that is the point. Every one of these
     # files also NAMES pr_payload.sh in a comment explaining why it does not
     # write its own query -- so a grep of the whole file is satisfied by the
@@ -3399,24 +2933,23 @@ if [ -x .github/scripts/pr_payload.sh ]; then
   done
   ok "a base without the gate's own scripts is told, not crashed into"
 
-  ok "the gate, review-status and the wait read one paginated payload"
+  ok "the gate, the review, the fix and the wait read one payload"
 else
   fail ".github/scripts/pr_payload.sh is missing or not executable"
 fi
 
-# The protected set has ONE implementation. `merge_gate.py` holds a prefix tuple
-# and, since #38, a pair of exact filenames -- `.autofleet/guard.json` and
-# `.autofleet/config`, which decide what the rules ARE, beside `setup.sh` and
-# `teardown.sh`, which are ordinary project code. A reader testing only the
-# prefixes still looks right and still compiles; what it does is report a
-# guard.json PR as a merge-gate failure to chase, which is the three wasted
-# review rounds #96 was about.
-grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'human_only(' \
-  || fail "review-status.sh no longer asks merge_gate.human_only() which paths a person merges"
-if grep -vE '^[[:space:]]*#' scripts/fleet/review-status.sh | qgrep 'HUMAN_ONLY_'; then
-  fail "review-status.sh tests merge_gate's protected-path constants itself; ask human_only() instead, or the two drift the next time the set grows a shape"
+# THE PROTECTED SET HAS ONE IMPLEMENTATION, and after armaatus/autofleet#152 it
+# has one reader too. `review-status.sh` asked `merge_gate.human_only()` so that
+# a local answer about which paths a person merges could not drift from the
+# gate's -- the drift cost three wasted review rounds in #96. That script is
+# gone with the post-PR protocol it served, so the assertion here is the
+# narrower one that survives: the gate still exposes the question as a FUNCTION
+# rather than as two constants a future reader would test itself.
+if grep -q '^def human_only(' .github/scripts/merge_gate.py \
+   && grep -q 'HUMAN_ONLY_FILES' .github/scripts/merge_gate.py; then
+  ok "merge_gate exposes human_only(), so a second reader cannot test the prefixes alone"
 else
-  ok "review-status.sh and the gate agree on which paths a person merges"
+  fail "merge_gate.py no longer answers which paths a person merges through one function; a reader testing the prefixes alone misses .autofleet/guard.json"
 fi
 
 # ...and the guard's project half is LOADED, not merely declared. `guard.py`

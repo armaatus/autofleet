@@ -25,14 +25,13 @@ PAYLOAD=(
   "scripts/fleet"
   ".github/workflows/merge-gate.yml"
   ".github/workflows/unblock.yml"
-  ".github/workflows/claude-review.yml"
-  # The `github`-mode twin of `scripts/fleet/validate.sh`. Both modes get a
-  # validator or hard rule 1 is broken: a host repository with the review secret
-  # and no dispatcher would otherwise inherit the merge gate's demand for a
-  # validation with nothing on the machine able to write one, and every PR with
-  # findings would block forever -- which is the exact failure `local` mode was
-  # added to remove, one phase further down.
-  ".github/workflows/validate.yml"
+  # THE REVIEW IS NOT A WORKFLOW ANY MORE. `claude-review.yml` and
+  # `validate.yml` shipped here until armaatus/autofleet#152: one review venue
+  # in Actions, one on the dispatcher, a mode knob to choose, and two copies of
+  # every rule to keep in step. There is one venue now -- the dispatcher, which
+  # a host already runs -- and a host that wants the review inside Actions
+  # instead writes a workflow around `anthropics/claude-code-action` directly,
+  # which is a thing to choose rather than a thing to inherit.
   ".github/workflows/agent-config.yml"
   ".github/scripts/merge_gate.py"
   ".github/scripts/issue_refs.py"
@@ -40,13 +39,11 @@ PAYLOAD=(
   ".claude/hooks/guard.py"
   ".claude/hooks/shell-parses.sh"
   ".claude/agents/researcher.md"
+  # The brief `scripts/fleet/review.sh` inlines. `validator.md` used to sit
+  # beside it and does not any more: the question it asked -- were these
+  # findings addressed -- is what a re-review of the fixed head answers in one
+  # pass with no protocol, and the protocol was where it failed every time.
   ".claude/agents/reviewer.md"
-  # The brief `scripts/fleet/validate.sh` and `.github/workflows/validate.yml`
-  # both inline. `verifier.md` used to sit here and does not any more: it gave an
-  # independent build-and-test verdict BEFORE the PR opened, which is now the
-  # fourth full suite run in one loop -- `/implement` runs it, CI runs it, and
-  # the validator runs it again with a reason to.
-  ".claude/agents/validator.md"
   "evals/lint.sh"
   # lint.sh RUNS these -- a vendored lint that shells out to, or imports, a file
   # the installer did not deliver fails on every host PR, on a check about the
@@ -158,8 +155,8 @@ echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 # WHAT THE PAYLOAD WRITES AT RUNTIME, kept out of the host's history.
 #
-# FOUR THINGS, which is what this repo's own `.gitignore` names, and hard rule 1
-# is the reason the installer may not ship fewer:
+# WHAT THIS REPO'S OWN `.gitignore` NAMES, and hard rule 1 is the reason the
+# installer may not ship fewer:
 #
 #   .env, .env.tmp*      `scripts/fleet/env.sh` writes the first per worktree
 #                        and leaves the second behind if it is killed mid-write.
@@ -168,19 +165,19 @@ for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 #                        and in a host that sentence is only true because of
 #                        this line. A project with ports and a setup hook that
 #                        appends a token to `.env` is the ordinary case.
-#   .autofleet/run/      `record-review.sh`'s `reviewed-<sha>` markers and
-#                        what the local review passes write.
-#   /findings.md         what the local review passes write on the way to the
-#                        PR body.
+#
+# TWO, and it was four. `.autofleet/run/` held the `reviewed-<sha>` push markers
+# and `/findings.md` was what the two local review passes wrote on the way to
+# the PR body; armaatus/autofleet#152 removed the passes and the marker with
+# them, so the payload writes neither. A line for a file nothing writes is a
+# line a host has to wonder about.
 #
 # The installer never touched the host's `.gitignore` at all, and that was
-# survivable while everything the payload wrote was an empty marker. The note is
-# the first file with CONTENT in it, and untracked content in a repo an agent
-# drives is what `git add -A` sweeps into a commit -- which is why
-# `/findings.md` is in this repo's own `.gitignore`, and it got there by being
-# committed once. The first version of this block shipped two of the four and
-# left `.env` out, which is the one that matters most; found by the independent
-# review.
+# survivable while everything the payload wrote was an empty marker, and stopped
+# being so the moment one of them had CONTENT in it: untracked content in a repo
+# an agent drives is what `git add -A` sweeps into a commit. The first version of
+# this block shipped two of the four it then had and left `.env` out, which is
+# the one that matters most; found by the independent review.
 #
 # APPENDED, never rewritten, and only when no line already covers it: a host's
 # `.gitignore` is the host's. Matching is on the exact lines the payload would
@@ -188,7 +185,7 @@ for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
 # that ignores the directory some other way gets one redundant line, and a
 # regression here is a duplicate entry rather than a clobbered file. Found by
 # the independent review of #55.
-IGNORES=(".env" ".env.tmp*" ".autofleet/run/" "/findings.md")
+IGNORES=(".env" ".env.tmp*")
 ensure_ignored() {
   local gi="$TARGET/.gitignore" want missing=()
   for want in "${IGNORES[@]}"; do
@@ -227,96 +224,139 @@ had_settings=false; [ -e "$TARGET/.claude/settings.json" ] && had_settings=true
 for rel in "${SEEDS[@]}"; do seed_one "$rel"; done
 
 
-# The seed is autofleet's own config, and autofleet runs itself on
-# `AUTOFLEET_REVIEW_MODE=local` (see hard rule 1: the weaker path is the one that
-# has to be exercised daily). Copying that verbatim would hand every host repo
-# the weaker independence guarantee as a DEFAULT, chosen by nobody and announced
-# nowhere -- which is the exact failure the mode's whole design is built to
-# avoid. So a freshly seeded config is normalised back to the strong default and
-# the change is printed. A config the host already had is never touched.
+# ------------------------------------------------------- the branch rules
 #
-# THE WHOLE BLOCK, not just the assignment. The lines above it in autofleet's own
-# config explain why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on
-# this repository", "the mode it runs itself on" -- and a host repo that read
-# that over a `github` setting would be reading a paragraph about somebody else's
-# repository. Found by the local review of the change that added this.
+# THREE RULES THE GATE DOES NOT CHECK, because GitHub already has them and a
+# Python re-implementation of a rule GitHub enforces is a second answer to the
+# same question. `merge_gate.py` asks three things -- a closing line, the paths
+# a person merges, an approving review of this head -- and everything else that
+# used to be in its 3,162 lines is set here, once, on the default branch:
 #
-# In PYTHON, not sed: this has to match every spelling `merge_gate.review_mode()`
-# accepts, including `export`, quotes and the `: "${X:=local}"` form. A
-# normalisation pinned to one spelling silently ships `local` the day the line is
-# reworded, which is the outcome this exists to prevent.
-normalise_review_mode() {
-  # Under --dry-run the seed has not been written, so there is nothing in the
-  # target to read: report against the file that WOULD be copied. A dry run
-  # silent about a rewrite the real install performs is the bug commit f5817b8
-  # existed to fix, one file over.
-  local cfg="$TARGET/.autofleet/config"
-  $DRY && cfg="$SOURCE/.autofleet/config"
-  [ -f "$cfg" ] || return 0
-  python3 - "$cfg" "$DRY" <<'PYEOF'
-import re, sys
-path, dry = sys.argv[1], sys.argv[2] == "true"
-lines = open(path).read().splitlines()
+#   required status checks          so `--auto` waits on a red build instead of
+#                                   merging into one. `merge-gate` always, plus
+#                                   whatever $AUTOFLEET_REQUIRED_CHECKS names.
+#
+#                                   THE HOST'S BUILD CHECK IS NOT GUESSED. A
+#                                   required context is the JOB's name, which
+#                                   this installer cannot know -- autofleet's
+#                                   own is `suite`, not `ci`, because that is
+#                                   the job key inside `ci.yml` -- and setting a
+#                                   context no job produces makes every pull
+#                                   request wait forever on a check that never
+#                                   reports. Hard rule 2: a project detail
+#                                   arrives through configuration, never through
+#                                   a guess in the payload. The next-steps below
+#                                   say how to add it.
+#   required_conversation_resolution
+#                                   every review thread resolved. This was ~400
+#                                   lines of thread paging in the gate, and the
+#                                   paging had a truncation bug that made a
+#                                   partial list read as a clean one.
+#   dismiss_stale_reviews           a push after an approval drops it. The gate
+#                                   binds its own check to the head sha as well,
+#                                   so the two agree; this is the half that
+#                                   makes GitHub's own UI agree with them.
+#
+# NOT FATAL WHEN IT FAILS, and that is deliberate. It needs admin on the
+# repository, which the person running the installer may not have, and an
+# installer that refuses to finish over a permission is an installer nobody
+# finishes. It prints what it could not set and the exact `gh api` to re-run.
+#
+# `enforce_admins` is left OFF on purpose: `HUMAN_ONLY_PREFIXES` means a
+# repository admin merging the enforcement layer by hand, with `merge-gate`
+# red, is the designed path and not an exception.
+set_branch_protection() {
+  # THE DEFAULT BRANCH, asked of GitHub. It was `symbolic-ref HEAD`, which is
+  # whatever branch the installer happens to run on -- and vendoring the payload
+  # on a branch so as to open a pull request for it is the natural way to do it.
+  # That protected a throwaway branch and left `main` with no required
+  # `merge-gate` context at all, so `gh pr merge --auto --squash` would merge
+  # without the gate ever being required. Found by the local /code-review pass.
+  local branch
+  branch="$(GH_PAGER=cat gh repo view --json defaultBranchRef \
+              --jq .defaultBranchRef.name 2>/dev/null)" || branch=""
+  [ -n "$branch" ] && [ "$branch" != null ] || branch=main
+  if $DRY; then
+    echo "   branch protection on '$branch' (skipped: --dry-run)"
+    return 0
+  fi
+  # `|| nwo=""`, because this file runs under `set -e` and a repository with no
+  # remote -- or a machine with no `gh` -- makes that substitution non-zero.
+  # Without it the installer stops here, silently, having written the payload and
+  # nothing else, and the summary never prints. Found by the suite's host
+  # fixture, which is a git repo with no remote for exactly this class of reason.
+  local nwo
+  nwo="$(GH_PAGER=cat gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)" \
+    || nwo=""
+  if [ -z "$nwo" ]; then
+    echo "   branch protection: gh could not say which repository this is; not set"
+    return 0
+  fi
+  # NEVER OVER AN EXISTING RULE. `PUT .../protection` is a full REPLACE, not a
+  # merge: a host that already required two approving reviews, a build context,
+  # push restrictions or a linear history would have all of it silently reset by
+  # installing a payload -- and `"required_approving_review_count": 0` and
+  # `"restrictions": null` below would write the human-approval requirement away.
+  # Every other host-owned artefact this installer touches is deliberately
+  # non-destructive: `ensure_ignored` appends only what is missing,
+  # `merge_plugin_entry` merges one key, `seed_one` never overwrites. This was
+  # the exception, with nothing warning about it. Found by the local
+  # /code-review pass.
+  if GH_PAGER=cat gh api "repos/$nwo/branches/$branch/protection" \
+       >/dev/null 2>&1; then
+    echo "   branch protection on '$branch': KEPT (yours) -- it already has rules,"
+    echo "                       and setting these would REPLACE them wholesale."
+    echo "                       docs/CONFIGURATION.md has what to add by hand."
+    return 0
+  fi
 
-# The same shapes merge_gate.REVIEW_MODE_RE reads -- `export` and quotes -- and
-# for the same reason: a normalisation pinned to one spelling silently ships
-# `local` the day the line is reworded. Deliberately NOT the `: "${X:=local}"`
-# form: config.sh's own default runs first, so that shape sets nothing, and a
-# file that only *looks* like it selects local mode must not be rewritten as if
-# it did. evals/lint.sh asserts this stays in step with the gate.
-#
-# ...and the LAST such assignment, because that is the one the shell is left
-# holding and the one REVIEW_MODE_RE reads. Rewriting the first would leave a
-# later `=local` standing under a normalised earlier line.
-ASSIGN = re.compile(
-    r"""^[ \t]*(?:export[ \t]+)?"""
-    r"""AUTOFLEET_REVIEW_MODE=[ \t]*["']?local\b""",
-    re.I,
-)
-hits = [i for i, ln in enumerate(lines) if ASSIGN.match(ln)]
-hit = hits[-1] if hits else None
-if hit is None:
-    raise SystemExit(0)
-if dry:
-    print("   would set .autofleet/config review mode to github (the strong default)")
-    raise SystemExit(0)
-
-# THE WHOLE BLOCK, not just the assignment. The comment lines above it explain
-# why AUTOFLEET runs local mode -- "no CLAUDE_CODE_OAUTH_TOKEN on this
-# repository", "the mode it runs itself on" -- and a host repo reading that over
-# a `github` setting is reading a paragraph about somebody else's repository.
-# Walk back over the contiguous comment block that introduces it.
-top = hit
-while top > 0 and lines[top - 1].lstrip().startswith("#"):
-    top -= 1
-while top > 0 and not lines[top - 1].strip():
-    top -= 1
-
-replacement = """# Where the independent review runs -- `github` or `local`.
-#
-# `github` is the default and the strong one, and it needs a
-# CLAUDE_CODE_OAUTH_TOKEN secret on this repository (`claude setup-token`).
-# WITHOUT that secret .github/workflows/claude-review.yml no-ops with a green
-# check and every pull request blocks forever on a review that cannot arrive.
-#
-# `local` runs the reviewer on the machine instead, with a weaker independence
-# guarantee that docs/CONFIGURATION.md spells out in full. Choose deliberately.
-AUTOFLEET_REVIEW_MODE=github""".splitlines()
-
-out = lines[:top] + [""] + replacement + lines[hit + 1:]
-open(path, "w").write("\n".join(out).rstrip("\n") + "\n")
-print("   .autofleet/config  (review mode set to github, the strong default --")
-print("                       the next steps below are where you choose otherwise)")
-PYEOF
+  # The contexts, as a JSON array built from the word list.
+  local contexts
+  contexts="$(REQUIRED="merge-gate ${AUTOFLEET_REQUIRED_CHECKS:-}" python3 -c '
+import json, os
+# Deduplicated and ORDER-PRESERVING: `merge-gate` first whatever the host set,
+# and a host that names it again does not get it twice.
+seen, out = set(), []
+for name in os.environ["REQUIRED"].split():
+    if name not in seen:
+        seen.add(name); out.append(name)
+print(json.dumps(out))
+')" || contexts='["merge-gate"]'
+  # A HEREDOC on stdin, not a stack of `-f` flags: `required_status_checks` is a
+  # nested object with an array in it, and `gh api -f` can only write flat
+  # strings. `--input -` takes the whole document.
+  if GH_PAGER=cat gh api -X PUT "repos/$nwo/branches/$branch/protection" \
+       --input - >/dev/null 2>&1 <<JSON
+{
+  "required_status_checks": {"strict": false, "contexts": $contexts},
+  "enforce_admins": false,
+  "required_pull_request_reviews": {"dismiss_stale_reviews": true,
+                                    "required_approving_review_count": 0},
+  "required_conversation_resolution": true,
+  "restrictions": null
 }
-$had_config || normalise_review_mode
+JSON
+  then
+    echo "   branch protection on '$branch' ($contexts required, threads must"
+    echo "                       resolve, approvals dismissed on push)"
+  else
+    echo "   branch protection on '$branch': NOT SET -- needs admin on $nwo."
+    echo "                       docs/CONFIGURATION.md has the gh api call to re-run."
+  fi
+}
+set_branch_protection
 
 # ---------------------------------------------------------------- the plugin
 # `mattpocock-skills` is not decoration and it is not optional. The agent brief
-# tells every worktree to run `/mattpocock-skills:code-review`, `merge_gate.py`
-# REQUIRES that pass to be named in the PR body before a PR may merge, and
-# `evals/lint.sh` fails if the entry is missing. So a host repo without it gets
-# a brief asking for a skill nobody has and a gate nothing can satisfy.
+# tells every worktree to run `/implement`, which drives
+# `/mattpocock-skills:tdd` at the seams, and `evals/lint.sh` fails if the entry
+# is missing. So a host repo without it gets a brief asking for a skill nobody
+# has.
+#
+# It used to be load-bearing twice over: `merge_gate.py` required
+# `/mattpocock-skills:code-review` to be NAMED in the PR body before a PR could
+# merge. That string stopped meaning anything with armaatus/autofleet#152 --
+# the pass it stood for is gone and the gate reads a verdict instead of prose.
 #
 # Two halves, because enabling and installing are different things and this
 # repo has now been bitten by both:
@@ -403,7 +443,7 @@ install_plugin() {
     || echo "   !! could not install $PLUGIN; run the two commands below by hand"
 }
 
-echo "==> the mattpocock-skills plugin (the brief and merge-gate both require it)"
+echo "==> the mattpocock-skills plugin (the brief requires it)"
 merge_plugin_entry
 install_plugin
 
@@ -429,19 +469,23 @@ Next, in the repo you just installed into:
   5. If you already had a .claude/settings.json, add the two hook entries from
      this repo's own settings.json -- guard.py on PreToolUse, shell-parses.sh on
      PostToolUse. Unregistered hooks do not run, and nothing says so.
-  6. Choose where the independent review runs -- AUTOFLEET_REVIEW_MODE in
-     .autofleet/config. The default `github` needs a CLAUDE_CODE_OAUTH_TOKEN
-     secret on the repository (mint one with `claude setup-token`); WITHOUT it
-     that job no-ops and every PR blocks forever on a review that cannot arrive.
-     `local` runs the reviewer on your machine instead, with a weaker
-     independence guarantee that docs/CONFIGURATION.md spells out.
+  6. Add YOUR build check to the required contexts. This installer set
+     `merge-gate` and cannot guess the other one: a required context is the
+     JOB's name inside your workflow file, and a context no job produces makes
+     every PR wait forever on a check that never reports. Re-run the installer
+     with AUTOFLEET_REQUIRED_CHECKS="<your job name>", or edit the rule by hand
+     -- docs/CONFIGURATION.md has the gh api call. The other two rules,
+     conversation resolution and dismissing an approval when the head moves,
+     are set; merge_gate.py deliberately does not re-check any of the three.
   7. Write .autofleet/review.md -- YOUR project's correctness rules, the ones
      REVIEW.md cannot know. The file that must be written atomically, the header
      that may not appear in that directory, the address a test may not reach.
      The reviewer reads it after REVIEW.md wherever it exists, and it is not
      seeded because seeding it would hand you somebody else's. REVIEW.md's "...and
      this project's own" section says what belongs in it.
-  8. Make `merge-gate` a required check on your default branch.
+  8. Read what the review gives up -- the reviewer signs in as whoever `gh` is,
+     which is normally the account that opened the pull request.
+     docs/CONFIGURATION.md, "What this gives up, exactly".
   9. Read docs/WORKFLOW.md, then: ./scripts/fleet/fleet.sh status
 
 If the plugin step above could not run, these are the two commands, from inside

@@ -2,15 +2,13 @@
 .env
 .env.tmp*
 
-# The hooks' scratch space: the review markers guard.py reads. Per worktree,
-# never shared, never committed.
-.autofleet/run/
-
-# What the local review passes write for record-review.sh. The findings belong
-# in the PR body, which is where merge-gate reads them; the file is the working
-# copy on the way there. `git add -A` swept one into a commit on #54, which is
-# why it is named here rather than remembered.
-/findings.md
+# `.autofleet/run/` and `/findings.md` WERE HERE. The first held the
+# `reviewed-<sha>` push markers guard.py read; the second was what the two local
+# review passes wrote on the way to the PR body. armaatus/autofleet#152 removed
+# both, and `env.sh` no longer creates the directory -- so what install.sh adds
+# to a host's `.gitignore` and what this repo's own names are back in step,
+# which is hard rule 1. A line for a file nothing writes is a line the next
+# reader has to wonder about.
 
 __pycache__/
 *.pyc

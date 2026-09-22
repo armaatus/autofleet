@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Covers scripts/fleet/issue-command.sh -- the opening brief, which since #49
-# arrives in TWO stages out of the one file.
+# Covers scripts/fleet/issue-command.sh -- the opening brief.
 #
-#   test_brief.sh stage1  the bare form -> the spec, steps 1-3, and a pointer at
-#                         stage 2. Under the `brief` ceiling with the spec
-#                         excluded, and
-#                         carrying NONE of the post-PR contract: the whole point
-#                         is that an agent does not pay for 1,272 words of review
-#                         loop in the prompt prefix of every request it makes
-#                         before the PR exists.
-#   test_brief.sh stage2  `--after-pr` -> the post-PR contract and nothing else.
-#                         No spec, no steps 1-3, and the issue number still
-#                         substituted, because `Closes #N` and the board line
-#                         live in this half.
+#   test_brief.sh stage1  the spec and the brief, under the `brief` ceiling with
+#                         the spec excluded, carrying NONE of the post-PR loop.
+#                         There was a second stage once, fetched with
+#                         `--after-pr`, holding 1,272 words of review protocol;
+#                         armaatus/autofleet#152 deleted it rather than deferring
+#                         it, because the agent's job now ends at the open pull
+#                         request. The phase keeps its name: renaming it would
+#                         rename a row of evals/lint.sh's ceilings table and the
+#                         registry in tests/run.sh for no gain.
 #   test_brief.sh reading what the brief costs an agent BEFORE its first edit:
 #                         the rendered brief plus every document it is told to
 #                         read. #54 measured 13,425 words there, because the
@@ -23,9 +20,9 @@
 #                         actually prints. One number, in that file's ceilings
 #                         table, read here through tests/ceiling.sh.
 #
-# The union of the two -- every instruction landing in exactly one stage -- is
-# asserted by evals/lint.sh, which reads the heredocs rather than running the
-# script. This file asserts what the agent actually receives.
+# What the brief may and may not name is asserted by evals/lint.sh, which reads
+# the heredoc rather than running the script. This file asserts what the agent
+# actually receives.
 #
 # `gh` is stubbed on PATH, so nothing here reads a real issue.
 set -uo pipefail
@@ -128,74 +125,30 @@ case "${1:-}" in
     # build with no tdd behind it. What makes it reachable at all is that
     # The brief is the run's PROMPT rather than something a model merely reads,
     # instruction to a model.
-    has "stage 1" "$out" \
-      '/implement' '/mattpocock-skills:tdd' \
-      '/code-review high' '/mattpocock-skills:code-review' \
-      './scripts/fleet/self-review.sh' \
-      './scripts/fleet/issue-command.sh --after-pr 42'
+    has "stage 1" "$out" '/implement' '/mattpocock-skills:tdd'
     has "stage 1" "$out" 'researcher' 'gh pr diff --stat' 'sed -n'
+    has "stage 1" "$out" 'Closes #42'
 
     # THE PLANNING PHASE IS GONE, and this is the assertion that says so rather
     # than a comment claiming it. The issue body is the plan -- `## Plan` in the
-    # PR body is now "what the issue asked, and where the implementation
-    # departed" -- so a brief that grew a plan-mode step back would be spending
-    # a phase before the first edit that nothing downstream reads.
-    #
-    # `/code-review high` is NOT in this list, and was for one commit: the two
-    # self-review passes are named in stage 1 because step 2 runs them there,
-    # before the push. What left stage 1 is the PLAN step and the `verifier`
-    # subagent, not the review.
+    # PR body is "what the issue asked, and where the implementation departed"
+    # -- so a brief that grew a plan-mode step back would be spending a phase
+    # before the first edit that nothing downstream reads.
     lacks "stage 1" "$out" 'plan mode' 'verifier'
 
-    # ...and NONE of the post-PR contract. This is the whole issue: these words
-    # ride in the prompt prefix of every request made before the PR exists.
+    # ...and NONE of the post-PR loop. Every one of these is something the
+    # dispatcher does and `guard.py` refuses from a worktree, so a brief that
+    # named one would send an agent to spend its budget being told no.
     lacks "stage 1" "$out" \
-      'await-review.sh' 'answer-review.sh' 'review-status.sh' 'resolve-thread.sh' \
-      '--auto --squash' 'Closes #' './scripts/fleet/board.sh'
+      './scripts/fleet/await-review.sh' './scripts/fleet/review.sh' \
+      './scripts/fleet/fix.sh' './scripts/fleet/after-pr.sh' \
+      '--auto --squash' '--after-pr' \
+      './scripts/fleet/self-review.sh' './scripts/fleet/board.sh'
 
     words="$(brief_only <<<"$out" | wc -w | tr -d ' ')"
     [ "$words" -le "$BRIEF_WORD_BUDGET" ] \
-      || fail "$(ceiling_over brief "$words"), or move something into --after-pr"
-    echo "ok: stage 1 is the spec, steps 1-3 and a pointer, in $words words"
-    ;;
-  stage2)
-    make_fixture
-    out="$(run_it --after-pr 42 2>&1)" || fail "--after-pr exited non-zero: $out"
-
-    has "stage 2" "$out" \
-      'gh pr merge <n> --auto --squash' 'Closes #42' \
-      './scripts/fleet/board.sh in-review "#42:' \
-      './scripts/fleet/await-review.sh' './scripts/fleet/review-status.sh' \
-      './scripts/fleet/answer-review.sh' \
-      'GitHub says BLOCKED' 'GitHub says DIRTY' 'GitHub says BEHIND' \
-      '.github/workflows/' '.github/scripts/' '.claude/'
-
-    # THE TWO-PHASE LOOP, asserted rather than described. An agent that comes
-    # away thinking a push buys another review is the failure this shape exists
-    # to remove -- it is what made #86 spend four reviews without one ever
-    # judging the commit that merged -- so the brief has to say both halves: the
-    # review runs once, and what judges the fix is a validation with a narrower
-    # question.
-    has "stage 2" "$out" \
-      'THERE IS ONLY ONE' 'VALIDATOR' 'At most TWO validations'
-
-    # ...and the author does NOT resolve the threads. The validator resolves what
-    # it is satisfied by, which is the whole of what makes a resolved thread mean
-    # anything; a brief that told the author to close them would hand the subject
-    # of the review the ledger it is judged against.
-    lacks "stage 2" "$out" './scripts/fleet/resolve-thread.sh'
-
-    # "and nothing else": an agent running this already has the spec and steps
-    # 1-3 in its context, and reprinting them is the duplication #49 is about.
-    # `self-review.sh` on the negative list for the same reason `record-review.sh
-    # findings.md` was: step 3 belongs to stage 1, and a second copy here is what
-    # an agent reads instead of the original. `record-review.sh` BARE stays out
-    # of this list -- stage 2's rebase remedy names it, because a rebase needs a
-    # marker for the new head and not a second pair of full passes.
-    lacks "stage 2" "$out" \
-      'SPEC-BODY-MARKER' '**1. Build it.**' '**2. Review it yourself' \
-      '/mattpocock-skills:tdd' 'self-review.sh'
-    echo "ok: --after-pr is the post-PR contract alone, with the issue number in it"
+      || fail "$(ceiling_over brief "$words"), or spend fewer"
+    echo "ok: the brief is the spec and one stage, in $words words"
     ;;
   reading)
     make_fixture
@@ -267,5 +220,5 @@ case "${1:-}" in
     echo "ok: a fleet agent reads $total words before its first edit, ceiling $READING_CEILING"
     ;;
   *)
-    echo "usage: $0 {stage1|stage2|reading}" >&2; exit 2 ;;
+    echo "usage: $0 {stage1|reading}" >&2; exit 2 ;;
 esac

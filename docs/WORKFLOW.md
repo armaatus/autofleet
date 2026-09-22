@@ -5,8 +5,8 @@ one human deciding what the rules are. **This page is the maintainer's**, read
 once and not per issue: it is that loop end to end — what each stage produces,
 what starts the next, where a person is required, how to stop the whole thing,
 and why each rule is the shape it is. An agent's own instructions are the brief
-([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`,
-then `--after-pr <n>`), with [CLAUDE.md](../CLAUDE.md) the working agreement
+([`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`),
+with [CLAUDE.md](../CLAUDE.md) the working agreement
 above it. `evals/lint.sh` holds what an agent reads before its first edit — those
 two and [REVIEW.md](../REVIEW.md), which the brief names at its review step —
 under a word ceiling.
@@ -34,15 +34,14 @@ Three things shape every decision below.
 
 **The machine is free.** This Mac has effectively unlimited time and the fixtures
 already on disk, so the heavy work — building, the full suite against a real
-the fixture, both review passes — happens locally. GitHub Actions is the independent
-second opinion and the gate, and at roughly 5.5 minutes per PR it is not the
-scarce resource.
+the fixture, and the review of the diff — happens locally. GitHub Actions runs
+the suite and the gate, and at roughly 5.5 minutes per PR it is not the scarce
+resource.
 
-**A PR arrives reviewed, or it does not arrive.** By the time a pull request
-exists it has been through `/code-review` and `/mattpocock-skills:code-review`
-locally and the findings are in its body. The push is gated on a local marker
-and the merge is gated on those findings being in the body — see
-[the merge gate](#the-merge-gate).
+**A PR is reviewed once, and at most one fix answers it.** The review runs after
+the pull request exists, from a context that has not seen the conversation which
+produced the diff, and the dispatcher runs it — see
+[Stage 5](#stage-5--one-review-at-most-one-fix-and-the-merge).
 
 **Nothing merges on trust.** The agent never merges and never approves. It asks
 GitHub to merge, and one required check — [`merge-gate`](#the-merge-gate) —
@@ -146,7 +145,7 @@ last paragraph says how**.
 |---|---|---|---|
 | **GitHub API calls** | 2 shared listings, plus 2 per owned worktree; a launch adds none | worktrees, not the backlog | rate limit |
 | **Runner calls** | 1 worktree listing, plus 1 build-state read per owned worktree, plus 2 per launch and 2 per release | worktrees | nothing |
-| **Model invocations** | 1 per launch; 1 more per owned worktree whose build stopped at a limit with its pull request open, bounded by `AUTOFLEET_BUILD_MAX_RUNS`; and on `AUTOFLEET_REVIEW_MODE=local` a **reviewer** per open PR with no counting review on its head and a **validator** per reviewed PR whose findings are unanswered, together bounded by `AUTOFLEET_MAX` | launches, owned worktrees, open PRs | **tokens** |
+| **Model invocations** | 1 per launch; 1 more per owned worktree whose build stopped at a limit, bounded by `AUTOFLEET_BUILD_MAX_RUNS`; and a **post-PR loop** per open PR the dispatcher has not finished with, bounded by `AUTOFLEET_MAX` and by two reviews per pull request | launches, owned worktrees, open PRs | **tokens** |
 
 Only the third row spends anything. **No model runs inside `cmd_run`'s own
 process** — its body is shell and `gh` from end to end — but it is what decides
@@ -154,44 +153,45 @@ when one runs somewhere else, in two different ways, and only the first is a new
 session:
 
 *Sessions it spawns*, three kinds: `start_build` is the work itself — one
-`claude -p` per run — `review.sh` is the local reviewer, and `validate.sh`,
-spawned by `start_validator` from inside `review_open_prs`' own loop, is the
-third.
+`claude -p` per run — and `after-pr.sh` runs the other two, `review.sh` and, at
+most once per pull request, `fix.sh`.
 
 **There is no fourth kind any more**, and that is what armaatus/autofleet#151
 changed here. The dispatcher used to type turns into a session that was already
-running: a handoff note before it cleared the conversation, the `--after-pr`
-brief after, and the same again at each time-box and each recycle. Each was a
+running: a handoff note before it cleared the conversation, a second brief
+after, and the same again at each time-box and each recycle. Each was a
 model turn that went out over the runner CLI and so looked free in the row
 above. A run ends by itself now, and a resume is an ordinary new session —
 counted in the third row like the other two, and bounded by
 `AUTOFLEET_BUILD_MAX_RUNS` rather than by a clock.
 
 Every other call a pass makes is an API or a CLI query and costs no tokens at
-all. All three spawned sessions are marker-guarded, so none is a spawn per PR
-per poll —
-`start_validator` returns early on its `v-<pr>` lock and on a `v-<pr>.done`
-holding the current head, and a reviewer is skipped while
-`$REVIEWING_DIR/<pr>` names a live one on the same head. A dispatcher left
+all. Every spawned session is marker-guarded, so none is a spawn per PR per
+poll: the post-PR loop is skipped while `$REVIEWING_DIR/<pr>` names a live one,
+and again while `<pr>.done` holds the current head. `review.sh` exits in two API
+calls when a verdict is already on the head, and `<pr>.reviews` is the ceiling
+of two that survives a dispatcher restart. A dispatcher left
 polling an idle fleet overnight is free in the only sense that matters; it is
 the runs that *launch* and *review* that cost, and `AUTOFLEET_MAX` is the number
 that bounds both.
 
 Concretely, at the defaults: an **idle** pass — nothing owned, every `ready`
-issue already claimed by an open PR — is **2 `gh` calls and 1 `worktree list`**,
-whether the backlog holds ten issues or fifty. A launch adds no `gh` call at
-all, because the title and labels the card needs come out of the `ready` listing
-the pass already has. A **full** fleet of three worktrees on
-`AUTOFLEET_REVIEW_MODE=github` is **14 `gh` calls**: the two shared listings,
-and per worktree a merged-PR check, an issue-state lookup, a merged-PR sweep for
+issue already claimed by an open PR, and the loop finished with each of them —
+is **3 `gh` calls and 1 `worktree list`**, whether the backlog holds ten issues
+or fifty. A launch adds no `gh` call at all, because the title and labels the
+card needs come out of the `ready` listing the pass already has. A **full** fleet
+of three worktrees is **15 `gh` calls**: the three shared listings, and per
+worktree a merged-PR check, an issue-state lookup, a merged-PR sweep for
 `Closes #N`, and a state-and-labels lookup. It was published as 8 until
 armaatus/autofleet#151, and 8 was measured on a fixture whose three owned issues
 all named ONE directory — so the three per-worktree calls that depend on the
 branch collapsed into one. A real fleet has three branches and always paid this.
-`AUTOFLEET_REVIEW_MODE=local` adds one listing plus three calls per reviewer it
-spawns and two more per validator, and up to `AUTOFLEET_MAX` model agents **on
-top of** the worktree agents — six concurrent sessions at the defaults, which is
-the number to know before leaving one running.
+The third shared listing is `review_open_prs`' own, and it arrived with
+armaatus/autofleet#152: the dispatcher runs the review now rather than leaving
+it to a workflow. A pull request the loop has not finished with adds three calls
+and, if it needs reviewing, one model agent — up to `AUTOFLEET_MAX` of those
+**on top of** the worktree agents, so six concurrent sessions at the defaults,
+which is the number to know before leaving one running.
 
 The flat idle figure is the point, and it was not always flat. Each candidate
 the launch loop scanned used to take its own `gh pr list` of every open PR, so a
@@ -309,7 +309,7 @@ and "let nothing out" are two instructions and only one of them is the agents'
 | file | means | set by | read by |
 |---|---|---|---|
 | `DRAIN` | no new worktrees | every stop | `fleet.sh` alone |
-| `STOP` | nothing goes out | `--now`, `--all` | `guard.py`, `await-review.sh`, `review-status.sh`, `resolve-thread.sh`, `fleet.sh` |
+| `STOP` | nothing goes out | `--now`, `--all` | `guard.py`, `after-pr.sh`, `review.sh`, `fix.sh`, `await-review.sh`, `fleet.sh` |
 
 Under a **drain**, the dispatcher launches nothing and keeps reaping, and the
 agents in flight are *not* frozen: they finish, push, open their PRs and
@@ -463,8 +463,8 @@ still the only way one comes back onto the queue.
 | 1. Intent | an `intent`-labelled issue | giving it Goal/Scope/Acceptance | anyone files |
 | 2. Spec | the issue body, `ready` | `fleet.sh` opening a worktree | the maintainer |
 | 3. Build | the diff and its tests | the test suite green | enforced by the hook |
-| 4. Local review | `.autofleet/run/reviewed-<sha>` + the PR body | the push gate lifting | enforced by the hook |
-| 5. Independent review | a GitHub review | `merge-gate` going green | the rules you set |
+| 4. The pull request | an open PR carrying `Closes #N` | the dispatcher picking it up | the agent stops here |
+| 5. Review, and at most one fix | a verdict on the head | `merge-gate` going green | the rules you set |
 | 6. Maintain | a new issue, or an eval case | back to stage 1 | the maintainer |
 
 ### Stage 1 — Intent
@@ -629,19 +629,18 @@ no other skill can call it. It is reachable because the brief arrives as the
 run's **prompt**, not as something a model merely reads. That is worth knowing
 before anyone moves the brief somewhere else.
 
-**The brief arrives in two stages, and the second one is fetched, not pushed.**
+**The brief is one text, and it is under 400 words.**
 [`scripts/fleet/issue-command.sh`](../scripts/fleet/issue-command.sh) `<n>`
-prints the spec, steps 1 to 3 — build, record the review, and a pointer;
-`issue-command.sh --after-pr <n>` prints steps 4 to 6, the post-PR contract:
-what the PR body must carry, arming auto-merge, the one review and the two
-validations. Whole,
-the brief was 1,521 words of which 1,272 were that second half, and all of it
-arrived before the agent had opened a file and then rode in the prompt prefix of
-every request it made for the rest of the session (armaatus/autofleet#49). Both
-stages are still written in that one file, so nothing that delivers the brief
-can drift from it, and `evals/lint.sh` asserts that the two together still name every
-script in the loop — an instruction that fell out of both halves is a rule
-nobody enforces.
+prints the spec and two steps: build it, and open the pull request. It arrived in
+two stages for a while — the second fetched with `--after-pr` when it applied —
+because whole it was 1,521 words of which 1,272 were the post-PR contract, and
+all of it arrived before the agent had opened a file and then rode in the prompt
+prefix of every request it made for the rest of the session
+(armaatus/autofleet#49). armaatus/autofleet#152 deleted that half instead: the
+agent's job ends at an open pull request and what follows is the dispatcher's.
+`evals/lint.sh` asserts the brief still names every step that is the agent's,
+and none that is not — a brief that told an agent to wait for a review would be
+a brief that spent its budget waiting.
 
 Then it builds, with three things that are not negotiable:
 
@@ -670,10 +669,9 @@ Then it builds, with three things that are not negotiable:
 There used to be a `verifier` subagent here: a fresh context that built, ran the
 suite, and answered `READY` or `NOT READY` before the PR opened. It is gone, and
 the reason is arithmetic rather than distrust. `/implement` runs the full suite
-at the end of the build, CI runs it on the push, and the **validator** runs it
-again with a reason to — "did the commits answering the review break anything" is
-not answerable by reading. A fourth run, before the pull request existed, was the
-belt-and-braces this whole change is about removing.
+at the end of the build, CI runs it on the push, and the one fix session runs it
+again if a review asks for changes. A fourth run, before the pull request
+existed, was the belt-and-braces this whole change is about removing.
 
 An issue gets **three hours**. On expiry, if no PR closing it is open, the fleet
 interrupts the agent, comments on the issue saying so, and **leaves the worktree
@@ -685,534 +683,147 @@ an agent is only ever stopped on an answer, never on a lookup that failed. The
 one it would otherwise stop is as likely to be the one waiting on a review as
 the one grinding.
 
-### Stage 4 — Local review, before anything leaves
-
-**One pass, and `/implement` runs it** — `/mattpocock-skills:code-review`, at the
-end of the build, before it commits, against [REVIEW.md](../REVIEW.md). What to
-run is the brief's step 1; the command that records it is step 2. This section is
-why that recording exists at all.
-
-It used to be two, `/code-review` alongside it. They overlapped heavily, and
-`merge_gate.py` refused any PR body that did not name both — so every pull
-request paid for two reviews of the same diff before a reviewer who had never
-seen the conversation had looked at it once. The surviving pass covers both axes
-the second was there for: standards, and spec-vs-diff.
-
-Recording writes `.autofleet/run/reviewed-<sha>`, and **`guard.py` refuses `git push` and
-`gh pr create` from a fleet-owned worktree without it.** The marker records what
-it is given; it cannot tell whether a review really happened, so it is a
-checklist gate. What actually enforces the pass is `merge-gate`, which
-reads the PR body — and that a human can read too. The marker is
-per-commit, so amending or adding a commit needs the review re-run — which is the
-point. A worktree you opened by hand is never gated: pushing a half-finished
-branch is normal, and a guard that argues about it is a guard people route
-around.
-
-What the PR body must carry is the brief's step 4, and it is not decoration:
-[`merge-gate`](#the-merge-gate) reads it — which is why the list lives in one
-place and not here as well.
-
-### Stage 5 — One review, two validations, and the merge
-
-**The loop is bounded by two numbers, and this is the section about why.**
-`AUTOFLEET_REVIEW_MAX` is 1 and `AUTOFLEET_VALIDATE_MAX` is 2, so a pull request
-costs at most three agent runs after it opens and often one.
-
-What it replaced was bounded at four **reviews** per pull request, and it spent
-them. The mechanism was not a bad reviewer; it was a correct one in a loop with
-no fixed point. A review is bound to the commit it judged. The author answers a
-finding with a commit. The commit moves the head. The moved head invalidates the
-review that asked for the fix, so `merge-gate` wants a verdict on the new head,
-so the reviewer reads the whole diff again — and finds one more thing, a level
-down, because there is always one more thing. #86 burned four reviews without one
-of them ever judging the commit that eventually merged. #79 converged on
-behaviour after two rounds and spent six more on the same finding one level
-further down; every one of the six was correct, which is the whole problem.
-
-So the second and later passes stopped being reviews. A **validation** asks two
-questions and no others:
-
-1. Is each finding the review left actually addressed — fixed, or answered with a
-   reason this reader accepts?
-2. Do the commits written since the review break anything — a red suite, or a
-   Critical defect *in that diff*?
-
-It does not re-read the branch. That narrowness is not modesty, it is the
-termination argument: a validator that looks for new things finds them, and new
-things are another round.
-
-**A `pass` stands in for the review.** `merge_gate.py` reads
-`<!-- validated: <head-sha> pass -->` on the current head as satisfying the
-"reviewed on this head" condition — which it has to, because from the first fix
-onward there is no review on the head and no second review is coming. Without
-that substitution every pull request would block forever on a review that cannot
-arrive, which is exactly the failure `AUTOFLEET_REVIEW_MODE=local` exists to
-remove, reintroduced one phase up.
-
-**The trailer rides in a `gh pr review`, not a `gh pr comment`**, and that is a
-security choice. `guard.py` already refuses `gh pr review` from a fleet-owned
-worktree in all four spellings it has, so the certificate is out of reach of the
-branch it certifies. `gh pr comment` had to stay reachable — `answer-review.sh`
-needs it — and a certificate its subject can write certifies nothing. The hook
-also refuses `validate.sh` by name from a worktree, so the refusal arrives at the
-command rather than one process deep in a log after a full-budget run.
-
-**Anything but a literal `pass` or `fail` is "not validated".** A missing
-trailer, a garbled verdict, a validator that crashed before writing one: all of
-them hold the pull request. That is the fail-closed direction and it is the one
-the whole phase rests on — nothing at all must not read as consent. The
-corollary is the refund: a validator killed at its deadline, or one whose CLI was
-not on `PATH`, does **not** burn a try. A cap that fires early here hands a
-person a branch nothing validated, and that is worse than a cap that fires late,
-because late still ends in a person.
-
-**Threads stayed.** The reviewer's inline comments are still threads, and
-`merge-gate` still refuses to merge while any is unresolved — #88 and #89 both
-sat green and blocked on exactly one. What changed is who closes them: the
-**validator** resolves the threads it is satisfied by. An author closing its own
-would be holding the ledger it is judged against.
-
-**A Critical or Important finding is fixed. A Suggestion is answered.** The
-asymmetry is because no second reviewer is coming: whatever an argument can close
-here, nothing else will catch. That replaced the old round-three nit floor, which
-existed to stop a reviewer spending rounds on preferences — a problem that only
-arises when there are rounds to spend.
-
-**Where this review runs is a knob**, `AUTOFLEET_REVIEW_MODE` in
-`.autofleet/config`. The rest of this stage describes the default, `github`.
-Under `local` the reviewer is a process the **dispatcher** starts on the machine
-— [`scripts/fleet/review.sh`](../scripts/fleet/review.sh), briefed by
-[`.claude/agents/reviewer.md`](../.claude/agents/reviewer.md) — and everything
-below still holds except who submits: same `REVIEW.md`, same verdict states, same
-`<!-- review-findings: N -->` trailer, same `await-review.sh` on this side.
-
-Two things differ, and both are the agent's business:
-
-- **You cannot start it and you cannot fake it.** `guard.py` refuses
-  `gh pr review` from a fleet worktree. The reviewer's verdict carries a second
-  trailer, `<!-- independent-review: local <head-sha> -->`, and that marker is the
-  only reason `merge_gate.py` counts a review submitted by your own account.
-- **There is no Actions run to look at.** A silent reviewer leaves a line in
-  `~/.autofleet/fleet.log` and a transcript under `~/.autofleet/reviews/`, not a
-  `verdict` comment on the PR.
-
-**One reviewer at a time, and an answer per review.** `#64`. Two reviewers
-landed on PR #1's head within fourteen minutes — 7 findings and then 10 — because
-the dispatcher decides to spawn from `[ -e "$REVIEWING_DIR/<pr>" ]` and writes
-that lock *after* the spawn, so a second poll, or a hand-run `review.sh` beside a
-running dispatcher (what clearing a backlog looks like), both saw no lock. The
-claim is the reviewer's own now, and it is a create-or-fail
-(`fleet_lock_claim`): of two racing claims exactly one wins and the other exits
-**9**, naming the pid that holds it. A lock whose process is gone is taken over
-rather than obeyed — nothing clears that directory across a dispatcher's death,
-and a stale marker read as "one is running" retires a pull request from review
-for good.
-
-The half that lost information was the gate's. `merge_gate` collapsed the
-reviews on a head to the latest one *per author*, and in `local` mode every
-reviewer is the same account — so the second review superseded the first, and
-the first's findings were never owed an answer. On PR #1 the author answered the
-07:13 review, that commit moved the head, and the 07:27 review's ten findings
-went unread with a green log beside them. Two changes: the findings condition is
-**per review** (the `CHANGES_REQUESTED` condition is still per author — that is
-a reviewer's standing verdict, which a later review from the same reviewer does
-supersede), and the gate names any review on an **abandoned** head whose
-findings nothing answered — on **every** path, not only the "no review on the
-current head" refusal it started inside. That arm already refuses, so reporting
-there added detail to a pull request that was blocked anyway and said nothing on
-the two paths a PR merges through: the exact sequence above, where a second
-review lands on the new head, is one of them. A PR held that way is also due a
-validation, because the validation is the reader the refusal names and a hold
-whose remedy never starts is a permanent one. One comment
-still answers every review on the head, because `answered()` only requires it to
-come after the review it answers; what changed is that it can no longer answer
-one and be counted for two.
-
-**The round count is the pull request's, not this fleet's.** `#91` bounded the
-rounds and `#65` made the number honest. `<pr>.rounds` was a tally `review.sh`
-incremented on exit 0, and its own comment recorded three reviews it could not
-see: one submitted by the workflow rather than by this script, one found on exit
-8 that no run ever counted, and one a killed reviewer had already left. Each is
-a real review a real PR really had, so a PR could pass the cap unnoticed.
-`review.sh` now also derives the count from the PR payload it already fetches —
-how many distinct heads carry a review `merge_gate` counts — and keeps the
-larger of the two. Larger, never smaller: a force-push that orphans every
-earlier review drops the derived count to zero, and that must not reopen the
-loop the cap closed. Two of the three are covered; the exit-8 case is not,
-because that run returns before the derivation, so a PR whose rounds arrive only
-that way overshoots by one and the correction lands on the next run that
-submits. `fleet.sh status` shows the count per open PR, which is
-where a person sees a pull request quietly on its fourth round.
-
-**What a round reads is also a knob.** `AUTOFLEET_REVIEW_SCOPE=delta` scopes
-round N to `<last reviewed head>..<head>` — derived from the pull request
-`review.sh` already fetches, never stored — and hands the reviewer a byte-capped
-file holding what the last round found, how it was answered, and the threads
-still open. It degrades to `full` on round one, on a force-push that orphans the
-last reviewed head, when the fetch of the PR ref fails, and every
-`AUTOFLEET_REVIEW_FULL_EVERY`th round, and it says in the log which it used.
-What it does **not** change is what the gate accepts: `merge_gate.py` still
-requires a counting independent review on the current head, per head. A narrower
-read is not a weaker gate.
-
-[CONFIGURATION.md](CONFIGURATION.md#the-review) has the trade in full, including
-what `local` gives up, the three counters side by side, and the per-round cost
-row every review appends to `$FLEET_DIR/reviews/cost.tsv`. autofleet itself runs
-on `local`, because it has no `CLAUDE_CODE_OAUTH_TOKEN`.
-
-On GitHub, in `github` mode:
-
-- [`ci.yml`](../.github/workflows/ci.yml) — host tests against the real fixture, three
-  Switch targets, `core/` include hygiene. ~5.5 minutes.
-- [`agent-config.yml`](../.github/workflows/agent-config.yml) — regression-tests
-  the agent configuration whenever it changes.
-- [`claude-review.yml`](../.github/workflows/claude-review.yml) — the independent
-  review, from a context that has not seen the conversation which produced the
-  diff. It submits a **real GitHub review**: `REQUEST_CHANGES` when it has a
-  Critical or Important finding, `COMMENT` when it does not, never `APPROVE`.
-  **It no longer fires on `synchronize`** — that was the trigger that turned one
-  review into one per push.
-- [`validate.yml`](../.github/workflows/validate.yml) — the `github`-mode twin of
-  `validate.sh`, on `synchronize`. Both modes get a validator or the payload is
-  broken in one of them: a host repository with the review secret and no
-  dispatcher would otherwise inherit a merge gate demanding a validation with
-  nothing able to write one.
-
-  Silence is its failure mode, so two things guard it. The review job is keyed on
-  the **head sha** and never cancels in progress: a build can be superseded by
-  the next push, but a review cannot, because the gate wants a verdict on one
-  specific commit and a cancelled run leaves that commit with none — and the
-  no-verdict notice is `needs: review`, so it does not fire either. And when a
-  run finishes having submitted nothing, the `verdict` job says so in a comment
-  *and asks for one more review, once per head*. That dispatch runs as
-  `github-actions[bot]`, which the action refuses as a non-human actor unless it
-  is named in `allowed_bots` — so the review job names it, and only it. Before that, both remedies the
-  comment named were manual, so a PR whose review was silent waited for a person
-  to notice — which is the same dead end as a gate nothing re-runs.
-
-  **A PR that edits this file gets no review at all, and that is the action's
-  rule rather than this repository's.** `claude-code-action` refuses to run
-  unless the workflow file is byte-identical to the copy on the default branch:
-
-  > Skipping action due to workflow validation: Workflow validation failed. The
-  > workflow file must exist and have identical content to the version on the
-  > repository's default branch.
-
-  It is a supply-chain control — otherwise a pull request could rewrite the
-  prompt and the tool list of the agent reviewing it.
-
-  **The remedy is a dispatch, not giving up.** A `workflow_dispatch` run uses
-  the DEFAULT BRANCH's copy of the workflow, so it passes that validation and
-  reviews `refs/pull/N/head` — the PR's content, judged by the agreed workflow:
-
-  ```bash
-  gh workflow run claude-review.yml -f pr=<N>
-  ```
-
-  The review it submits lands against the PR's current head, so `merge-gate`'s
-  independence requirement is genuinely satisfied by it. PR #87 was reviewed
-  this way while editing this same file, and so was #147, which is where the
-  rule was diagnosed. What must NOT happen is waiting out `await-review.sh` for
-  an automatic review that cannot start; the `verdict` job's comment is the
-  signal to dispatch one instead.
-
-  The reviewer is also told to submit with `gh pr review --body`, not
-  `--body-file`. Its allowed tools are Read, Grep, Glob and a fixed list of
-  `gh`/`git` calls: no Write, no generic Bash, no redirection, so it had no way
-  to create the file the instruction named. A run submitted only if it
-  improvised away from what it was told, and PR #131 produced three green review
-  runs and zero reviews. `evals/lint.sh` now checks the documented command
-  against the granted tool list.
-- [`merge-gate.yml`](../.github/workflows/merge-gate.yml) — the required check
-  that decides whether the PR may merge itself.
-
-Back in the worktree the agent waits with one blocking call, `await-review.sh`,
-which the brief's step 5 hands it at the moment it applies.
-
-This is the cheap half of the loop. An agent that waits by *thinking about
-whether the review has arrived* burns tokens the whole time. An agent that waits
-inside one tool call burns nothing — the session is suspended until the script
-returns. No webhook, no ingress, no daemon; `gh` on a 30-second poll.
-
-It also returns early on the two things a review cannot answer, rather than
-spending the deadline on them: exit 7 when the PR's build is red, and exit 8 when
-GitHub says `DIRTY` because something merged underneath the branch. Both print
-what to do instead — for the conflict that is a rebase, a fresh
-`record-review.sh .autofleet/run/self-review.md` (the marker is per-commit, and a
-rebase changes every sha),
-and `git push --force-with-lease`.
-
-What it waits *for* is not "any review record": it imports
-[`merge_gate.py`](../.github/scripts/merge_gate.py) and asks the gate, exactly as
-`review-status.sh` does. A review counts when it is not by the PR's own author,
-is on the head GitHub currently has, and carries a body worth reading or at least
-one inline comment. That matters because replying to a review thread submits a
-`COMMENTED` review attributed to the replier — so an agent answering findings
-used to be handed its own empty reply back as "the review", spend a round on it,
-and then watch `merge-gate` refuse the PR for the reason the wait had just called
-satisfied ([#114](https://github.com/armaatus/rommsync-nx/issues/114)).
-
-It also hands a given review back exactly once. A round can begin on an unchanged
-head — `claude-review.yml` still fires on `review_requested`, the one manual route
-to a second opinion — so the wait remembers the newest review it reported, in
-`.autofleet/run/review-rounds` beside the round count, and waits for a *newer* one rather
-than spending a second round on findings already in hand.
-
-**The inline findings obey that same rule, and for one round did not.** A review
-verdict is only half of what the wait hands back; the other half is the review
-threads, which is where the findings actually are. That half used to come from
-`pulls/<n>/comments`, an endpoint that cannot report `isResolved` and has no
-notion of a round: it returns every review comment the PR has ever had, so round
-two re-read round one's findings — already fixed — and round three re-read both,
-with the one live comment buried among them. It was also cut at two hundred
-lines, mid-comment, in the middle of the text the agent was being told to act on.
-
-So the wait asks for *threads*, through the same
-[`pr_payload.sh`](../.github/scripts/pr_payload.sh) query `merge-gate` and
-`review-status.sh` use, and prints a thread when it is unresolved **and** its
-newest comment is newer than the one recorded on the last round. A thread the
-agent has already seen and nobody has touched is not repeated; a thread it
-replied to and the reviewer answered has *moved*, and is. The agent's *own*
-reply does not count as movement — the loop tells it to reply with its reasoning
-before resolving, so without that test every thread it answered would come back
-with its own answer underneath, which is the same failure by another route. In
-`local` mode the reviewer and the author are one account, nothing can tell the
-two replies apart, and the thread is shown rather than guessed at. Still-open threads it
-withholds are counted, never truncated, and pointed at `review-status.sh`, which
-exists to print every one of them.
-
-That leaves the wait's own closing prose as the commands and one line of why —
-what the PR body must carry, how the merge is queued and what auto-merge is doing
-meanwhile are the brief's, and a second copy of a contract is what an agent reads
-instead of the original.
-
-Then it fixes what is Critical or Important, replies with a reason where it
-disagrees with a Suggestion, and **leaves the threads alone** — the validator
-resolves what it accepts, which is the whole of what makes a resolved thread mean
-anything. `answer-review.sh`, then a push if anything changed, then
-`review-status.sh`, whose exit 0 means every thread resolved and every check
-green. The brief's step 5 is the order and the exact invocations; the rest of
-this section is why each has to exist.
-
-The order matters: an answer has to come *after* the review it answers, and a
-push invalidates that review. So answering a review you have just pushed over
-would be discarded by the review of the new head — `answer-review.sh` refuses
-when no review has been submitted against the current head, rather than posting
-one that nothing will count.
-
-Resolving goes through `resolve-thread.sh` — which is now the **validator's** to
-run, and a person's — rather than the `resolveReviewThread` mutation, because
-**no GitHub event re-runs `merge-gate` when a thread is resolved**.
-`pull_request_review_thread` is a webhook event, not a workflow trigger — putting
-it in `on:` invalidates the whole file, and actionlint rejects it — so the gate
-went red on an open thread, the agent closed the thread, and nothing asked the
-gate again. `--auto` never fired, and only a later push or `review_requested`
-rescued it. `resolve-thread.sh` resolves the threads and, once the *last* one is
-shut, re-runs the gate's own failed run on this head, which updates that check
-run in place. That is the same mechanism `merge-gate.yml`'s `clear-stale` job
-uses, and the only one available: a `workflow_dispatch` run's checks attach to
-the ref it was dispatched on, not to a PR head.
-
-### Answering the review, and why the branch waits for it
-
-`gh pr merge --auto --squash` is run the moment the PR exists, and the review
-only runs after that. So from the instant a review is submitted the branch is one
-green check away from merging — and `merge-gate`'s other conditions do not stop
-it. A standing `--request-changes` does. An open thread does. **Nits in the body
-of a `COMMENTED` review do not**: the gate is satisfied, `--auto` fires, and the
-branch goes in while the agent is still editing.
-
-That happened four times — [#146](https://github.com/armaatus/rommsync-nx/pull/146),
-[#154](https://github.com/armaatus/rommsync-nx/pull/154),
-[#159](https://github.com/armaatus/rommsync-nx/pull/159),
-[#168](https://github.com/armaatus/rommsync-nx/pull/168) — each leaving real work
-uncommitted in a worktree the dispatcher then tried to delete, and #154's took a
-defect that silences the stalled-agent detector to `main` with it
-([#170](https://github.com/armaatus/rommsync-nx/issues/170)).
-
-The window is not the life of the PR. `merge-gate` requires a review on the
-*current head*, so the agent's next push turns the gate red on its own; the race
-runs from the review being submitted until anything is pushed. What the agent
-does in between is read the findings, fix them, run the test suite, and push — and a
-full suite here is 20 to 30 minutes. All four merged inside that run, because
-that run *is* the window.
-
-So the review declares what it left, and the author answers it:
-
-- every review body ends with `<!-- review-important: M -->` and
-  `<!-- review-findings: N -->`
-  ([REVIEW.md](../REVIEW.md), and `claude-review.yml`'s prompt demands both).
-  `N` of `0` is the only thing that can tell "nothing at all" from "five nits" —
-  both are a `COMMENTED` verdict. `M` splits the second case again, into "five
-  nits" and "one data-loss bug", which nothing downstream could previously tell
-  apart either;
-- **`M` does not decide whether the branch merges.** `N` above zero holds the PR
-  either way. What `M == 0` changes is what `await-review.sh` tells the agent:
-  that the answer may be *words*, because `answer-review.sh` clears the hold with
-  no commit at all. That difference is worth a paragraph of its own, below;
-- a review reporting anything other than `0`, **or not saying**, holds the PR
-  until its author comments an answer. `answer-review.sh` writes it, carrying the
-  head sha, and re-runs the gate's failed run exactly as `resolve-thread.sh` does
-  — an issue comment is not one of `merge-gate.yml`'s triggers and cannot be, since
-  an `issue_comment` run's check attaches to the default branch rather than to
-  this PR's head;
-- **"I am not doing this, because" is as good an answer as a fix.** The gate
-  cannot tell them apart and does not try. What it asserts is that somebody read
-  the findings and decided before the code went in;
-- a review reporting `0` needs no answer, so a finished PR still merges with
-  nobody watching. That is the property arming `--auto` early exists to keep
-  ([#90](https://github.com/armaatus/rommsync-nx/issues/90)), and it is why the
-  requirement is conditional rather than a blanket "the agent declares done" — an
-  agent that dies must not be able to strand a PR that nothing was wrong with.
-
-Missing the trailer fails *closed*: the PR is held as though findings were left.
-Guessing "clean" re-opens the race; guessing "found something" costs one command.
-
-Two consequences of failing closed, both deliberate and neither free:
-
-- **a human leaving a `COMMENTED` review holds the PR too**, since a human does
-  not write the trailer. Add `<!-- review-findings: 0 -->` to the body if you
-  meant "nothing here", **approve it** — an approval asks for nothing, so it is
-  never held, and it is the one verdict the review job cannot give — or merge by
-  hand, since `enforce_admins` is off and that works with the check red. What
-  the gate deliberately does *not* do is exempt human reviewers as such: that
-  would make *who* reviewed decide whether findings can be outrun, and the
-  reviewer's identity is not what the race is about;
-- **a review whose findings were all inline** cannot carry a trailer if its body
-  is empty, so it is held until answered even once every thread is resolved.
-  That is the right way round: resolving a thread says the finding was handled,
-  and the answer says the review was.
-
-One thing the answer does *not* close: `merge_gate.py` reads the **latest**
-substantive review per author, so a second review on the same head declaring `0`
-supersedes an earlier unanswered one. That is the same property that lets a clean
-re-review clear a standing `CHANGES_REQUESTED` without a dismissal step, and it
-is older than this condition; taking it away here would wedge the PRs it exists
-to unwedge.
-
-Exit 4 is the same verdict on a PR that touches `.claude/`, `.github/workflows/`,
-`.github/scripts/`, `.autofleet/guard.json`, `.autofleet/config` or
-`.autofleet/review.md`: nothing left to fix, and a person merges it. The last
-three are the project-owned half of the same layer — `guard.json` *is*
-`guard.py`'s project rules, `config` carries `AUTOFLEET_REVIEW_MODE`, and
-`review.md` is the host's own correctness rules, which the reviewer applies —
-while `.autofleet/setup.sh` and `teardown.sh` beside them are ordinary project
-code the fleet merges for itself. Exit 1 prints
-the reasons, and three of them are not waiting on a review — GitHub answering
-`BLOCKED` while every check is green is [#84](https://github.com/armaatus/rommsync-nx/issues/84),
-a stale run still counted by branch protection, and the script prints the
-`gh run rerun --job` that clears it; `DIRTY` is a conflict with the base, and
-`BEHIND` is a base that moved. None of the three is answered by another review.
-
-Checks are judged the way GitHub judges them, newest run per check *name*.
-`merge-gate` runs several times on one head on purpose, and every run before the
-review lands is an honest failure its own later run supersedes.
-
-Resolution comes from GitHub's own state through GraphQL, not from whether a
-reply exists — the REST endpoint for PR comments cannot report it, and
-`isOutdated` is not `isResolved`.
-
-**A nit is answered, not fixed.** When the review in hand declares
-`review-important: 0`, `await-review.sh` prints a different instruction: answer,
-open one follow-up issue for anything worth keeping, and push only if something
-there is genuinely worth a commit. It is not printing a weaker review — the nits
-are printed in full — it is printing the cheaper of two ways to discharge them.
-
-The expensive way was the default, and it was the default silently. A fix moves
-the head; a moved head invalidates the review that asked for the fix
-(`merge_gate.py` requires one on the *current* head); the dispatcher then starts
-a fresh reviewer, which reads the whole diff again and finds one more nit. Three
-pull requests were measured sitting in that cycle — #85, #86 and #88 — with
-`answer-review.sh`, which clears the same hold with no commit, never once run on
-any of them. Nothing forbade the cheap path. Nothing mentioned it either.
-
-**The other half of that floor has been removed, and with it the floor.** It used
-to live in [REVIEW.md](../REVIEW.md): from round three on, a review finding
-nothing Important stopped asking for a diff and named its nits in the body as
-follow-up issues instead. It was a correct rule for a loop with rounds to spend,
-and the loop no longer has them — the reviewer runs once. What replaced it is the
-asymmetry in the policy itself: a Critical or Important finding is fixed, a
-Suggestion is answered, and the validator will not accept an argument in place of
-the first two because no second reviewer is coming.
-
-One thing the old floor got right is worth keeping in view, because it is the
-reason `0` is still dangerous: `review-findings: 0` releases the gate outright,
-and auto-merge is armed from the moment the PR opens. A review that found five
-Suggestions and reported `0` merges the branch while its author is still reading
-them. That has happened four times.
-
-**At most three waits, counted by the script.** `await-review.sh` keeps the count
-in `.autofleet/run/review-rounds` and exits 5 on the fourth call rather than
-waiting, so this is not something an agent has to remember. Three is still the
-right number under the new shape for a different reason than it was under the old
-one: one review plus two validations is three things an agent waits for. When it
-trips, the agent stops, comments saying exactly what is unresolved and why it
-disagrees, and flags the card. Another lap is not what a disagreement needs; your
-attention is.
-
-**And `AUTOFLEET_REVIEW_MAX` and `AUTOFLEET_VALIDATE_MAX` on the dispatcher's
-side**, which are different caps answering a different question. The agent's is
-per-worktree and binds only while the agent is alive: #85's agent stopped at its
-cap and a fourth review landed with nobody left to answer it. The dispatcher's
-count lives in `<pr>.rounds` and `v-<pr>.rounds`, counts what was *submitted* on
-the pull request across every head, and survives `stop.sh`, because what it
-counts belongs to the PR rather than to one dispatcher's run.
-
-Reaching the review cap is now the **ordinary** path rather than the exhausted
-one — at a cap of 1, every healthy pull request reaches it on its second poll —
-so the dispatcher no longer announces "needs you" there. It hands the PR to the
-validator instead. The hold that still means a person is due is the **validation**
-cap, and `validate.sh` prints it, where the number lives.
-
-Nothing in this section is where the merge gets armed. It used to end by saying
-the agent runs `gh pr merge --auto --squash` "when it is green" — a second copy
-of the rule, ninety lines below the first, saying the opposite of it: the merge
-is armed the moment the PR exists, which is the whole of
-[#90](https://github.com/armaatus/rommsync-nx/issues/90) and what
-[the section above](#answering-the-review-and-why-the-branch-waits-for-it) opens
-with. That is what a second copy costs, and why the brief is the only one.
+### Stage 4 — The pull request, and where the agent stops
+
+**The agent's job ends at an open pull request carrying `Closes #N`.** It does
+not queue the merge, wait for a review, or answer one; `guard.py` refuses all
+three from a fleet-owned worktree. What the body carries is the brief's step 2,
+and it is not decoration: [`merge-gate`](#the-merge-gate) reads the closing line,
+and the reviewer reads `## Plan` against the diff.
+
+**There is no self-review pass any more, and no push gate.** Both existed:
+`/code-review` and `/mattpocock-skills:code-review` ran on the author's own diff
+before the push, `guard.py` refused `git push` and `gh pr create` without a
+`.autofleet/run/reviewed-<sha>` marker recording them, and `merge_gate.py`
+refused a body that did not name both. They were the largest per-issue line item
+after the build — measured on this repository, PR #126 ran **sixteen** rounds of
+both passes and PR #129 eight, each round two fresh full-budget agents re-reading
+the whole branch diff, 36% of one issue's 207M tokens — and what they bought was
+a second opinion from the same context that wrote the code.
+
+armaatus/autofleet#152 removed them and moved the one opinion that is
+independent to *after* the PR exists, where the dispatcher runs it and the agent
+cannot reach it. The marker went with them: a gate nothing can ever write is not
+a gate.
+
+### Stage 5 — One review, at most one fix, and the merge
+
+**Two reviews maximum, ever**, and this is the section about why that number.
+
+1. The dispatcher runs `gh pr merge --auto --squash` the moment the PR exists.
+   That does not merge — it asks GitHub to, once the required checks pass. It is
+   armed **first** because GitHub refuses to queue auto-merge on a PR that is
+   already mergeable, so one that goes green before anything queued it has
+   nobody left to merge it. That is
+   [#90](https://github.com/armaatus/autofleet/issues/90), and it sat clean and
+   untouched forever.
+2. [`review.sh`](../scripts/fleet/review.sh) runs one `claude -p` from the repo
+   root, in a context that has not seen the conversation which produced the
+   diff. It is handed [REVIEW.md](../REVIEW.md), the host's
+   `.autofleet/review.md` where there is one, the issue, and the diff against
+   the merge base — and `--json-schema` makes its answer a shape rather than a
+   hope: `{verdict, findings[{severity, file, line, text}]}`.
+3. **The script posts, not the model.** The Critical and Important findings go in
+   the review body with a marker naming the head; the Suggestions go in an
+   ordinary comment that blocks nothing. `verdict` is `request-changes` if and
+   only if something is Critical or Important, so nothing reads prose to decide.
+4. On `request-changes`, [`fix.sh`](../scripts/fleet/fix.sh) gets **one** session
+   in the worktree, with the review text and the diff as its prompt. It commits
+   and pushes; it cannot review, approve or merge.
+5. `review.sh` again, on the head the fix pushed. **That verdict is final**: a
+   second `request-changes` parks the pull request with a comment and the
+   dispatcher moves on.
+
+#### What that replaced, and why
+
+A loop bounded at four **reviews** per pull request, which spent them. The
+mechanism was not a bad reviewer; it was a correct one in a loop with no fixed
+point. A review is bound to the commit it judged. The author answers a finding
+with a commit. The commit moves the head. The moved head invalidates the review
+that asked for the fix, so the gate wants a verdict on the new head, so the
+reviewer reads the whole diff again — and finds one more thing, a level down,
+because there is always one more thing. #86 burned four reviews without one of
+them ever judging the commit that eventually merged. #79 converged on behaviour
+after two rounds and spent six more on the same finding one level further down;
+every one of the six was correct, which is the whole problem.
+
+What replaced *that* was one review and up to two **validations** — a narrower
+pass asking whether the review's findings had been addressed and whether the
+commits answering them broke anything. It never once ended the loop on its own.
+Every validation of #132 and #133 came back `fail` for reasons unrelated to the
+code — "cannot get the head's tree", "no answer posted" — so every pull request
+landed on the maintainer at the cap anyway, having spent five model passes to
+get there. PR #132 alone bought four full reviews, $11.54
+(`~/.autofleet/reviews/cost.tsv`).
+
+The validator's premise — were the findings addressed — is what a re-review of
+the fixed head answers anyway, in one pass with no protocol. It failed because it
+needed a checkout it could not have and an answer comment nobody wrote; both are
+protocol, not judgement. So the protocol went: no `answer-review.sh`, no
+`record-review.sh`, no `review-status.sh`, no `resolve-thread.sh`, no
+`review-answered` marker, and no `<!-- validated: ... -->` trailer.
+
+**The trade is stated plainly: a fix that CI passes but a second reviewer would
+have caught, merges.** That is the price of a bounded loop, and the measured
+alternative was a loop that ended on a person 100% of the time.
+
+#### Why the verdict is a marker
+
+GitHub refuses `--approve` and `--request-changes` on your own pull request, and
+the reviewer signs in as whoever `gh` is — normally the account that opened the
+PR. Every review this repository has ever received is `COMMENTED` for that
+reason (PRs #133, #135, #146). So `review.sh` tries the real state first and
+falls back to a `COMMENTED` review carrying
+`<!-- autofleet-verdict: approve <sha> -->`, which is what `merge_gate.py` reads.
+
+The marker is written by the **script**, from the schema's `verdict` field —
+never spelled by the model — and it names a sha, so an approval cannot be
+inherited by a later head. `guard.py` refuses `gh pr review`, its REST spelling
+(`gh api .../pulls/N/reviews`) and its GraphQL spelling
+(`addPullRequestReview`) from a fleet-owned worktree, which is what keeps it out
+of the author's reach. A repository with a separate reviewer identity gets the
+real `APPROVED` badge for free.
+
+#### Why the model returns a value instead of posting one
+
+The most common failure of the whole fleet used to be a reviewer that read the
+diff, formed a verdict, and ended without ever running `gh pr review`. The
+verdict lived only in its transcript, the gate saw no review on the head, and
+the worktree on the other side waited for something that was never coming —
+`review.sh` exited 5, and the dispatcher retried at full budget up to
+`AUTOFLEET_REVIEW_MAX_TRIES` times. A model that returns a value cannot forget
+to return it, and the knob that bounded the silence is gone with the silence.
 
 ### The merge gate
 
 [`merge_gate.py`](../.github/scripts/merge_gate.py) is the required check
-`--auto` waits on. It passes only when all seven hold:
+`--auto` waits on. It asks **three** things:
 
-1. the PR body shows a local `/code-review` pass;
-2. …and a local `/mattpocock-skills:code-review` pass;
-3. an independent review exists on the **current head SHA** — pushing a fix
-   invalidates it, so a re-review is required. Whose review counts depends on
-   `AUTOFLEET_REVIEW_MODE`: in `github` mode, anyone but the PR's author; in
-   `local` mode, that plus the author's own review when it carries
-   `<!-- independent-review: local <head-sha> -->`. The mode is read from the
-   **base** ref, so a PR cannot turn on the second rule for itself;
-4. the **latest** review from each author is not `CHANGES_REQUESTED`;
-5. no review thread is unresolved — read from a **complete** thread list, not
-   from the first page of one;
-6. the body says which issue it closes. Any keyword GitHub acts on counts, so
+1. the body says which issue it closes. Any keyword GitHub acts on counts, so
    `Fixes #12` is as good as `Closes #12` — but a body with none merges without
    closing anything, `unblock.yml` relabels nothing, and the fleet then reports
    "nothing startable" with the work available;
-7. every review still standing that reports findings — or does not say what it
-   found — has been **answered** by the PR's author, on this head, since it was
-   submitted. "Answering the review" above is what that is for.
+2. the change does not touch the enforcement layer;
+3. a review of the **current head** said approve — an `APPROVED` state on that
+   commit, or the marker naming it. Pushing a fix invalidates it, so a
+   re-review is required.
 
-Point 5's second half is its own trap. Both readers of the thread list asked for
-`reviewThreads(first:100)`, the first hundred, so on a longer PR the newest
+**Everything else is branch protection**, set by `install.sh` through `gh api`:
+required status checks, `required_conversation_resolution`, and
+`dismiss_stale_reviews`. The gate was 3,162 lines and re-implemented all three
+in Python, on a payload it had to page itself — and the paging had its own trap:
+both readers asked for `reviewThreads(first:100)`, so on a longer PR the newest
 threads fell off the end and the gate reported "no review thread is unresolved"
-about a state it had never established. The query now lives once, in
-[`pr_payload.sh`](../.github/scripts/pr_payload.sh), which pages to the end; if
-paging ever runs out the gate refuses to answer rather than answering from half
-a list.
+about a state it had never established. GitHub answers that question itself now,
+and cannot be wrong about it.
 
-Point 4 is the whole trick. GitHub's `reviewDecision` is sticky: once a reviewer
-requests changes it stays `CHANGES_REQUESTED` until dismissed or until that
-reviewer *approves* — and this reviewer never approves, by design. Reading it
-would leave a PR whose findings were all addressed blocked forever. Taking the
-latest review per author instead lets a clean re-review supersede the old verdict
-on its own, with no dismissal step and nothing waiting on a person.
+The fourth layer it lost is the one that could not be checked at all: **has the
+author ANSWERED the review**, decided by reading prose the agent wrote. Two
+validation passes existed to judge that prose. Stage 5 is what happened to them.
 
-A PR touching **`.claude/**`**, **`.github/workflows/**`** or
-**`.github/scripts/**`** fails the gate on purpose. Those are the paths that can
+A PR touching **`.claude/**`**, **`.github/workflows/**`**,
+**`.github/scripts/**`**, or `.autofleet/`'s `guard.json`, `config` and
+`review.md`, fails the gate on purpose. Those are the paths that can
 disable the checks gating their own PR — the last one because `merge_gate.py`
 *is* the gate, and a change to what "may merge" means must not merge itself on
 the strength of its own new rules. `enforce_admins` is off, so you merge them by
@@ -1312,9 +923,11 @@ And what comes back from the change re-enters at stage 1:
 Everything runs through the runner, so its board is the status surface. `fleet.sh`
 drives it: **`in-progress`** while a worktree builds, **`in-review`** once the
 agent has opened its PR, **`completed`** on merge, and a one-line comment on each
-card saying what it is waiting for. From inside a worktree an agent sets its own
-card with `./scripts/fleet/board.sh in-review "<what it is waiting for>"` --
-which goes through the runner driver, so the brief never names one runner's CLI.
+card saying what it is waiting for. An agent used to set its own card from
+inside a worktree, with `board.sh`; that went with the post-PR protocol it
+reported into (armaatus/autofleet#152), and the dispatcher is now the only
+writer. Its own updates still go through the runner driver, so nothing outside
+`scripts/fleet/runner/` names one runner's CLI.
 
 You get a macOS notification for the two cases you would otherwise miss: the
 fleet stopping, and an issue giving up on its time-box. Everything else is
@@ -1342,7 +955,7 @@ fails if that entry disappears, because the agent brief names those skills.
 | It blocks | Why |
 |---|---|
 | `gh pr merge`, and the `gh api …/merge` spelling | separation of duties: the agent that wrote it does not merge it |
-| `gh pr merge --auto` is **allowed** — but not while the fleet is stopped | that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than the agent. A stop is different: arming a merge hands GitHub an instruction that outlives it, which is an outward effect like any other |
+| `gh pr merge --auto` **from a fleet worktree** | the merge queue is the dispatcher's: `after-pr.sh` arms it the moment the PR exists, and it has to be first, because GitHub refuses to queue auto-merge on a PR that is already mergeable. In a worktree you opened yourself it is allowed — that asks GitHub to merge once `merge-gate` passes, so a rule decides rather than you — except while the fleet is stopped, since arming a merge hands GitHub an instruction that outlives the stop |
 | the GraphQL names for all of it — `mergePullRequest`, `addPullRequestReview`, `dismissPullRequestReview` | the same acts by a third name. Each was reachable until a review found it |
 | `gh api` carrying a body from a file (`--input`, `@file`) from a fleet worktree | a payload this hook cannot read is one it cannot judge, and `-F query=@file` put a whole mutation out of its sight |
 | force-pushing `main` | the commit chain is the audit trail |
@@ -1352,14 +965,20 @@ fails if that entry disappears, because the agent brief names those skills.
 | editing `.claude/hooks/` and `settings.json` **in a fleet worktree** | an agent rewriting its own guards while nobody is watching has none |
 | editing `.autofleet/guard.json`, `.autofleet/config` or `.autofleet/review.md` **in a fleet worktree** | the same rule for the project's half of the layer. `merge-gate` will not let a PR touching these merge itself, but `guard.py` re-reads `guard.json` on every tool call — so an agent that empties it has disarmed every project rule while the PR is still open. Reading them is untouched: `config.sh` sources the config on the way into every fleet script |
 | `gh api` with `-X POST/PUT/PATCH/DELETE` while stopped | a write is outward; a read is not |
-| pushing or opening a PR from a fleet worktree with no `.autofleet/run/reviewed-<sha>` | a PR arrives reviewed or it does not arrive |
+| starting `review.sh`, `fix.sh` or `after-pr.sh` **in a fleet worktree** | the agent does not start the pass that judges its own pull request. The verdict releases the merge gate, so a branch that could start its own reviewer could certify itself |
 | anything outward while `~/.autofleet/STOP` exists (a drain sets `DRAIN`, which this does not read) | a stop that depends on cooperation is not a stop |
 
-Three of those apply **only in a worktree the fleet opened**: editing
+Four of those apply **only in a worktree the fleet opened**: editing
 `.claude/hooks/` and `settings.json`, editing the `.autofleet/` files that set
-the rules, and pushing with no recorded review. In
-your own worktree you are the control, and a guard that argues with a person
-doing manual work is a guard people route around. The two stop rows apply
+the rules, starting the review or the fix that judges the branch, and arming the
+merge queue. In your own worktree you are the control, and a guard that argues
+with a person doing manual work is a guard people route around.
+
+The push gate that used to sit in this table is gone.
+`.autofleet/run/reviewed-<sha>` refused `git push` and `gh pr create` until a
+local review had been recorded; [Stage 4](#stage-4--the-pull-request-and-where-the-agent-stops)
+says what happened to the passes that wrote it. A gate nothing can ever satisfy
+is not a gate. The two stop rows apply
 everywhere — a stop that reached only the fleet's own worktrees would not be
 one. It is also why the guards can still be
 improved: the first version protected itself everywhere, and made its own bug
@@ -1448,10 +1067,10 @@ rather than passing the flag, for the reason in Stage 6.
 | ...and `status` lists the issue you want under "gave up on" | its build ran out of turns or budget, and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
 | Worktree provisioned, nothing building in it | the build command would not start — a bad `AUTOFLEET_BUILD_CMD`, or no credentials | the launch says so in `fleet.log`; the run's own words are in `$AUTOFLEET_DIR/builds/<n>/build.log` |
 | Every hook says "this worktree has no linked issue" | the `orca` CLI on `PATH` cannot find `Orca.app` | nothing — the hooks probe it and fall back. If it persists: `sudo chmod -h 755 /usr/local/bin/orca` |
-| `git push` refused, "nothing leaves one of those unreviewed" | the local review is not recorded for this commit | `./scripts/fleet/self-review.sh` — it runs both passes and records the marker |
+| `gh pr review` refused, "an agent does not submit the independent review of its own pull request" | the review is the dispatcher's | nothing — the dispatcher runs it, and the agent's job ended at the open PR |
 | `await-review.sh` times out | the review job never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | `gh run list`; check `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret |
 | `await-review.sh` exits 2, naming `merge_gate.py` | that file is what decides which reviews count, and it does not import | fix the syntax or the missing name; nothing in the loop can answer until it does |
-| `await-review.sh` exits 8, "GitHub says DIRTY" | something merged underneath the branch | rebase, re-run `record-review.sh .autofleet/run/self-review.md`, `git push --force-with-lease` |
+| `await-review.sh` exits 4, "moved to &lt;sha&gt;" | the head moved while it waited | nothing — the verdict that matters is the one on the new head, and the dispatcher re-reviews it |
 | `merge-gate` red on a PR that looks fine | usually the body is missing a review section, the review predates the last push, or a review reporting findings has not been answered | read the check's output; it says which of the seven |
 | A PR sits queued and never merges | a required check never reported | `gh pr checks <n>` |
 | the test suite reports `rig.smoke` **Skipped** | RomM is not running for this worktree | `./scripts/fleet/compose.sh up -d` |
