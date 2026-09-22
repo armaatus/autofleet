@@ -159,6 +159,40 @@ diff="$(GH_PAGER=cat gh pr diff "$pr" 2>/dev/null)"
   echo "review.sh: gh pr diff #$pr came back empty; not reviewing nothing." >&2
   exit 2; }
 
+# ...AND A CEILING ON WHAT IS INLINED, because a diff has no upper bound and a
+# prompt does. PR #158 is 1,315,566 bytes -- about 328k tokens, past the whole
+# context window -- so inlining it unconditionally is a review that fails before
+# it reads anything, on exactly the change that is too big to review by eye.
+#
+# TRUNCATING THE DIFF IS NOT THE ANSWER. A reviewer handed half a hunk reports
+# confidently on the half it can see, which is worse than one that fetches. Over
+# the ceiling it gets the `--stat` instead, and the instruction to read what it
+# needs with the `gh pr diff` and `git diff` it is already granted -- so the
+# prompt is bounded and nothing is silently missing.
+#
+# The knob this replaces was AUTOFLEET_REVIEW_CONTEXT_MAX, which capped the
+# carried-forward context of a delta round. armaatus/autofleet#152 removed the
+# delta rounds and the cap with them, and left round one uncapped -- the growth
+# the cap existed for, one round over.
+diff_bytes="$(printf '%s' "$diff" | wc -c | tr -d ' ')"
+if [ "$diff_bytes" -gt "$AUTOFLEET_REVIEW_DIFF_MAX" ]; then
+  echo "    diff: $diff_bytes bytes, over AUTOFLEET_REVIEW_DIFF_MAX ($AUTOFLEET_REVIEW_DIFF_MAX);"
+  echo "          handing the reviewer the stat and letting it read what it needs"
+  diff="$(GH_PAGER=cat gh pr diff "$pr" --stat 2>/dev/null)
+
+THIS IS THE STAT, NOT THE DIFF. The diff is $diff_bytes bytes, which is more
+than fits in one prompt, so you are reading what changed and how much. Read the
+hunks yourself, a few paths at a time, with the tools you have:
+
+    gh pr diff $pr -- <path> [<path>...]
+    git diff \$(git merge-base origin/main HEAD)...HEAD -- <path>
+
+Start with the paths where a defect is expensive -- the ones this project's
+policy calls Critical or Important -- rather than in the order above. You have a
+turn budget; spend it on the files that decide behaviour, and say in a finding
+if you ran out before reading something that mattered."
+fi
+
 prompt="$(cat "$BRIEF")
 
 --- REVIEW.md (the policy; follow it exactly) -------------------------------

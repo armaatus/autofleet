@@ -130,6 +130,21 @@
 # review costing at most $4 against a measured $0.84-$8.65 per round.
 : "${AUTOFLEET_REVIEW_MAX_TURNS:=40}"
 
+# The byte ceiling on the diff inlined into the reviewer's prompt.
+#
+# A diff has no upper bound and a prompt does: PR #158 is 1,315,566 bytes, about
+# 328k tokens, which is past the context window entirely -- so an uncapped
+# inline is a review that fails before it reads anything, on exactly the change
+# too big to review by eye. Past this the reviewer is handed `gh pr diff --stat`
+# and reads the hunks itself with the `gh pr diff` and `git diff` it is already
+# granted. Nothing is truncated: a reviewer given half a hunk reports
+# confidently on the half it can see.
+#
+# 256K is about 64k tokens, which leaves the policy, the brief and the issue
+# room in a 200k window. Raise it on a model with more, and `0` is not an off
+# switch -- it would mean "never inline", which is the stat path for every PR.
+: "${AUTOFLEET_REVIEW_DIFF_MAX:=262144}"
+
 # ------------------------------------------------------------------- the fix
 #
 # The one session that answers a review asking for changes (`scripts/fleet/fix.sh`).
@@ -352,6 +367,11 @@ config_whole_number AUTOFLEET_REVIEW_TIMEOUT "$AUTOFLEET_REVIEW_TIMEOUT" \
   1 "a positive whole number of seconds"
 config_whole_number AUTOFLEET_REVIEW_MAX_TURNS "$AUTOFLEET_REVIEW_MAX_TURNS" \
   1 "a positive whole number of turns"
+# The only consumer is `[ "$diff_bytes" -gt "$AUTOFLEET_REVIEW_DIFF_MAX" ]`, and
+# a non-number makes `[` return 2, which reads as FALSE -- so the whole diff is
+# inlined whatever its size, which is the failure the ceiling exists to prevent.
+config_whole_number AUTOFLEET_REVIEW_DIFF_MAX "$AUTOFLEET_REVIEW_DIFF_MAX" \
+  1 "a positive whole number of bytes"
 # The fix session's three, refused for the same reason and with a sharper edge
 # on the timeout: its only consumer is `[ "$waited" -ge "$AUTOFLEET_FIX_TIMEOUT" ]`
 # in fix.sh, so a non-number makes `[` return 2, the test FALSE, and the

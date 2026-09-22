@@ -32,6 +32,11 @@
 #   ceiling      after-pr.sh refuses a third review on a pull request, whatever
 #                it is asked.
 #   parks        a second request-changes parks the PR with a comment and stops.
+#   bigdiff      a diff past AUTOFLEET_REVIEW_DIFF_MAX is NOT inlined and NOT
+#                truncated: the reviewer gets the stat and reads the hunks
+#                itself. PR #158 is 1.3MB, about 328k tokens, so an uncapped
+#                inline is a review that fails before it reads anything -- on
+#                exactly the change too big to review by eye.
 #   refund       ...and a review that never started a model does NOT spend one
 #                of the two. Exit 8 is the ordinary case -- a dispatcher that
 #                lost its `.done` record, a second machine, a PR a person
@@ -345,6 +350,59 @@ STUB
     || fail "a reviewer that ran and produced no verdict was refunded; it cost what a review costs"
   ok "a review that started no model is refunded, and one that ran is not"
   ;;
+# -------------------------------------------------------------------- bigdiff
+  bigdiff)
+  make_fixture "" "$APPROVE"
+  # A diff well past the cap, and a stat that is not. The stub answers both.
+  cat >"$WORK/bin/gh" <<'BIGSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$GH_CALLS"
+case "$*" in
+  *"repo view"*)      echo "armaatus/autofleet"; exit 0 ;;
+  *headRefOid*)       cat "$GH_HEAD"; echo; exit 0 ;;
+  *autoMergeRequest*) echo false; exit 0 ;;
+  *"pr list"*)        echo 42; exit 0 ;;
+  *"pr diff"*--stat*) echo " scripts/fleet/lib.sh | 4 ++--"; exit 0 ;;
+  *"pr diff"*)        awk 'BEGIN{for(i=0;i<9000;i++) print "+a line of diff that is quite long indeed"}'; exit 0 ;;
+  *"pr view"*--json\ body*) echo "Closes #7"; exit 0 ;;
+  *"issue view"*)     echo "a title"; exit 0 ;;
+  *"pr review"*|*"pr comment"*)
+    printf '%s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >>"$GH_POSTS"; exit 0 ;;
+  *graphql*)
+    echo '{"data":{"repository":{"pullRequest":{"body":"Closes #7","reviews":{"nodes":[]}}}}}'
+    exit 0 ;;
+esac
+exit 0
+BIGSTUB
+  chmod +x "$WORK/bin/gh"
+  # The reviewer records the prompt it was handed, so this can assert on it.
+  cat >"$WORK/bin/stub-reviewer" <<'PROMPTSTUB'
+#!/usr/bin/env bash
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "-p" ] && printf '%s' "$arg" >"$CLAUDE_CALLS"
+  prev="$arg"
+done
+printf '{"type":"result","result":"x","structured_output":{"verdict":"approve","findings":[]},"total_cost_usd":0.1,"num_turns":1}\n'
+PROMPTSTUB
+  chmod +x "$WORK/bin/stub-reviewer"
+
+  out="$(review_it)"; rc=$?
+  [ "$rc" = 0 ] || { echo "$out" >&2; fail "the review did not finish (rc $rc)"; }
+  bytes="$(wc -c <"$CLAUDE_CALLS" | tr -d ' ')"
+  # The whole diff is ~370KB; the prompt must be nowhere near it.
+  [ "$bytes" -lt 262144 ] \
+    || fail "the prompt is $bytes bytes: the diff was inlined past the ceiling"
+  grep -q 'THIS IS THE STAT, NOT THE DIFF' "$CLAUDE_CALLS" \
+    || fail "the reviewer was not told the diff is not in its prompt, so it reviews what it can see and calls that the change"
+  grep -q 'gh pr diff 42 -- <path>' "$CLAUDE_CALLS" \
+    || fail "the reviewer was not told how to read the hunks itself"
+  # ...and NOT a truncated diff, which is the shape that reports confidently on
+  # half a hunk.
+  grep -q 'a line of diff that is quite long indeed' "$CLAUDE_CALLS" \
+    && fail "the diff was truncated into the prompt rather than replaced by the stat"
+  ok "a diff past the ceiling is replaced by the stat, not truncated into the prompt"
+  ;;
 # ---------------------------------------------------------------------- parks
   parks)
   make_fixture "" "$APPROVE"
@@ -362,6 +420,6 @@ STUB
   ok "one review, one fix, one re-review, then a person"
   ;;
   *)
-  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|parks}" >&2
+  echo "usage: $0 {approve|changes|nits|judged|stopped|silent|costrow|fixpush|fixnopush|arms|ceiling|refund|bigdiff|parks}" >&2
   exit 2 ;;
 esac
