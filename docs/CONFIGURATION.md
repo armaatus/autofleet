@@ -196,10 +196,13 @@ enforcement layer by hand, with `merge-gate` red, is the designed path.
 inside a workflow file, which the installer cannot know — autofleet's own is
 `suite`, not `ci` — and a context no job ever produces makes every pull request
 wait forever on a check that never reports. So the installer sets `merge-gate`
-and takes the rest from `AUTOFLEET_REQUIRED_CHECKS`, a space-separated list:
+and takes the rest from `AUTOFLEET_REQUIRED_CHECKS`: space-separated, or one
+per line when a job name has spaces in it (agent-config.yml's own job is
+"configuration is well-formed"). A dry run prints the exact list it would set.
 
 ```bash
 AUTOFLEET_REQUIRED_CHECKS="suite" ./install.sh /path/to/your/repo
+AUTOFLEET_REQUIRED_CHECKS=$'host-tests\nconfiguration is well-formed' ./install.sh /path/to/your/repo
 ```
 
 **It never writes over rules you already have.** `PUT .../protection` is a full

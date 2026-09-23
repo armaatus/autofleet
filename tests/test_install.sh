@@ -209,6 +209,27 @@ case "${1:-}" in
   ok "...and counts them, so the summary is not a contradiction"
   ;;
 
+  contexts)
+  # A required check is a JOB NAME, and job names have spaces in them:
+  # agent-config.yml's own is "configuration is well-formed". Split on
+  # whitespace, that became three contexts no job reports and every PR on the
+  # host waited forever. Newline-separated keeps a name whole; the plain
+  # whitespace form still works for names without spaces.
+  make_host
+  out="$(AUTOFLEET_REQUIRED_CHECKS=$'host-tests\nconfiguration is well-formed\nmerge-gate' install_it --dry-run)" \
+    || fail "install.sh failed: $out"
+  grep -F '"configuration is well-formed"' <<<"$out" >/dev/null \
+    || fail "a check named with spaces was split: $out"
+  grep -F '["merge-gate", "host-tests", "configuration is well-formed"]' <<<"$out" >/dev/null \
+    || fail "the contexts are not merge-gate first, deduplicated, in the host's order: $out"
+  echo "ok: a newline-separated list keeps a job name with spaces whole"
+  out="$(AUTOFLEET_REQUIRED_CHECKS='suite switch-build' install_it --dry-run)" \
+    || fail "install.sh failed: $out"
+  grep -F '["merge-gate", "suite", "switch-build"]' <<<"$out" >/dev/null \
+    || fail "the whitespace form stopped working: $out"
+  echo "ok: ...and the whitespace form still splits"
+  ;;
+
   retires)
   # WHAT A v1 INSTALL LEFT BEHIND. `claude-review.yml` and `validate.yml`
   # shipped in PAYLOAD until armaatus/autofleet#152 and do not any more -- and

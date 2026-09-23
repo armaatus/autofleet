@@ -349,8 +349,29 @@ set_branch_protection() {
   branch="$(GH_PAGER=cat gh repo view --json defaultBranchRef \
               --jq .defaultBranchRef.name 2>/dev/null)" || branch=""
   [ -n "$branch" ] && [ "$branch" != null ] || branch=main
+  # The contexts, as a JSON array built from the host's list. Built BEFORE the
+  # dry-run return so a dry run shows the exact list a real run would set --
+  # which is how the split below got found: a check named with spaces
+  # ("configuration is well-formed", which agent-config.yml's own job is called)
+  # became three contexts no job ever reports, and every pull request on the
+  # host waited forever (armaatus/rommsync-nx, 2026-09-23). NEWLINE-SEPARATED
+  # when the value holds a newline, whitespace-separated otherwise: a name with a
+  # space in it is one line.
+  local contexts
+  contexts="$(HOST_CHECKS="${AUTOFLEET_REQUIRED_CHECKS:-}" python3 -c '
+import json, os
+raw = os.environ["HOST_CHECKS"]
+names = raw.splitlines() if "\n" in raw.strip() else raw.split()
+# Deduplicated and ORDER-PRESERVING: `merge-gate` first whatever the host set,
+# and a host that names it again does not get it twice.
+seen, out = set(), []
+for name in ["merge-gate"] + [n.strip() for n in names]:
+    if name and name not in seen:
+        seen.add(name); out.append(name)
+print(json.dumps(out))
+')" || contexts='["merge-gate"]'
   if $DRY; then
-    echo "   branch protection on '$branch' (skipped: --dry-run)"
+    echo "   branch protection on '$branch' ($contexts required; skipped: --dry-run)"
     return 0
   fi
   # `|| nwo=""`, because this file runs under `set -e` and a repository with no
@@ -383,18 +404,6 @@ set_branch_protection() {
     return 0
   fi
 
-  # The contexts, as a JSON array built from the word list.
-  local contexts
-  contexts="$(REQUIRED="merge-gate ${AUTOFLEET_REQUIRED_CHECKS:-}" python3 -c '
-import json, os
-# Deduplicated and ORDER-PRESERVING: `merge-gate` first whatever the host set,
-# and a host that names it again does not get it twice.
-seen, out = set(), []
-for name in os.environ["REQUIRED"].split():
-    if name not in seen:
-        seen.add(name); out.append(name)
-print(json.dumps(out))
-')" || contexts='["merge-gate"]'
   # A HEREDOC on stdin, not a stack of `-f` flags: `required_status_checks` is a
   # nested object with an array in it, and `gh api -f` can only write flat
   # strings. `--input -` takes the whole document.
@@ -545,7 +554,8 @@ Next, in the repo you just installed into:
      `merge-gate` and cannot guess the other one: a required context is the
      JOB's name inside your workflow file, and a context no job produces makes
      every PR wait forever on a check that never reports. Re-run the installer
-     with AUTOFLEET_REQUIRED_CHECKS="<your job name>", or edit the rule by hand
+     with AUTOFLEET_REQUIRED_CHECKS="<your job name>" (one per line when a
+     name has spaces in it), or edit the rule by hand
      -- docs/CONFIGURATION.md has the gh api call. The other two rules,
      conversation resolution and dismissing an approval when the head moves,
      are set; merge_gate.py deliberately does not re-check any of the three.
