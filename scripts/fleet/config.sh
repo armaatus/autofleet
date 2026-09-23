@@ -95,7 +95,27 @@
 # flag. Found by the local `/code-review` pass.
 : "${AUTOFLEET_BUILD_PERMISSION_MODE:=auto}"
 : "${AUTOFLEET_BUILD_MAX_TURNS:=400}"
-: "${AUTOFLEET_BUILD_MAX_BUDGET_USD:=25}"
+# WHAT ONE BUILD MAY SPEND. 15 rather than the 25 this was: 25 was a first
+# guess written beside the measurement it was guessing from, and
+# armaatus/autofleet#154 -- the first unattended night on a real host -- budgets
+# a build at $15. A number that ends a run is only useful at the value somebody
+# is willing to pay, and nothing else in the loop reads this one.
+: "${AUTOFLEET_BUILD_MAX_BUDGET_USD:=15}"
+# THE THIRD BOUND, and the one the other two cannot be: turns and dollars end a
+# build that is still SPENDING. A build wedged on a prompt nobody will answer, or
+# on a network read that never returns, spends neither and reaches neither --
+# and until armaatus/autofleet#161 the dispatcher had nothing to end it with, so
+# it held a worktree and a slot until a person noticed. Two hours is longer than
+# any build this repository has measured and short enough that a wedged one is
+# not the whole night.
+#
+# Enforced by the dispatcher's poll, not by the build command line: that line is
+# deliberately the same for both drivers, and the stop goes through
+# `runner_build_stop` so the Orca driver -- which has no pid to signal -- is
+# stopped the way it is started. A build stopped this way lands in the same
+# state a turns or budget exhaustion lands in: `fleet.sh status` shows it under
+# "gave up on" and `retry N` starts it again.
+: "${AUTOFLEET_BUILD_TIMEOUT:=7200}"
 
 # Where the headless driver puts the worktrees it creates. Empty means
 # `$AUTOFLEET_DIR/trees`, which is the answer for every host that does not care.
@@ -381,6 +401,14 @@ config_whole_number AUTOFLEET_BUILD_MAX_TURNS "$AUTOFLEET_BUILD_MAX_TURNS" \
 
 config_whole_number AUTOFLEET_BUILD_MAX_RUNS "$AUTOFLEET_BUILD_MAX_RUNS" \
   1 "a positive whole number (1 means a build is never resumed)"
+
+# ...and the wall clock, refused for the reason AUTOFLEET_REVIEW_TIMEOUT is: its
+# only consumer is `[ "$age" -ge "$AUTOFLEET_BUILD_TIMEOUT" ]` in the poll, and
+# a non-number makes `[` return 2, which reads as FALSE -- so the deadline never
+# fires and the knob that exists to end a wedged build silently stops ending it,
+# which is hard rule 3 in a number.
+config_whole_number AUTOFLEET_BUILD_TIMEOUT "$AUTOFLEET_BUILD_TIMEOUT" \
+  1 "a positive whole number of seconds"
 
 # ...and the budget, which is the one of the three that is NOT a whole number.
 # It went through no check at all while the comment beside its sibling argued

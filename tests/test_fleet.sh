@@ -2098,6 +2098,44 @@ DRIVER
     echo "ok: ...and a launch that cannot build says which command is missing"
     ;;
 
+  build_bounds)
+    # THE THREE NUMBERS A BUILD ENDS ON, read from the payload defaults rather
+    # than from this repository's `.autofleet/config` -- `AUTOFLEET_CONFIG` is
+    # pointed at nothing so what is asserted is what a fresh host inherits.
+    #
+    # The budget is #154's cost target, which is 15 and not the 25 that was a
+    # first guess; the wall clock is #161's, and is the third bound because the
+    # other two only end a build that is still spending. A build wedged on a
+    # prompt spends nothing and reaches neither.
+    out="$(env -u AUTOFLEET_BUILD_MAX_BUDGET_USD -u AUTOFLEET_BUILD_TIMEOUT \
+             -u AUTOFLEET_BUILD_MAX_TURNS \
+             REPO_ROOT="$REPO_ROOT" AUTOFLEET_CONFIG=/dev/null bash -c \
+      '. "$REPO_ROOT/scripts/fleet/config.sh" \
+        && printf "%s %s %s\\n" "$AUTOFLEET_BUILD_MAX_BUDGET_USD" \
+             "$AUTOFLEET_BUILD_TIMEOUT" "$AUTOFLEET_BUILD_MAX_TURNS"' 2>&1)" \
+      || fail "the payload defaults would not load on their own: $out"
+    set -- $out
+    [ "$1" = 15 ] \
+      || fail "the default build budget is \$$1, not the \$15 #154 budgets a night at"
+    echo "ok: the default build budget is \$15"
+    [ "$2" = 7200 ] \
+      || fail "the default build wall clock is [$2], not 7200"
+    echo "ok: ...and a build that spends nothing still ends, at 7200s"
+    [ "$3" = 400 ] || fail "the default turn cap moved to [$3]"
+
+    # ...and the clock is CHECKED, like every other number the dispatcher
+    # compares against: `[ "$age" -ge "$AUTOFLEET_BUILD_TIMEOUT" ]` with a
+    # non-number returns 2, which reads as false, so the deadline never fires
+    # and the knob that exists to end a wedged build silently stops ending it.
+    out="$(env REPO_ROOT="$REPO_ROOT" AUTOFLEET_CONFIG=/dev/null \
+             AUTOFLEET_BUILD_TIMEOUT=soon bash -c \
+      '. "$REPO_ROOT/scripts/fleet/config.sh"' 2>&1)" \
+      && fail "a build wall clock of 'soon' was accepted: $out"
+    grep -q AUTOFLEET_BUILD_TIMEOUT <<<"$out" \
+      || fail "the refusal does not name the knob it refused: $out"
+    echo "ok: ...and a wall clock that is not a number is refused rather than ignored"
+    ;;
+
   build_command)
     # THE SPEC'S CENTRAL ARTEFACT, and nothing asserted it. The issue names the
     # flags exactly and its design notes say `--bare` must not be passed --
