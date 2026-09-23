@@ -1868,6 +1868,106 @@ DRIVER
     echo "ok: ...and the guard still refuses anything outward while it is stopped"
     ;;
 
+  stop_kills_real_build)
+    # THE BUILD THE DRIVER ITSELF STARTED, not one the fixture arranged.
+    #
+    # `stop_now_stops_builds` above plants its own sleeper with
+    # `exec -a "build $dir"`, so the fake build's command line names the build
+    # directory -- which is exactly what `headless_pid_is_ours` greps for, and
+    # exactly what a REAL `runner_build_start` never produced: it recorded `$!`
+    # of the spawn subshell, whose command line is the dispatcher's own
+    # (`fleet.sh run --auto`). The identity check therefore answered no for
+    # every build the dispatcher ever started, the kill was skipped, the pid
+    # file was removed, and `stop --now` printed `stopped the build for #N`
+    # over a `claude -p` that was still running (#163). A fixture that fakes
+    # what the driver cannot produce is a guard that stopped guarding, so this
+    # phase starts the build through `start_build` and asserts on processes.
+    #
+    # #161's wall clock calls this same path, and its timeout must assert the
+    # same thing: that the process is GONE, not that the stop returned 0.
+    make_fixture ok
+    make_worktree
+    # The build command is the fixture's own stub, told to sit there. The sleep
+    # is a GRANDCHILD of what the driver forked -- AUTOFLEET_BUILD_CMD is a
+    # wrapper seam, so that is the shape the kill has to reach.
+    export BUILD_STUB_SLEEP=300
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
+      || fail "the fixture build did not start, so this phase would assert nothing"
+    pid="$(cat "$AUTOFLEET_DIR/builds/42/pid" 2>/dev/null)"
+    [ -n "$pid" ] || fail "the driver recorded no pid for the build it started"
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pgid" ] || fail "the build's pid $pid is not a process"
+    # The whole group has to be up before the stop, or "nothing is left" is a
+    # sentence about a build that never ran.
+    up=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      up="$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)"
+      [ "$up" -ge 2 ] && break
+      sleep 0.3
+    done
+    [ "$up" -ge 2 ] \
+      || fail "the build group $pgid holds $up processes, so the build command never ran"
+
+    in_fleet runner_build_stop "$WORK/wt" >/dev/null 2>&1; rc=$?
+    [ "$rc" = 0 ] || fail "the driver said it could not stop a build it had just started (rc $rc)"
+    left=1
+    for _ in 1 2 3 4 5 6; do
+      left="$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)"
+      [ "$left" = 0 ] && break
+      sleep 0.5
+    done
+    [ "$left" = 0 ] || { pkill -9 -g "$pgid" 2>/dev/null
+      fail "$left processes of the build group $pgid outlived runner_build_stop"; }
+    echo "ok: a build the driver started is gone within three seconds of runner_build_stop"
+
+    # ...and the state reader SAYS it stopped. Without an `rc` the reader has a
+    # worktree file, no rc and no pid, which it reads as `running` -- so a
+    # restarted dispatcher waits out its whole budget on a build that was
+    # killed hours ago.
+    state="$(in_fleet runner_build_state "$WORK/wt" 2>&1)"
+    case "$state" in
+      exited*) ;;
+      *) fail "a stopped build still reads as [$state], so a restarted dispatcher waits on it" ;;
+    esac
+    echo "ok: ...and the state reader reports the stop rather than running forever"
+
+    # WHAT `stop --now` PRINTS IS ABOUT WHAT HAPPENED. Same build, through the
+    # command a person actually types.
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
+      || fail "the second fixture build did not start"
+    pid="$(cat "$AUTOFLEET_DIR/builds/42/pid" 2>/dev/null)"
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pgid" ] || fail "the second build's pid $pid is not a process"
+    out="$(in_fleet cmd_stop --now 2>&1)"
+    grep -q "stopped the build for #42" <<<"$out" \
+      || fail "stop --now did not say it stopped the build: $out"
+    left=1
+    for _ in 1 2 3 4 5 6; do
+      left="$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)"
+      [ "$left" = 0 ] && break
+      sleep 0.5
+    done
+    [ "$left" = 0 ] || { pkill -9 -g "$pgid" 2>/dev/null
+      fail "stop --now said it stopped a build, over $left processes it left running: $out"; }
+    echo "ok: stop --now says stopped only for a build that is gone"
+    in_fleet cmd_resume >/dev/null 2>&1
+    unset BUILD_STUB_SLEEP
+
+    # ...and NAMES THE PID when it could not. A driver that answers `1` and
+    # prints the survivor is the contract; stubbed here because a process this
+    # suite can start is a process it can kill, and the line a person reads
+    # when one cannot be is the thing under test.
+    out="$(in_pass 'runner_build_state() { echo running; }
+                    runner_build_stop() { echo 4242; return 1; }
+                    cmd_stop --now' 2>&1)"
+    grep -q "could not stop the build for #42 (pid 4242 still running)" <<<"$out" \
+      || fail "a stop that failed still read as a stop: $out"
+    grep -q "stopped the build for #42" <<<"$out" \
+      && fail "it said both that it stopped the build and that it could not: $out"
+    echo "ok: ...and names the surviving pid when it could not stop one"
+    in_fleet cmd_resume >/dev/null 2>&1
+    ;;
+
   no_build_command)
     # A MACHINE WITH NO AGENT CLI STILL RUNS EVERY FLEET COMMAND THAT DOES NOT
     # BUILD. `runner_available` asked for the build command for one round, and
