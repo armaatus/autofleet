@@ -193,7 +193,7 @@ reader checking it. The truth is three cases:
 One thing the rule deliberately does not cover: a message about the CALLER being
 malformed is not a runtime failure and goes to stderr — `runner_worktree_set`'s
 rc 2 for a bad pair list is the one that exists. `runner_build_stop` produces no
-failure words at all, because it has no failure: see below.
+failure words at all: its one failure is a pid, not a sentence — see below.
 
 `runner_dispatcher_hint` is the one human-facing string that is runner-specific;
 `fleet.sh`'s usage prints it rather than hardcoding a command line that is wrong
@@ -326,13 +326,38 @@ going red.
   up. `fleet_build_state_of` in `lib.sh` answers it for both drivers from the
   files the command line itself writes, so a driver that has nothing to add
   delegates to it.
-- **`runner_build_stop`** ends the build in one worktree. Silent, idempotent and
-  always 0: every caller reaches it on a path where the worktree is going away
-  regardless, and a driver that reported "there was none" would be describing
-  the ordinary case. It must stop **the whole process group** where it forked
-  one — `AUTOFLEET_BUILD_CMD` is a wrapper seam, so the process holding the
-  credentials is routinely a child of what was forked, and signalling the direct
-  child leaves a full-budget run nobody is counting.
+- **`runner_build_stop`** ends the build in one worktree. Silent and idempotent:
+  every caller reaches it on a path where the worktree is going away regardless,
+  and a driver that reported "there was none" would be describing the ordinary
+  case. 0 means **nothing of that build is still running**; a build that was
+  running and still is answers **non-zero, with the surviving pid on stdout**,
+  and `fleet.sh stop --now` names that pid rather than claiming a stop
+  (armaatus/autofleet#163: it printed `stopped the build for #N` over a
+  `claude -p` that was still there, which is the one line a person reads to
+  decide whether they have to go and kill something by hand). A driver that
+  cannot tell answers 0 — the app-backed one closes a terminal tab and has no pid
+  to check, so the old contract is unchanged for it. It must stop **the whole
+  process group** where it forked one — `AUTOFLEET_BUILD_CMD` is a wrapper seam,
+  so the process holding the credentials is routinely a child of what was
+  forked, and signalling the direct child leaves a full-budget run nobody is
+  counting. And a driver whose handle on the build is a pid it recorded must be
+  able to RECOGNISE that pid later: the headless one records the `bash -c`
+  running the build line, whose command line names the build directory, so that
+  the check guarding against a reused pid number cannot answer no for every
+  build the dispatcher ever started. A driver that killed a build **records the
+  kill** with `fleet_build_mark_stopped`, because the command line writes its own
+  `rc` last and a killed one never reaches that line: without the record the
+  state reader has a worktree, no `rc` and no pid and answers `running` forever.
+  The marker rather than an `rc` of 143 the driver made up — the reader renders
+  it as `exited 143` either way, but `build_exited` has to be able to tell a stop
+  the fleet asked for from a build that died at its budget, and only the latter
+  earns a comment on the issue. A stop of an issue the fleet still owns is
+  recorded as given up on locally (`build_stopped` in fleet.sh), so the slot is
+  released and `fleet.sh retry N` brings it back; a stop the reaper performed
+  gets nothing, since the reaper's own line is the record. On the failure
+  branch the driver **keeps its handle**: the headless one leaves the pid file
+  in place for a pid it has just confirmed alive and its own, so the next stop
+  reaches the same process instead of finding no pid and printing `stopped`.
 
 **Six functions left this contract** with armaatus/autofleet#151:
 `runner_agent_states`, `runner_agent_terminals`, `runner_agent_terminal`,

@@ -432,14 +432,19 @@ card() {
 # wrapper seam, so the process holding the credentials is routinely a child of
 # what was forked.
 #
-# Silent and always 0. A worktree with no build running is the ordinary case on
-# most polls, and a caller that had to tell "no build" from "could not tell"
-# would be the `*_blind` distinction all over again -- except there is no
-# runtime here to be blind to. `runner_build_state` is where that distinction
-# lives, and it is the one the dispatcher reads.
+# Silent about a worktree with no build in it -- the ordinary case on most polls
+# -- and a caller that had to tell "no build" from "could not tell" would be the
+# `*_blind` distinction all over again, except there is no runtime here to be
+# blind to. `runner_build_state` is where that distinction lives, and it is the
+# one the dispatcher reads.
+#
+# NOT ALWAYS 0, though, which is what it used to be. The one answer this does
+# carry is "the build was running and it still is": the driver returns non-zero
+# and prints the surviving pid, and `cmd_stop` prints that instead of claiming a
+# stop that did not happen (#163). A pass-through, because the driver is the
+# only thing that can tell.
 stop_build_in() {
   runner_build_stop "$1"
-  return 0
 }
 
 # --------------------------------------------------------------- the state ---
@@ -3251,7 +3256,7 @@ reap_abandoned() {
       # that is about to go.
       : >"$STATE_DIR/warned-$num"
       say "#$num: $reason, and the worktree holds nothing -- releasing it next pass unless something lands in it"
-      stop_build_in "$path"
+      stop_build_in "$path" >/dev/null || say "#$num: its build would not stop; the removal next pass will race it"
       card "$path" comment "#$num: $reason; this worktree is released next pass unless something lands in it"
       continue
     fi
@@ -3260,7 +3265,7 @@ reap_abandoned() {
     # Stopped again before the removal: a build that somehow restarted would
     # otherwise keep writing into a directory being deleted, and lose its rig
     # with it the moment the removal lands (#163).
-    stop_build_in "$path"
+    stop_build_in "$path" >/dev/null || say "#$num: its build would not stop; removing the worktree anyway"
     # The comment and no status. `completed` is reap_merged's word for work that
     # landed, and this worktree is being released precisely because it did not.
     # Phrased as what it is about to do, not as done: if the removal refuses, this
@@ -3403,9 +3408,57 @@ build_ran_out() {
 # budget the moment it starts -- a bad model name, an expired token -- is an
 # infinite loop that spends the whole account, one session at a time, with the
 # log saying "resuming" forever.
+# THE FLEET STOPPED THIS BUILD, and the two things that stop one want different
+# things afterwards. `reap_abandoned` stops a build whose issue is closed,
+# `blocked` or a human step, and removes the worktree on its next pass: that
+# stop needs nothing said here, and the reaper's own line is the record. A
+# person's `stop --now` (and, once #161 lands, a wall clock) stops the build of
+# an issue that is still the fleet's to work -- and a marker that only ever
+# returned early left that build INVISIBLE: never resumed, its slot never
+# released, `status` showing a worktree with nothing happening in it (the
+# re-review of #164). So it is recorded as given up on, ONCE and LOCALLY: `status`
+# lists it under "gave up on", `retry N` clears it, and the reaper releases the
+# worktree when it holds nothing. No comment on GitHub and no notification: the
+# comment `build_exited` posts says the agent's budget ended, and nobody's did.
+#
+# A lookup that cannot be read decides nothing this poll; the marker stands and
+# the next poll asks again. The same label reading as `reap_abandoned`, so the
+# two never disagree about whose stop this was.
+build_stopped() {
+  local num="$1" path="$2" answer labels
+  gave_up_on "$num" && return 0
+  answer="$(poll_issue "$num")" || return 0
+  [ "$(issue_state_in "$answer")" = CLOSED ] && return 0
+  labels="$(issue_labels_in "$answer")"
+  has_label "$labels" "$BLOCKED_LABEL" && return 0
+  has_label "$labels" "$HUMAN_STEP_LABEL" && return 0
+  : >"$STATE_DIR/gaveup-$num"
+  say "#$num: its build was stopped, not resumed -- ./scripts/fleet/fleet.sh retry $num starts it again"
+  card "$path" comment "#$num: its build was stopped; retry $num starts it again"
+  return 0
+}
+
 build_exited() {
   local num="$1" path="$2" state="$3" dir runs
   dir="$(fleet_build_dir "$num")"
+
+  # WE KILLED THIS ONE, so there is nothing here to notice. Before every other
+  # answer, and before the issue lookups: a stop is the fleet's own decision and
+  # no reading of GitHub can change what it means.
+  #
+  # The stop the reaper's warning pass performs is so that "nothing new is being
+  # written into a directory that is about to go"; `stop --now` is a person
+  # asking for the same thing. Read as an exit like any other, both come back
+  # here on the very next poll as a build that ran out -- and for an issue that
+  # is merely `blocked` or `human-step` rather than closed, that is a `gaveup-`
+  # record, a card, and "The fleet's build agent stopped on this without opening
+  # a pull request" posted to the issue of a build nobody's budget ended
+  # (armaatus/autofleet#163). Silent, and re-entered every poll while the
+  # marker stands, so there is nothing to say once either.
+  if fleet_build_was_stopped "$dir"; then
+    build_stopped "$num" "$path"
+    return 0
+  fi
 
   issue_is_done "$num" && return 0
 
@@ -3993,14 +4046,17 @@ cmd_stop() {
       # `--now` to prevent is spending. What survives is what was committed,
       # which is what survives a build ending at its budget too.
       echo "  stopping builds..."
-      local path dir stopped=0
+      local path dir left stopped=0
       if [ "$mode" = "--all" ]; then
         for dir in "$FLEET_BUILDS"/*; do
           [ -d "$dir" ] || continue
           path="$(cat "$dir/worktree" 2>/dev/null)" || continue
           [ -n "$path" ] || continue
-          runner_build_stop "$path"
-          echo "    stopped the build in $path"
+          if left="$(runner_build_stop "$path")"; then
+            echo "    stopped the build in $path"
+          else
+            echo "    could not stop the build in $path (pid ${left:-unknown} still running)"
+          fi
           stopped=$((stopped + 1))
         done
       else
@@ -4013,8 +4069,16 @@ cmd_stop() {
           # which on an idle fleet is a screen of stops that did not occur.
           # Found by the local `/code-review` pass.
           [ "$(runner_build_state "$path" 2>/dev/null)" = running ] || continue
-          stop_build_in "$path"
-          echo "    stopped the build for #$(basename "$f")"
+          # SAID AFTER THE FACT, and only about what happened. This printed
+          # `stopped the build for #N` over a `claude -p` that was still
+          # running for as long as the driver's identity check answered no --
+          # the one line a person reads to decide whether they have to go and
+          # kill something by hand (#163).
+          if left="$(stop_build_in "$path")"; then
+            echo "    stopped the build for #$(basename "$f")"
+          else
+            echo "    could not stop the build for #$(basename "$f") (pid ${left:-unknown} still running)"
+          fi
           stopped=$((stopped + 1))
         done
       fi

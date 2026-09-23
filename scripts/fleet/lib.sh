@@ -379,7 +379,7 @@ fleet_build_started() {
     while [ -e "$dir/runs/$n.json" ]; do n=$((n + 1)); done
     mv "$dir/result.json" "$dir/runs/$n.json" 2>/dev/null || true
   fi
-  rm -f "$dir/rc" "$dir/result.json" "$dir/pid"
+  rm -f "$dir/rc" "$dir/result.json" "$dir/pid" "$dir/stopped"
   printf '%s\n' "$path" >"$dir/worktree"
   printf '%s\n' "$issue" >"$FLEET_BUILDS/by-path/$(fleet_build_key "$path")"
 }
@@ -391,6 +391,27 @@ fleet_build_started() {
 fleet_build_forget_path() {
   rm -f "$FLEET_BUILDS/by-path/$(fleet_build_key "$1")"
 }
+
+# THE FLEET KILLED THIS BUILD, which is not the same event as a build that
+# ended at its budget, and the difference is the one `build_exited` acts on: a
+# build that ran out with no PR gets a `gaveup-` record and a comment on its
+# issue, and a build the fleet stopped on purpose -- `reap_abandoned`'s warning
+# pass, `stop --now` -- has to get neither. So the stop leaves a MARKER beside
+# `rc` rather than a plausible `rc` of its own: the state reader renders it, so
+# a restarted dispatcher does not wait forever on a build that was killed hours
+# ago, and the dispatcher can still tell the two apart (armaatus/autofleet#163;
+# writing `rc` 143 here made them indistinguishable, which was the second wrong
+# answer the review of that PR caught). Cleared by `fleet_build_started`, with
+# the `rc` of the run it replaces.
+# What the dispatcher does with the marker is `build_stopped` in fleet.sh: a
+# reaper-owned issue gets nothing, any other is recorded as given up on, so the
+# slot is released and `retry` brings it back.
+#
+# 143 is what a shell reports for a process ended by SIGTERM, which is what
+# `fleet_kill_group` sends first -- so the rendering is the true exit status,
+# and only the REASON is what the marker adds.
+fleet_build_mark_stopped() { : >"$1/stopped"; }
+fleet_build_was_stopped() { [ -e "$1/stopped" ]; }
 
 # `running`, or `exited <rc>`. Non-zero when there is no build here to describe
 # -- which is a different answer from "not running", and conflating the two is
@@ -415,6 +436,10 @@ fleet_build_state_of() {
   [ -d "$dir" ] || return 1
   rc="$(cat "$dir/rc" 2>/dev/null)"
   if [ -n "$rc" ]; then printf 'exited %s\n' "$rc"; return 0; fi
+  # AFTER the real `rc` and before the pid: a build that finished between the
+  # kill and this read wrote the true answer and it wins, and a build the fleet
+  # killed has no pid left to ask about -- `runner_build_stop` removes the file.
+  if fleet_build_was_stopped "$dir"; then printf 'exited 143\n'; return 0; fi
   pid="$(cat "$dir/pid" 2>/dev/null)"
   if [ -n "$pid" ]; then
     kill -0 "$pid" 2>/dev/null && { printf 'running\n'; return 0; }
