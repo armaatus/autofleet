@@ -3297,6 +3297,45 @@ prune_gaveup() {
   done
 }
 
+# THE BUILD'S WALL CLOCK, asked once per running build per poll. 0 when the
+# build has been stopped and the caller should now read its exit; non-zero when
+# there is nothing to do -- inside its clock, an age that cannot be told, or a
+# stop that did not stop.
+#
+# STOPPED THROUGH THE RUNNER CONTRACT rather than with a signal of its own. The
+# Orca driver has no pid to aim at, so a build is stopped the way it is started;
+# `stop_build_in` is the same call `cmd_stop --now` makes, and its answer means
+# the same thing here -- 0 is "nothing of that build is left", non-zero prints
+# the pid that survived (#163). A clock that assumed the kill worked would
+# record a build still holding its worktree as given up on, and the reaper would
+# then take the worktree out from under it.
+#
+# NO `rc` AND NO `gaveup-` WRITTEN HERE. The stop leaves a `stopped` marker, the
+# state reader renders it, and `build_exited` routes it to `build_stopped` --
+# which is what records the issue as given up on, once, locally, without
+# commenting on GitHub. A build the fleet stopped on purpose is not a build that
+# ran out of budget, and the marker is what keeps those two apart (#164). So the
+# only thing this adds to that path is the line saying which bound ended it.
+build_over_clock() {
+  local num="$1" path="$2" age dir left
+  age="$(fleet_build_age_of "$path")" || return 1
+  [ "$age" -ge "$AUTOFLEET_BUILD_TIMEOUT" ] || return 1
+  if left="$(stop_build_in "$path")"; then
+    # THE MARKER IS WRITTEN HERE TOO, and idempotently: the headless driver
+    # already wrote one, and a driver whose stop leaves no record at all --
+    # Orca's interrupts and closes, and has no `rc` to write -- would otherwise
+    # leave the build reading `running` after a stop that worked, so this clock
+    # would fire again every poll for the rest of the night.
+    dir="$(fleet_build_dir_for_path "$path")" && fleet_build_mark_stopped "$dir"
+    say "#$num: its build passed the ${AUTOFLEET_BUILD_TIMEOUT}s wall clock (${age}s) and was stopped"
+    return 0
+  fi
+  # Said every poll, deliberately: a build that outlives its kill is holding a
+  # worktree the fleet believes it can stop, and the stop is retried each pass.
+  say "#$num: its build passed the ${AUTOFLEET_BUILD_TIMEOUT}s wall clock (${age}s) and would not stop (pid ${left:-unknown} still running) -- trying again next poll"
+  return 1
+}
+
 # -------------------------------------------------------- the build's exit ---
 # THREE WATCHERS BECAME ONE, and the reason is the whole of
 # armaatus/autofleet#151.
@@ -3310,10 +3349,19 @@ prune_gaveup() {
 # at `--max-turns` or `--max-budget-usd`. So the dispatcher's whole job here is
 # to notice that it ended and say which way.
 #
-# The wall clock is gone with them, and that is a deliberate loss rather than an
-# oversight: a build that is cheap and slow was never the problem -- #71 spent
-# 65M tokens inside one three-hour box and the box is what let it. Turns and
-# dollars bound the thing that actually costs.
+# The three-hour time-box went with them and is not coming back: a build that is
+# cheap and slow was never the problem -- #71 spent 65M tokens inside one
+# three-hour box and the box is what let it. Turns and dollars bound the thing
+# that actually costs.
+#
+# WHAT CAME BACK IS A CLOCK FOR THE BUILD THAT COSTS NOTHING (#161). Turns and
+# dollars only end a run that is still SPENDING; a build wedged on a network
+# read that never returns, or on a runtime that stopped answering, reaches
+# neither, and reads `running` for as long as the dispatcher lives -- one
+# worktree and one of AUTOFLEET_MAX slots, held until a person notices. That is
+# the first unattended night's failure, so `build_over_clock` below is the third
+# bound. It is two hours by default, not three, and it is not a box: nothing
+# about it is meant to be reached by a build that is working.
 notice_build_exit() {
   local f num path state
   for f in "$OWNED_DIR"/*; do
@@ -3331,7 +3379,15 @@ notice_build_exit() {
       continue
     fi
     rm -f "$STATE_DIR/build-blind-$num"
-    case "$state" in running) continue ;; esac
+    if [ "$state" = running ]; then
+      build_over_clock "$num" "$path" || continue
+      # RE-READ RATHER THAN ASSUMED. The stop records the kill through
+      # `fleet_build_mark_stopped`, and the state reader is the one thing that
+      # turns that record into a state -- a `143` invented here would be a
+      # second implementation of the same answer, and the one that drifts.
+      state="$(runner_build_state "$path")" || continue
+      [ "$state" = running ] && continue
+    fi
     build_exited "$num" "$path" "$state"
   done
 }

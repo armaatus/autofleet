@@ -1132,7 +1132,7 @@ hold_pidfile_with_dispatcher() {
   # A stand-in ps would not recognise makes every assertion after it vacuous --
   # the fleet would answer "no dispatcher" for the ordinary reason and the
   # phases that assert a refusal would pass without one.
-  ps -o command= -p "$HELD_PID" 2>/dev/null | grep -q 'fleet\.sh run' \
+  grep -q 'fleet\.sh run' <<<"$(ps -o command= -p "$HELD_PID" 2>/dev/null)" \
     || fail "the stand-in dispatcher does not look like one to ps; every assertion below would be vacuous"
 }
 
@@ -1150,7 +1150,7 @@ hold_pidfile_with_stranger() {
   HELD_PID=$!
   disown "$HELD_PID" 2>/dev/null
   hold_pidfile "$HELD_PID"
-  ps -o command= -p "$HELD_PID" 2>/dev/null | grep -q 'fleet\.sh' \
+  grep -q 'fleet\.sh' <<<"$(ps -o command= -p "$HELD_PID" 2>/dev/null)" \
     && fail "the stranger looks like a dispatcher; the phase would assert nothing"
   return 0
 }
@@ -2096,6 +2096,135 @@ DRIVER
     grep -q "AUTOFLEET_BUILD_CMD" <<<"$out" \
       || fail "it did not name the knob that sets it, which is the only way to fix it: $out"
     echo "ok: ...and a launch that cannot build says which command is missing"
+    ;;
+
+  build_timeout)
+    # A BUILD THAT NEVER WRITES AN `rc` IS KILLED ON A CLOCK (#161). Turns and
+    # dollars end a build that is still spending; this phase is the one that
+    # spends nothing -- the stub is told to sit there -- so without the clock
+    # `notice_build_exit` reads `running` forever and the slot never comes back.
+    #
+    # STARTED THROUGH `start_build`, and asserted on PROCESSES. The shape is
+    # `stop_kills_real_build` above and its reason is #163: a fixture that
+    # plants its own sleeper proves the stop RETURNED 0, which is what the
+    # broken kill also did. What has to be true here is that the build's
+    # process group is GONE.
+    make_fixture ok
+    make_worktree
+    add_origin
+    quiet_issue
+    export BUILD_STUB_SLEEP=300
+    in_fleet start_build 42 "$WORK/wt" >/dev/null 2>&1 \
+      || fail "the fixture build did not start, so this phase would assert nothing"
+    pid="$(cat "$AUTOFLEET_DIR/builds/42/pid" 2>/dev/null)"
+    [ -n "$pid" ] || fail "the driver recorded no pid for the build it started"
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$pgid" ] || fail "the build's pid $pid is not a process"
+    up=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      up="$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)"
+      [ "$up" -ge 2 ] && break
+      sleep 0.3
+    done
+    [ "$up" -ge 2 ] \
+      || fail "the build group $pgid holds $up processes, so the build command never ran"
+
+    # A BUILD INSIDE ITS CLOCK IS LEFT ALONE, first -- a timeout that fires on
+    # every running build is not a timeout, it is an outage, and it would pass
+    # every assertion below.
+    out="$(in_pass 'AUTOFLEET_BUILD_TIMEOUT=7200; notice_build_exit' 2>&1)"
+    grep -q "wall clock" <<<"$out" \
+      && fail "a build two seconds old was stopped on a two-hour clock: $out"
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      && fail "a build inside its clock was recorded as given up on: $out"
+    [ "$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)" -ge 2 ] \
+      || fail "a build inside its clock was killed anyway"
+    echo "ok: a build inside its wall clock is left running"
+
+    # ...and past it, it is gone. One second, and the build is older than that.
+    sleep 2
+    : >"$GH_CALLS"
+    out="$(in_pass 'AUTOFLEET_BUILD_TIMEOUT=1; notice_build_exit' 2>&1)"
+    left=1
+    for _ in 1 2 3 4 5 6; do
+      left="$(pgrep -g "$pgid" 2>/dev/null | grep -c . || true)"
+      [ "$left" = 0 ] && break
+      sleep 0.5
+    done
+    [ "$left" = 0 ] || { pkill -9 -g "$pgid" 2>/dev/null
+      fail "$left processes of the build group $pgid outlived the wall clock: $out"; }
+    echo "ok: ...and a build past it is gone, process group and all"
+
+    grep -q "wall clock" <<<"$out" \
+      || fail "the log does not say the build ran out of clock: $out"
+    echo "ok: ...and fleet.log says which bound ended it"
+
+    # THE SAME STATE A TURNS OR BUDGET EXHAUSTION LANDS IN, so `status` and
+    # `retry` need no branch of their own -- and no GitHub comment, because the
+    # fleet stopped this build itself (the `stopped` marker path, #164).
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      || fail "a build the clock killed is not recorded as given up on: $out"
+    grep -q "retry 42" <<<"$out" \
+      || fail "the log does not say how to hand the issue back: $out"
+    grep -q "issue comment" "$GH_CALLS" \
+      && fail "it commented on GitHub about a build the fleet itself stopped: $(cat "$GH_CALLS")"
+    echo "ok: ...and the issue shows under gave up on, locally and once"
+    unset BUILD_STUB_SLEEP
+
+    # A STOP THAT DID NOT STOP IS NOT A TIMEOUT THAT FIRED. The driver answers
+    # non-zero with the surviving pid on stdout (docs/RUNNERS.md), and the clock
+    # reads that answer rather than assuming the kill worked -- otherwise a
+    # build still holding the worktree is recorded as given up on and the
+    # worktree is released out from under it.
+    rm -f "$AUTOFLEET_DIR/gaveup-42"
+    out="$(in_pass 'AUTOFLEET_BUILD_TIMEOUT=1
+                    fleet_build_age_of() { echo 9999; }
+                    runner_build_state() { echo running; }
+                    runner_build_stop() { echo 4242; return 1; }
+                    notice_build_exit' 2>&1)"
+    grep -q 4242 <<<"$out" \
+      || fail "the clock did not name the pid that outlived its stop: $out"
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      && fail "a build that is still running was recorded as given up on: $out"
+    echo "ok: ...and a build that would not stop is named, not written off"
+    ;;
+
+  build_bounds)
+    # THE THREE NUMBERS A BUILD ENDS ON, read from the payload defaults rather
+    # than from this repository's `.autofleet/config` -- `AUTOFLEET_CONFIG` is
+    # pointed at nothing so what is asserted is what a fresh host inherits.
+    #
+    # The budget is #154's cost target, which is 15 and not the 25 that was a
+    # first guess; the wall clock is #161's, and is the third bound because the
+    # other two only end a build that is still spending. A build wedged on a
+    # prompt spends nothing and reaches neither.
+    out="$(env -u AUTOFLEET_BUILD_MAX_BUDGET_USD -u AUTOFLEET_BUILD_TIMEOUT \
+             -u AUTOFLEET_BUILD_MAX_TURNS \
+             REPO_ROOT="$REPO_ROOT" AUTOFLEET_CONFIG=/dev/null bash -c \
+      '. "$REPO_ROOT/scripts/fleet/config.sh" \
+        && printf "%s %s %s\\n" "$AUTOFLEET_BUILD_MAX_BUDGET_USD" \
+             "$AUTOFLEET_BUILD_TIMEOUT" "$AUTOFLEET_BUILD_MAX_TURNS"' 2>&1)" \
+      || fail "the payload defaults would not load on their own: $out"
+    set -- $out
+    [ "$1" = 15 ] \
+      || fail "the default build budget is \$$1, not the \$15 #154 budgets a night at"
+    echo "ok: the default build budget is \$15"
+    [ "$2" = 7200 ] \
+      || fail "the default build wall clock is [$2], not 7200"
+    echo "ok: ...and a build that spends nothing still ends, at 7200s"
+    [ "$3" = 400 ] || fail "the default turn cap moved to [$3]"
+
+    # ...and the clock is CHECKED, like every other number the dispatcher
+    # compares against: `[ "$age" -ge "$AUTOFLEET_BUILD_TIMEOUT" ]` with a
+    # non-number returns 2, which reads as false, so the deadline never fires
+    # and the knob that exists to end a wedged build silently stops ending it.
+    out="$(env REPO_ROOT="$REPO_ROOT" AUTOFLEET_CONFIG=/dev/null \
+             AUTOFLEET_BUILD_TIMEOUT=soon bash -c \
+      '. "$REPO_ROOT/scripts/fleet/config.sh"' 2>&1)" \
+      && fail "a build wall clock of 'soon' was accepted: $out"
+    grep -q AUTOFLEET_BUILD_TIMEOUT <<<"$out" \
+      || fail "the refusal does not name the knob it refused: $out"
+    echo "ok: ...and a wall clock that is not a number is refused rather than ignored"
     ;;
 
   build_command)
@@ -5282,8 +5411,9 @@ GITSTUB
     # different repositories. Found by the local review.
     printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
     in_fleet_at "$WORK/wt2" launch 4 "a title" >/dev/null 2>&1
-    grep "^worktree create" "$ORCA_CALLS" | grep -q -- "--repo path:$WORK/repo" \
-      || fail "the create names the caller's checkout, not the repository root: $(grep '^worktree create' "$ORCA_CALLS")"
+    creates="$(grep "^worktree create" "$ORCA_CALLS" || true)"
+    grep -q -- "--repo path:$WORK/repo" <<<"$creates" \
+      || fail "the create names the caller's checkout, not the repository root: $creates"
     echo "ok: creating a worktree scopes to the repository root, from a worktree too"
     ;;
 

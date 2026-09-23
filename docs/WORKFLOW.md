@@ -1062,11 +1062,11 @@ the reason in Stage 6.
 |---|---|---|
 | `fleet.sh run` opens nothing | the stop file is set | `./scripts/fleet/fleet.sh resume` |
 | `fleet.sh status` shows no next issue | everything `ready` is already in flight | merge something, or file work |
-| ...and `status` lists the issue you want under "gave up on" | its build ran out of turns or budget, and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
+| ...and `status` lists the issue you want under "gave up on" | its build ran out of turns, of budget or of `AUTOFLEET_BUILD_TIMEOUT` — the wall clock that ends a build which is wedged rather than spending — and the fleet will not start it again on its own | `./scripts/fleet/fleet.sh retry <n>` |
 | Worktree provisioned, nothing building in it | the build command would not start — a bad `AUTOFLEET_BUILD_CMD`, or no credentials | the launch says so in `fleet.log`; the run's own words are in `$AUTOFLEET_DIR/builds/<n>/build.log` |
 | Every hook says "this worktree has no linked issue" | the `orca` CLI on `PATH` cannot find `Orca.app` | nothing — the hooks probe it and fall back. If it persists: `sudo chmod -h 755 /usr/local/bin/orca` |
 | `gh pr review` refused, "an agent does not submit the independent review of its own pull request" | the review is the dispatcher's | nothing — the dispatcher runs it, and the agent's job ended at the open PR |
-| `await-review.sh` times out | the review job never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | `gh run list`; check `CLAUDE_CODE_OAUTH_TOKEN` is a repo secret |
+| `await-review.sh` times out | the review never ran. Any other reason the wait had — records the gate discounts, a review already handed back, an unpushed worktree — it printed the moment it found it | the review is not a workflow: `scripts/fleet/review.sh`, started by the dispatcher's own poll. Read `fleet.log`, and the run's own words in `$AUTOFLEET_DIR/reviews/pr-<n>-<sha>.log` |
 | `await-review.sh` exits 2, naming `merge_gate.py` | that file is what decides which reviews count, and it does not import | fix the syntax or the missing name; nothing in the loop can answer until it does |
 | `await-review.sh` exits 4, "moved to &lt;sha&gt;" | the head moved while it waited | nothing — the verdict that matters is the one on the new head, and the dispatcher re-reviews it |
 | `merge-gate` red on a PR that looks fine | usually the body has no `Closes #N`, or the verdict predates the last push | read the check's output; it says which of the three |

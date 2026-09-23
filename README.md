@@ -75,7 +75,7 @@ Then tell it about your project — the four files the installer seeds:
 | `.autofleet/config` | Ports, compose file, test command, labels, concurrency. |
 | `.autofleet/setup.sh` | What a fresh worktree needs before work can start. |
 | `.autofleet/guard.json` | Paths and secrets the guard hook must refuse to write. |
-| `orca.yaml` | Orca's own hooks, for worktrees a person opens by hand. Optional. |
+| `orca.yaml` | Orca's own hooks, for worktrees a person opens by hand. Seeded like the three above; optional to fill in, because the default driver is headless and never reads it. |
 
 Nothing in `scripts/fleet/` knows about your project. See
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).

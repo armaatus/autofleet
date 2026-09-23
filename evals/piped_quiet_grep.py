@@ -23,10 +23,20 @@ import sys
 # may not fix. It is armaatus/autofleet#90 instead, and CLAUDE.md says what is
 # scanned rather than claiming the payload has none. Found by the independent
 # review.
+#
+# `tests/*.sh` is here too, and is not payload: it is where the hazard has most
+# recently SHIPPED -- test_docs.sh went in with an assertion whose silent
+# direction made a new guard report PASS on the regression it was added to
+# catch, and the scan could not say so because it did not look. A suite is
+# assertions, which is the one thing this class turns into a lie, and
+# `evals/run.sh` already shellchecks the same files. On a host the glob is the
+# host's own suite, and a real hazard there is a real one. Found by the
+# independent review of #165.
 PATTERNS = (
     "scripts/fleet/*.sh",
     "scripts/fleet/runner/*.sh",
     "evals/*.sh",
+    "tests/*.sh",
     ".github/scripts/*.sh",
     ".claude/hooks/*.sh",
     "install.sh",

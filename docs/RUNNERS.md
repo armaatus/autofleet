@@ -316,9 +316,10 @@ going red.
   running is success, not an error**: the dispatcher calls this to make sure one
   is up, and two `claude -p` in one worktree is two agents editing one tree. It
   must call `fleet_build_started` before it starts anything — that is what
-  clears the previous run's verdict and writes the path index `runner_build_state`
-  reads, and a driver that skips it reports a build that has just started as
-  already finished.
+  clears the previous run's verdict, writes the path index `runner_build_state`
+  reads and stamps the run's start for the wall clock below; a driver that skips
+  it reports a build that has just started as already finished, and one the
+  clock can never end.
 - **`runner_build_state`** prints `running` or `exited <rc>`, and is non-zero
   when there is no build here to describe. That third answer is not decoration:
   "I could not tell" and "it has stopped" lead the dispatcher to opposite
@@ -402,9 +403,20 @@ Named here rather than left to be discovered:
 - One worktree, one directory on this machine, at a path the dispatcher can
   `stat`. `runner_worktree_remove` is judged on that directory being gone.
 - The build is a command that ENDS. `fleet_build_command_line` bounds it with
-  `--max-turns` and `--max-budget-usd`; a runtime whose agent cannot be given a
-  budget has nothing to stop it, and the dispatcher no longer carries a wall
-  clock to stop it with.
+  `--max-turns` and `--max-budget-usd`, and the dispatcher's poll carries a
+  third bound those two cannot be: past `AUTOFLEET_BUILD_TIMEOUT` seconds — two
+  hours by default — a build that has still written no `rc` is stopped through
+  `runner_build_stop` and lands in the state a turns or budget exhaustion lands
+  in, so `fleet.sh status` shows it under "gave up on" and `retry N` starts it
+  again. Turns and dollars only end a run that is still SPENDING; a wedged one
+  spends nothing, and on a runtime whose agent cannot be given a budget at all
+  the wall clock is the only thing that ends a build.
+
+  Two things it asks of a driver, both already in the contract above. Its stop
+  is `runner_build_stop`, so a driver with no pid to signal is stopped the way
+  it is started; and it believes that call's answer — a non-zero return names a
+  surviving pid in `fleet.log` and the build is left alone and tried again next
+  poll, rather than being written off while it still holds its worktree.
 - The worktree's setup and archive hooks are wired somewhere. `orca.yaml` is
   where the app-backed driver does it; the headless driver has no hook
   mechanism at all, and `setup.sh` runs from `runner_worktree_create`'s caller

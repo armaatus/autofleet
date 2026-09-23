@@ -23,6 +23,20 @@
 #                              would write. It printed "would add ..." followed
 #                              by "Nothing was written", and a real run reported
 #                              "0 written" having just edited a host-owned file.
+#
+# The other thing an upgrade does to a host is REMOVE -- `install.sh`'s RETIRED
+# list, the files a v1 install left behind that v2 does not ship. That is a
+# delete on somebody else's machine, so it gets the same two phases the append
+# does:
+#
+#   test_install.sh retires       the v1 workflows are gone and named, the host's
+#                                 own workflows are untouched, and a re-run
+#                                 announces nothing.
+#   test_install.sh retires_dry   --dry-run deletes nothing and still says which
+#                                 file it would delete.
+#   test_install.sh retires_alien a file at a retired PATH that autofleet did
+#                                 not write is kept, said, and removed only on
+#                                 --force.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -78,6 +92,25 @@ GHSTUB
 }
 
 install_it() { (cd "$WORK/host" && "$REPO_ROOT/install.sh" "$@" . 2>&1); }
+
+# WHAT A v1 INSTALL LEFT ON THE HOST, written the way autofleet wrote it. Not a
+# stand-in string: `install.sh`'s RETIRED list removes a path only when the file
+# THERE carries the markers every revision autofleet shipped of it carried, so a
+# fixture with `name: x` in it would prove the keep, never the removal. These
+# two lines are those markers; they are what `git show <v1>:.github/workflows/`
+# has at the top of each file.
+v1_workflows() {
+  mkdir -p "$WORK/host/.github/workflows"
+  for w in review validate; do
+    cat >"$WORK/host/.github/workflows/${w/review/claude-review}.yml" <<YML
+name: claude $w
+jobs:
+  $w:
+    steps:
+      - uses: anthropics/claude-code-action@v1
+YML
+  done
+}
 
 has_line() { grep -qxF -- "$1" "$WORK/host/.gitignore"; }
 
@@ -176,5 +209,92 @@ case "${1:-}" in
   ok "...and counts them, so the summary is not a contradiction"
   ;;
 
-  *) echo "usage: $0 {ignores|idempotent|dry}" >&2; exit 2 ;;
+  retires)
+  # WHAT A v1 INSTALL LEFT BEHIND. `claude-review.yml` and `validate.yml`
+  # shipped in PAYLOAD until armaatus/autofleet#152 and do not any more -- and
+  # an upgrade that only ever COPIES leaves both on the host, running. A host
+  # with `claude-review.yml` still on it gets two reviews per pull request in
+  # two verdict formats, one of them from a rule set nothing updates; that is
+  # armaatus/rommsync-nx today, which is the host #154 opens its first night on.
+  # Dropping a path out of PAYLOAD is not a removal, and the comment in
+  # install.sh that says why they are gone is what this list makes executable.
+  make_host
+  v1_workflows
+  # ...and the host's OWN workflow, which the installer has no business touching.
+  printf 'name: ci\n' >"$WORK/host/.github/workflows/ci.yml"
+
+  out="$(install_it)" || fail "install.sh failed: $out"
+
+  for w in claude-review validate; do
+    [ -e "$WORK/host/.github/workflows/$w.yml" ] \
+      && fail "$w.yml is still on the host, so it still runs: $out"
+    grep -qF ".github/workflows/$w.yml" <<<"$out" \
+      || fail "install.sh removed $w.yml without saying so: $out"
+  done
+  ok "the v1 workflows are removed from the host, and named"
+
+  [ -e "$WORK/host/.github/workflows/ci.yml" ] \
+    || fail "install.sh removed a workflow that was the host's own"
+  ok "...and the host's own workflows are untouched"
+
+  # A SECOND RUN SAYS NOTHING. They are gone; an installer that announces a
+  # removal it did not make is one nobody can read the output of.
+  out="$(install_it)" || fail "the second install failed: $out"
+  grep -qF '.github/workflows/claude-review.yml' <<<"$out" \
+    && fail "the second run announced a removal of a file that was already gone: $out"
+  ok "...and a re-run announces nothing"
+  ;;
+
+  retires_dry)
+  # --dry-run ANNOUNCES AND LEAVES. Same rule the copy follows: a dry run that
+  # deletes is the worst possible reading of the flag, and one that stays silent
+  # about what it would delete is the bug f5817b8 fixed for the seeds.
+  make_host
+  v1_workflows
+
+  out="$(install_it --dry-run)" || fail "--dry-run failed: $out"
+
+  [ -e "$WORK/host/.github/workflows/claude-review.yml" ] \
+    || fail "--dry-run deleted a file from the host: $out"
+  ok "--dry-run removes nothing"
+
+  grep -qF 'would remove .github/workflows/claude-review.yml' <<<"$out" \
+    || fail "--dry-run does not say which file it would remove: $out"
+  ok "...and still says which file it would remove"
+  ;;
+
+  retires_alien)
+  # A FILE AT A RETIRED PATH THAT AUTOFLEET DID NOT WRITE. `validate.yml` is a
+  # name anybody would pick, and a host that never installed v1 -- or that has
+  # since replaced the file -- has its own lint workflow sitting there. An
+  # upgrade that removes it on the strength of the NAME deletes the host's work
+  # on an ordinary `./install.sh /path/to/host`, announced by one line in a long
+  # output; and if that copy is untracked, nothing brings it back. Found by the
+  # independent review of #165.
+  make_host
+  mkdir -p "$WORK/host/.github/workflows"
+  mine="$WORK/host/.github/workflows/validate.yml"
+  printf 'name: validate\njobs:\n  lint:\n    steps:\n      - run: make lint\n' >"$mine"
+
+  out="$(install_it)" || fail "install.sh failed: $out"
+
+  [ -e "$mine" ] \
+    || fail "install.sh deleted a workflow it did not write: $out"
+  ok "a host's own file at a retired path survives the upgrade"
+
+  grep -qF 'differs (kept): .github/workflows/validate.yml' <<<"$out" \
+    || fail "install.sh kept the host's file without saying so: $out"
+  grep -qF -- '--force' <<<"$out" \
+    || fail "the keep does not say how to remove it anyway: $out"
+  ok "...and is named, with the way to remove it anyway"
+
+  # ...and --force is that way. The host asked for it in as many words, which is
+  # the same bar `copy_one` sets for overwriting a file that differs.
+  out="$(install_it --force)" || fail "--force failed: $out"
+  [ -e "$mine" ] \
+    && fail "--force did not remove the retired path: $out"
+  ok "...and --force removes it"
+  ;;
+
+  *) echo "usage: $0 {ignores|idempotent|dry|retires|retires_dry|retires_alien}" >&2; exit 2 ;;
 esac
