@@ -56,3 +56,11 @@ AUTOFLEET_MAX=2
 # in as the account that opened the pull request. GitHub refuses `--approve` on
 # your own PR, so the verdict arrives as a COMMENTED review carrying the marker
 # `merge_gate.py` reads. docs/CONFIGURATION.md has the row.
+
+# EVERY FLEET-OWNED CLAUDE IS OPUS. Without these, `claude -p` inherits the
+# model from ~/.claude/settings.json -- the maintainer's interactive choice --
+# and a build ran on Fable on 2026-09-23 for that reason. The wrapper is one
+# word so review.sh's quoted invocation of the seam still works; $REPO_ROOT is
+# set by config.sh before this file is sourced.
+AUTOFLEET_BUILD_CMD="$REPO_ROOT/.autofleet/claude-opus"
+AUTOFLEET_REVIEW_CMD="$REPO_ROOT/.autofleet/claude-opus"
