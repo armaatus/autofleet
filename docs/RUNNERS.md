@@ -351,7 +351,13 @@ going red.
   The marker rather than an `rc` of 143 the driver made up — the reader renders
   it as `exited 143` either way, but `build_exited` has to be able to tell a stop
   the fleet asked for from a build that died at its budget, and only the latter
-  earns a `gaveup-` record and a comment on the issue.
+  earns a comment on the issue. A stop of an issue the fleet still owns is
+  recorded as given up on locally (`build_stopped` in fleet.sh), so the slot is
+  released and `fleet.sh retry N` brings it back; a stop the reaper performed
+  gets nothing, since the reaper's own line is the record. On the failure
+  branch the driver **keeps its handle**: the headless one leaves the pid file
+  in place for a pid it has just confirmed alive and its own, so the next stop
+  reaches the same process instead of finding no pid and printing `stopped`.
 
 **Six functions left this contract** with armaatus/autofleet#151:
 `runner_agent_states`, `runner_agent_terminals`, `runner_agent_terminal`,

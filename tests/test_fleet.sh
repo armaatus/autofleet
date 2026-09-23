@@ -1968,6 +1968,58 @@ DRIVER
     in_fleet cmd_resume >/dev/null 2>&1
     ;;
 
+  stop_then_gaveup)
+    # A stop of a build whose issue is still the fleet's to work -- `stop --now`,
+    # a wall clock -- is recorded as given up on, once, with no GitHub comment:
+    # a marker that only returned early left the build invisible for good
+    # (#164's re-review).
+    make_fixture ok
+    make_worktree
+    add_origin
+    quiet_issue
+    build_running
+    in_fleet runner_build_stop "$WORK/wt" >/dev/null 2>&1
+    wait "$BUILD_SLEEPER" 2>/dev/null
+    [ -e "$AUTOFLEET_DIR/builds/42/stopped" ] \
+      || fail "the stop left no marker, so this phase asserts nothing about the poll after it"
+    : >"$GH_CALLS"
+    out="$(in_pass 'notice_build_exit' 2>&1)"
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      || fail "a stopped build of a ready issue was not recorded as given up on, so nothing restarts or frees it: $out"
+    grep -q "retry 42" <<<"$out" \
+      || fail "the log does not say how to hand the issue back: $out"
+    grep -q "issue comment" "$GH_CALLS" \
+      && fail "it commented on GitHub about a build the fleet itself stopped: $(cat "$GH_CALLS")"
+    grep -q "ran out" <<<"$out" \
+      && fail "the log calls a deliberate stop a build that ran out: $out"
+    echo "ok: a stopped build of a ready issue is given up on, locally and once"
+    out="$(in_pass 'notice_build_exit' 2>&1)"
+    grep -q "retry 42" <<<"$out" \
+      && fail "the second poll said it again: $out"
+    echo "ok: ...and the next poll says nothing more"
+    ;;
+
+  stop_keeps_pid_when_alive)
+    # When the kill does not take, the pid file is the only handle left, and
+    # removing it is how the NEXT stop prints "stopped" over the same process.
+    make_fixture ok
+    make_worktree
+    build_running
+    out="$(in_pass 'fleet_kill_group() { :; }; runner_build_stop "'"$WORK/wt"'"' 2>&1)"; rc=$?
+    [ "$rc" != 0 ] || { kill -9 "$BUILD_SLEEPER" 2>/dev/null; fail "a stop that killed nothing returned 0: $out"; }
+    [ "$out" = "$BUILD_SLEEPER" ] || { kill -9 "$BUILD_SLEEPER" 2>/dev/null; fail "it did not name the surviving pid $BUILD_SLEEPER: [$out]"; }
+    [ -e "$AUTOFLEET_DIR/builds/42/pid" ] || { kill -9 "$BUILD_SLEEPER" 2>/dev/null
+      fail "the pid file was removed for a build that is still running"; }
+    [ -e "$AUTOFLEET_DIR/builds/42/stopped" ] && { kill -9 "$BUILD_SLEEPER" 2>/dev/null
+      fail "a build that survived the kill was marked stopped"; }
+    echo "ok: a stop that did not take keeps the pid and marks nothing"
+    in_fleet runner_build_stop "$WORK/wt" >/dev/null 2>&1; rc=$?
+    wait "$BUILD_SLEEPER" 2>/dev/null
+    [ "$rc" = 0 ] || fail "the second stop, with a real kill, still failed (rc $rc)"
+    [ -e "$AUTOFLEET_DIR/builds/42/pid" ] && fail "the pid file outlived a stop that worked"
+    echo "ok: ...and the next stop reaches the same process and clears the handle"
+    ;;
+
   stop_is_not_ran_out)
     # WHAT THE DISPATCHER DOES ON THE POLL AFTER A STOP -- which is the half of
     # #163 that a stop writing an `rc` of its own got wrong in the other

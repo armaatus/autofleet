@@ -243,7 +243,7 @@ runner_worktree_remove() {
   fi
   # The build first: `git worktree remove` on a tree a `claude -p` is still
   # writing to races the agent, and the loser is the worktree.
-  runner_build_stop "$path"
+  runner_build_stop "$path" >/dev/null
   out="$(mktemp)"
   FLEET_RUN_CAPTURE_STDERR=1 fleet_run_with_deadline "$deadline" "$out" \
     git -C "$REPO_ROOT" worktree remove --force "$path"
@@ -334,9 +334,23 @@ runner_build_stop() {
   [ -n "$pid" ] || return 0
   if headless_pid_alive "$pid" && headless_pid_is_ours "$pid"; then
     fleet_kill_group "$pid"
+    # A GRACE AFTER THE KILL. `fleet_kill_group` returns when SIGKILL is SENT,
+    # not when it has been delivered, and a process in uninterruptible sleep
+    # dies a moment later -- read at once, it still answers `kill -0` and is not
+    # yet a zombie, and the stop would report a failure over a build that is
+    # dying. Three seconds is the bound the test uses for the same question.
+    local waited=0
+    while headless_pid_alive "$pid" && [ "$waited" -lt 15 ]; do
+      sleep 0.2; waited=$((waited + 1))
+    done
     if headless_pid_alive "$pid"; then
+      # THE PID FILE STAYS. It has just been confirmed alive AND ours, which is
+      # the one case the reuse precaution below was never about -- and without
+      # it the next `stop --now` finds no pid, returns 0 at the top of this
+      # function, and prints "stopped" over the process this call just named
+      # as surviving (#163's lie, one command later).
       printf '%s\n' "$pid"
-      rc=1
+      return 1
     else
       # A RECORD THAT THE BUILD WAS KILLED. The command line writes its own exit
       # status last and a killed one never reaches that line, so on files alone

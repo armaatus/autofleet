@@ -403,6 +403,9 @@ fleet_build_forget_path() {
 # writing `rc` 143 here made them indistinguishable, which was the second wrong
 # answer the review of that PR caught). Cleared by `fleet_build_started`, with
 # the `rc` of the run it replaces.
+# What the dispatcher does with the marker is `build_stopped` in fleet.sh: a
+# reaper-owned issue gets nothing, any other is recorded as given up on, so the
+# slot is released and `retry` brings it back.
 #
 # 143 is what a shell reports for a process ended by SIGTERM, which is what
 # `fleet_kill_group` sends first -- so the rendering is the true exit status,
