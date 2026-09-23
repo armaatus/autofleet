@@ -209,7 +209,12 @@ FAKE
         || fail "[$state] teardown targeted the wrong project; expected $expected, calls: $(cat "$log")"
       # The failure this guards is teardown running with no project named at
       # all, which compose resolves to its own default and which removes nothing.
-      grep 'down -v' "$log" | grep -qv -- '-p aftest-' \
+      # `[ -n ]` FIRST: a here-string of the empty string is still one empty
+      # line, and an empty line is a line `grep -qv` matches -- so the rewrite
+      # away from the pipe would have failed this phase on a log with no
+      # teardown in it at all, which is the opposite of what it asserts.
+      downs="$(grep 'down -v' "$log" || true)"
+      [ -n "$downs" ] && grep -qv -- '-p aftest-' <<<"$downs" \
         && fail "[$state] a teardown ran with no project name: $(cat "$log")"
       [ "$rc" -eq 0 ] \
         || fail "[$state] archive.sh exited $rc against a stubbed docker"

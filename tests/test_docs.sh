@@ -62,7 +62,13 @@ case "${1:-}" in
   # out is a doc that says so.
   [ -e .github/workflows/claude-review.yml ] \
     && fail "this phase assumes the review is not a workflow, and one is back"
-  grep -n 'gh run list' docs/WORKFLOW.md | grep -qi 'review' \
+  # NOT `grep ... | grep -qi`. An assertion piped into a quiet grep under
+  # `pipefail` is what `evals/piped_quiet_grep.py` exists for: `-qi` exits on the
+  # first match, the producer dies of EPIPE, the pipeline is 141, `&& fail` is
+  # not taken -- and this phase reports PASS on the exact regression it is here
+  # to catch. Found by the independent review of #165.
+  runlist="$(grep -n 'gh run list' docs/WORKFLOW.md || true)"
+  grep -qi 'review' <<<"$runlist" \
     && fail "docs/WORKFLOW.md sends a reader to Actions for a review that runs on the dispatcher"
   grep -q 'review.sh' docs/WORKFLOW.md \
     || fail "docs/WORKFLOW.md never names what runs the review, so a reader cannot find it"
@@ -74,7 +80,8 @@ case "${1:-}" in
   # asks or not, so a README row calling it optional is a reader deciding not to
   # have a file they already have. "Optional to fill in" is the true sentence
   # and the row has to say which it means.
-  sed -n '/^SEEDS=(/,/^)/p' install.sh | grep -q '"orca.yaml"' \
+  seeds="$(sed -n '/^SEEDS=(/,/^)/p' install.sh)"
+  grep -q '"orca.yaml"' <<<"$seeds" \
     || fail "this phase assumes install.sh seeds orca.yaml, and it does not any more"
   row="$(grep -F '| `orca.yaml` |' README.md)" \
     || fail "README.md has no row for orca.yaml, which the installer seeds"

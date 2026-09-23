@@ -1132,7 +1132,7 @@ hold_pidfile_with_dispatcher() {
   # A stand-in ps would not recognise makes every assertion after it vacuous --
   # the fleet would answer "no dispatcher" for the ordinary reason and the
   # phases that assert a refusal would pass without one.
-  ps -o command= -p "$HELD_PID" 2>/dev/null | grep -q 'fleet\.sh run' \
+  grep -q 'fleet\.sh run' <<<"$(ps -o command= -p "$HELD_PID" 2>/dev/null)" \
     || fail "the stand-in dispatcher does not look like one to ps; every assertion below would be vacuous"
 }
 
@@ -1150,7 +1150,7 @@ hold_pidfile_with_stranger() {
   HELD_PID=$!
   disown "$HELD_PID" 2>/dev/null
   hold_pidfile "$HELD_PID"
-  ps -o command= -p "$HELD_PID" 2>/dev/null | grep -q 'fleet\.sh' \
+  grep -q 'fleet\.sh' <<<"$(ps -o command= -p "$HELD_PID" 2>/dev/null)" \
     && fail "the stranger looks like a dispatcher; the phase would assert nothing"
   return 0
 }
@@ -5411,8 +5411,9 @@ GITSTUB
     # different repositories. Found by the local review.
     printf '%s\n' "$WORK/repo" >"$ORCA_REPO_ROOTS"
     in_fleet_at "$WORK/wt2" launch 4 "a title" >/dev/null 2>&1
-    grep "^worktree create" "$ORCA_CALLS" | grep -q -- "--repo path:$WORK/repo" \
-      || fail "the create names the caller's checkout, not the repository root: $(grep '^worktree create' "$ORCA_CALLS")"
+    creates="$(grep "^worktree create" "$ORCA_CALLS" || true)"
+    grep -q -- "--repo path:$WORK/repo" <<<"$creates" \
+      || fail "the create names the caller's checkout, not the repository root: $creates"
     echo "ok: creating a worktree scopes to the repository root, from a worktree too"
     ;;
 

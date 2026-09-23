@@ -215,9 +215,10 @@ case "${1:-}" in
   # THE SPLIT IS BY SEVERITY AND IT IS THE SCRIPT'S, not the reviewer's: the
   # blocking body carries the Important finding and the nit is somewhere that
   # gates nothing.
-  grep 'pr review' "$GH_POSTS" | grep -q 'no backoff' \
+  reviews="$(grep 'pr review' "$GH_POSTS" || true)"
+  grep -q 'no backoff' <<<"$reviews" \
     || { cat "$GH_POSTS" >&2; fail "the Important finding is not in the blocking review body"; }
-  grep 'pr review' "$GH_POSTS" | grep -q 'name it for what it returns' \
+  grep -q 'name it for what it returns' <<<"$reviews" \
     && { cat "$GH_POSTS" >&2; fail "a Suggestion reached the blocking review body"; }
   ok "an Important finding blocks, and the Suggestion beside it does not"
   ;;
