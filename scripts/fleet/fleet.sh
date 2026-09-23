@@ -432,14 +432,19 @@ card() {
 # wrapper seam, so the process holding the credentials is routinely a child of
 # what was forked.
 #
-# Silent and always 0. A worktree with no build running is the ordinary case on
-# most polls, and a caller that had to tell "no build" from "could not tell"
-# would be the `*_blind` distinction all over again -- except there is no
-# runtime here to be blind to. `runner_build_state` is where that distinction
-# lives, and it is the one the dispatcher reads.
+# Silent about a worktree with no build in it -- the ordinary case on most polls
+# -- and a caller that had to tell "no build" from "could not tell" would be the
+# `*_blind` distinction all over again, except there is no runtime here to be
+# blind to. `runner_build_state` is where that distinction lives, and it is the
+# one the dispatcher reads.
+#
+# NOT ALWAYS 0, though, which is what it used to be. The one answer this does
+# carry is "the build was running and it still is": the driver returns non-zero
+# and prints the surviving pid, and `cmd_stop` prints that instead of claiming a
+# stop that did not happen (#163). A pass-through, because the driver is the
+# only thing that can tell.
 stop_build_in() {
   runner_build_stop "$1"
-  return 0
 }
 
 # --------------------------------------------------------------- the state ---
@@ -3993,14 +3998,17 @@ cmd_stop() {
       # `--now` to prevent is spending. What survives is what was committed,
       # which is what survives a build ending at its budget too.
       echo "  stopping builds..."
-      local path dir stopped=0
+      local path dir left stopped=0
       if [ "$mode" = "--all" ]; then
         for dir in "$FLEET_BUILDS"/*; do
           [ -d "$dir" ] || continue
           path="$(cat "$dir/worktree" 2>/dev/null)" || continue
           [ -n "$path" ] || continue
-          runner_build_stop "$path"
-          echo "    stopped the build in $path"
+          if left="$(runner_build_stop "$path")"; then
+            echo "    stopped the build in $path"
+          else
+            echo "    could not stop the build in $path (pid ${left:-unknown} still running)"
+          fi
           stopped=$((stopped + 1))
         done
       else
@@ -4013,8 +4021,16 @@ cmd_stop() {
           # which on an idle fleet is a screen of stops that did not occur.
           # Found by the local `/code-review` pass.
           [ "$(runner_build_state "$path" 2>/dev/null)" = running ] || continue
-          stop_build_in "$path"
-          echo "    stopped the build for #$(basename "$f")"
+          # SAID AFTER THE FACT, and only about what happened. This printed
+          # `stopped the build for #N` over a `claude -p` that was still
+          # running for as long as the driver's identity check answered no --
+          # the one line a person reads to decide whether they have to go and
+          # kill something by hand (#163).
+          if left="$(stop_build_in "$path")"; then
+            echo "    stopped the build for #$(basename "$f")"
+          else
+            echo "    could not stop the build for #$(basename "$f") (pid ${left:-unknown} still running)"
+          fi
           stopped=$((stopped + 1))
         done
       fi

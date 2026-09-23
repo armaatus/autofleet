@@ -294,7 +294,16 @@ runner_build_start() {
     # yes, and `fleet_build_state_of` reports `running` for a build that will
     # never move again. `self-review.sh` documents this exact trap and guards
     # against it; this spawn did not. Found by the local `/code-review` pass.
-    bash -c "$line" </dev/null >/dev/null 2>&1
+    # `exec`, and it is the pid file's whole correctness. Without it the
+    # subshell stays alive as the parent of the build, and `$!` -- the only pid
+    # this driver records -- names a process whose command line is the
+    # DISPATCHER's (`fleet.sh run --auto`), not the build's. `headless_pid_is_ours`
+    # then answered no for every build the dispatcher ever started, the kill was
+    # skipped, the pid file was removed, and `stop --now` reported a stop over a
+    # `claude -p` that was still running (#163). Exec replaces the subshell in
+    # place: same pid, same process group, and a command line that names this
+    # fleet's build directory, which is what the identity check reads.
+    exec bash -c "$line" </dev/null >/dev/null 2>&1
   ) &
   local pid=$!
   set +m
@@ -311,13 +320,34 @@ runner_build_state() { fleet_build_state_of "$1"; }
 # Stop the build in $1, if there is one. Idempotent, and silent about a build
 # that is already gone: every caller reaches here on a path where the worktree
 # is going away regardless.
+#
+# 0 WHEN THERE IS NOTHING LEFT RUNNING, and non-zero with the surviving pid on
+# stdout when there is. It returned 0 unconditionally, so `cmd_stop` printed
+# `stopped the build for #N` whether or not anything had been stopped -- and the
+# case it printed it in was the only case that mattered (#163). The pid goes on
+# stdout rather than into a message because the caller is driver-agnostic: it
+# knows there is a build, not where the driver keeps its handle on it.
 runner_build_stop() {
-  local dir pid
+  local dir pid rc=0
   dir="$(fleet_build_dir_for_path "$1")" || return 0
   pid="$(cat "$dir/pid" 2>/dev/null)" || return 0
   [ -n "$pid" ] || return 0
-  if kill -0 "$pid" 2>/dev/null && headless_pid_is_ours "$pid"; then
+  if headless_pid_alive "$pid" && headless_pid_is_ours "$pid"; then
     fleet_kill_group "$pid"
+    if headless_pid_alive "$pid"; then
+      printf '%s\n' "$pid"
+      rc=1
+    else
+      # AN `rc` FOR A KILLED BUILD. The command line writes its own exit status
+      # last and a killed one never reaches that line, so on files alone the
+      # state reader sees a worktree, no rc and no pid and answers `running` --
+      # forever, which is a restarted dispatcher waiting out its budget on a
+      # build that was killed hours ago. 143 is what a shell reports for a
+      # process ended by SIGTERM, which is what `fleet_kill_group` sends first.
+      # Not written over one that is already there: a build that finished
+      # between the two reads wrote the true answer.
+      [ -s "$dir/rc" ] || printf '143\n' >"$dir/rc"
+    fi
   fi
   # THE PID FILE GOES EITHER WAY. It outlives a `kill -9` and a reboot, and the
   # number in it is then whatever the system reused it for -- so a file left
@@ -326,15 +356,32 @@ runner_build_stop() {
   # replaced carried exactly this precaution and it was not carried over. Found
   # by the local `/code-review` pass.
   rm -f "$dir/pid"
+  return "$rc"
+}
+
+# Is this pid a process that is still doing something?
+#
+# `kill -0` alone is not that question. A build the dispatcher forked is a job
+# of the dispatcher shell, which never waits on it, so a killed one stays a
+# ZOMBIE until its parent exits -- and `kill -0` goes on answering yes about it.
+# A stop that read that as "still running" would report failure for every build
+# it successfully killed, which is the same lie as the one above with the sign
+# flipped. `ps` is asked for the state and a `Z` is read as gone; a `ps` that
+# cannot answer at all leaves `kill -0`'s answer standing.
+headless_pid_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o state= -p "$1" 2>/dev/null)" in
+    *Z*) return 1 ;;
+  esac
   return 0
 }
 
 # Is this pid the build we forked, rather than whatever the system has since
 # reused the number for?
 #
-# The command line is what says so: the build runs under `bash -c` with the
-# generated line as its argument, and that line always names this fleet's build
-# directory. `ps` rather than a stored start time, because `ps` is what every
+# The command line is what says so: the pid recorded by `runner_build_start` IS
+# the `bash -c` running the generated line -- see the `exec` there -- and that
+# line always names this fleet's build directory. `ps` rather than a stored start time, because `ps` is what every
 # machine has. A `ps` that cannot answer is read as "not ours", which errs
 # towards not signalling -- the direction where the cost is a build that outlives
 # its worktree rather than a stranger's process group killed.
@@ -342,6 +389,10 @@ runner_build_stop() {
 # `grep` without `-q`: every caller sources lib.sh under `pipefail`, and `-q`
 # exits on the first match, so `ps` can write into a closed pipe and the
 # pipeline is 141 for a probe that MATCHED. CLAUDE.md carries the rule.
+# `-ww`: BSD `ps` truncates a command line to the terminal width, and the build
+# line names the build directory some forty characters in -- so under a fleet
+# directory with a long path the identity check would read a truncated line, find
+# nothing, and decline to kill a build that is ours.
 headless_pid_is_ours() {
-  ps -o command= -p "$1" 2>/dev/null | grep -F "$FLEET_BUILDS" >/dev/null
+  ps -ww -o command= -p "$1" 2>/dev/null | grep -F "$FLEET_BUILDS" >/dev/null
 }
