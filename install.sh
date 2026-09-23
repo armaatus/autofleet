@@ -31,7 +31,9 @@ PAYLOAD=(
   # every rule to keep in step. There is one venue now -- the dispatcher, which
   # a host already runs -- and a host that wants the review inside Actions
   # instead writes a workflow around `anthropics/claude-code-action` directly,
-  # which is a thing to choose rather than a thing to inherit.
+  # which is a thing to choose rather than a thing to inherit. Dropping them
+  # from this list only stopped shipping them; RETIRED below is what takes them
+  # off a host that was installed before #152.
   ".github/workflows/agent-config.yml"
   ".github/scripts/merge_gate.py"
   ".github/scripts/issue_refs.py"
@@ -89,6 +91,25 @@ SEEDS=(
   ".claude/settings.json"
 )
 
+# WHAT A v1 INSTALL LEFT BEHIND, and what this one takes back off the host.
+#
+# These shipped in PAYLOAD above until armaatus/autofleet#152 and do not any
+# more -- but dropping a path out of a list of things to COPY is not a removal.
+# An upgraded host keeps running the file it was last given, which for
+# `claude-review.yml` means two reviews per pull request in two verdict formats,
+# the second from a rule set nothing updates any more; armaatus/rommsync-nx is
+# in exactly that state today. The comment in PAYLOAD says why they are gone,
+# and this list is that comment made executable.
+#
+# ONLY PATHS AUTOFLEET ITSELF SHIPPED. A host's own workflows are the host's,
+# and nothing that was ever a SEED belongs here -- a seed is the host's answer.
+# Both of these are in the host's git history, so a host that wants its copy
+# back has one `git checkout` to make.
+RETIRED=(
+  ".github/workflows/claude-review.yml"
+  ".github/workflows/validate.yml"
+)
+
 DRY=false
 FORCE=false
 TARGET=""
@@ -138,6 +159,19 @@ copy_one() {
   cp -R "$src" "$dst"
 }
 
+# Said lazily, because on every host but an upgraded one there is nothing here
+# to say and a heading over an empty list is a question a reader has to answer.
+retired_said=false
+retire_one() {
+  local rel="$1" dst="$TARGET/$rel"
+  [ -e "$dst" ] || return 0
+  $retired_said || { echo "==> what no longer ships (removed from the host)"; retired_said=true; }
+  changed=$((changed + 1))
+  if $DRY; then echo "   would remove $rel"; return 0; fi
+  echo "   removed $rel"
+  rm -rf "$dst"
+}
+
 seed_one() {
   local rel="$1" src="$SOURCE/$rel" dst="$TARGET/$rel"
   if [ -e "$dst" ]; then
@@ -153,6 +187,10 @@ seed_one() {
 
 echo "==> payload"
 for rel in "${PAYLOAD[@]}"; do copy_one "$rel"; done
+# AFTER the copy, so a path that is in both lists -- which would be a mistake,
+# but a survivable one -- ends as the removal rather than as a file this
+# installer wrote and then left.
+for rel in "${RETIRED[@]}"; do retire_one "$rel"; done
 # WHAT THE PAYLOAD WRITES AT RUNTIME, kept out of the host's history.
 #
 # WHAT THIS REPO'S OWN `.gitignore` NAMES, and hard rule 1 is the reason the
