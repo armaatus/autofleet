@@ -380,8 +380,37 @@ fleet_build_started() {
     mv "$dir/result.json" "$dir/runs/$n.json" 2>/dev/null || true
   fi
   rm -f "$dir/rc" "$dir/result.json" "$dir/pid" "$dir/stopped"
+  # WHEN THIS RUN STARTED, which is the only clock the dispatcher's wall clock
+  # has. Written here rather than by a driver so both get it: `pid` is the
+  # headless driver's and Orca has no equivalent, and the run-count and worktree
+  # files below say a run happened without saying when. Rewritten at every
+  # start, so a resume is timed from the resume -- a second run gets its own two
+  # hours, exactly as it gets its own turns and its own budget.
+  date +%s >"$dir/started"
   printf '%s\n' "$path" >"$dir/worktree"
   printf '%s\n' "$issue" >"$FLEET_BUILDS/by-path/$(fleet_build_key "$path")"
+}
+
+# HOW LONG THE CURRENT RUN HAS BEEN GOING, in seconds, for the dispatcher's
+# wall clock. Beside the write of the stamp it reads, and the other half of the
+# question `fleet_build_state_of` answers: that one says whether a build is
+# still running, this says for how long.
+#
+# NOTHING when it cannot be told -- no build directory, no stamp (a run started
+# by an install from before the stamp existed), or a stamp that is not a number.
+# The caller's only use for this is deciding whether to KILL a build, and
+# "I could not tell" must never read as "long enough": an unreadable clock that
+# defaulted to firing would stop every build the first poll after an upgrade.
+fleet_build_age_of() {
+  local dir started now
+  dir="$(fleet_build_dir_for_path "$1")" || return 1
+  started="$(cat "$dir/started" 2>/dev/null)"
+  case "$started" in ''|*[!0-9]*) return 1 ;; esac
+  now="$(date +%s)"
+  # A clock that went backwards -- a host that corrected its time, or a stamp
+  # from the future -- reads as an age of zero rather than as a huge one.
+  [ "$now" -gt "$started" ] || { printf '0\n'; return 0; }
+  printf '%s\n' "$(( now - started ))"
 }
 
 # ...and the index entry, dropped when the worktree goes. A path is reusable --
