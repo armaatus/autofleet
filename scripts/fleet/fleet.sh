@@ -3412,6 +3412,21 @@ build_exited() {
   local num="$1" path="$2" state="$3" dir runs
   dir="$(fleet_build_dir "$num")"
 
+  # WE KILLED THIS ONE, so there is nothing here to notice. Before every other
+  # answer, and before the issue lookups: a stop is the fleet's own decision and
+  # no reading of GitHub can change what it means.
+  #
+  # The stop the reaper's warning pass performs is so that "nothing new is being
+  # written into a directory that is about to go"; `stop --now` is a person
+  # asking for the same thing. Read as an exit like any other, both come back
+  # here on the very next poll as a build that ran out -- and for an issue that
+  # is merely `blocked` or `human-step` rather than closed, that is a `gaveup-`
+  # record, a card, and "The fleet's build agent stopped on this without opening
+  # a pull request" posted to the issue of a build nobody's budget ended
+  # (armaatus/autofleet#163). Silent, and re-entered every poll while the
+  # marker stands, so there is nothing to say once either.
+  fleet_build_was_stopped "$dir" && return 0
+
   issue_is_done "$num" && return 0
 
   # CAPTURED BEFORE ANYTHING ELSE RUNS. `has_open_pr` answers in its exit

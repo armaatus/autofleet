@@ -344,7 +344,14 @@ going red.
   able to RECOGNISE that pid later: the headless one records the `bash -c`
   running the build line, whose command line names the build directory, so that
   the check guarding against a reused pid number cannot answer no for every
-  build the dispatcher ever started.
+  build the dispatcher ever started. A driver that killed a build **records the
+  kill** with `fleet_build_mark_stopped`, because the command line writes its own
+  `rc` last and a killed one never reaches that line: without the record the
+  state reader has a worktree, no `rc` and no pid and answers `running` forever.
+  The marker rather than an `rc` of 143 the driver made up — the reader renders
+  it as `exited 143` either way, but `build_exited` has to be able to tell a stop
+  the fleet asked for from a build that died at its budget, and only the latter
+  earns a `gaveup-` record and a comment on the issue.
 
 **Six functions left this contract** with armaatus/autofleet#151:
 `runner_agent_states`, `runner_agent_terminals`, `runner_agent_terminal`,

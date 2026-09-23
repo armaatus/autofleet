@@ -1968,6 +1968,48 @@ DRIVER
     in_fleet cmd_resume >/dev/null 2>&1
     ;;
 
+  stop_is_not_ran_out)
+    # WHAT THE DISPATCHER DOES ON THE POLL AFTER A STOP -- which is the half of
+    # #163 that a stop writing an `rc` of its own got wrong in the other
+    # direction. `reap_abandoned`'s warning pass stops the build ON PURPOSE, so
+    # that nothing new is written into a directory that is about to go; a stop
+    # recorded as an ordinary non-zero exit comes back one poll later as a build
+    # that RAN OUT, and for an issue that is merely `blocked` -- not closed, so
+    # `issue_is_done` does not short-circuit -- that is a `gaveup-` record, a
+    # card, and "The fleet's build agent stopped on this without opening a pull
+    # request" posted to a GitHub issue about a build nobody's budget ended.
+    # Outward-facing, and the same path `stop --now` reaches after a `resume`.
+    make_fixture ok
+    make_worktree
+    add_origin
+    quiet_issue
+    issue_labels "blocked"
+    build_running
+    out="$(release_pass)"
+    grep -q "releasing it next pass" <<<"$out" \
+      || fail "the warning pass did not run, so nothing here stopped a build: $out"
+    # REAPED before the state is read, for the reason `stop_now_stops_builds`
+    # gives: the fixture build is a job of this shell and a killed one stays a
+    # zombie until it is waited on.
+    wait "$BUILD_SLEEPER" 2>/dev/null
+    state="$(in_fleet runner_build_state "$WORK/wt" 2>&1)"
+    [ "$state" = "exited 143" ] \
+      || fail "a stopped build reads as [$state], so this phase asserts nothing about the poll after it"
+
+    : >"$GH_CALLS"
+    # The real order of the two watchers: `notice_build_exit` runs BEFORE
+    # `reap_abandoned`, so the stop the reaper performed is read by the exit
+    # watcher first.
+    out="$(in_pass 'notice_build_exit; reap_abandoned' 2>&1)"
+    [ -e "$AUTOFLEET_DIR/gaveup-42" ] \
+      && fail "a build the fleet stopped was recorded as one that gave up: $out"
+    grep -q "issue comment" "$GH_CALLS" \
+      && fail "it told GitHub a build we killed stopped without opening a pull request: $(cat "$GH_CALLS")"
+    grep -q "ran out" <<<"$out" \
+      && fail "the log calls a deliberate stop a build that ran out: $out"
+    echo "ok: the poll after a stop reads it as a stop, not as a build that ran out"
+    ;;
+
   no_build_command)
     # A MACHINE WITH NO AGENT CLI STILL RUNS EVERY FLEET COMMAND THAT DOES NOT
     # BUILD. `runner_available` asked for the build command for one round, and

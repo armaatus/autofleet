@@ -338,15 +338,19 @@ runner_build_stop() {
       printf '%s\n' "$pid"
       rc=1
     else
-      # AN `rc` FOR A KILLED BUILD. The command line writes its own exit status
-      # last and a killed one never reaches that line, so on files alone the
-      # state reader sees a worktree, no rc and no pid and answers `running` --
-      # forever, which is a restarted dispatcher waiting out its budget on a
-      # build that was killed hours ago. 143 is what a shell reports for a
-      # process ended by SIGTERM, which is what `fleet_kill_group` sends first.
-      # Not written over one that is already there: a build that finished
-      # between the two reads wrote the true answer.
-      [ -s "$dir/rc" ] || printf '143\n' >"$dir/rc"
+      # A RECORD THAT THE BUILD WAS KILLED. The command line writes its own exit
+      # status last and a killed one never reaches that line, so on files alone
+      # the state reader sees a worktree, no rc and no pid and answers `running`
+      # -- forever, which is a restarted dispatcher waiting out its budget on a
+      # build that was killed hours ago.
+      #
+      # The marker rather than an `rc` of 143 written here: the state reader
+      # renders it as `exited 143` either way, but an `rc` alone would make a
+      # deliberate stop indistinguishable from a build that died at its budget,
+      # and `build_exited` acts on that difference -- it would comment on the
+      # issue of every worktree `reap_abandoned` stopped on purpose. See
+      # `fleet_build_mark_stopped` in lib.sh.
+      fleet_build_mark_stopped "$dir"
     fi
   fi
   # THE PID FILE GOES EITHER WAY. It outlives a `kill -9` and a reboot, and the
@@ -381,8 +385,8 @@ headless_pid_alive() {
 #
 # The command line is what says so: the pid recorded by `runner_build_start` IS
 # the `bash -c` running the generated line -- see the `exec` there -- and that
-# line always names this fleet's build directory. `ps` rather than a stored start time, because `ps` is what every
-# machine has. A `ps` that cannot answer is read as "not ours", which errs
+# line always names this fleet's build directory. `ps` rather than a stored
+# start time, because `ps` is what every machine has. A `ps` that cannot answer is read as "not ours", which errs
 # towards not signalling -- the direction where the cost is a build that outlives
 # its worktree rather than a stranger's process group killed.
 #
